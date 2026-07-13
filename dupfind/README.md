@@ -1,0 +1,116 @@
+# dupfind
+
+Find duplicate files on an Amiga volume.
+
+`dupfind` is a command-line tool for AmigaOS that recursively scans a
+directory tree and reports groups of files that are duplicates of each
+other. Written in Amiga E, compiled to a native AmigaOS loadseg()able
+executable.
+
+## Usage
+
+```
+dupfind DIR [PATTERN pat] [FULL] [CHECKSUM] [VERBOSE]
+```
+
+| Argument | Meaning |
+|---|---|
+| `DIR` | Required. Directory (or volume) to scan, e.g. `work:` or `work:downloads`. Scanned recursively. |
+| `PATTERN pat` | Optional AmigaDOS wildcard pattern to filter which files are considered, e.g. `PATTERN #?.iff`. Defaults to `#?` (all files). |
+| `FULL` | Use the FULL comparison mode (see below). |
+| `CHECKSUM` | Use the CHECKSUM comparison mode (see below). |
+| `VERBOSE` | Print every matching file's path as it's found, not just the duplicate report at the end. |
+
+`FULL` and `CHECKSUM` are mutually exclusive; if neither is given, `dupfind`
+uses its default HEADER mode. Only files with an identical size are ever
+compared against each other, in any mode.
+
+### Examples
+
+```
+dupfind work:
+dupfind work:downloads
+dupfind work:downloads PATTERN #?.iff
+dupfind work: CHECKSUM
+dupfind work: FULL VERBOSE
+```
+
+## Comparison modes
+
+`dupfind` offers three ways to decide whether two same-size files are
+"duplicates". They trade speed against certainty:
+
+- **HEADER (default)** — Compares only the first 512 bytes of each
+  same-size candidate pair. Fast, since it never reads a whole file, but
+  it is **not** a guarantee of equality: two files can share identical
+  first 512 bytes and still differ further in. In practice this is rare
+  but real — e.g. on a stock AmigaOS 3.2 install, `C/Owner` and `C/Group`
+  are the same size and share an identical 512-byte header, but are not
+  actually identical files. Use this mode for a quick first pass, and
+  `FULL` or `CHECKSUM` to confirm anything it flags.
+
+- **CHECKSUM** — Hashes each candidate file's entire contents (a cheap
+  rolling hash) as a pre-filter, then confirms any hash match with a
+  full, byte-for-byte comparison before reporting it as a duplicate.
+  This makes it exact — the hash is only ever used to avoid a full byte
+  compare on files that are obviously different, never as the final
+  word. Good default choice when you have many same-size files that
+  mostly turn out to differ (e.g. icons or presets of the same size),
+  since the hash is cheap to compute and rules out most candidates
+  before any byte compare is needed.
+
+- **FULL** — Skips hashing and does a direct, chunked byte-for-byte
+  comparison of every same-size candidate pair. Exact, like CHECKSUM,
+  but does the full read up front instead of hashing first. Simpler,
+  and can be faster than CHECKSUM when most same-size files actually
+  *are* duplicates (little pre-filtering benefit) or on a small
+  candidate set.
+
+`CHECKSUM` and `FULL` always produce identical results to each other,
+since both are exact; `HEADER` can produce false positives that the
+other two modes will not.
+
+## How it works
+
+1. Recursively walks `DIR` via `Lock`/`Examine`/`ExNext`, collecting
+   every file whose name matches `PATTERN` into an in-memory list along
+   with its size.
+2. Groups files with an O(n²) scan: for each not-yet-matched file,
+   compares it against every later not-yet-matched file of the same
+   size, using the selected comparison mode. Matching files are grouped
+   into a "duplicate set" and marked so they aren't reported again as
+   part of another set.
+3. Prints each duplicate set (byte size + every member's full path) as
+   it's found, then a final summary line with the total number of
+   duplicate sets.
+
+Only files that share an exact size are ever compared, so the cost
+scales with how many files share each size, not with total file count.
+
+## Building
+
+Compile `dupfind.e` with the E-VO E compiler:
+
+```
+evo dupfind.e
+```
+
+This produces an AmigaOS loadseg()able executable named `dupfind`.
+
+A clean compile only proves the source is syntactically valid —
+recursive directory scanning should be exercised on real AmigaOS (real
+hardware or an emulator) before trusting the results.
+
+## Verified behaviour
+
+`dupfind` has been run against a real AmigaOS 3.2 install (762 files) in
+all three modes. `CHECKSUM` and `FULL` both found the same 8 duplicate
+sets; `HEADER` additionally (and correctly, per its known tradeoff)
+flagged one false positive (`C/Owner` vs `C/Group`). The `CHECKSUM`/`FULL`
+result was independently cross-checked against the same file tree using
+`find | sha256sum` on Linux and matched exactly, group for group.
+
+---
+
+See [`dupfind.readme`](dupfind.readme) for the same information in
+plain-text form, in the style of a classic Aminet tool distribution.
