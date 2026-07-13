@@ -9,6 +9,7 @@ A collection of small tools for AmigaOS.
 | [dupfind](dupfind/) | Recursively scan a directory for duplicate files, with fast header-based, hash-confirmed checksum, or exact full-byte comparison modes. |
 | [cboot](cboot/) | Boot selector — hold a mouse button or Amiga key at boot to jump straight into a different startup-sequence. |
 | [amifetch](amifetch/) | neofetch-style dump of CPU/FPU, video timing, chip/fast RAM, Kickstart version, E-Clock, and stack size. |
+| [mv](mv/) | Unix-style move — Rename() on the same volume, copy+delete across volumes. In both Amiga E and 68k assembly. |
 
 Each tool lives in its own subdirectory with its own README covering
 usage, how it works, and how to build it.
@@ -23,3 +24,10 @@ evo <toolname>.e
 ```
 
 This produces a native AmigaOS loadseg()able executable.
+
+Some tools also come in 68000 assembly, buildable with
+[vasm](http://sun.hasenbraten.de/vasm/):
+
+```
+vasmm68k_mot -Fhunkexe -nosym -o <toolname> <toolname>.asm
+```

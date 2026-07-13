@@ -2,4 +2,7 @@
 /cboot/cboot
 /cboot/CBoot
 /amifetch/amifetch
+/mv/mv
+/mv/mv-asm
+/mv/mv-e
 .claude/settings.local.json
