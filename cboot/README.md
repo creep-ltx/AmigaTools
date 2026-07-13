@@ -45,9 +45,8 @@ Compile `cboot.e` with the E-VO E compiler:
 evo cboot.e
 ```
 
-There is also a hand-written 68000 assembly port, [cboot.asm](cboot.asm)
-— see [Testing status](#testing--this-is-not-a-shell-tool) before
-trusting it. Assemble with [vasm](http://sun.hasenbraten.de/vasm/):
+There is also a hand-written 68000 assembly port, [cboot.asm](cboot.asm),
+also boot-verified. Assemble with [vasm](http://sun.hasenbraten.de/vasm/):
 
 ```
 vasmm68k_mot -Fhunkexe -nosym -o CBoot cboot.asm
@@ -86,7 +85,7 @@ that any boot mode actually works.
 
 Diff any two releases with e.g. `git diff v1.3 v1.4 -- cboot/cboot.e`.
 
-## The assembly port and its testing status
+## The assembly port
 
 [cboot.asm](cboot.asm) is a hand-written 68000 assembly port of the
 v1.4 feature set (all four boot modes, `mouse`/`amiga` argument,
@@ -94,11 +93,8 @@ control center), aimed at a smaller binary — it assembles to 3240
 bytes against the E version's 4384. Its header documents how every
 LVO and struct offset was derived rather than recalled.
 
-Testing status differs between the two sources, and per the section
-above that difference matters: **cboot.e v1.4 is boot-verified** on a
-real AmigaOS 3.2 install. The asm port's earlier LMB/RMB-only version
-was also boot-verified, but the current extended version has only
-been verified to assemble — its LAmiga/RAmiga paths and argument
-handling haven't been exercised through real reboots yet. Until that
-happens, treat `cboot.e` as the reference implementation and the asm
-port as a work in progress.
+Both sources are boot-verified on a real AmigaOS 3.2 install
+(FS-UAE): all four boot modes (LMB, RMB, LAmiga, RAmiga) and the
+Ctrl control-center entry have been exercised through real reboots
+in each. The one path not yet reboot-tested in the asm port is the
+optional `mouse`/`amiga` argument restriction.
