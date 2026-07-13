@@ -2,7 +2,10 @@
 
 A tiny neofetch-style system info dump for AmigaOS. Run it from a Shell
 and it prints CPU, FPU, video timing, chip/fast RAM, Kickstart version,
-E-Clock frequency, and current stack size.
+E-Clock frequency, and current stack size, inside a border box sized to
+fit whatever the longest line turns out to be:
+
+![amifetch running in KB, MB, and B modes, each with a correctly-sized border](amifetch.png)
 
 ## Usage
 
@@ -23,30 +26,11 @@ amifetch CHIP=B FAST=MB
 amifetch CHIP KB FAST B
 ```
 
-Verified output on a real AmigaOS 3.2 install (FS-UAE, 68030, 2MB
-chip + 64MB Zorro III fast):
-
-```
-1.AmigaOS3.2:AmigaTools> amifetch
-CPU:        68030
-FPU:        none
-Video:      PAL (50Hz)
-Chip RAM:   1965 KB free / 2032 KB total
-Fast RAM:   64704 KB free / 65536 KB total
-Exec:       47.7 (Kickstart)
-E-Clock:    709379 Hz
-Stack:      4096 bytes
-
-1.AmigaOS3.2:AmigaTools> amifetch MEM=MB CHIP=B
-CPU:        68030
-FPU:        none
-Video:      PAL (50Hz)
-Chip RAM:   2012280 B free / 2080768 B total
-Fast RAM:   63.1 MB free / 64.0 MB total
-Exec:       47.7 (Kickstart)
-E-Clock:    709379 Hz
-Stack:      4096 bytes
-```
+The screenshot above is from a real AmigaOS 3.2 install (FS-UAE,
+68030, 2MB chip + 64MB Zorro III fast), showing `amifetch`,
+`amifetch MEM=MB`, and `amifetch MEM=B` back to back — the border
+resizes correctly in every case, including `B` mode's 8-digit byte
+counts, which produce the widest box.
 
 ## How it works
 
