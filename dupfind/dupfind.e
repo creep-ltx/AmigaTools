@@ -252,3 +252,5 @@ PROC memEq(a:PTR TO CHAR, b:PTR TO CHAR, len)
     IF a[i]<>b[i] THEN RETURN FALSE
   ENDFOR
 ENDPROC TRUE
+
+version: CHAR '$VER: dupfind 0.1 (14.7.26)',0

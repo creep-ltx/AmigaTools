@@ -225,3 +225,5 @@ PROC makeborder(out:PTR TO CHAR, width, left:PTR TO CHAR, right:PTR TO CHAR)
   FOR i:=1 TO width+2 DO StrAddChar(out,"-")
   StrAdd(out,right,ALL)
 ENDPROC out
+
+version: CHAR '$VER: amifetch 0.1 (14.7.26)',0
