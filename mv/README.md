@@ -7,8 +7,8 @@ you like and install it as `C:mv`.
 
 | Implementation | Binary size |
 |---|---|
-| mv.e (E-VO) | 4320 bytes |
-| mv.asm (vasm) | 2304 bytes |
+| mv.e (E-VO) | 4952 bytes |
+| mv.asm (vasm) | 2620 bytes |
 
 Speed is identical — a move spends all its time inside dos.library —
 so the assembly version's win is size, not speed.
@@ -16,7 +16,7 @@ so the assembly version's win is size, not speed.
 ## Usage
 
 ```
-mv FROM/A/M TO/A [OVERWRITE]
+mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
 ```
 
 ```
@@ -28,6 +28,7 @@ mv work:somedir work:elsewhere    (directories move too, same volume)
 mv #?.mod mods:                   (AmigaDOS pattern)
 mv a.txt b.txt c.txt work:stuff   (multiple sources)
 mv #?.iff pics: OVERWRITE         (replace existing targets)
+mv config work:app BACKUP         (existing target -> config.mvbak)
 ```
 
 - `FROM` takes any number of names and/or AmigaDOS patterns. With
@@ -35,11 +36,21 @@ mv #?.iff pics: OVERWRITE         (replace existing targets)
   single plain name keeps the simple rename/move behaviour.
 - If `TO` is an existing directory, sources are moved into it under
   their own names.
-- An existing target is **skipped** by default; skipped files are
-  listed at the end and the return code is 5 (WARN). `OVERWRITE`
-  deletes and replaces the target instead — after checking (with
-  `SameLock()`) that source and target aren't the same object, so
-  `mv file file OVERWRITE` can never delete your only copy.
+- An existing target is **skipped** by default; everything that
+  wasn't moved is listed under `not moved:` at the end, return code
+  5 (WARN). `OVERWRITE` deletes and replaces the target instead —
+  after checking (with `SameLock()`) that source and target aren't
+  the same object, so `mv file file OVERWRITE` can never delete your
+  only copy.
+- `BACKUP` renames the existing target to `<name>.mvbak` first, then
+  moves the source in. If that backup name is already taken the file
+  is **refused** — nothing is touched, the reason is printed, and it
+  joins the not-moved list (return code 10). The `.mvbak` suffix
+  belongs to this tool (unlike `.old`, which people hand-craft for
+  their own backups), so `BACKUP OVERWRITE` is allowed and means
+  "replace the stale `.mvbak`" — `OVERWRITE` consistently sanctions
+  destroying exactly one thing: alone it's the target, with `BACKUP`
+  it's the old backup.
 - Cross-volume moves preserve the protection bits and datestamp, and
   a failed copy deletes the partial target rather than leaving half a
   file behind. If the copy succeeds but the source can't be deleted
@@ -98,7 +109,9 @@ assemblers should cope with at most minor tweaks.
 Both versions were verified on a real AmigaOS 3.2 install (FS-UAE):
 rename, move-into-directory, pattern expansion, cross-volume
 copy+delete with datestamp and protection bits intact across repeated
-moves, skip-and-list-at-end, OVERWRITE replacement, the
-`mv file file OVERWRITE` self-move guard, existing-target and
+moves, skip-and-list-at-end, OVERWRITE replacement, BACKUP rescue to
+`.mvbak` (including the clash refusal, `BACKUP OVERWRITE` replacing a
+stale backup, and backups on the far side of a cross-volume move),
+the `mv file file OVERWRITE` self-move guard, existing-target and
 cross-volume-directory refusals, Ctrl-C mid-copy, and same-volume
 directory moves.

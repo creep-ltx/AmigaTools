@@ -5,15 +5,15 @@ WHAT IT IS
 
   mv moves or renames files and directories, like Unix mv, with
   AmigaDOS pattern support. It comes as two implementations with
-  identical behaviour: one in Amiga E (mv.e, 4320 bytes) and one in
-  68000 assembly (mv.asm, 2304 bytes). Build whichever you prefer
+  identical behaviour: one in Amiga E (mv.e, 4952 bytes) and one in
+  68000 assembly (mv.asm, 2620 bytes). Build whichever you prefer
   and install it as C:mv.
 
   Requires Kickstart 2.04 or newer.
 
 USAGE
 
-  mv FROM/A/M TO/A [OVERWRITE]
+  mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
 
     mv oldname newname                (rename)
     mv work:file work:archive/file    (move within a volume)
@@ -29,11 +29,20 @@ USAGE
   keeps the simple rename/move behaviour. If TO is an existing
   directory, sources are moved into it under their own names.
 
-  An existing target is skipped by default; skipped files are listed
-  at the end and the return code is 5. OVERWRITE deletes and replaces
-  the target instead -- after checking with SameLock() that source
-  and target aren't the same object, so `mv file file OVERWRITE` can
-  never delete your only copy.
+  An existing target is skipped by default; everything that wasn't
+  moved is listed under "not moved:" at the end, return code 5.
+  OVERWRITE deletes and replaces the target instead -- after checking
+  with SameLock() that source and target aren't the same object, so
+  `mv file file OVERWRITE` can never delete your only copy.
+
+  BACKUP renames the existing target to <name>.mvbak first, then
+  moves the source in. If that backup name is already taken the file
+  is refused: nothing is touched, the reason is printed, and it joins
+  the not-moved list (return code 10). The .mvbak suffix belongs to
+  this tool, so BACKUP OVERWRITE is allowed and means "replace the
+  stale .mvbak" -- OVERWRITE consistently sanctions destroying
+  exactly one thing: alone it's the target, with BACKUP it's the old
+  backup.
 
   Ctrl-C is honoured between files and during copies; a break or a
   failed copy removes the partial target file. Errors on one file are

@@ -1,5 +1,5 @@
 /* mv.e -- Unix-style move for AmigaDOS
-   Usage: mv FROM/A/M TO/A [OVERWRITE]
+   Usage: mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
    e.g.   mv oldname newname
           mv work:file work:archive/file
           mv work:file work:archive         (into the directory)
@@ -21,11 +21,20 @@
    -- TO must be an existing directory. A single plain FROM keeps the
    simple rename/move-into-directory behaviour.
 
-   An existing target is skipped by default (skipped files are listed
-   at the end, return code 5). With OVERWRITE the target is deleted
-   and replaced instead -- unless source and target are the same
-   object (checked with SameLock(), otherwise `mv file file OVERWRITE`
-   would delete the only copy), or the target is a directory.
+   An existing target is skipped by default; every file that wasn't
+   moved is listed at the end (return code 5). With OVERWRITE the
+   target is deleted and replaced. With BACKUP the target is renamed
+   to <name>.mvbak first and the move proceeds -- but if that backup
+   name is already taken, the file is refused: nothing is touched,
+   the reason is printed, and it joins the not-moved list (rc 10).
+   The .mvbak suffix belongs to this tool (unlike .old, which people
+   hand-craft), so BACKUP OVERWRITE is allowed to mean "replace a
+   stale .mvbak" -- OVERWRITE consistently sanctions destroying one
+   thing: alone it's the target, with BACKUP it's the old backup.
+   Neither flag touches anything when source and target are the same
+   object (checked with SameLock(), otherwise `mv file file
+   OVERWRITE` would delete the only copy) or when the target is a
+   directory.
 
    Ctrl-C is honoured between files and between copy chunks; a break
    mid-copy removes the partial target file, like any failed copy.
@@ -45,9 +54,10 @@ OBJECT snode
   path[PATHLEN]:ARRAY OF CHAR
 ENDOBJECT
 
-DEF rc, overwrite, toisdir
+DEF rc, overwrite, backup, toisdir
 DEF gto:PTR TO CHAR
 DEF gtarget[PATHLEN+4]:ARRAY OF CHAR
+DEF gbak[PATHLEN+8]:ARRAY OF CHAR
 DEF gpatbuf[1030]:ARRAY OF CHAR
 DEF gfib:PTR TO fileinfoblock
 DEF gbuf=NIL                       -> copy buffer, allocated on first use
@@ -55,19 +65,20 @@ DEF skiphead=NIL:PTR TO snode, skiptail=NIL:PTR TO snode, skipcount
 
 PROC main() HANDLE
   DEF rdargs=NIL:PTR TO rdargs
-  DEF argarray[3]:ARRAY OF LONG
+  DEF argarray[4]:ARRAY OF LONG
   DEF fromlist:PTR TO LONG
   DEF n, i, wild, multi, lock
   DEF node:PTR TO snode
 
   rc := RETURN_OK
 
-  rdargs := ReadArgs('FROM/A/M,TO/A,OVERWRITE/S', argarray, NIL)
+  rdargs := ReadArgs('FROM/A/M,TO/A,OVERWRITE/S,BACKUP/S', argarray, NIL)
   IF rdargs=NIL THEN Throw("DOS", IoErr())
 
   fromlist  := argarray[0]
   gto       := argarray[1]
   overwrite := argarray[2]
+  backup    := argarray[3]
 
   n := 0
   wild := FALSE
@@ -92,7 +103,7 @@ PROC main() HANDLE
   FOR i:=0 TO n-1 DO dosource(fromlist[i])
 
   IF skipcount>0
-    WriteF('skipped (already exists):\n')
+    WriteF('not moved:\n')
     node := skiphead
     WHILE node
       WriteF('  \s\n', node.path)
@@ -162,7 +173,7 @@ ENDPROC
    returns, so one bad file never kills the batch; the only exception
    that can escape is "BRK" (Ctrl-C during a copy). */
 PROC moveone(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock)
-  DEF tlock, slock, same, tisdir, err
+  DEF tlock, slock, blk, same, tisdir, err
 
   AstrCopy(gtarget, gto, PATHLEN)
   IF toisdir THEN AddPart(gtarget, FilePart(srcpath), PATHLEN)
@@ -199,14 +210,44 @@ PROC moveone(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock)
       setrc(RETURN_ERROR)
       RETURN
     ENDIF
-    IF overwrite=FALSE
+    IF backup
+      -> move the target out of the way as <name>.mvbak
+      AstrCopy(gbak, gtarget, PATHLEN)
+      catbak(gbak)
+      blk := Lock(gbak, ACCESS_READ)
+      IF blk
+        UnLock(blk)
+        IF overwrite
+          -> BACKUP OVERWRITE: sanctioned to replace a stale .mvbak
+          IF DeleteFile(gbak)=FALSE
+            WriteF('mv: cannot replace \s: ', gbak)
+            PrintFault(IoErr(), NIL)
+            setrc(RETURN_ERROR)
+            RETURN
+          ENDIF
+        ELSE
+          -> refuse: nothing touched, reported now, listed at the end
+          WriteF('mv: \s: not moved, \s already exists\n', srcpath, gbak)
+          addskip(srcpath)
+          setrc(RETURN_ERROR)
+          RETURN
+        ENDIF
+      ENDIF
+      IF Rename(gtarget, gbak)=FALSE
+        WriteF('mv: cannot back up \s: ', gtarget)
+        PrintFault(IoErr(), NIL)
+        setrc(RETURN_ERROR)
+        RETURN
+      ENDIF
+    ELSEIF overwrite
+      IF DeleteFile(gtarget)=FALSE
+        WriteF('mv: cannot replace \s: ', gtarget)
+        PrintFault(IoErr(), NIL)
+        setrc(RETURN_ERROR)
+        RETURN
+      ENDIF
+    ELSE
       addskip(srcpath)
-      RETURN
-    ENDIF
-    IF DeleteFile(gtarget)=FALSE
-      WriteF('mv: cannot replace \s: ', gtarget)
-      PrintFault(IoErr(), NIL)
-      setrc(RETURN_ERROR)
       RETURN
     ENDIF
   ENDIF
@@ -281,6 +322,21 @@ EXCEPT
   ENDIF
 ENDPROC
 
+/* Appends '.mvbak' to a null-terminated path in place; the buffer is
+   sized PATHLEN+8 so this always fits. */
+PROC catbak(s:PTR TO CHAR)
+  DEF i
+  i := 0
+  WHILE s[i] DO i := i+1
+  s[i]   := "."
+  s[i+1] := "m"
+  s[i+2] := "v"
+  s[i+3] := "b"
+  s[i+4] := "a"
+  s[i+5] := "k"
+  s[i+6] := 0
+ENDPROC
+
 PROC addskip(srcpath:PTR TO CHAR)
   DEF node:PTR TO snode
   NEW node
@@ -295,4 +351,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: mv 0.2 (13.7.26) E build',0
+version: CHAR '$VER: mv 0.3 (14.7.26) E build',0

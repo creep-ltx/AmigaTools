@@ -1,6 +1,6 @@
 ;----------------------------------------------------------------------
 ; mv.asm -- Unix-style move for AmigaDOS, 68000 assembly.
-; Usage: mv FROM/A/M TO/A [OVERWRITE]
+; Usage: mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
 ;
 ; Same behaviour as mv.e (see that file for the full design notes):
 ;   - Rename() first, per file: on AmigaDOS that's already a full move
@@ -10,10 +10,14 @@
 ;   - FROM takes multiple names and/or AmigaDOS patterns (MatchFirst/
 ;     MatchNext); with several files or a pattern, TO must be an
 ;     existing directory.
-;   - Existing targets are skipped by default and listed at the end
-;     (return code 5); OVERWRITE deletes and replaces them instead --
-;     after proving the source exists and is a different object
-;     (SameLock), so a self-move can never delete the only copy.
+;   - Existing targets are skipped by default; everything not moved
+;     is listed at the end (return code 5). OVERWRITE deletes and
+;     replaces the target; BACKUP renames it to <name>.mvbak first
+;     and refuses the file if that name is taken (rc 10) -- unless
+;     OVERWRITE is also given, which sanctions replacing the stale
+;     .mvbak. All of it guarded by proving the source exists and is
+;     a different object (SameLock), so a self-move can never delete
+;     the only copy.
 ;   - Ctrl-C is honoured between files and between copy chunks; a
 ;     break or failed copy removes the partial target file.
 ;   - Per-file errors are reported and the batch continues. Return
@@ -303,23 +307,83 @@ moveone:
         move.l  d6,d1
         jsr     _LVOUnLock(a6)
         tst.l   d3
-        beq.s   .same
+        beq     .same
         tst.l   d5
         beq.s   .notdir                 ; Examine failed: treat as file
         tst.l   gfib+fib_DirEntryType
-        bgt.s   .ovdir
+        bgt     .ovdir
 .notdir:
+        tst.l   argarr+12               ; BACKUP given?
+        bne.s   .dobak
         tst.l   argarr+8                ; OVERWRITE given?
         bne.s   .dodel
-        lea     srcpath,a3              ; no: record the skip
+        lea     srcpath,a3              ; neither: record the skip
         bra     addskip
 .dodel: move.l  #gtarget,d1
         jsr     _LVODeleteFile(a6)
         tst.l   d0
-        bne.s   .rename
+        bne     .rename
         jsr     _LVOIoErr(a6)
         move.l  d0,d5
-        lea     msg_repl(pc),a0
+        lea     gtarget,a3
+        bra     replfault
+
+.dobak: lea     gtarget,a0              ; gbak = gtarget + '.mvbak'
+        lea     gbak,a1
+.bk1:   move.b  (a0)+,(a1)+
+        bne.s   .bk1
+        lea     -1(a1),a1
+        move.b  #'.',(a1)+
+        move.b  #'m',(a1)+
+        move.b  #'v',(a1)+
+        move.b  #'b',(a1)+
+        move.b  #'a',(a1)+
+        move.b  #'k',(a1)+
+        clr.b   (a1)
+        move.l  #gbak,d1                ; is the backup name taken?
+        moveq   #ACCESS_READ,d2
+        jsr     _LVOLock(a6)
+        tst.l   d0
+        beq.s   .bakfree
+        move.l  d0,d1
+        jsr     _LVOUnLock(a6)
+        tst.l   argarr+8                ; BACKUP OVERWRITE: sanctioned
+        beq.s   .bakclash               ; to replace a stale .mvbak
+        move.l  #gbak,d1
+        jsr     _LVODeleteFile(a6)
+        tst.l   d0
+        bne.s   .bakfree
+        jsr     _LVOIoErr(a6)
+        move.l  d0,d5
+        lea     gbak,a3
+        bra     replfault
+.bakclash:                              ; refuse: nothing touched,
+        lea     pfx(pc),a0              ; reported now + listed at end
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        move.l  #srcpath,d1
+        jsr     _LVOPutStr(a6)
+        lea     msg_bak1(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        move.l  #gbak,d1
+        jsr     _LVOPutStr(a6)
+        lea     msg_bak2(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        lea     srcpath,a3
+        bsr     addskip
+        moveq   #RETURN_ERROR,d0
+        bra     setrc
+.bakfree:
+        move.l  #gtarget,d1
+        move.l  #gbak,d2
+        jsr     _LVORename(a6)
+        tst.l   d0
+        bne     .rename                 ; backed up: proceed with move
+        jsr     _LVOIoErr(a6)
+        move.l  d0,d5
+        lea     msg_cbak(pc),a0
         move.l  a0,d1
         jsr     _LVOPutStr(a6)
         move.l  #gtarget,d1
@@ -531,6 +595,23 @@ setrc:  cmp.l   d7,d0
         move.l  d0,d7
 .r:     rts
 
+; replfault: print "mv: cannot replace <a3>: <fault text for d5>",
+; raise rc to ERROR
+replfault:
+        lea     msg_repl(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        move.l  a3,d1
+        jsr     _LVOPutStr(a6)
+        lea     colsp(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        move.l  d5,d1
+        moveq   #0,d2
+        jsr     _LVOPrintFault(a6)
+        moveq   #RETURN_ERROR,d0
+        bra.s   setrc
+
 ;----------------------------------------------------------------------
 ; skip list: nodes of [next.l, allocsize.l, "  <path>\n\0"], printed
 ; and freed at the end
@@ -656,9 +737,9 @@ exit_wb:
         movem.l (sp)+,d2-d7/a2-a6
         rts
 
-verstr:      dc.b '$VER: mv 0.2 (13.7.26) asm build',0
+verstr:      dc.b '$VER: mv 0.3 (14.7.26) asm build',0
 dosname:     dc.b 'dos.library',0
-template:    dc.b 'FROM/A/M,TO/A,OVERWRITE/S',0
+template:    dc.b 'FROM/A/M,TO/A,OVERWRITE/S,BACKUP/S',0
 mvname:      dc.b 'mv',0
 pfx:         dc.b 'mv: ',0
 colsp:       dc.b ': ',0
@@ -671,15 +752,18 @@ msg_repl:    dc.b 'mv: cannot replace ',0
 msg_dirx:    dc.b ': moving a directory across volumes is not supported',10,0
 msg_cpd1:    dc.b 'mv: copied to ',0
 msg_cpd2:    dc.b ' but could not delete ',0
-msg_skiphdr: dc.b 'skipped (already exists):',10,0
-msg_skipf:   dc.b ': skipped (already exists)',10,0
+msg_skiphdr: dc.b 'not moved:',10,0
+msg_skipf:   dc.b ': not moved',10,0
+msg_bak1:    dc.b ': not moved, ',0
+msg_bak2:    dc.b ' already exists',10,0
+msg_cbak:    dc.b 'mv: cannot back up ',0
 msg_break:   dc.b '***Break: mv',10,0
 
         section mem,bss
 
 dosbase:  ds.l 1
 rdargs:   ds.l 1
-argarr:   ds.l 3
+argarr:   ds.l 4
 wbmsg:    ds.l 1
 bufptr:   ds.l 1
 fhin:     ds.l 1
@@ -691,6 +775,7 @@ skiptail: ds.l 1
 gfib:     ds.b fib_SIZEOF               ; Examine() needs long alignment;
 anchor:   ds.b 280+PATHLEN              ; all-ds.l above guarantees it,
 gtarget:  ds.b PATHLEN+4                ; and the ds.b sizes stay
-patbuf:   ds.b 1024                     ; long-multiples down to here
+gbak:     ds.b PATHLEN+12               ; long-multiples down to here
+patbuf:   ds.b 1024
 toisdir:  ds.b 1
 brkflag:  ds.b 1
