@@ -7,20 +7,43 @@ E-Clock frequency, and current stack size.
 ## Usage
 
 ```
+amifetch [MEM unit] [CHIP unit] [FAST unit]
+```
+
+`unit` is one of `B`, `KB`, or `MB` (case-insensitive). `MEM` sets the
+default for both Chip and Fast RAM; `CHIP`/`FAST` override it
+individually. With nothing given, both default to `KB`. `MB` is shown
+with one decimal place (`xx.x MB`); `B`/`KB` are whole numbers.
+
+```
 amifetch
+amifetch MEM=MB
+amifetch MEM=MB CHIP=B
+amifetch CHIP=B FAST=MB
+amifetch CHIP KB FAST B
 ```
 
-No arguments. Illustrative output (not yet verified on real hardware/
-FS-UAE — see below) for a 68030/68882 system with 2MB chip + 8MB fast
-RAM:
+Verified output on a real AmigaOS 3.2 install (FS-UAE, 68030, 2MB
+chip + 64MB Zorro III fast):
 
 ```
+1.AmigaOS3.2:AmigaTools> amifetch
 CPU:        68030
-FPU:        68882
+FPU:        none
 Video:      PAL (50Hz)
-Chip RAM:   1847 K free / 2048 K total
-Fast RAM:   8192 K free / 8192 K total
-Exec:       40.10 (Kickstart)
+Chip RAM:   1965 KB free / 2032 KB total
+Fast RAM:   64704 KB free / 65536 KB total
+Exec:       47.7 (Kickstart)
+E-Clock:    709379 Hz
+Stack:      4096 bytes
+
+1.AmigaOS3.2:AmigaTools> amifetch MEM=MB CHIP=B
+CPU:        68030
+FPU:        none
+Video:      PAL (50Hz)
+Chip RAM:   2012280 B free / 2080768 B total
+Fast RAM:   63.1 MB free / 64.0 MB total
+Exec:       47.7 (Kickstart)
 E-Clock:    709379 Hz
 Stack:      4096 bytes
 ```
@@ -49,6 +72,22 @@ No `Lock()`/`Examine()`/filesystem access at all, so unlike `dupfind`
 this one doesn't need real disk access to do its job — just real
 exec.library structures, which still means real AmigaOS (or FS-UAE) to
 verify against.
+
+### A real compiler bug, and how the unit conversion avoids it
+
+The first working version divided raw byte counts by 1024 with the
+plain `/` operator. Chip RAM (a couple million bytes) displayed fine;
+Fast RAM (tens of millions of bytes) came back as garbage — e.g.
+`66100000/1024` returned `-25824` instead of `64550`. Isolated with a
+series of throwaway diagnostic builds (ruled out `AvailMem()`,
+`WriteF()` argument count/order, and variable reuse in turn), the
+actual bug turned out to be `/` itself: on a 32-bit dividend past a
+few million, it silently returns the low 16 bits of the dividend,
+sign-extended, as though no division happened at all. `Shr(x,10)`
+(right-shift by 10, equivalent to `/1024`) gives the correct answer
+every time, so all RAM math here goes through `Shl()`/`Shr()`/`Mod()`
+instead of `/` or `*`. Worth remembering for any future tool here that
+divides a value that isn't guaranteed small.
 
 ## Building
 

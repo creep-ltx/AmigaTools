@@ -10,9 +10,18 @@ WHAT IT IS
 
 USAGE
 
-  amifetch
+  amifetch [MEM unit] [CHIP unit] [FAST unit]
 
-  No arguments.
+  unit is one of B, KB, or MB (case-insensitive). MEM sets the default
+  for both Chip and Fast RAM; CHIP/FAST override it individually. With
+  nothing given, both default to KB. MB is shown with one decimal
+  place (xx.x MB); B/KB are whole numbers.
+
+    amifetch
+    amifetch MEM=MB
+    amifetch MEM=MB CHIP=B
+    amifetch CHIP=B FAST=MB
+    amifetch CHIP KB FAST B
 
 HOW IT WORKS
 
@@ -34,6 +43,15 @@ HOW IT WORKS
 
   No disk access at all -- this only reads exec.library structures in
   memory.
+
+A NOTE ON THE UNIT CONVERSION
+
+  RAM byte counts are converted with Shr()/Shl()/Mod() rather than the
+  plain / and * operators. The first version used x/1024 and worked
+  fine for Chip RAM (a couple million bytes) but returned garbage for
+  Fast RAM (tens of millions of bytes) -- this compiler's `/` operator
+  silently misbehaves on large 32-bit dividends. Shr(x,10) gives the
+  correct answer every time, so that's what's used throughout.
 
 BUILDING
 
