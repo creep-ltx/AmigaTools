@@ -3,41 +3,61 @@ mv - a Unix-style move command for AmigaDOS
 
 WHAT IT IS
 
-  mv moves or renames files and directories, like Unix mv. It comes
-  as two implementations with identical behaviour: one in Amiga E
-  (mv.e, 2864 bytes) and one in 68000 assembly (mv.asm, 1104 bytes).
-  Build whichever you prefer and install it as C:mv.
+  mv moves or renames files and directories, like Unix mv, with
+  AmigaDOS pattern support. It comes as two implementations with
+  identical behaviour: one in Amiga E (mv.e, 4288 bytes) and one in
+  68000 assembly (mv.asm, 2272 bytes). Build whichever you prefer
+  and install it as C:mv.
 
   Requires Kickstart 2.04 or newer.
 
 USAGE
 
-  mv FROM/A TO/A
+  mv FROM/A/M TO/A [OVERWRITE]
 
     mv oldname newname                (rename)
     mv work:file work:archive/file    (move within a volume)
     mv work:file work:archive         (into a directory, same name)
     mv work:file ram:                 (cross-volume: copy + delete)
     mv work:somedir work:elsewhere    (directories too, same volume)
+    mv #?.mod mods:                   (AmigaDOS pattern)
+    mv a.txt b.txt c.txt work:stuff   (multiple sources)
+    mv #?.iff pics: OVERWRITE         (replace existing targets)
 
-  If TO is an existing directory, FROM is moved into it under its own
-  name. An existing file is never overwritten. Moving a directory
-  across volumes is refused (that would need a recursive copy).
+  FROM takes any number of names and/or patterns. With several files
+  or a pattern, TO must be an existing directory; a single plain name
+  keeps the simple rename/move behaviour. If TO is an existing
+  directory, sources are moved into it under their own names.
+
+  An existing target is skipped by default; skipped files are listed
+  at the end and the return code is 5. OVERWRITE deletes and replaces
+  the target instead -- after checking with SameLock() that source
+  and target aren't the same object, so `mv file file OVERWRITE` can
+  never delete your only copy.
+
+  Ctrl-C is honoured between files and during copies; a break or a
+  failed copy removes the partial target file. Errors on one file are
+  reported and the rest of the batch still runs. Return code is the
+  worst that happened: 0 clean, 5 skips, 10 errors, 20 break.
+
+  Moving a directory across volumes would need a recursive copy and
+  is refused.
 
 HOW IT WORKS
 
   AmigaDOS Rename() is secretly most of mv already: a rename is just
   a directory-entry relink, so Rename() moves a file -- or a whole
   directory -- anywhere on the same volume in one cheap call. mv
-  always tries that first.
+  tries that first for every file.
 
   When the target is on a different volume, Rename() fails with
   ERROR_RENAME_ACROSS_DEVICES, and mv falls back to copying the data
   in 32KB chunks, carrying over the protection bits and datestamp,
-  then deleting the source. A failed copy deletes the partial target
-  file rather than leaving half a file behind; a successful copy
-  whose source can't be deleted (delete protection, say) is reported
-  with return code 5 (WARN).
+  then deleting the source.
+
+  Plain names and patterns are handled uniformly: every FROM argument
+  runs through MatchFirst()/MatchNext(), which expands wildcards and
+  matches literal names with the same code path.
 
 BUILDING
 
