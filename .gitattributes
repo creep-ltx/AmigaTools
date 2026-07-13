@@ -3,6 +3,7 @@
 /amifetch/amifetch binary
 /mv/mv binary
 /mv/mv-asm binary
+/cmenu/cmenu binary
 
 # Amiga E sources: GitHub's default guess for .e is Eiffel
 *.e linguist-language=E
