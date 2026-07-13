@@ -1,0 +1,144 @@
+
+Introduction
+------------
+CBoot is a small Boot Selector program that lets you choose between
+several different startup-sequences with the use of the mouse buttons
+or the Amiga keys. CBoot is completely transparent and you wont notice
+it until you try to boot a boot mode that hasn't been installed yet.
+I made CBoot because I was tired of booting into Early Startup, boot
+with no startup-sequence and then run my custom "demo startup" script
+when I wanted to watch some demos. Also so it would be easy for my kids
+to just hold down a mouse button when starting the computer to get
+straight into TinyLauncher and start playing some games.
+
+
+Boot modes
+----------
+Default - Normal boot, no mouse button or Amiga key is pressed at boot.
+LMB     - LMB boot, left mouse button is pressed at boot.
+RMB     - RMB boot, right mouse button is pressed at boot.
+LAmiga  - LAmiga boot, left Amiga key is pressed at boot.
+RAmiga  - RAmiga boot, right Amiga key is pressed at boot.
+
+If both a mouse button and an Amiga key are held down at the same
+time, the mouse button takes priority.
+
+
+Command line modes
+-------------------
+CBoot can be started from Startup-sequence with an optional argument
+to only check a subset of the boot modes above:
+
+run >nil: c:cboot        - No argument, checks all four boot modes
+                            (LMB, RMB, LAmiga, RAmiga). This is default.
+run >nil: c:cboot mouse  - Only checks the mouse button boot modes
+                            (LMB, RMB).
+run >nil: c:cboot amiga  - Only checks the Amiga key boot modes
+                            (LAmiga, RAmiga).
+
+This is useful if you want to reserve the mouse buttons or the Amiga
+keys for something else, or if you just prefer to limit CBoot to one
+input type.
+
+
+Extra features
+--------------
+If you try to boot a boot mode that has no installed bootscript
+you will get to choose between booting "Default mode" or you can
+choose a bootscript to install for that boot mode.
+
+
+Control mode
+------------
+Press and hold down Ctrl to enter the CBoot control center
+for the current boot mode. So Ctrl alone will let you control
+Default boot mode, Ctrl and Left or Right mouse button will
+enter LMB or RMB control center, and Ctrl and Left or Right Amiga
+will enter LAmiga or RAmiga control center. This works exactly the
+same whether CBoot was started with no argument, "mouse" or "amiga".
+In the control center you can edit the active boot script, replace
+it or just test a different boot script without installing it.
+
+
+Source code
+-----------
+You can find the Amiga E source code for this small program in the
+source directory. This might be my last update on CBoot.
+
+
+Installation
+------------
+1. Copy CBoot to C:
+2. Create CBoot directory in S:
+3. Copy S:Startup-sequence to S:CBoot/ and rename it to Default
+4. Copy the included startup-sequence to S:
+5. Copy your alternative bootscripts to S:CBoot/ and name them LMB,
+   RMB, LAmiga and/or RAmiga
+6. Optionally edit the "run >nil: c:cboot" line in S:Startup-sequence
+   and add "mouse" or "amiga" if you only want to use one input type
+
+
+Changelog
+---------
+v1.4 - Added LAmiga and RAmiga boot modes, selected by holding down
+       the left or right Amiga key at boot. CBoot can now also be
+       started with "mouse" or "amiga" to limit it to only the mouse
+       button or only the Amiga key boot modes. Ctrl still enters the
+       control center the same way regardless of which modes are
+       active. Fixed a bug where bootscript paths with spaces could
+       break the copy, protect and execute commands. Trimmed away
+       dead code and messages for an even smaller filesize than v1.3.
+
+v1.3 - Added a control center for editing or replacing the current
+       boot script, or test a diffrent boot script without installing.
+       Some duplicated code has been converted into functions.
+       Amiga E source code included in the archive.
+
+v1.2 - Fixed so CBoot now works properly on AmigaOS 3.2. CBoot now
+       makes sure that bootscript file flags is set before execution.
+
+v1.1 - Small optimization update. Some functions has been rewritten
+       and easter egg / hidden part has been removed. Aiming for small size.
+
+v1.0 - CBoot has been rewritten from scratch in AmigaE instead of
+       BlitzBasic, which has resulted in a much smaller filesize.
+       Of course it still has all the features of previous versions.
+       For now it's manual installation only, an installer might
+       be availible for later versions. First version on Aminet.
+
+v0.9 - Rewrote the FileRequester code so it uses ASL instead of Intuition.
+       The CBoot Installer has been rewritten from scratch.
+
+v0.8 - Added yet another failesafe to both CBoot and Installer.
+       If the user press "Cancel" in the FileRequester CBoot and Installer
+       now has routines to deal with that situation.
+
+v0.7 - Expanded failsafe routine to not only let you know if a bootscript
+       is missing but also to install the bootscript that you select.
+       Created an installer that will copy the files to the proper places.
+
+v0.6 - Removed a lot of duplicate subroutines to make the code smaller
+       and more efficient. Expanded failsafe routine to include LMB/RMB.
+       
+v0.5 - Added a failsafe if S:CBoot/Normal isn't found.
+       Added version information, fixed more spelling.
+
+v0.4 - Fixed some spelling.
+
+v0.3 - Added Easter Egg.
+
+v0.2 - Added error handeling.
+
+v0.1 - First try.
+
+
+Thanks to
+---------
+Rebel  - For guiding me in the right direction and checking my code.
+luNix  - For support, ideas, and trying out the first versions.
+Steven - For informing me about AmigaOS 3.2 problems and help testing.
+
+
+Tobias Karlsson
+Creep / F4CG^LTX
+2026-07-12

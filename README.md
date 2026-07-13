@@ -1,12 +1,13 @@
 # AmigaTools
 
-A collection of small command-line tools for AmigaOS.
+A collection of small tools for AmigaOS.
 
 ## Tools
 
 | Tool | Description |
 |---|---|
 | [dupfind](dupfind/) | Recursively scan a directory for duplicate files, with fast header-based, hash-confirmed checksum, or exact full-byte comparison modes. |
+| [cboot](cboot/) | Boot selector — hold a mouse button or Amiga key at boot to jump straight into a different startup-sequence. |
 
 Each tool lives in its own subdirectory with its own README covering
 usage, how it works, and how to build it.
