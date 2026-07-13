@@ -106,7 +106,7 @@ Both produce an AmigaOS loadseg()able executable. The asm source uses
 Devpac-style Motorola syntax and plain 68000 instructions, so other
 assemblers should cope with at most minor tweaks.
 
-Both versions were verified on a real AmigaOS 3.2 install (FS-UAE):
+Both versions were verified on an AmigaOS 3.2 install (FS-UAE):
 rename, move-into-directory, pattern expansion, cross-volume
 copy+delete with datestamp and protection bits intact across repeated
 moves, skip-and-list-at-end, OVERWRITE replacement, BACKUP rescue to

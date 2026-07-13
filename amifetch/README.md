@@ -26,7 +26,7 @@ amifetch CHIP=B FAST=MB
 amifetch CHIP KB FAST B
 ```
 
-The screenshot above is from a real AmigaOS 3.2 install (FS-UAE,
+The screenshot above is from an AmigaOS 3.2 install (FS-UAE,
 68030, 2MB chip + 64MB Zorro III fast), showing `amifetch`,
 `amifetch MEM=MB`, and `amifetch MEM=B` back to back — the border
 resizes correctly in every case, including `B` mode's 8-digit byte
@@ -53,9 +53,9 @@ global and one library call:
   the built-in `thistask` pointer to a `process` struct.
 
 No `Lock()`/`Examine()`/filesystem access at all, so unlike `dupfind`
-this one doesn't need real disk access to do its job — just real
-exec.library structures, which still means real AmigaOS (or FS-UAE) to
-verify against.
+this one doesn't need disk access to do its job — just live
+exec.library structures, which still means AmigaOS itself (real
+hardware or FS-UAE) to verify against.
 
 ### `/` overflowing, and how the unit conversion avoids it
 

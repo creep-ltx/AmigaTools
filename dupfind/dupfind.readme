@@ -101,12 +101,12 @@ BUILDING
   This produces an AmigaOS loadseg()able executable named `dupfind`.
 
   A clean compile only proves the source is syntactically valid --
-  recursive directory scanning should be exercised on real AmigaOS
+  recursive directory scanning should be exercised on AmigaOS itself
   (real hardware or an emulator) before trusting the results.
 
 VERIFIED BEHAVIOUR
 
-  dupfind has been run against a real AmigaOS 3.2 install (762 files)
+  dupfind has been run against an AmigaOS 3.2 install (FS-UAE, 762 files)
   in all three modes. CHECKSUM and FULL both found the same 8
   duplicate sets; HEADER additionally (and correctly, per its known
   tradeoff) flagged one false positive (C/Owner vs C/Group). The

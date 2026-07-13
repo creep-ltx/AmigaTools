@@ -93,7 +93,7 @@ control center), aimed at a smaller binary — it assembles to 3240
 bytes against the E version's 4384. Its header documents how every
 LVO and struct offset was derived rather than recalled.
 
-Both sources are boot-verified on a real AmigaOS 3.2 install
+Both sources are boot-verified on an AmigaOS 3.2 install
 (FS-UAE): all four boot modes (LMB, RMB, LAmiga, RAmiga) and the
 Ctrl control-center entry have been exercised through real reboots
 in each. The one path not yet reboot-tested in the asm port is the
