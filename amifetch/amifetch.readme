@@ -1,0 +1,44 @@
+amifetch - a tiny neofetch-style system info dump for AmigaOS
+===============================================================
+
+WHAT IT IS
+
+  amifetch is a command-line tool that prints a short summary of the
+  machine it's running on: CPU, FPU, video timing (PAL/NTSC),
+  chip/fast RAM (free vs. installed), Kickstart/exec.library version,
+  E-Clock frequency, and the current process's stack size.
+
+USAGE
+
+  amifetch
+
+  No arguments.
+
+HOW IT WORKS
+
+  Everything comes from exec.library's always-available execbase
+  global and a single library call:
+
+  - CPU/FPU: execbase's AttnFlags is a cumulative bitfield -- a 68030
+    machine has both the 68020 and 68030 bits set -- so amifetch checks
+    from the highest bit down and reports the first match.
+  - Video timing: execbase's vertical blank frequency (50 = PAL,
+    60 = NTSC).
+  - Chip/Fast RAM: AvailMem(MEMF_CHIP) / AvailMem(MEMF_FAST) for free
+    bytes, OR'd with MEMF_TOTAL for installed bytes.
+  - Kickstart version: exec.library's own version/revision fields.
+  - E-Clock: execbase's E-Clock frequency, the timing reference used
+    by timer.device.
+  - Stack size: the current process's stack size field, reached via
+    the built-in thistask pointer.
+
+  No disk access at all -- this only reads exec.library structures in
+  memory.
+
+BUILDING
+
+  Compile amifetch.e with the E-VO E compiler:
+
+    evo amifetch.e
+
+  This produces an AmigaOS loadseg()able executable named `amifetch`.
