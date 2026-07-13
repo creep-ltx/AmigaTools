@@ -35,8 +35,7 @@ run >nil: C:CBoot mouse    ; only LMB/RMB
 run >nil: C:CBoot amiga    ; only LAmiga/RAmiga
 ```
 
-Full behaviour and installation steps: [cboot.readme](cboot.readme)
-(the author's own Aminet-style distribution readme).
+Full behaviour and installation steps: [cboot.readme](cboot.readme).
 
 ## Building
 
