@@ -294,3 +294,5 @@ PROC addskip(srcpath:PTR TO CHAR)
   skiptail := node
   skipcount := skipcount+1
 ENDPROC
+
+version: CHAR '$VER: mv 0.2 (13.7.26) E build',0

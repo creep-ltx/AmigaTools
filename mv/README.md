@@ -7,8 +7,8 @@ you like and install it as `C:mv`.
 
 | Implementation | Binary size |
 |---|---|
-| mv.e (E-VO) | 4288 bytes |
-| mv.asm (vasm) | 2272 bytes |
+| mv.e (E-VO) | 4320 bytes |
+| mv.asm (vasm) | 2304 bytes |
 
 Speed is identical — a move spends all its time inside dos.library —
 so the assembly version's win is size, not speed.

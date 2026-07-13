@@ -5,8 +5,8 @@ WHAT IT IS
 
   mv moves or renames files and directories, like Unix mv, with
   AmigaDOS pattern support. It comes as two implementations with
-  identical behaviour: one in Amiga E (mv.e, 4288 bytes) and one in
-  68000 assembly (mv.asm, 2272 bytes). Build whichever you prefer
+  identical behaviour: one in Amiga E (mv.e, 4320 bytes) and one in
+  68000 assembly (mv.asm, 2304 bytes). Build whichever you prefer
   and install it as C:mv.
 
   Requires Kickstart 2.04 or newer.

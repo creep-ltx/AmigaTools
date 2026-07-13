@@ -656,6 +656,7 @@ exit_wb:
         movem.l (sp)+,d2-d7/a2-a6
         rts
 
+verstr:      dc.b '$VER: mv 0.2 (13.7.26) asm build',0
 dosname:     dc.b 'dos.library',0
 template:    dc.b 'FROM/A/M,TO/A,OVERWRITE/S',0
 mvname:      dc.b 'mv',0
