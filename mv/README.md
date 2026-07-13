@@ -56,7 +56,11 @@ datestamp, and deleting the source.
 
 ## Building
 
-The E version, with the E-VO compiler:
+Both prebuilt binaries are included in this directory — `mv` (the E
+build) and `mv-asm` (the assembly build). No compiler needed; copy
+either one to `C:mv` and go.
+
+To build them yourself — the E version, with the E-VO compiler:
 
 ```
 evo mv.e

@@ -55,7 +55,9 @@ A NOTE ON THE UNIT CONVERSION
 
 BUILDING
 
-  Compile amifetch.e with the E-VO E compiler:
+  A prebuilt amifetch binary is included -- no compiler needed.
+
+  To build it yourself, compile amifetch.e with the E-VO E compiler:
 
     evo amifetch.e
 

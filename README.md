@@ -12,7 +12,10 @@ A collection of small tools for AmigaOS.
 | [mv](mv/) | Unix-style move — Rename() on the same volume, copy+delete across volumes. In both Amiga E and 68k assembly. |
 
 Each tool lives in its own subdirectory with its own README covering
-usage, how it works, and how to build it.
+usage, how it works, and how to build it. Prebuilt binaries are
+included right in the tool directories (cboot's full release archives
+live under [Releases](../../releases) instead), so no compiler is
+needed — copy the binary somewhere in your path and go.
 
 ## Building
 

@@ -79,7 +79,10 @@ value that isn't guaranteed small.
 
 ## Building
 
-Compile `amifetch.e` with the E-VO E compiler:
+A prebuilt `amifetch` binary is included in this directory — no
+compiler needed, just copy it somewhere in your path.
+
+To build it yourself, compile `amifetch.e` with the E-VO E compiler:
 
 ```
 evo amifetch.e

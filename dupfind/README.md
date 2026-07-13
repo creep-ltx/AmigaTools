@@ -89,7 +89,10 @@ scales with how many files share each size, not with total file count.
 
 ## Building
 
-Compile `dupfind.e` with the E-VO E compiler:
+A prebuilt `dupfind` binary is included in this directory — no
+compiler needed, just copy it somewhere in your path.
+
+To build it yourself, compile `dupfind.e` with the E-VO E compiler:
 
 ```
 evo dupfind.e

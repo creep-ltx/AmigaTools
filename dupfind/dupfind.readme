@@ -92,7 +92,9 @@ HOW IT WORKS
 
 BUILDING
 
-  Compile dupfind.e with the E-VO E compiler:
+  A prebuilt dupfind binary is included -- no compiler needed.
+
+  To build it yourself, compile dupfind.e with the E-VO E compiler:
 
     evo dupfind.e
 
