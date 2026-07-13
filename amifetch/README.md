@@ -57,21 +57,25 @@ this one doesn't need real disk access to do its job — just real
 exec.library structures, which still means real AmigaOS (or FS-UAE) to
 verify against.
 
-### A real compiler bug, and how the unit conversion avoids it
+### `/` overflowing, and how the unit conversion avoids it
 
 The first working version divided raw byte counts by 1024 with the
 plain `/` operator. Chip RAM (a couple million bytes) displayed fine;
 Fast RAM (tens of millions of bytes) came back as garbage — e.g.
 `66100000/1024` returned `-25824` instead of `64550`. Isolated with a
 series of throwaway diagnostic builds (ruled out `AvailMem()`,
-`WriteF()` argument count/order, and variable reuse in turn), the
-actual bug turned out to be `/` itself: on a 32-bit dividend past a
-few million, it silently returns the low 16 bits of the dividend,
-sign-extended, as though no division happened at all. `Shr(x,10)`
-(right-shift by 10, equivalent to `/1024`) gives the correct answer
-every time, so all RAM math here goes through `Shl()`/`Shr()`/`Mod()`
-instead of `/` or `*`. Worth remembering for any future tool here that
-divides a value that isn't guaranteed small.
+`WriteF()` argument count/order, and variable reuse in turn) and
+reported upstream, Darren Coles (E-VO's author) confirmed the cause:
+`/` compiles straight to the 68000's hardware `DIVU`/`DIVS`
+instruction (32-bit dividend, 16-bit divisor, 16-bit quotient) for
+speed, and silently returns garbage if the quotient overflows that
+16-bit result — which Fast RAM's `/1024` did (64550 doesn't fit a
+signed 16-bit result), while Chip RAM's never got big enough to.
+E provides `Div()` for the general large-value case, but it's
+markedly slower — since every divisor here is a power of two,
+`Shr()`/`Shl()` are both correct *and* the faster choice, not just a
+workaround. Worth remembering for any future tool here that divides a
+value that isn't guaranteed small.
 
 ## Building
 

@@ -17,16 +17,19 @@
    to fit whatever the longest line turns out to be.
 
    RAM sizes are converted with Shr(x,shift)/Shl(x,n) rather than
-   x/divisor or x*factor: this compiler's `/` operator on a 32-bit
-   dividend north of a few million (e.g. Fast RAM's raw byte count,
-   tens of millions) silently returns garbage -- specifically the low
-   16 bits of the dividend, sign-extended, as if no division happened
-   at all. Chip RAM's raw byte count is small enough to never trip it,
-   which is why it looked fine while Fast RAM didn't. Confirmed on
-   real hardware/FS-UAE with hardcoded values, unrelated to AvailMem()
-   or WriteF() itself. Shr()/Shl() don't have the bug, so MB's one
-   decimal place is derived from those plus the small-value-only
-   Mod() builtin instead of plain `/` or `*`.
+   x/divisor or x*factor: E-VO's `/` operator compiles straight to the
+   68000's hardware DIVU/DIVS instruction (32-bit dividend, 16-bit
+   divisor, 16-bit quotient) for speed, and if the quotient overflows
+   that 16-bit result it silently returns garbage instead of a proper
+   32-bit-safe division -- confirmed by Darren Coles (E-VO's author)
+   after this was reported upstream. Fast RAM's raw byte count is big
+   enough that its /1024 quotient overflows a signed 16-bit result;
+   Chip RAM's never got that big, which is why it looked fine while
+   Fast RAM didn't. E provides Div() for the general case, but it's
+   markedly slower per Darren -- since every divisor here is a power
+   of two, Shr()/Shl() are both correct AND the faster choice, not
+   just a workaround. MB's one decimal place is derived from those
+   plus the small-value-only Mod() builtin instead of plain `/` or `*`.
 
    Every line is built into a buffer with StringF() first (never
    printed straight to the screen), so the true width of the longest
