@@ -2,11 +2,27 @@ MODULE 'Dos','dos/dos','Asl','libraries/Asl','exec/io','exec/ports','amigalib/po
 
 CONST MATRIX_SIZE=16
 
-PROC checkctrl()
+CONST CTRL_BIT=8, LAMIGA_BIT=64, RAMIGA_BIT=128
+
+CONST MODE_ALL=0, MODE_MOUSE=1, MODE_AMIGA=2
+
+PROC getmode()
+  DEF options:PTR TO LONG, rdargs, mode=MODE_ALL
+  options:=[0]
+  IF rdargs:=ReadArgs('MODE',options,NIL)
+    IF options[0]
+      IF StrCmp(options[0],'mouse',ALL) THEN mode:=MODE_MOUSE
+      IF StrCmp(options[0],'amiga',ALL) THEN mode:=MODE_AMIGA
+    ENDIF
+    FreeArgs(rdargs)
+  ENDIF
+ENDPROC mode
+
+PROC readkeyflags()
   DEF keyIO: PTR TO iostd
   DEF keyMP: PTR TO mp
   DEF keyMatrix:PTR TO CHAR
-  DEF ctrl=FALSE
+  DEF flags=0
 
   IF (keyMP:=createPort(0,0))
     IF (keyIO:=createExtIO(keyMP,SIZEOF iostd))
@@ -17,99 +33,97 @@ PROC checkctrl()
           keyIO.length:=IF KickVersion(36) THEN MATRIX_SIZE ELSE 13
           DoIO(keyIO)
 
-          IF (keyMatrix[12] AND 8) THEN ctrl:=TRUE
+          flags:=keyMatrix[12] AND (CTRL_BIT OR LAMIGA_BIT OR RAMIGA_BIT)
           FreeMem(keyMatrix,MATRIX_SIZE)
-        ELSE
-          WriteF('Error: Could not allocate keymatrix memory\n')
         ENDIF
         CloseDevice(keyIO)
-      ELSE
-        WriteF('Error: Could not open keyboard.device\n')
       ENDIF
       deleteExtIO(keyIO)
-    ELSE
-      WriteF('Error: Could not create I/O request\n')
     ENDIF
     deletePort(keyMP)
-  ELSE
-    WriteF('Error: Could not create message port\n')
   ENDIF
-ENDPROC ctrl
+ENDPROC flags
 
-PROC checkmouse(file)
-  DEF m
-  m:=Mouse()
-  SELECT m
-    CASE 0
-      StrCopy(file,'S:CBoot/Default')
-    CASE 1
-      StrCopy(file,'S:CBoot/LMB')
-    CASE 2
-      StrCopy(file,'S:CBoot/RMB')
-  ENDSELECT
+PROC selectboot(file, mode, lamiga, ramiga)
+  DEF m, matched=FALSE
+
+  IF mode<>MODE_AMIGA
+    m:=Mouse()
+    SELECT m
+      CASE 1
+        StrCopy(file,'S:CBoot/LMB')
+        matched:=TRUE
+      CASE 2
+        StrCopy(file,'S:CBoot/RMB')
+        matched:=TRUE
+    ENDSELECT
+  ENDIF
+
+  IF (matched=FALSE) AND (mode<>MODE_MOUSE)
+    IF lamiga
+      StrCopy(file,'S:CBoot/LAmiga')
+      matched:=TRUE
+    ELSEIF ramiga
+      StrCopy(file,'S:CBoot/RAmiga')
+      matched:=TRUE
+    ENDIF
+  ENDIF
+
+  IF matched=FALSE THEN StrCopy(file,'S:CBoot/Default')
 ENDPROC
 
 PROC configmenu(file)
   DEF ask, executeStr[255]:STRING
-  ask:=request('CBoot control.\n\nEdit or replace \s?\nOr test a new script without installing?','Edit|Replace|Test',[file])
+  ask:=request('CBoot control.\n\nEdit, replace or test \s?','Edit|Replace|Test',[file])
   SELECT ask
     CASE 1
-      StringF(executeStr,'ed \s',file)
+      StringF(executeStr,'ed "\s"',file)
       Execute(executeStr,0,0)
     CASE 2
-      install(file)
+      install(file,TRUE)
     CASE 0
-      test(file)
+      install(file,FALSE)
   ENDSELECT
 ENDPROC
 
 PROC selectfile(file)
   DEF ask
   IF FileLength('S:CBoot/Default') > 0
-    ask:=request('Select the bootscript that you\nwant to install as: \s. \n\nOr use S:CBoot/Default to boot normally?','Boot normally|Select file',[file])
+    ask:=request('No script for \s.\nBoot normally or select one?','Normal|Select',[file])
   ELSE
-    ask:=request('Select the bootscript that you\nwant to install as: \s. ','Select file',[file])
+    ask:=request('No script for \s.\nSelect one:','Select',[file])
   ENDIF
   IF ask = 1
     StrCopy(file,'S:CBoot/Default')
   ELSE
-    install(file)
+    install(file,TRUE)
   ENDIF
 ENDPROC
 
-PROC install(file)
-  DEF req:PTR TO filerequester, executeStr[255]:STRING
-    IF aslbase:=OpenLibrary('asl.library',37)
-      IF req:=AllocFileRequest()
-        IF RequestFile(req)
-          StringF(executeStr,'copy \s/\s \s', req.drawer, req.file, file)
-          Execute(executeStr,0,0)
-        ENDIF
-        FreeFileRequest(req)
-      ELSE
-        WriteF('Could not open filerequester!\n')
+PROC pickfile(result)
+  DEF req:PTR TO filerequester, ok=FALSE
+  IF aslbase:=OpenLibrary('asl.library',37)
+    IF req:=AllocFileRequest()
+      IF RequestFile(req)
+        StringF(result,'\s/\s', req.drawer, req.file)
+        ok:=TRUE
       ENDIF
-      CloseLibrary(aslbase)
-    ELSE
-      WriteF('Could not open asl.library!\n')
+      FreeFileRequest(req)
     ENDIF
-ENDPROC
+    CloseLibrary(aslbase)
+  ENDIF
+ENDPROC ok
 
-PROC test(file)
-  DEF req:PTR TO filerequester
-    IF aslbase:=OpenLibrary('asl.library',37)
-      IF req:=AllocFileRequest()
-        IF RequestFile(req)
-          StringF(file,'\s/\s', req.drawer, req.file)
-        ENDIF
-        FreeFileRequest(req)
-      ELSE
-        WriteF('Could not open filerequester!\n')
-      ENDIF
-      CloseLibrary(aslbase)
+PROC install(file, doinstall)
+  DEF picked[255]:STRING, executeStr[255]:STRING
+  IF pickfile(picked)
+    IF doinstall
+      StringF(executeStr,'copy "\s" "\s"', picked, file)
+      Execute(executeStr,0,0)
     ELSE
-      WriteF('Could not open asl.library!\n')
+      StrCopy(file,picked)
     ENDIF
+  ENDIF
 ENDPROC
 
 PROC request(body,gadgets,args) IS EasyRequestArgs(0,[20,0,0,body,gadgets],0,args)
@@ -140,17 +154,22 @@ ENDPROC
 
 PROC setflags(file)
   DEF flags[255]:STRING
-  StringF(flags,'protect \s +srwed',file)
+  StringF(flags,'protect "\s" +srwed',file)
   Execute(flags,0,0)
 ENDPROC
 
 PROC main()
-  DEF file[255]:STRING, ctrl
+  DEF file[255]:STRING, ctrl, lamiga, ramiga, keyflags, mode, execStr[255]:STRING
 
-  '$VER:CBoot version 1.3 (13.9.25) tobias.karlsson@piratkopia.se'
+  '$VER:CBoot 1.4 tobias.karlsson@piratkopia.se'
 
-  ctrl:=checkctrl()
-  checkmouse(file)
+  mode:=getmode()
+  keyflags:=readkeyflags()
+  ctrl:=IF (keyflags AND CTRL_BIT) THEN TRUE ELSE FALSE
+  lamiga:=IF (keyflags AND LAMIGA_BIT) THEN TRUE ELSE FALSE
+  ramiga:=IF (keyflags AND RAMIGA_BIT) THEN TRUE ELSE FALSE
+
+  selectboot(file,mode,lamiga,ramiga)
   setupenv()
 
   IF ctrl=TRUE THEN configmenu(file)
@@ -161,5 +180,6 @@ PROC main()
 
     envremove()
     setflags(file)
-    Execute(file,0,0)
+    StringF(execStr,'"\s"',file)
+    Execute(execStr,0,0)
 ENDPROC
