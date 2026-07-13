@@ -92,23 +92,20 @@ HOW IT WORKS
 
 BUILDING
 
-  Requires the native-Linux Amiga E cross-compiler pipeline (vasm +
-  vamos + E-VO). With `ecompile` on PATH:
+  Compile dupfind.e with the E-VO E compiler:
 
-    ecompile dupfind.e dupfind
+    ec dupfind.e dupfind
 
   This produces an AmigaOS loadseg()able executable named `dupfind`.
 
-  Note: recursive directory scanning (Lock/Examine/ExNext) cannot be
-  exercised under vamos -- it crashes on Lock() regardless of caller
-  correctness. A clean compile only proves the source is
-  syntactically valid; real testing has to happen on actual AmigaOS
-  (real hardware or an emulator like FS-UAE).
+  A clean compile only proves the source is syntactically valid --
+  recursive directory scanning should be exercised on real AmigaOS
+  (real hardware or an emulator) before trusting the results.
 
 VERIFIED BEHAVIOUR
 
-  dupfind has been run against a real AmigaOS 3.2 install (762 files,
-  FS-UAE) in all three modes. CHECKSUM and FULL both found the same 8
+  dupfind has been run against a real AmigaOS 3.2 install (762 files)
+  in all three modes. CHECKSUM and FULL both found the same 8
   duplicate sets; HEADER additionally (and correctly, per its known
   tradeoff) flagged one false positive (C/Owner vs C/Group). The
   CHECKSUM/FULL result was independently cross-checked against the
