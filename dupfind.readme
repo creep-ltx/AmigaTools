@@ -94,7 +94,7 @@ BUILDING
 
   Compile dupfind.e with the E-VO E compiler:
 
-    ec dupfind.e dupfind
+    evo dupfind.e
 
   This produces an AmigaOS loadseg()able executable named `dupfind`.
 
