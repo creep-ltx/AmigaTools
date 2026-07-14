@@ -1,8 +1,8 @@
 ; cboot14.asm - 68k port of cboot14.e, extended with LAmiga/RAmiga
 ; boot modes and "mouse"/"amiga" command-line mode selection.
 ;
-; Based on cboot14_old.asm (verified working on real hardware: booted and run
-; under FS-UAE on a real AmigaOS 3.2 install, assembled size 3704 bytes for
+; Based on cboot14_old.asm (verified: booted and run on an AmigaOS 3.2
+; install under FS-UAE, assembled size 3704 bytes for
 ; the Ctrl/LMB/RMB-only version). This adds the same functionality that was
 ; added to cboot14.e: reading the Left/Right Amiga bits from the keyboard
 ; matrix, and an optional "MODE" command-line argument ("mouse" or "amiga")
