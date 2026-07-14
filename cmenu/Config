@@ -9,7 +9,7 @@
 ; STYLE LIGHT|DARK|ANSI
 ;              - LIGHT = grey bg/black text, DARK = black bg/white
 ;                text, ANSI = DARK plus full-colour art
-;                (default DARK)
+;                (default LIGHT)
 ; HEADERS [ON|OFF] dir
 ;              - directory with ANSI art headers; one is picked at
 ;                random each run and drawn above the menu. OFF keeps
@@ -17,12 +17,25 @@
 ; BACKGROUND [ON|OFF] path
 ;              - full-screen background art (file, or directory to
 ;                rotate) instead of a header; the menu is laid out
-;                inside the art's free interior
+;                inside the art's free interior. When rotating, only
+;                art that fits the screen height is considered
+; MUSIC [RANDOM|REPEAT|OFF] path
+;              - ProTracker music while the menu is shown (file, or
+;                directory incl. subdirs; name.mod / mod.name files).
+;                RANDOM jukeboxes to another module when one ends,
+;                REPEAT loops the picked one. Needs ptreplay.library
+;                in LIBS:
+; FONT name/size
+;              - e.g. FONT MicroKnight/8: a font from FONTS: instead
+;                of Topaz/8 (missing fonts fall back to Topaz/8;
+;                8x8 fonts fit the art best)
 
 Workbench|S:Startup-Sequence-Normal
 Shell|C:NewShell
 DEFAULT 1
 TIMEOUT 10
-STYLE DARK
-HEADERS ON S:CMenu/Headers
-BACKGROUND OFF S:CMenu/Backgrounds
+STYLE LIGHT
+HEADERS OFF S:CMenu/Headers
+BACKGROUND ON S:CMenu/Backgrounds
+MUSIC RANDOM S:CMenu/Music
+;FONT MicroKnight/8

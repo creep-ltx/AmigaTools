@@ -10,3 +10,4 @@
 
 # ANSI art: escape bytes, never diff as text
 /cmenu/Headers/*.ANS binary
+/cmenu/Libs/ptreplay.library binary
