@@ -1,4 +1,4 @@
-; cboot14.asm - hand-written 68k port of cboot14.e, extended with LAmiga/RAmiga
+; cboot14.asm - 68k port of cboot14.e, extended with LAmiga/RAmiga
 ; boot modes and "mouse"/"amiga" command-line mode selection.
 ;
 ; Based on cboot14_old.asm (verified working on real hardware: booted and run

@@ -45,7 +45,7 @@ Compile `cboot.e` with the E-VO E compiler:
 evo cboot.e
 ```
 
-There is also a hand-written 68000 assembly port, [cboot.asm](cboot.asm),
+There is also a 68000 assembly port, [cboot.asm](cboot.asm),
 also boot-verified. Assemble with [vasm](http://sun.hasenbraten.de/vasm/):
 
 ```
@@ -87,7 +87,7 @@ Diff any two releases with e.g. `git diff v1.3 v1.4 -- cboot/cboot.e`.
 
 ## The assembly port
 
-[cboot.asm](cboot.asm) is a hand-written 68000 assembly port of the
+[cboot.asm](cboot.asm) is a 68000 assembly port of the
 v1.4 feature set (all four boot modes, `mouse`/`amiga` argument,
 control center), aimed at a smaller binary — it assembles to 3240
 bytes against the E version's 4384. Its header documents how every
