@@ -1,0 +1,28 @@
+; S:CMenu/Config - menu definition for CMenu
+;
+; One item per line:  Menu name|path-to-script-or-executable
+; Max 10 items (keys 1-9 and 0 launch them directly).
+;
+; DEFAULT n    - 1-based index of the preselected item (default 1)
+; TIMEOUT secs - start the DEFAULT item after secs seconds unless a
+;                key is pressed; 0 or absent = wait forever
+; STYLE LIGHT|DARK|ANSI
+;              - LIGHT = grey bg/black text, DARK = black bg/white
+;                text, ANSI = DARK plus full-colour art
+;                (default DARK)
+; HEADERS [ON|OFF] dir
+;              - directory with ANSI art headers; one is picked at
+;                random each run and drawn above the menu. OFF keeps
+;                the dir configured but hides the header
+; BACKGROUND [ON|OFF] path
+;              - full-screen background art (file, or directory to
+;                rotate) instead of a header; the menu is laid out
+;                inside the art's free interior
+
+Workbench|S:Startup-Sequence-Normal
+Shell|C:NewShell
+DEFAULT 1
+TIMEOUT 10
+STYLE DARK
+HEADERS ON S:CMenu/Headers
+BACKGROUND OFF S:CMenu/Backgrounds

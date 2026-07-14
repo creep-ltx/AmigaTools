@@ -7,3 +7,6 @@
 
 # Amiga E sources: GitHub's default guess for .e is Eiffel
 *.e linguist-language=E
+
+# ANSI art: escape bytes, never diff as text
+/cmenu/Headers/*.ANS binary
