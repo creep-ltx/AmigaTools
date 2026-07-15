@@ -3,7 +3,7 @@
               `. ^ .'      _/  |_/ __/__ _/  |  \_       `  ^  '
 ·              ! ¡ !      |    |   `)   |>   _   <.       ! ¡ !                ·
 |                !        `----^--._____|----|____|         !                  |
-¦--------------------------------------..--------------------------------------¦
+¦-» output, rename, : commands, and other stuff can have this border!        «-¦
 :This is the first line in the file vie||This is the first line in the file vie·
 |                                      ||                                      |
 |                                      ||                                      |
@@ -27,5 +27,5 @@
 |                                      ||                                      |
 |This is the last line in the file view|!This is the last line in the file view|
 |      \                               !:                               /      |
-|      \\          h = help             ·           Esc = Quit         //      |
+|      \\          ? = help             ·           Esc = Quit         //      |
 `------ \- ----- /- ------ -÷- A LATEX PRODUCTiON! -÷- ------ -\----- -/ ------'

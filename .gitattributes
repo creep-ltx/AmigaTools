@@ -13,5 +13,6 @@
 /cmenu/Headers/*.ANS binary
 /cmenu/Libs/ptreplay.library binary
 
-# CFile's frame mockup is ISO-8859-1 -- keep the bytes exact
+# CFile's frame mockups are ISO-8859-1 -- keep the bytes exact
 /cfile/layout binary
+/cfile/console-and-view-layout binary
