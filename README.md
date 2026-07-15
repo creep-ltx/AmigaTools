@@ -11,7 +11,7 @@ A collection of small tools for AmigaOS.
 | [amifetch](amifetch/) | neofetch-style dump of CPU/FPU, video timing, chip/fast RAM, Kickstart version, E-Clock, and stack size. |
 | [mv](mv/) | Unix-style move with pattern support — Rename() on the same volume, copy+delete across volumes, skip/OVERWRITE/BACKUP on collisions. In both Amiga E and 68k assembly. |
 | [cmenu](cmenu/) | Full-screen text boot menu — runs before the Startup-Sequence and launches the chosen script or executable. Default item with countdown, rotating ANSI art headers or full-screen backgrounds, LIGHT/DARK/ANSI colour styles, ProTracker chip music while the menu is up, and a built-in config screen that edits everything in place. |
-| [cfile](cfile/) | Two-pane keyboard-driven text-mode file manager — copy/move/delete/rename with marks and collision prompts, recursive directory operations with a progress bar, volume list, text/ANSI/hex viewer, archive packing and unpacking, live in-frame console with scrollback, protection-bit editor, and shell commands. |
+| [cfile](cfile/) | Two-pane keyboard-driven text-mode file manager — copy/move/delete/rename with marks and collision prompts, recursive directory operations with a progress bar, volume list, text/ANSI/hex viewer, built-in text editor, archive packing and unpacking, live in-frame console with scrollback, protection-bit editor, shell commands, and a config file with custom fonts, live reload and remembered pane paths. |
 
 Each tool lives in its own subdirectory with its own README covering
 usage, how it works, and how to build it. Prebuilt binaries are

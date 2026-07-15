@@ -4,13 +4,14 @@ CFile - a two-pane text-mode file manager for AmigaOS
 WHAT IT IS
 
   CFile is a keyboard-driven file manager: two directory panes inside
-  a full-screen 80x31 character frame, in the spirit of the classic
-  two-pane managers. Files are recognised by their headers (hunk
-  executable, lha/lzx/zip archive, ANSI, text), and each verb does
-  the natural thing for the type. Written in Amiga E, compiled to a
-  native AmigaOS loadseg()able executable. Needs AmigaOS 2.0+; the
-  panes start in DH0: and DH1: and the volume list reaches
-  everything else.
+  a full-screen character frame, in the spirit of the classic
+  two-pane managers. The frame is composed at startup for whatever
+  font and screen it finds, so a small custom font gets a wider,
+  taller grid and the same layout. Files are recognised by their
+  headers (hunk executable, lha/lzx/zip archive, ANSI, text), and
+  each verb does the natural thing for the type. Written in Amiga E,
+  compiled to a native AmigaOS loadseg()able executable. Needs
+  AmigaOS 2.0+.
 
 KEYS
 
@@ -21,7 +22,12 @@ KEYS
   Enter        open by type: enter a directory, view text or ANSI,
                run an executable (asks first), hex-view the rest
   v            view: text pager, ANSI art in the classic palette,
-               hex dump for binaries, contents listing for archives
+               hex dump for binaries, contents listing for archives;
+               with marks, a tour - Right = next (unmarks the viewed
+               file), Left = back, Esc keeps the rest marked
+  e            edit a text file in place (e inside the viewer works
+               too); Esc asks about saving only when something
+               changed
   i            info window: size, date, comment, protection bits -
                h s p a r w e d toggle the bits live
   Space        mark/unmark the entry (and step down)
@@ -30,7 +36,9 @@ KEYS
   m / M        move likewise (same volume renames, across volumes
                copies and deletes)
   r            rename; with marks, one prompt per entry
-  n            new directory
+  n            new: a name ending in "/" makes a directory, any
+               other name opens the editor on a new file (created
+               only when saved)
   Del / D      delete the selection or marked set, directories
                recursively (asks first)
   u            unpack the selected archive - or every marked
@@ -40,6 +48,9 @@ KEYS
   :            run a shell command in the active pane's directory
   ? / Help / h help screen
   Esc          quit (asks first)
+
+  In every text prompt the cursor walks with Left/Right, and
+  Shift+Left/Shift+Right jump to the start and end of the line.
 
 FILE OPERATIONS
 
@@ -57,7 +68,18 @@ FILE OPERATIONS
   and the summary names what remains.
 
   Marks (Space) turn c, m, Del and u into bulk operations on the
-  whole set; r walks the marked set one prompt at a time.
+  whole set; r walks the marked set one prompt at a time, and v
+  tours it file by file.
+
+THE EDITOR
+
+  e opens a text file in the frame: arrows move the cursor (Shift =
+  page and line ends, Ctrl = first/last line), Enter splits a line,
+  Backspace/Del join across line ends, tabs become spaces on load.
+  Esc asks about saving only when something changed. n opens the
+  same editor on a new file, which is created only if it is saved.
+  Lines are capped at 200 characters and files at 8192 lines;
+  bigger files stay view-only.
 
 ARCHIVES
 
@@ -79,16 +101,42 @@ THE CONSOLE
   through up to 4000 lines of output; any other key returns to the
   panes.
 
+CONFIGURATION
+
+  CFile reads PROGDIR:cfile.config (plain text, ";" comments):
+
+    LEFT      SYS:
+    RIGHT     RAM:
+    SAVEDIRS  ON
+    FONT      MicroKnight7/7
+
+  LEFT/RIGHT are the start paths ("(volumes)" starts a pane in the
+  volume list); command-line arguments (cfile [left] [right])
+  override them. SAVEDIRS ON writes the current pane paths back on
+  quit - only those two lines are rewritten, everything else in the
+  file passes through verbatim. FONT takes any fixed-width disk
+  font; "topaz" always means the ROM font, and a font that fails to
+  open, is proportional, or leaves less than an 80x18 grid is
+  refused - CFile falls back to Topaz/8. Editing the config in
+  CFile's own editor applies it on save: the font, grid and frames
+  rebuild live, and a bad value keeps the last good setup. Without
+  a config file the panes start in SYS: and RAM:.
+
+  CFile also runs without a Startup-Sequence: if ENV: or T: is
+  missing at start it creates them the standard way (RAM:Env,
+  RAM:T) and removes only what it made, on a clean exit.
+
 DISPLAY
 
   CFile opens its own 8-colour screen (like Workbench, made public
   as CFILE): grey background, black text, blue directories, and a
   black selection bar that keeps the entry's type colour. Each
   pane's path lives in the frame's border row; prompts and messages
-  take that row over and give it back afterwards. Viewing ANSI art
-  switches the palette to the classic ANSI colours and restores it
-  on exit. If the screen cannot be opened, CFile falls back to a
-  borderless window on the public screen.
+  take that row over and give it back afterwards. The volume list
+  shows volumes first, assigns below them. Viewing ANSI art switches
+  the palette to the classic ANSI colours and restores it on exit.
+  If the screen cannot be opened, CFile falls back to a borderless
+  window on the public screen.
 
 BUILDING
 
@@ -104,10 +152,13 @@ BUILDING
 VERIFIED BEHAVIOUR
 
   Exercised on an AmigaOS 3.2 install (FS-UAE): pane navigation with
-  paging, the volume list, copy and move with collision prompts and
-  bulk marks, recursive deletes including delete-protected entries,
-  sequential rename, the info window with live protection-bit
-  editing, text/ANSI/hex viewing, archive unpacking singly and in
-  bulk, shell commands, running executables, and the live console
-  with scrollback. The pack verb and the newest console refinements
-  have had the least testing so far.
+  paging, the volume list with assigns, copy and move with collision
+  prompts and bulk marks, recursive deletes including
+  delete-protected entries, sequential rename, the info window with
+  live protection-bit editing, text/ANSI/hex viewing, the bulk view
+  tour, the editor including new files from n, archive unpacking
+  singly and in bulk, shell commands, running executables, the live
+  console with scrollback, and the config file end to end - custom
+  fonts, live reload from an in-CFile edit, and SAVEDIRS preserving
+  hand edits. The pack verb, the prompt-line Shift jumps and the
+  ENV:/T: bootstrap have had the least testing so far.

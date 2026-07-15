@@ -1,10 +1,12 @@
 -> CFile - a two-pane text-style file manager for AmigaOS
 ->
--> Opens its own 640x256-style screen (SA_LIKEWORKBENCH) and draws a
--> compiled-in 80x31 character frame with two 38-column directory
--> panes side by side. The left pane starts in DH0:, the right pane
--> in DH1:; going Left past a device root shows the volume list, so
--> either pane can reach any mounted volume.
+-> Opens its own screen (SA_LIKEWORKBENCH) and composes a character
+-> frame for whatever font the config names (PROGDIR:cfile.config:
+-> LEFT/RIGHT start paths, SAVEDIRS, FONT name/size), with two
+-> directory panes side by side. The panes start in SYS: and RAM:
+-> unless the config or the command line says otherwise; going Left
+-> past a device root shows the volume list (volumes, then assigns),
+-> so either pane can reach any mounted volume.
 ->
 -> Keys:
 ->   Tab         switch the active pane
@@ -14,7 +16,13 @@
 ->               came from); at a device root, the volume list
 ->   Enter       open by type: enter a directory, view text, run a
 ->               hunk executable (asks first), hex-view the rest
-->   v           view the file: text pager, or hex for binaries
+->   v           view the file: text pager, ANSI, or hex; with
+->               marks, a tour - Right = next file (consumes the
+->               mark), Left = back, Esc keeps the rest marked
+->   e           edit a text file in place: arrows move the cursor
+->               (Shift = page/line ends, Ctrl = first/last line),
+->               Enter splits, Backspace/Del join; Esc asks to save
+->               when something changed
 ->   i           info window: size/date/comment plus the protection
 ->               bits, which h/s/p/a/r/w/e/d toggle live
 ->   Space       mark/unmark the entry (marked sets make c/m/Del bulk)
@@ -24,7 +32,9 @@
 ->   m / M       move likewise (same volume = Rename, across = copy
 ->               and delete)
 ->   r           rename the selected entry
-->   n           make a new directory in the active pane
+->   n           new: a name ending in "/" makes a directory, any
+->               other name opens the editor on a new file (created
+->               only when saved)
 ->   Del / D     delete the selection or marked set, directories
 ->               contents and all (asks first)
 ->   u           unpack the selected archive (lha/lzx/zip) - or all
@@ -33,7 +43,7 @@
 ->               the other pane; the typed name's extension picks
 ->               the archiver (.lha/.lzh, .lzx, .zip)
 ->   :           run a shell command in the active pane's directory
-->               (its console opens as a window on CFile's screen)
+->               (output streams into the frame; Up/Down scroll back)
 ->   ? / Help    help screen (h works too)
 ->   Esc         quit (asks first)
 ->
@@ -55,9 +65,10 @@ OPT LARGE
 MODULE 'intuition/intuition','intuition/screens',
        'graphics/text','graphics/rastport',
        'utility/tagitem','dos/dos','dos/dosextens',
-       'dos/datetime','dos/dostags','devices/inputevent'
+       'dos/datetime','dos/dostags','devices/inputevent','diskfont'
 
-CONST CPATHLEN=300, MAXENT=500, VISROWS=22, PANEW=38, CBUFSZ=16384,
+CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
+      EDMAXL=8192, EDLW=200,    -> editor: line count / line length caps
       CMAXL=4000,    -> console scrollback, lines of 80
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
@@ -82,6 +93,15 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     rp=NIL:PTR TO rastport,
     ownscr=FALSE, txtpen=1, dirpen=1, errpen=1, softmask=0,
     winw, winh, baseline, x0, top, bordy, panetop,
+    cw=8, ch=8,          -> the font cell; every coordinate derives
+    ncols=80, nrows=31,  -> the character grid the screen provides
+    visrows=22,          -> pane rows: nrows minus logo and footer
+    divcol=39, panewl=38, panewr=38,    -> pane split around the divider
+    framebuf=NIL, viewbuf=NIL, promptbuf=NIL,    -> composed frames
+    vescol=0,            -> where the view footer's Esc text sits
+    fullfont[44]:STRING, diskfontbase=NIL,
+    appliedfont[44]:STRING, wantreload=FALSE,    -> live config reload
+    bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
     copybuf=NIL,      -> file-copy buffer, allocated once at startup
     rnames[500]:ARRAY OF LONG,    -> resolved target names (bulk runs)
@@ -95,6 +115,12 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
     ccol=0, crow=0, cesc=0, cnum=0,    -> the in-frame console renderer
     cmodel=NIL, cmrow=0,    -> its text model: the scrollback
+    cfgleft[300]:STRING, cfgright[300]:STRING,    -> start paths
+    savedirs=TRUE,          -> rewrite the config with them on quit
+    cfgfont[40]:STRING,     -> FONT key, applied by the grid build
+    madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
+    edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
+    edcur=0, edcol=0, edvtop=0, edxoff=0, edmod=FALSE, ednew=FALSE,
     rc=0
 
 -> the global arrays are NOT zero-initialised (E globals live in the
@@ -110,9 +136,253 @@ PROC initpanes()
     etop[p] := 0
     efail[p] := FALSE
   ENDFOR
-  StrCopy(ppath[0], 'DH0:')
-  StrCopy(ppath[1], 'DH1:')
+  StrCopy(ppath[0], cfgleft)
+  StrCopy(ppath[1], cfgright)
   IF (copybuf := String(CBUFSZ)) = NIL THEN Raise("MEM")
+ENDPROC
+
+-> without a Startup-Sequence there is no ENV: or T:; CFile makes
+-> them the standard way (RAM:Env, RAM:T) and remembers what it made.
+-> Existence is asked of the DosList - a Lock on an unassigned name
+-> would put up a "please insert volume" requester.
+PROC haveassign(name)
+  DEF dl, found=FALSE
+  dl := LockDosList(LDF_ASSIGNS OR LDF_DEVICES OR LDF_VOLUMES OR LDF_READ)
+  IF FindDosEntry(dl, name, LDF_ASSIGNS OR LDF_DEVICES OR LDF_VOLUMES)
+    found := TRUE
+  ENDIF
+  UnLockDosList(LDF_ASSIGNS OR LDF_DEVICES OR LDF_VOLUMES OR LDF_READ)
+ENDPROC found
+
+-> a shared lock on dir (created if missing) for AssignLock to keep
+PROC dirlock(dir)
+  DEF lock
+  IF (lock := Lock(dir, SHARED_LOCK)) = NIL
+    IF lock := CreateDir(dir)
+      UnLock(lock)
+      lock := Lock(dir, SHARED_LOCK)
+    ENDIF
+  ENDIF
+ENDPROC lock
+
+PROC ensureassigns()
+  DEF lock
+  IF haveassign('ENV') = FALSE
+    IF lock := dirlock('RAM:Env')
+      IF AssignLock('ENV', lock)    -> the assign owns the lock now
+        madeenv := TRUE
+      ELSE
+        UnLock(lock)
+      ENDIF
+    ENDIF
+  ENDIF
+  IF haveassign('T') = FALSE
+    IF lock := dirlock('RAM:T')
+      IF AssignLock('T', lock)
+        madet := TRUE
+      ELSE
+        UnLock(lock)
+      ENDIF
+    ENDIF
+  ENDIF
+ENDPROC
+
+-> clean exits only: remove exactly what ensureassigns created
+PROC dropassigns()
+  IF madeenv THEN AssignLock('ENV', NIL)
+  IF madet THEN AssignLock('T', NIL)
+ENDPROC
+
+-> the config lives next to the binary: PROGDIR:cfile.config.
+-> KEY value lines, ';' comments. LEFT/RIGHT start paths ("(volumes)"
+-> = the volume list), SAVEDIRS ON|OFF, FONT name/size (stored and
+-> preserved; takes effect with the font-grid build).
+PROC loadconfig()
+  DEF fh, buf=NIL, n, i=0, j, c, s:PTR TO CHAR,
+      line[300]:STRING, key[20]:STRING, val[280]:STRING, l, sp
+  StrCopy(cfgleft, 'SYS:')
+  StrCopy(cfgright, 'RAM:')
+  StrCopy(cfgfont, '')
+  IF (fh := Open('PROGDIR:cfile.config', OLDFILE)) = NIL THEN RETURN
+  buf := New(4096)
+  IF buf = NIL
+    Close(fh)
+    RETURN
+  ENDIF
+  n := Read(fh, buf, 4095)
+  Close(fh)
+  IF n < 0 THEN n := 0
+  s := buf
+  WHILE i < n
+    -> one line
+    StrCopy(line, '')
+    j := i
+    WHILE (j < n) AND (s[j] <> 10)
+      j := j + 1
+    ENDWHILE
+    l := j - i
+    IF l > 298 THEN l := 298
+    IF l > 0 THEN StrCopy(line, s + i, l)
+    i := j + 1
+    -> split into KEY and value on the first space
+    IF EstrLen(line) > 0
+      c := line[0]
+      IF c <> ";"
+        sp := -1
+        FOR j := 0 TO EstrLen(line) - 1
+          IF (line[j] = 32) AND (sp = -1) THEN sp := j
+        ENDFOR
+        IF sp > 0
+          StrCopy(key, line, sp)
+          UpperStr(key)
+          MidStr(val, line, sp + 1, ALL)
+          -> trim leading spaces from the value
+          WHILE (EstrLen(val) > 0) AND (val[0] = 32)
+            MidStr(val, val, 1, ALL)
+          ENDWHILE
+          IF StrCmp(key, 'LEFT')
+            IF StrCmp(val, '(volumes)')
+              StrCopy(cfgleft, '')
+            ELSE
+              StrCopy(cfgleft, val)
+            ENDIF
+          ELSEIF StrCmp(key, 'RIGHT')
+            IF StrCmp(val, '(volumes)')
+              StrCopy(cfgright, '')
+            ELSE
+              StrCopy(cfgright, val)
+            ENDIF
+          ELSEIF StrCmp(key, 'SAVEDIRS')
+            UpperStr(val)
+            savedirs := StrCmp(val, 'ON')
+          ELSEIF StrCmp(key, 'FONT')
+            StrCopy(cfgfont, val)
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+  Dispose(buf)
+ENDPROC
+
+-> command-line arguments override the config: cfile [left] [right],
+-> quotes allowed for paths with spaces
+PROC parseargs()
+  DEF s:PTR TO CHAR, i=0, t, q, tok[300]:STRING, ntok=0
+  s := arg
+  WHILE s[i]
+    WHILE s[i] = 32
+      i := i + 1
+    ENDWHILE
+    IF s[i]
+      q := s[i] = 34
+      IF q THEN i := i + 1
+      t := i
+      IF q
+        WHILE s[i] AND (s[i] <> 34)
+          i := i + 1
+        ENDWHILE
+      ELSE
+        WHILE s[i] AND (s[i] <> 32)
+          i := i + 1
+        ENDWHILE
+      ENDIF
+      StrCopy(tok, s + t, i - t)
+      IF q AND s[i] THEN i := i + 1
+      IF ntok = 0
+        StrCopy(cfgleft, tok)
+      ELSEIF ntok = 1
+        StrCopy(cfgright, tok)
+      ENDIF
+      ntok := ntok + 1
+    ENDIF
+  ENDWHILE
+ENDPROC
+
+PROC wline(fh, s)
+ENDPROC Write(fh, s, EstrLen(s))
+
+-> SAVEDIRS ON: remember where the panes stand for the next start.
+-> Only the LEFT/RIGHT lines are rewritten - everything else in the
+-> file (comments, FONT, SAVEDIRS, hand edits) passes through
+-> verbatim, so editing the config from inside CFile survives quit.
+PROC savepane(fh, keyname, p)
+  DEF line[340]:STRING
+  StringF(line, '\s \s\n', keyname,
+          IF EstrLen(ppath[p]) = 0 THEN '(volumes)' ELSE ppath[p])
+  wline(fh, line)
+ENDPROC
+
+PROC saveconfig()
+  DEF fh, buf=NIL, n=0, i, j, l, sp, c, s:PTR TO CHAR,
+      line[300]:STRING, key[20]:STRING, wl=FALSE, wr=FALSE
+  IF savedirs = FALSE THEN RETURN
+  IF fh := Open('PROGDIR:cfile.config', OLDFILE)
+    buf := New(4096)
+    IF buf
+      n := Read(fh, buf, 4095)
+      IF n < 0 THEN n := 0
+    ENDIF
+    Close(fh)
+  ENDIF
+  IF (fh := Open('PROGDIR:cfile.config', NEWFILE)) = NIL
+    IF buf THEN Dispose(buf)
+    RETURN
+  ENDIF
+  IF n = 0
+    StringF(line, '; CFile configuration - LEFT/RIGHT start paths,\n')
+    wline(fh, line)
+    StringF(line, '; SAVEDIRS ON|OFF, FONT name/size\n')
+    wline(fh, line)
+    StringF(line, 'SAVEDIRS ON\n')
+    wline(fh, line)
+    IF EstrLen(cfgfont) > 0
+      StringF(line, 'FONT \s\n', cfgfont)
+      wline(fh, line)
+    ENDIF
+  ELSE
+    s := buf
+    i := 0
+    WHILE i < n
+      j := i
+      WHILE (j < n) AND (s[j] <> 10)
+        j := j + 1
+      ENDWHILE
+      l := j - i
+      IF l > 298 THEN l := 298
+      StrCopy(line, '')
+      IF l > 0 THEN StrCopy(line, s + i, l)
+      i := j + 1
+      StrCopy(key, '')
+      IF EstrLen(line) > 0
+        c := line[0]
+        IF c <> ";"
+          sp := -1
+          FOR j := 0 TO EstrLen(line) - 1
+            IF (line[j] = 32) AND (sp = -1) THEN sp := j
+          ENDFOR
+          IF sp > 0
+            StrCopy(key, line, sp)
+            UpperStr(key)
+          ENDIF
+        ENDIF
+      ENDIF
+      IF StrCmp(key, 'LEFT')
+        savepane(fh, 'LEFT', 0)
+        wl := TRUE
+      ELSEIF StrCmp(key, 'RIGHT')
+        savepane(fh, 'RIGHT', 1)
+        wr := TRUE
+      ELSE
+        StrAdd(line, '\n')
+        wline(fh, line)
+      ENDIF
+    ENDWHILE
+  ENDIF
+  IF wl = FALSE THEN savepane(fh, 'LEFT', 0)
+  IF wr = FALSE THEN savepane(fh, 'RIGHT', 1)
+  Close(fh)
+  IF buf THEN Dispose(buf)
 ENDPROC
 
 -> an empty pane path means the pane shows the volume list
@@ -172,8 +442,10 @@ PROC entbefore(p, i, j)
   b := p * MAXENT
   di := edirs[b + i]
   dj := edirs[b + j]
-  IF (di <> 0) AND (dj = 0) THEN RETURN TRUE
-  IF (di = 0) AND (dj <> 0) THEN RETURN FALSE
+  -> higher tier sorts first: directories/volumes (255) over
+  -> assigns (1) over files (0), alphabetical within each
+  IF di > dj THEN RETURN TRUE
+  IF di < dj THEN RETURN FALSE
 ENDPROC nccmp(enames[b + i], enames[b + j]) < 0
 
 -> selection sort: n*n/2 compares but only n swaps; fine for one
@@ -239,12 +511,12 @@ ENDPROC
 -> Names are copied out while the DosList is locked; dol_Name is a
 -> BPTR to a length-prefixed BCPL string.
 PROC readvolumes(p)
-  DEF dl:PTR TO doslist, s:PTR TO CHAR, nm[34]:STRING, len, i
+  DEF dl:PTR TO doslist, head, s:PTR TO CHAR, nm[34]:STRING, len, i
   ecount[p] := 0
   efail[p] := FALSE
   clearmarks(p)
-  dl := LockDosList(LDF_VOLUMES OR LDF_READ)
-  dl := NextDosEntry(dl, LDF_VOLUMES)
+  head := LockDosList(LDF_VOLUMES OR LDF_ASSIGNS OR LDF_READ)
+  dl := NextDosEntry(head, LDF_VOLUMES)
   WHILE dl
     s := Shl(dl.name, 2)
     len := s[0]
@@ -254,10 +526,24 @@ PROC readvolumes(p)
     ENDFOR
     SetStr(nm, len)
     StrAdd(nm, ':')
-    addentry(p, nm, TRUE, 0)
+    addentry(p, nm, 255, 0)
     dl := NextDosEntry(dl, LDF_VOLUMES)
   ENDWHILE
-  UnLockDosList(LDF_VOLUMES OR LDF_READ)
+  -> assigns below the volumes (tier 1 sorts after tier 255)
+  dl := NextDosEntry(head, LDF_ASSIGNS)
+  WHILE dl
+    s := Shl(dl.name, 2)
+    len := s[0]
+    IF len > 30 THEN len := 30
+    FOR i := 0 TO len - 1
+      nm[i] := s[i + 1]
+    ENDFOR
+    SetStr(nm, len)
+    StrAdd(nm, ':')
+    addentry(p, nm, 1, 0)
+    dl := NextDosEntry(dl, LDF_ASSIGNS)
+  ENDWHILE
+  UnLockDosList(LDF_VOLUMES OR LDF_ASSIGNS OR LDF_READ)
   sortpane(p)
   IF esel[p] >= ecount[p] THEN esel[p] := ecount[p] - 1
   IF esel[p] < 0 THEN esel[p] := 0
@@ -272,13 +558,163 @@ PROC readpane(p)
   ENDIF
 ENDPROC
 
-PROC openui()
+-> the configured FONT via diskfont.library (CMenu's pattern);
+-> anything missing or proportional falls back to ROM Topaz/8
+PROC openfont()
+  DEF l, i, sl=-1, sz, t[12]:STRING, s:PTR TO CHAR
   NEW ta
-  ta.name := 'topaz.font'
-  ta.ysize := 8
   ta.style := 0
   ta.flags := 0
-  IF (tf := OpenFont(ta)) = NIL THEN Throw("UI", 'topaz.font/8')
+  IF EstrLen(cfgfont) > 0
+    s := cfgfont
+    l := EstrLen(cfgfont)
+    FOR i := 0 TO l - 1
+      IF s[i] = "/" THEN sl := i
+    ENDFOR
+    IF sl > 0
+      StrCopy(fullfont, cfgfont, sl)
+      sz := Val(s + sl + 1)
+      IF sz < 4 THEN sz := 8
+      l := EstrLen(fullfont)
+      IF l >= 5
+        MidStr(t, fullfont, l - 5, 5)
+        LowerStr(t)
+      ENDIF
+      IF StrCmp(t, '.font') = FALSE THEN StrAdd(fullfont, '.font')
+      -> "topaz" always means the ROM font: the topaz.font file on
+      -> disk is a different font with different metrics
+      StrCopy(t, '')
+      IF EstrLen(fullfont) >= 10 THEN StrCopy(t, fullfont, 10)
+      LowerStr(t)
+      IF StrCmp(t, 'topaz.font')
+        ta.name := 'topaz.font'
+        ta.ysize := sz
+        tf := OpenFont(ta)
+      ELSEIF diskfontbase := OpenLibrary('diskfont.library', 0)
+        ta.name := fullfont
+        ta.ysize := sz
+        tf := OpenDiskFont(ta)
+        CloseLibrary(diskfontbase)
+        diskfontbase := NIL
+      ENDIF
+      IF tf
+        IF tf.flags AND FPF_PROPORTIONAL
+          -> the grid needs fixed-width glyphs
+          CloseFont(tf)
+          tf := NIL
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDIF
+  IF tf = NIL
+    ta.name := 'topaz.font'
+    ta.ysize := 8
+    IF (tf := OpenFont(ta)) = NIL THEN Throw("UI", 'topaz.font/8')
+  ENDIF
+  cw := tf.xsize
+  ch := tf.ysize
+  baseline := tf.baseline
+ENDPROC
+
+-> compose the frame for this grid from the measured pieces: left
+-> pieces keep their distance from the left edge, right pieces from
+-> the right, centered pieces stay centered; the pane rows repeat
+PROC composeframes()
+  DEF i, r, c, t:PTR TO LONG, row, anch, par, w, o,
+      m:PTR TO CHAR, dst:PTR TO CHAR, n
+  IF (framebuf := New(Mul(nrows, ncols))) = NIL THEN Raise("MEM")
+  IF (viewbuf := New(Mul(4, ncols))) = NIL THEN Raise("MEM")
+  IF (promptbuf := New(ncols)) = NIL THEN Raise("MEM")
+  n := Mul(nrows, ncols)
+  m := framebuf
+  FOR i := 0 TO n - 1
+    m[i] := 32
+  ENDFOR
+  m := viewbuf
+  FOR i := 0 TO Mul(4, ncols) - 1
+    m[i] := 32
+  ENDFOR
+  m := promptbuf
+  FOR i := 0 TO ncols - 1
+    m[i] := 32
+  ENDFOR
+  -> row 5, resting: the paths border with the divider notch
+  m := framebuf + Mul(5, ncols)
+  FOR c := 1 TO ncols - 2
+    m[c] := 45
+  ENDFOR
+  m[0] := 166
+  m[ncols - 1] := 166
+  m[divcol] := 46
+  m[divcol + 1] := 46
+  -> the pane rows: ':'/'·' accents on the first, '|' after
+  FOR r := 6 TO nrows - 4
+    m := framebuf + Mul(r, ncols)
+    IF r = 6
+      m[0] := 58
+      m[ncols - 1] := 183
+    ELSE
+      m[0] := 124
+      m[ncols - 1] := 124
+    ENDIF
+    m[divcol] := 124
+    m[divcol + 1] := 124
+  ENDFOR
+  -> banner rows fill with dashes before the pieces land
+  m := framebuf + Mul(nrows - 1, ncols)
+  FOR c := 0 TO ncols - 1
+    m[c] := 45
+  ENDFOR
+  m := viewbuf + Mul(3, ncols)
+  FOR c := 0 TO ncols - 1
+    m[c] := 45
+  ENDFOR
+  -> the view frame's closed top border
+  m := viewbuf
+  FOR c := 1 TO ncols - 2
+    m[c] := 45
+  ENDFOR
+  m[0] := 96
+  m[ncols - 1] := 180
+  -> the occupied border: text between the guillemets
+  m := promptbuf
+  m[0] := 166
+  m[1] := 45
+  m[2] := 187
+  m[ncols - 3] := 171
+  m[ncols - 2] := 45
+  m[ncols - 1] := 166
+  -> place the measured pieces
+  t := {ctab}
+  i := 0
+  WHILE t[i] <> -99
+    row  := t[i]
+    anch := t[i + 1]
+    par  := t[i + 2]
+    w    := t[i + 3]
+    o    := t[i + 4]
+    IF row < 20
+      dst := framebuf + Mul(row, ncols)
+    ELSEIF row < 30
+      dst := framebuf + Mul(nrows - 24 + row, ncols)
+    ELSE
+      dst := viewbuf + Mul(row - 30, ncols)
+    ENDIF
+    IF anch = 0
+      c := par
+    ELSEIF anch = 1
+      c := (ncols - w) / 2
+    ELSE
+      c := ncols - par
+    ENDIF
+    CopyMem({cpieces} + o, dst + c, w)
+    i := i + 5
+  ENDWHILE
+  vescol := (ncols - 25) / 2
+ENDPROC
+
+PROC openui()
+  openfont()
   scr := OpenScreenTagList(NIL,
     [SA_LIKEWORKBENCH, TRUE,
      SA_DEPTH,     3,
@@ -338,13 +774,107 @@ PROC openui()
   ENDIF
   winw := win.width
   winh := win.height
-  baseline := tf.baseline
-  x0 := (winw - 640) / 2
+  -> the character grid this font gets from this screen
+  ncols := winw / cw
+  IF ncols > 200 THEN ncols := 200
+  nrows := winh / ch
+  IF nrows > 120 THEN nrows := 120
+  IF (ncols < 80) OR (nrows < 18)
+    -> the frame cannot fit at this size: retreat to Topaz/8
+    IF StrCmp(fullfont, 'topaz.font') = FALSE
+      CloseFont(tf)
+      tf := NIL
+      StrCopy(cfgfont, '')
+      openfont()
+      SetFont(rp, tf)
+      ncols := winw / cw
+      IF ncols > 200 THEN ncols := 200
+      nrows := winh / ch
+      IF nrows > 120 THEN nrows := 120
+    ENDIF
+  ENDIF
+  x0 := (winw - Mul(ncols, cw)) / 2
   IF x0 < 0 THEN x0 := 0
-  top := (winh - 248) / 2    -> the frame is 31 rows of 8 pixels
+  top := (winh - Mul(nrows, ch)) / 2
   IF top < 0 THEN top := 0
-  bordy   := top + 40    -> frame row 6: the border above the panes
-  panetop := top + 48    -> frame rows 7-28: the listing rows
+  visrows := nrows - 9
+  divcol := (ncols - 2) / 2
+  panewl := divcol - 1
+  panewr := ncols - divcol - 3
+  bordy   := top + (5 * ch)    -> grid row 5: the border above the panes
+  panetop := top + (6 * ch)    -> grid row 6: the first listing row
+  composeframes()
+  StrCopy(appliedfont, cfgfont)
+ENDPROC
+
+-> saving the config from inside CFile applies it on the spot: the
+-> font (and grid, and frames) rebuild live. A font that fails to
+-> open or cannot fit the frame is refused and the current one
+-> stays - the last good setup always survives.
+PROC applyfont()
+  DEF oldtf, oldcw, oldch, oldbl, nc, nr
+  oldtf := tf
+  oldcw := cw
+  oldch := ch
+  oldbl := baseline
+  tf := NIL
+  openfont()
+  nc := winw / cw
+  IF nc > 200 THEN nc := 200
+  nr := winh / ch
+  IF nr > 120 THEN nr := 120
+  IF (nc < 80) OR (nr < 18)
+    -> no good: keep what we have
+    IF tf <> oldtf THEN CloseFont(tf)
+    tf := oldtf
+    cw := oldcw
+    ch := oldch
+    baseline := oldbl
+    showmsg('that font does not fit this screen - keeping the old one')
+    RETURN FALSE
+  ENDIF
+  IF tf <> oldtf THEN CloseFont(oldtf)
+  SetFont(rp, tf)
+  ncols := nc
+  nrows := nr
+  x0 := (winw - Mul(ncols, cw)) / 2
+  IF x0 < 0 THEN x0 := 0
+  top := (winh - Mul(nrows, ch)) / 2
+  IF top < 0 THEN top := 0
+  visrows := nrows - 9
+  divcol := (ncols - 2) / 2
+  panewl := divcol - 1
+  panewr := ncols - divcol - 3
+  bordy   := top + (5 * ch)
+  panetop := top + (6 * ch)
+  IF framebuf THEN Dispose(framebuf)
+  IF viewbuf THEN Dispose(viewbuf)
+  IF promptbuf THEN Dispose(promptbuf)
+  composeframes()
+  IF cmodel    -> the scrollback's row width changed with the grid
+    Dispose(cmodel)
+    cmodel := NIL
+  ENDIF
+  StrCopy(appliedfont, cfgfont)
+ENDPROC TRUE
+
+PROC applyconfig()
+  DEF keepl[300]:STRING, keepr[300]:STRING
+  -> re-read the file; the panes keep their session paths (LEFT and
+  -> RIGHT are start paths, honoured at the next start)
+  StrCopy(keepl, cfgleft)
+  StrCopy(keepr, cfgright)
+  loadconfig()
+  StrCopy(cfgleft, keepl)
+  StrCopy(cfgright, keepr)
+  IF StrCmp(cfgfont, appliedfont) = FALSE
+    applyfont()
+    -> reclamp the pane windows to the new row count
+    IF esel[0] >= (etop[0] + visrows) THEN etop[0] := esel[0] - visrows + 1
+    IF esel[1] >= (etop[1] + visrows) THEN etop[1] := esel[1] - visrows + 1
+    drawall()
+    IF msgup THEN remsg()
+  ENDIF
 ENDPROC
 
 -> Workbench-style palette: grey background, black text, blue
@@ -386,22 +916,26 @@ ENDPROC
 
 PROC panex(p)
   DEF x
-  x := IF p = 0 THEN 8 ELSE 328
-ENDPROC x0 + x
+  x := IF p = 0 THEN 1 ELSE divcol + 2
+ENDPROC x0 + (x * cw)
 
--> one row of the compiled-in frame, 1-based
+-> pane interior width in characters
+PROC panew(p)
+ENDPROC IF p = 0 THEN panewl ELSE panewr
+
+-> one row of the composed frame, 0-based
 PROC frow(r)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  Move(rp, x0, top + ((r - 1) * 8) + baseline)
-  Text(rp, {frameart} + ((r - 1) * 80), 80)
+  Move(rp, x0, top + (r * ch) + baseline)
+  Text(rp, framebuf + Mul(r, ncols), ncols)
 ENDPROC
 
 PROC drawframe()
   DEF r
   SetAPen(rp, 0)
   RectFill(rp, 0, 0, winw - 1, winh - 1)
-  FOR r := 1 TO 31
+  FOR r := 0 TO nrows - 1
     frow(r)
   ENDFOR
 ENDPROC
@@ -410,21 +944,22 @@ ENDPROC
 -> the selection bar alone shows which pane is active. Deep paths show
 -> their tail end, truncated to 32 characters.
 PROC drawpaths()
-  DEF p, s[40]:STRING, l, x
-  frow(6)
+  DEF p, s[200]:STRING, l, x, j
+  frow(5)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   FOR p := 0 TO 1
+    j := (IF p = 0 THEN panewl ELSE panewr) - 6    -> label room
     l := EstrLen(ppath[p])
     IF l = 0
       StrCopy(s, '(volumes)')
-    ELSEIF l > 32
-      MidStr(s, ppath[p], l - 32, 32)
+    ELSEIF l > j
+      MidStr(s, ppath[p], l - j, j)
     ELSE
       StrCopy(s, ppath[p])
     ENDIF
-    x := IF p = 0 THEN 24 ELSE 344
-    Move(rp, x0 + x, bordy + baseline)
+    x := IF p = 0 THEN 3 ELSE divcol + 4
+    Move(rp, x0 + (x * cw), bordy + baseline)
     Text(rp, ' ', 1)
     Text(rp, s, EstrLen(s))
     Text(rp, ' ', 1)
@@ -433,12 +968,13 @@ PROC drawpaths()
 ENDPROC
 
 PROC drawrow(p, r)
-  DEF idx, x, y, s, l
+  DEF idx, x, y, s, l, pw
   x := panex(p)
-  y := panetop + (r * 8)
+  y := panetop + (r * ch)
+  pw := Mul(panew(p), cw)
   idx := etop[p] + r
   SetAPen(rp, 0)
-  RectFill(rp, x, y, x + 303, y + 7)
+  RectFill(rp, x, y, x + pw - 1, y + ch - 1)
   IF efail[p]
     IF r = 0
       s := 'cannot read this directory'
@@ -452,13 +988,15 @@ PROC drawrow(p, r)
   IF idx >= ecount[p] THEN RETURN
   s := enames[(p * MAXENT) + idx]
   l := EstrLen(s)
-  IF l > PANEW THEN l := PANEW
+  IF l > (panew(p) - (IF emark[(p * MAXENT) + idx] THEN 1 ELSE 0))
+    l := panew(p) - (IF emark[(p * MAXENT) + idx] THEN 1 ELSE 0)
+  ENDIF
   IF (p = active) AND (idx = esel[p])
     -> the bar keeps the entry's type colour: blue text for a
     -> directory, grey for a file (unless the fallback screen left
     -> dirpen = txtpen, which would vanish into the bar)
     SetAPen(rp, txtpen)
-    RectFill(rp, x, y, x + 303, y + 7)
+    RectFill(rp, x, y, x + pw - 1, y + ch - 1)
     IF edirs[(p * MAXENT) + idx] AND (dirpen <> txtpen)
       SetAPen(rp, dirpen)
     ELSE
@@ -477,7 +1015,7 @@ ENDPROC
 
 PROC drawpane(p)
   DEF r
-  FOR r := 0 TO VISROWS - 1
+  FOR r := 0 TO visrows - 1
     drawrow(p, r)
   ENDFOR
 ENDPROC
@@ -505,8 +1043,8 @@ PROC selectbyname(p)
     FOR i := 0 TO ecount[p] - 1
       IF nccmp(enames[b + i], prevname) = 0 THEN esel[p] := i
     ENDFOR
-    etop[p] := esel[p] - 10
-    IF etop[p] > (ecount[p] - VISROWS) THEN etop[p] := ecount[p] - VISROWS
+    etop[p] := esel[p] - (visrows / 2)
+    IF etop[p] > (ecount[p] - visrows) THEN etop[p] := ecount[p] - visrows
     IF etop[p] < 0 THEN etop[p] := 0
   ENDIF
   drawpane(p)
@@ -520,10 +1058,10 @@ PROC promptrow(s)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   Move(rp, x0, bordy + baseline)
-  Text(rp, {promptart}, 80)
+  Text(rp, promptbuf, ncols)
   l := StrLen(s)
-  IF l > 73 THEN l := 73
-  Move(rp, x0 + 32, bordy + baseline)
+  IF l > (ncols - 7) THEN l := ncols - 7
+  Move(rp, x0 + (4 * cw), bordy + baseline)
   Text(rp, s, l)
 ENDPROC
 
@@ -533,15 +1071,15 @@ PROC drawviewframe(showesc)
   DEF r
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  Move(rp, x0, top + 40 + baseline)    -> frame row 6
-  Text(rp, {viewart}, 80)
-  FOR r := 0 TO 2    -> frame rows 29-31
-    Move(rp, x0, top + ((28 + r) * 8) + baseline)
-    Text(rp, {viewart} + 80 + (r * 80), 80)
+  Move(rp, x0, bordy + baseline)    -> grid row 5, closed border
+  Text(rp, viewbuf, ncols)
+  FOR r := 0 TO 2    -> the footer rows
+    Move(rp, x0, top + ((nrows - 3 + r) * ch) + baseline)
+    Text(rp, viewbuf + Mul(r + 1, ncols), ncols)
   ENDFOR
   IF showesc = FALSE
     -> the console is left by any key, so the footer offer is blanked
-    Move(rp, x0 + 224, top + (29 * 8) + baseline)
+    Move(rp, x0 + (vescol * cw), top + ((nrows - 2) * ch) + baseline)
     Text(rp, {spaces}, 25)
   ENDIF
 ENDPROC
@@ -597,7 +1135,7 @@ PROC drawinput(prompt, buf, cpos, max)
   pl := StrLen(prompt)
   s := buf
   l := EstrLen(buf)
-  Move(rp, x0 + 32, bordy + baseline)
+  Move(rp, x0 + (4 * cw), bordy + baseline)
   Text(rp, prompt, pl)
   IF cpos > 0 THEN Text(rp, s, cpos)
   SetAPen(rp, 0)    -> the cursor cell, inverted
@@ -671,15 +1209,19 @@ PROC lineinput(prompt, buf, max, names)
     ELSEIF class = IDCMP_RAWKEY
       IF code < $80
         IF code = RK_LEFT
-          IF cpos > 0
+          IF MsgQualifier() AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            cpos := 0    -> Shift: start of the line
+          ELSEIF cpos > 0
             cpos := cpos - 1
-            drawinput(prompt, buf, cpos, max)
           ENDIF
+          drawinput(prompt, buf, cpos, max)
         ELSEIF code = RK_RIGHT
-          IF cpos < EstrLen(buf)
+          IF MsgQualifier() AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            cpos := EstrLen(buf)    -> Shift: end of the line
+          ELSEIF cpos < EstrLen(buf)
             cpos := cpos + 1
-            drawinput(prompt, buf, cpos, max)
           ENDIF
+          drawinput(prompt, buf, cpos, max)
         ENDIF
       ENDIF
     ENDIF
@@ -707,8 +1249,8 @@ PROC movedown()
   IF efail[p] THEN RETURN
   IF esel[p] >= (ecount[p] - 1) THEN RETURN
   esel[p] := esel[p] + 1
-  IF esel[p] >= (etop[p] + VISROWS)
-    etop[p] := esel[p] - VISROWS + 1
+  IF esel[p] >= (etop[p] + visrows)
+    etop[p] := esel[p] - visrows + 1
     drawpane(p)
   ELSE
     drawrow(p, esel[p] - 1 - etop[p])
@@ -728,7 +1270,7 @@ PROC pagemove(delta)
   IF ns = esel[p] THEN RETURN
   esel[p] := ns
   IF esel[p] < etop[p] THEN etop[p] := esel[p]
-  IF esel[p] >= (etop[p] + VISROWS) THEN etop[p] := esel[p] - VISROWS + 1
+  IF esel[p] >= (etop[p] + visrows) THEN etop[p] := esel[p] - visrows + 1
   drawpane(p)
 ENDPROC
 
@@ -889,15 +1431,15 @@ PROC progshow(total)
   progdone := 0
   progpx := 0
   progon := TRUE
-  progx := x0 + 188            -> 33 cells wide, centered on the frame
-  progy := top + 112           -> frame rows 15-17
+  progx := x0 + (((ncols - 33) / 2) * cw)    -> 33 cells, centered
+  progy := top + (((nrows / 2) - 2) * ch)
   -> the box is an overlay of exactly its own footprint: the three
   -> JAM2 rows paint every cell of it (borders and interior), and
   -> whatever is around it stays put right up to the edge
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   FOR r := 0 TO 2
-    Move(rp, progx, progy + (r * 8) + baseline)
+    Move(rp, progx, progy + (r * ch) + baseline)
     Text(rp, {progart} + (r * 33), 33)
   ENDFOR
 ENDPROC
@@ -918,11 +1460,11 @@ PROC progadd(n)
   IF t < 1 THEN t := 1
   IF d < 0 THEN d := 0
   IF d > t THEN d := t
-  px := Div(Mul(d, 248), t)    -> interior is 31 cells = 248 pixels
+  px := Div(Mul(d, Mul(31, cw)), t)    -> the 31-cell interior
   IF px > progpx
     SetAPen(rp, txtpen)
-    RectFill(rp, progx + 8 + progpx, progy + 8,
-             progx + 8 + px - 1, progy + 15)
+    RectFill(rp, progx + cw + progpx, progy + ch,
+             progx + cw + px - 1, progy + ch + ch - 1)
     progpx := px
   ENDIF
 ENDPROC
@@ -1509,7 +2051,7 @@ PROC infline(xx, yy, row, s)
   IF l > 31 THEN l := 31
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  Move(rp, xx + 8, yy + (row * 8) + baseline)
+  Move(rp, xx + cw, yy + (row * ch) + baseline)
   Text(rp, s, l)
   IF l < 31 THEN Text(rp, {spaces}, 31 - l)
 ENDPROC
@@ -1577,17 +2119,17 @@ PROC infowindow()
   StrCopy(cmt, fib.comment)
   FreeDosObject(DOS_FIB, fib)
   -> the box: 8 rows, borders from the progress art (same width)
-  xx := x0 + 188
-  yy := top + 88    -> frame rows 12-19
+  xx := x0 + (((ncols - 33) / 2) * cw)
+  yy := top + (((nrows / 2) - 4) * ch)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   Move(rp, xx, yy + baseline)
   Text(rp, {progart}, 33)
   FOR r := 1 TO 6
-    Move(rp, xx, yy + (r * 8) + baseline)
+    Move(rp, xx, yy + (r * ch) + baseline)
     Text(rp, {progart} + 33, 33)
   ENDFOR
-  Move(rp, xx, yy + 56 + baseline)
+  Move(rp, xx, yy + (7 * ch) + baseline)
   Text(rp, {progart} + 66, 33)
   infline(xx, yy, 1, enames[i])
   IF isdir
@@ -1704,14 +2246,14 @@ PROC textrow(buf, len, off, rb)
     IF c = 10 THEN RETURN off    -> line done
     IF c = 9
       REPEAT
-        IF col < 80 THEN r[col] := 32
+        IF col < ncols THEN r[col] := 32
         col := col + 1
       UNTIL Mod(col, 8) = 0
     ELSEIF (c >= 32) AND ((c <= 126) OR (c >= 160))
-      IF col < 80 THEN r[col] := c
+      IF col < ncols THEN r[col] := c
       col := col + 1
     ELSEIF c <> 13
-      IF col < 80 THEN r[col] := "."
+      IF col < ncols THEN r[col] := "."
       col := col + 1
     ENDIF
   ENDWHILE
@@ -1760,10 +2302,13 @@ ENDPROC
 -> the art's shape.
 PROC drawansipage(buf, len, vtop)
   DEF p:PTR TO CHAR, i, j, c, col, row, fg, sty,
-      pv[8]:ARRAY OF LONG, np, v
+      pv[8]:ARRAY OF LONG, np, v, xa
   p := buf
+  -> 80-column art centers on wider grids
+  xa := x0 + (IF ncols > 80 THEN ((ncols - 80) / 2) * cw ELSE 0)
   SetAPen(rp, 0)
-  RectFill(rp, x0, panetop, x0 + 639, panetop + (VISROWS * 8) - 1)
+  RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+           panetop + Mul(visrows, ch) - 1)
   fg := 7
   sty := 0
   SetSoftStyle(rp, 0, softmask)
@@ -1772,7 +2317,7 @@ PROC drawansipage(buf, len, vtop)
   col := 0
   row := 0
   i := 0
-  WHILE (i < len) AND (row < (vtop + VISROWS))
+  WHILE (i < len) AND (row < (vtop + visrows))
     c := p[i]
     IF c = 27    -> ESC
       i++
@@ -1834,7 +2379,7 @@ PROC drawansipage(buf, len, vtop)
         j++
       ENDWHILE
       IF row >= vtop
-        Move(rp, x0 + (col * 8), panetop + ((row - vtop) * 8) + baseline)
+        Move(rp, xa + (col * cw), panetop + ((row - vtop) * ch) + baseline)
         Text(rp, p + i, j - i)
       ENDIF
       col := col + (j - i)
@@ -1850,11 +2395,11 @@ ENDPROC
 -> full-screen viewer over the pane area: text pager, hex dump, or
 -> ANSI art (mode 0/1/2). Up/Down = line, Shift = page, Ctrl = ends,
 -> Space = page down, Esc/q = back.
-PROC viewfile(path, name, mode)
+PROC viewfile(path, name, mode, bulk)
   DEF buf=NIL, bp:PTR TO CHAR, len, size, fh, top2=0, r, off, o2,
-      class, code, qual, done=FALSE, dirty=TRUE,
-      rb[80]:ARRAY OF CHAR, i, mb[120]:STRING, mn:PTR TO CHAR,
-      pgd, lock, fib:PTR TO fileinfoblock, nrows=0, maxtop=0, vmax=0
+      class, code, qual, done=FALSE, dirty=TRUE, res2=0,
+      rb[204]:ARRAY OF CHAR, i, mb[120]:STRING, mn:PTR TO CHAR,
+      pgd, lock, fib:PTR TO fileinfoblock, nrows2=0, maxtop=0, vmax=0
   -> size via the pane data is stale-proof enough, but re-examine to
   -> be safe for files just written
   size := -1
@@ -1894,23 +2439,23 @@ PROC viewfile(path, name, mode)
     -> the last line belongs on the BOTTOM row: the highest top2 is
     -> the start of the final 22-line window
     vmax := len
-    FOR r := 1 TO VISROWS
+    FOR r := 1 TO visrows
       IF vmax > 0 THEN vmax := prevline(buf, vmax)
     ENDFOR
     IF vmax < 0 THEN vmax := 0
   ELSEIF mode = 1
-    vmax := Shr(len + 15, 4) - VISROWS
+    vmax := Shr(len + 15, 4) - visrows
     IF vmax < 0 THEN vmax := 0
     vmax := Mul(vmax, 16)
   ENDIF
   IF mode = 2
     -> ANSI scrolls by art rows; count them, and light the classic
     -> ANSI palette while the art is up
-    nrows := 1
+    nrows2 := 1
     FOR i := 0 TO len - 1
-      IF bp[i] = 10 THEN nrows := nrows + 1
+      IF bp[i] = 10 THEN nrows2 := nrows2 + 1
     ENDFOR
-    maxtop := nrows - VISROWS
+    maxtop := nrows2 - visrows
     IF maxtop < 0 THEN maxtop := 0
     setansipal()
   ENDIF
@@ -1918,7 +2463,11 @@ PROC viewfile(path, name, mode)
   IF mode = 1 THEN mn := 'hex'
   IF mode = 2 THEN mn := 'ansi'
   drawviewframe(TRUE)
-  StringF(mb, '\s "\s" - \d bytes', mn, name, len)
+  IF bulktot > 0
+    StringF(mb, '\s "\s" (\d/\d) - \d bytes', mn, name, bulkpos, bulktot, len)
+  ELSE
+    StringF(mb, '\s "\s" - \d bytes', mn, name, len)
+  ENDIF
   promptrow(mb)
   WHILE done = FALSE
     IF dirty
@@ -1927,8 +2476,8 @@ PROC viewfile(path, name, mode)
       ELSE
         -> draw the page: 22 rows over the pane area
         off := top2
-        FOR r := 0 TO VISROWS - 1
-          FOR i := 0 TO 79
+        FOR r := 0 TO visrows - 1
+          FOR i := 0 TO ncols - 1
             rb[i] := 32
           ENDFOR
           IF mode = 1
@@ -1941,8 +2490,8 @@ PROC viewfile(path, name, mode)
           ENDIF
           SetAPen(rp, txtpen)
           SetBPen(rp, 0)
-          Move(rp, x0, panetop + (r * 8) + baseline)
-          Text(rp, rb, 80)
+          Move(rp, x0, panetop + (r * ch) + baseline)
+          Text(rp, rb, ncols)
         ENDFOR
       ENDIF
       dirty := FALSE
@@ -1954,8 +2503,11 @@ PROC viewfile(path, name, mode)
     IF class = IDCMP_VANILLAKEY
       IF (code = 27) OR (code = "q") OR (code = "Q")
         done := TRUE
+      ELSEIF ((code = "e") OR (code = "E")) AND (mode = 0)
+        res2 := 1    -> straight from reading to editing
+        done := TRUE
       ELSEIF code = 32
-        pgd := VISROWS - 1
+        pgd := visrows - 1
       ENDIF
     ELSEIF class = IDCMP_RAWKEY
       IF code < $80
@@ -1963,7 +2515,7 @@ PROC viewfile(path, name, mode)
           IF qual AND IEQUALIFIER_CONTROL
             pgd := -30000
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            pgd := -(VISROWS - 1)
+            pgd := -(visrows - 1)
           ELSE
             pgd := -1
           ENDIF
@@ -1971,10 +2523,16 @@ PROC viewfile(path, name, mode)
           IF qual AND IEQUALIFIER_CONTROL
             pgd := 30000
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            pgd := VISROWS - 1
+            pgd := visrows - 1
           ELSE
             pgd := 1
           ENDIF
+        ELSEIF (code = RK_RIGHT) AND bulk    -> next marked file
+          res2 := 2
+          done := TRUE
+        ELSEIF (code = RK_LEFT) AND bulk    -> back one file
+          res2 := 3
+          done := TRUE
         ENDIF
       ENDIF
     ENDIF
@@ -2025,6 +2583,58 @@ PROC viewfile(path, name, mode)
   ENDWHILE
   IF buf THEN Dispose(buf)
   IF mode = 2 THEN setlightpal()
+  IF bulk = FALSE THEN drawall()    -> a bulk tour redraws at its end
+ENDPROC res2
+
+-> v with marks: tour the marked files - Right = next (consumes the
+-> mark), Left = back, Esc keeps the current and unviewed marks
+PROC bulkview(p)
+  DEF b, i, n=0, pos=0, r, ty, mode, seq[500]:ARRAY OF LONG,
+      fpath[310]:STRING
+  b := p * MAXENT
+  FOR i := 0 TO ecount[p] - 1
+    IF emark[b + i]
+      IF edirs[b + i] = 0
+        seq[n] := i
+        n := n + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  IF n = 0
+    showmsg('only directories are marked - nothing to view')
+    RETURN
+  ENDIF
+  bulktot := n
+  WHILE pos >= 0
+    i := seq[pos]
+    bulkpos := pos + 1
+    buildfull(fpath, ppath[p], enames[b + i])
+    ty := sniff(fpath)
+    mode := 1
+    IF ty = TY_TEXT THEN mode := 0
+    IF ty = TY_ANSI THEN mode := 2
+    r := viewfile(fpath, enames[b + i], mode, TRUE)
+    IF r = 2    -> onward; this one is seen and its mark consumed
+      emark[b + i] := 0
+      pos := pos + 1
+      IF pos >= n THEN pos := -1    -> tour complete
+    ELSEIF r = 3
+      IF pos > 0 THEN pos := pos - 1
+    ELSEIF r = 1    -> e: edit this one, the tour ends here
+      bulktot := 0
+      bulkpos := 0
+      IF editfile(fpath, enames[b + i]) = 1
+        refreshall()
+      ELSE
+        drawall()
+      ENDIF
+      RETURN
+    ELSE    -> Esc/q: abort - current and unviewed stay marked
+      pos := -1
+    ENDIF
+  ENDWHILE
+  bulktot := 0
+  bulkpos := 0
   drawall()
 ENDPROC
 
@@ -2036,6 +2646,10 @@ PROC doview()
     RETURN
   ENDIF
   IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  IF markcount(p) > 0
+    bulkview(p)
+    RETURN
+  ENDIF
   i := (p * MAXENT) + esel[p]
   IF edirs[i]
     showmsg('cannot view a directory')
@@ -2044,9 +2658,11 @@ PROC doview()
   buildfull(fpath, ppath[p], enames[i])
   ty := sniff(fpath)
   IF ty = TY_TEXT
-    viewfile(fpath, enames[i], 0)
+    IF viewfile(fpath, enames[i], 0, FALSE) = 1
+      IF editfile(fpath, enames[i]) = 1 THEN refreshall() ELSE drawall()
+    ENDIF
   ELSEIF ty = TY_ANSI
-    viewfile(fpath, enames[i], 2)
+    viewfile(fpath, enames[i], 2, FALSE)
   ELSEIF ty = TY_LHA
     StringF(cmd, 'lha l "\s"', fpath)
     capturecmd(p, cmd, enames[i], FALSE)
@@ -2057,7 +2673,418 @@ PROC doview()
     StringF(cmd, 'unzip -l "\s"', fpath)
     capturecmd(p, cmd, enames[i], FALSE)
   ELSE
-    viewfile(fpath, enames[i], 1)
+    viewfile(fpath, enames[i], 1, FALSE)
+  ENDIF
+ENDPROC
+
+-> ---- the text editor ----------------------------------------------
+
+PROC edtitle(name)
+  DEF mb[130]:STRING
+  StringF(mb, 'edit "\s"\s', name,
+          IF edmod THEN ' *modified*' ELSE (IF ednew THEN ' (new)' ELSE ''))
+  promptrow(mb)
+ENDPROC
+
+PROC edtouch(name)
+  IF edmod = FALSE
+    edmod := TRUE
+    edtitle(name)
+  ENDIF
+ENDPROC
+
+-> one window row: line edvtop+r from column edxoff, with the cursor
+-> cell inverted when it lives here
+PROC edrow(r)
+  DEF idx, s:PTR TO CHAR, l, i, vis, erb[204]:ARRAY OF CHAR,
+      cc[4]:ARRAY OF CHAR
+  idx := edvtop + r
+  FOR i := 0 TO ncols - 1
+    erb[i] := 32
+  ENDFOR
+  IF idx < ednum
+    s := edl[idx]
+    l := EstrLen(edl[idx])
+    vis := l - edxoff
+    IF vis > ncols THEN vis := ncols
+    IF vis > 0 THEN CopyMem(s + edxoff, erb, vis)
+  ENDIF
+  SetAPen(rp, txtpen)
+  SetBPen(rp, 0)
+  Move(rp, x0, panetop + (r * ch) + baseline)
+  Text(rp, erb, ncols)
+  IF idx = edcur
+    cc[0] := erb[edcol - edxoff]
+    SetAPen(rp, 0)
+    SetBPen(rp, txtpen)
+    Move(rp, x0 + ((edcol - edxoff) * cw), panetop + (r * ch) + baseline)
+    Text(rp, cc, 1)
+    SetAPen(rp, txtpen)
+    SetBPen(rp, 0)
+  ENDIF
+ENDPROC
+
+PROC edpage()
+  DEF r
+  FOR r := 0 TO visrows - 1
+    edrow(r)
+  ENDFOR
+ENDPROC
+
+-> keep the cursor inside the window; TRUE = whole page must redraw
+PROC edfix()
+  DEF fix=FALSE
+  IF edcur < edvtop
+    edvtop := edcur
+    fix := TRUE
+  ENDIF
+  IF edcur >= (edvtop + visrows)
+    edvtop := edcur - visrows + 1
+    fix := TRUE
+  ENDIF
+  IF edcol < edxoff
+    edxoff := edcol
+    fix := TRUE
+  ENDIF
+  IF (edcol - edxoff) >= ncols
+    edxoff := edcol - ncols + 1
+    fix := TRUE
+  ENDIF
+ENDPROC fix
+
+PROC edfree()
+  DEF i
+  IF ednum > 0
+    FOR i := 0 TO ednum - 1
+      DisposeLink(edl[i])
+    ENDFOR
+  ENDIF
+  ednum := 0
+ENDPROC
+
+-> insert one character at the cursor (no redraw; caller batches)
+PROC edinsch(c)
+  DEF s:PTR TO CHAR, l, i
+  s := edl[edcur]
+  l := EstrLen(edl[edcur])
+  IF l >= EDLW THEN RETURN FALSE
+  FOR i := l TO edcol + 1 STEP -1
+    s[i] := s[i - 1]
+  ENDFOR
+  s[edcol] := c
+  SetStr(edl[edcur], l + 1)
+  edcol := edcol + 1
+ENDPROC TRUE
+
+-> load for editing: LF splits, CR dropped, tabs to spaces (8-stops),
+-> lines capped at 200 characters. -1 = failed (message shown).
+PROC edload(path)
+  DEF fh, buf=NIL, n, size=-1, i, c, col, s, ok=TRUE,
+      lock, fib:PTR TO fileinfoblock, bp:PTR TO CHAR, ln:PTR TO CHAR
+  IF edl = NIL
+    IF (edl := New(Mul(EDMAXL, 4))) = NIL THEN RETURN FALSE
+  ENDIF
+  edfree()
+  ednew := FALSE
+  IF fib := AllocDosObject(DOS_FIB, NIL)
+    IF lock := Lock(path, SHARED_LOCK)
+      IF Examine(lock, fib) THEN size := fib.size
+      UnLock(lock)
+    ELSEIF IoErr() = ERROR_OBJECT_NOT_FOUND
+      -> a new file: an empty buffer that only exists once saved
+      size := 0
+      ednew := TRUE
+    ENDIF
+    FreeDosObject(DOS_FIB, fib)
+  ENDIF
+  IF size < 0
+    faultmsg('cannot edit')
+    RETURN FALSE
+  ENDIF
+  IF size > VIEWMAX
+    showmsg('file too large to edit (512KB cap)')
+    RETURN FALSE
+  ENDIF
+  IF size > 0
+    IF (buf := New(size)) = NIL
+      showmsg('not enough memory')
+      RETURN FALSE
+    ENDIF
+    IF (fh := Open(path, OLDFILE)) = NIL
+      Dispose(buf)
+      faultmsg('cannot edit')
+      RETURN FALSE
+    ENDIF
+    n := Read(fh, buf, size)
+    Close(fh)
+    IF n < 0 THEN n := 0
+  ELSE
+    n := 0
+  ENDIF
+  bp := buf
+  IF (s := String(EDLW)) = NIL THEN ok := FALSE
+  IF ok
+    edl[0] := s
+    ednum := 1
+    ln := s
+    col := 0
+    i := 0
+    WHILE (i < n) AND ok
+      c := bp[i]
+      IF c = 10
+        SetStr(edl[ednum - 1], col)
+        IF ednum >= EDMAXL
+          showmsg('too many lines to edit (8192 cap)')
+          ok := FALSE
+        ELSEIF (s := String(EDLW)) = NIL
+          showmsg('not enough memory')
+          ok := FALSE
+        ELSE
+          edl[ednum] := s
+          ednum := ednum + 1
+          ln := s
+          col := 0
+        ENDIF
+      ELSEIF c = 13
+        -> dropped: Amiga text is LF
+      ELSEIF c = 9
+        REPEAT
+          IF col < EDLW
+            ln[col] := 32
+            col := col + 1
+          ENDIF
+        UNTIL (Mod(col, 8) = 0) OR (col >= EDLW)
+      ELSE
+        IF col < EDLW
+          ln[col] := c
+          col := col + 1
+        ENDIF
+      ENDIF
+      i := i + 1
+    ENDWHILE
+    IF ok THEN SetStr(edl[ednum - 1], col)
+  ENDIF
+  IF buf THEN Dispose(buf)
+  IF ok = FALSE THEN edfree()
+ENDPROC ok
+
+PROC edsave(path)
+  DEF fh, i, ok=TRUE
+  IF samefile(path, 'PROGDIR:cfile.config') THEN wantreload := TRUE
+  IF (fh := Open(path, NEWFILE)) = NIL
+    faultmsg('cannot save')
+    RETURN FALSE
+  ENDIF
+  FOR i := 0 TO ednum - 1
+    IF ok
+      IF Write(fh, edl[i], EstrLen(edl[i])) < 0 THEN ok := FALSE
+      IF Write(fh, '\n', 1) < 0 THEN ok := FALSE
+    ENDIF
+  ENDFOR
+  Close(fh)
+  IF ok = FALSE THEN faultmsg('write failed')
+ENDPROC ok
+
+-> the editor itself. Returns -1 = could not load (message shown),
+-> 0 = left without saving, 1 = saved.
+PROC editfile(path, name)
+  DEF class, code, qual, done2=FALSE, saved=0, k, i, l, r, nl,
+      s:PTR TO CHAR
+  IF edload(path) = FALSE THEN RETURN -1
+  edcur := 0
+  edcol := 0
+  edvtop := 0
+  edxoff := 0
+  edmod := FALSE
+  drawviewframe(TRUE)
+  SetAPen(rp, 0)
+  RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+           panetop + Mul(visrows, ch) - 1)
+  edtitle(name)
+  edpage()
+  WHILE done2 = FALSE
+    class := WaitIMessage(win)
+    code := MsgCode()
+    qual := MsgQualifier()
+    IF class = IDCMP_VANILLAKEY
+      IF code = 27
+        IF edmod
+          promptrow('save changes? (y)es (n)o (Esc = keep editing)')
+          k := waitvanilla()
+          IF (k = "y") OR (k = "Y")
+            IF edsave(path)
+              saved := 1
+              ednew := FALSE
+              done2 := TRUE
+            ENDIF
+          ELSEIF (k = "n") OR (k = "N")
+            done2 := TRUE
+          ENDIF
+          IF done2 = FALSE THEN edtitle(name)
+        ELSE
+          done2 := TRUE
+        ENDIF
+      ELSEIF code = 13    -> split the line at the cursor
+        IF ednum < EDMAXL
+          IF (nl := String(EDLW)) <> NIL
+            s := edl[edcur]
+            StrCopy(nl, s + edcol)
+            SetStr(edl[edcur], edcol)
+            FOR i := ednum TO edcur + 2 STEP -1
+              edl[i] := edl[i - 1]
+            ENDFOR
+            edl[edcur + 1] := nl
+            ednum := ednum + 1
+            edcur := edcur + 1
+            edcol := 0
+            edtouch(name)
+            edfix()
+            edpage()
+          ENDIF
+        ENDIF
+      ELSEIF code = 8    -> backspace
+        IF edcol > 0
+          s := edl[edcur]
+          l := EstrLen(edl[edcur])
+          FOR i := edcol TO l - 1
+            s[i - 1] := s[i]
+          ENDFOR
+          SetStr(edl[edcur], l - 1)
+          edcol := edcol - 1
+          edtouch(name)
+          IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
+        ELSEIF edcur > 0
+          -> join with the line above when the result fits
+          l := EstrLen(edl[edcur - 1])
+          IF (l + EstrLen(edl[edcur])) <= EDLW
+            edcol := l
+            StrAdd(edl[edcur - 1], edl[edcur])
+            DisposeLink(edl[edcur])
+            FOR i := edcur TO ednum - 2
+              edl[i] := edl[i + 1]
+            ENDFOR
+            ednum := ednum - 1
+            edcur := edcur - 1
+            edtouch(name)
+            edfix()
+            edpage()
+          ENDIF
+        ENDIF
+      ELSEIF code = 127    -> del: under the cursor / join the next
+        s := edl[edcur]
+        l := EstrLen(edl[edcur])
+        IF edcol < l
+          FOR i := edcol + 1 TO l - 1
+            s[i - 1] := s[i]
+          ENDFOR
+          SetStr(edl[edcur], l - 1)
+          edtouch(name)
+          IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
+        ELSEIF edcur < (ednum - 1)
+          IF (l + EstrLen(edl[edcur + 1])) <= EDLW
+            StrAdd(edl[edcur], edl[edcur + 1])
+            DisposeLink(edl[edcur + 1])
+            FOR i := edcur + 1 TO ednum - 2
+              edl[i] := edl[i + 1]
+            ENDFOR
+            ednum := ednum - 1
+            edtouch(name)
+            edfix()
+            edpage()
+          ENDIF
+        ENDIF
+      ELSEIF code = 9    -> tab: spaces to the next 8-stop
+        REPEAT
+          IF edinsch(32) = FALSE THEN edcol := edcol    -> line full
+        UNTIL (Mod(edcol, 8) = 0) OR (EstrLen(edl[edcur]) >= EDLW)
+        edtouch(name)
+        IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
+      ELSEIF (code >= 32) AND (code <= 255)
+        IF edinsch(code)
+          edtouch(name)
+          IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
+        ENDIF
+      ENDIF
+    ELSEIF class = IDCMP_RAWKEY
+      IF code < $80
+        r := edcur
+        IF code = RK_UP
+          IF qual AND IEQUALIFIER_CONTROL
+            edcur := 0
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            edcur := edcur - (visrows - 1)
+          ELSE
+            edcur := edcur - 1
+          ENDIF
+        ELSEIF code = RK_DOWN
+          IF qual AND IEQUALIFIER_CONTROL
+            edcur := ednum - 1
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            edcur := edcur + (visrows - 1)
+          ELSE
+            edcur := edcur + 1
+          ENDIF
+        ELSEIF code = RK_LEFT
+          IF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            edcol := 0
+          ELSEIF edcol > 0
+            edcol := edcol - 1
+          ELSEIF edcur > 0
+            edcur := edcur - 1
+            edcol := EstrLen(edl[edcur])
+          ENDIF
+        ELSEIF code = RK_RIGHT
+          IF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            edcol := EstrLen(edl[edcur])
+          ELSEIF edcol < EstrLen(edl[edcur])
+            edcol := edcol + 1
+          ELSEIF edcur < (ednum - 1)
+            edcur := edcur + 1
+            edcol := 0
+          ENDIF
+        ENDIF
+        IF edcur < 0 THEN edcur := 0
+        IF edcur > (ednum - 1) THEN edcur := ednum - 1
+        IF edcol > EstrLen(edl[edcur]) THEN edcol := EstrLen(edl[edcur])
+        IF edfix()
+          edpage()
+        ELSEIF edcur <> r
+          edrow(r - edvtop)
+          edrow(edcur - edvtop)
+        ELSE
+          edrow(edcur - edvtop)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+  edfree()
+ENDPROC saved
+
+-> e: edit the selected text file
+PROC doedit()
+  DEF p, i, ty, r, fpath[310]:STRING
+  p := active
+  IF involume(p)
+    showmsg('nothing to edit in the volume list')
+    RETURN
+  ENDIF
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  i := (p * MAXENT) + esel[p]
+  IF edirs[i]
+    showmsg('cannot edit a directory')
+    RETURN
+  ENDIF
+  buildfull(fpath, ppath[p], enames[i])
+  ty := sniff(fpath)
+  IF (ty = TY_TEXT) OR (esize[i] = 0)
+    r := editfile(fpath, enames[i])
+    IF r = 1
+      refreshall()
+    ELSEIF r = 0
+      drawall()
+    ENDIF
+  ELSE
+    showmsg('only text files can be edited')
   ENDIF
 ENDPROC
 
@@ -2132,7 +3159,7 @@ PROC capturecmd(p, cmd, title, refresh)
     IF refresh THEN drawall()
     faultmsg('cannot run')
   ELSE
-    viewfile('T:CFile-out', title, 0)    -> ends with a full redraw
+    viewfile('T:CFile-out', title, 0, FALSE)    -> ends with a full redraw
     IF res <> 0
       StringF(mb, 'returned code \d', res)
       showmsg(mb)
@@ -2147,17 +3174,17 @@ ENDPROC
 PROC connl()
   DEF m:PTR TO CHAR, j
   ccol := 0
-  IF crow < (VISROWS - 1)
+  IF crow < (visrows - 1)
     crow := crow + 1
   ELSE
-    ScrollRaster(rp, 0, 8, x0, panetop,
-                 x0 + 639, panetop + (VISROWS * 8) - 1)
+    ScrollRaster(rp, 0, ch, x0, panetop,
+                 x0 + Mul(ncols, cw) - 1, panetop + Mul(visrows, ch) - 1)
   ENDIF
   IF cmodel
     IF cmrow < (CMAXL - 1)    -> past the cap the last line churns
       cmrow := cmrow + 1
-      m := cmodel + Mul(cmrow, 80)
-      FOR j := 0 TO 79
+      m := cmodel + Mul(cmrow, ncols)
+      FOR j := 0 TO ncols - 1
         m[j] := 32
       ENDFOR
     ENDIF
@@ -2187,15 +3214,15 @@ PROC confeed(buf, n)
       IF c >= 64    -> the final byte
         IF c = "C"
           ccol := ccol + (IF cnum = 0 THEN 1 ELSE cnum)
-          IF ccol > 80 THEN ccol := 80
+          IF ccol > ncols THEN ccol := ncols
         ELSEIF c = "K"
           SetAPen(rp, 0)
-          RectFill(rp, x0 + (ccol * 8), panetop + (crow * 8),
-                   x0 + 639, panetop + (crow * 8) + 7)
+          RectFill(rp, x0 + (ccol * cw), panetop + (crow * ch),
+                   x0 + Mul(ncols, cw) - 1, panetop + (crow * ch) + ch - 1)
           SetAPen(rp, txtpen)
           IF cmodel
-            m := cmodel + Mul(cmrow, 80)
-            FOR j := ccol TO 79
+            m := cmodel + Mul(cmrow, ncols)
+            FOR j := ccol TO ncols - 1
               m[j] := 32
             ENDFOR
           ENDIF
@@ -2226,14 +3253,14 @@ PROC confeed(buf, n)
       i := i + 1
     ELSEIF c = 9
       REPEAT
-        Move(rp, x0 + (ccol * 8), panetop + (crow * 8) + baseline)
+        Move(rp, x0 + (ccol * cw), panetop + (crow * ch) + baseline)
         Text(rp, ' ', 1)
         IF cmodel
-          m := cmodel + Mul(cmrow, 80)
+          m := cmodel + Mul(cmrow, ncols)
           m[ccol] := 32
         ENDIF
         ccol := ccol + 1
-      UNTIL (Mod(ccol, 8) = 0) OR (ccol >= 80)
+      UNTIL (Mod(ccol, 8) = 0) OR (ccol >= ncols)
       IF ccol >= 80 THEN connl()
       i := i + 1
     ELSEIF c >= 32
@@ -2243,12 +3270,12 @@ PROC confeed(buf, n)
       ENDWHILE
       run := j - i
       WHILE run > 0
-        IF ccol >= 80 THEN connl()
-        fit := 80 - ccol
+        IF ccol >= ncols THEN connl()
+        fit := ncols - ccol
         IF fit > run THEN fit := run
-        Move(rp, x0 + (ccol * 8), panetop + (crow * 8) + baseline)
+        Move(rp, x0 + (ccol * cw), panetop + (crow * ch) + baseline)
         Text(rp, s + i, fit)
-        IF cmodel THEN CopyMem(s + i, cmodel + Mul(cmrow, 80) + ccol, fit)
+        IF cmodel THEN CopyMem(s + i, cmodel + Mul(cmrow, ncols) + ccol, fit)
         ccol := ccol + fit
         i := i + fit
         run := run - fit
@@ -2264,18 +3291,19 @@ PROC livestart()
   DEF m:PTR TO CHAR, j
   drawviewframe(FALSE)
   SetAPen(rp, 0)
-  RectFill(rp, x0, panetop, x0 + 639, panetop + (VISROWS * 8) - 1)
+  RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+           panetop + Mul(visrows, ch) - 1)
   ccol := 0
   crow := 0
   cesc := 0
   cnum := 0
   -> the scrollback model, allocated once; without it the console
   -> still works, just without scrolling back
-  IF cmodel = NIL THEN cmodel := New(Mul(CMAXL, 80))
+  IF cmodel = NIL THEN cmodel := New(Mul(CMAXL, ncols))
   cmrow := 0
   IF cmodel
     m := cmodel
-    FOR j := 0 TO 79
+    FOR j := 0 TO ncols - 1
       m[j] := 32
     ENDFOR
   ENDIF
@@ -2338,7 +3366,7 @@ PROC liveend()
     refreshall()
     RETURN
   ENDIF
-  maxv := cmrow - (VISROWS - 1)
+  maxv := cmrow - (visrows - 1)
   IF maxv < 0 THEN maxv := 0
   vtop := maxv
   WHILE over = FALSE
@@ -2352,7 +3380,7 @@ PROC liveend()
           IF qual AND IEQUALIFIER_CONTROL
             nv := 0
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            nv := vtop - (VISROWS - 1)
+            nv := vtop - (visrows - 1)
           ELSE
             nv := vtop - 1
           ENDIF
@@ -2360,7 +3388,7 @@ PROC liveend()
           IF qual AND IEQUALIFIER_CONTROL
             nv := maxv
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            nv := vtop + (VISROWS - 1)
+            nv := vtop + (visrows - 1)
           ELSE
             nv := vtop + 1
           ENDIF
@@ -2380,13 +3408,13 @@ PROC liveend()
       vtop := nv
       SetAPen(rp, txtpen)
       SetBPen(rp, 0)
-      FOR r := 0 TO VISROWS - 1
+      FOR r := 0 TO visrows - 1
         line := vtop + r
-        Move(rp, x0, panetop + (r * 8) + baseline)
+        Move(rp, x0, panetop + (r * ch) + baseline)
         IF line <= cmrow
-          Text(rp, cmodel + Mul(line, 80), 80)
+          Text(rp, cmodel + Mul(line, ncols), ncols)
         ELSE
-          Text(rp, {spaces}, 80)
+          Text(rp, {spaces2}, ncols)
         ENDIF
       ENDFOR
     ENDIF
@@ -2647,13 +3675,15 @@ PROC doopen()
       drawpaths()
     ENDIF
   ELSEIF ty = TY_TEXT
-    viewfile(fpath, enames[i], 0)
+    IF viewfile(fpath, enames[i], 0, FALSE) = 1
+      IF editfile(fpath, enames[i]) = 1 THEN refreshall() ELSE drawall()
+    ENDIF
   ELSEIF ty = TY_ANSI
-    viewfile(fpath, enames[i], 2)
+    viewfile(fpath, enames[i], 2, FALSE)
   ELSEIF (ty = TY_LHA) OR (ty = TY_LZX) OR (ty = TY_ZIP)
     showmsg('an archive - u unpacks it to the other pane, v lists it')
   ELSE
-    viewfile(fpath, enames[i], 1)
+    viewfile(fpath, enames[i], 1, FALSE)
   ENDIF
 ENDPROC
 
@@ -2717,8 +3747,11 @@ PROC dorename()
   ENDIF
 ENDPROC
 
-PROC domakedir()
-  DEF p, lock, tname[34]:STRING, dpath[310]:STRING
+-> n: a name ending in "/" makes a directory; anything else opens
+-> the editor on a NEW file - which only exists once it is saved
+PROC donew()
+  DEF p, lock, tname[40]:STRING, dpath[310]:STRING,
+      s:PTR TO CHAR, i, l, wantdir=FALSE, r
   p := active
   IF involume(p)
     showmsg('no file operations in the volume list')
@@ -2726,22 +3759,55 @@ PROC domakedir()
   ENDIF
   IF efail[p] THEN RETURN
   StrCopy(tname, '')
-  IF lineinput('make dir: ', tname, 30, TRUE) = 0
+  IF lineinput('new (name/ = dir): ', tname, 31, FALSE) = 0
     drawpaths()
     RETURN
   ENDIF
-  IF EstrLen(tname) = 0
+  l := EstrLen(tname)
+  IF l = 0
     drawpaths()
     RETURN
   ENDIF
+  s := tname
+  IF s[l - 1] = "/"
+    wantdir := TRUE
+    SetStr(tname, l - 1)
+    l := l - 1
+  ENDIF
+  IF l = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  FOR i := 0 TO l - 1
+    IF (s[i] = "/") OR (s[i] = ":")
+      showmsg('plain names only (a trailing / makes a directory)')
+      RETURN
+    ENDIF
+  ENDFOR
   buildfull(dpath, ppath[p], tname)
-  IF lock := CreateDir(dpath)
-    UnLock(lock)    -> CreateDir hands back an exclusive lock
-    StrCopy(prevname, tname)
-    refreshall()
-    selectbyname(p)
+  IF wantdir
+    IF lock := CreateDir(dpath)
+      UnLock(lock)    -> CreateDir hands back an exclusive lock
+      StrCopy(prevname, tname)
+      refreshall()
+      selectbyname(p)
+    ELSE
+      faultmsg('cannot create')
+    ENDIF
   ELSE
-    faultmsg('cannot create')
+    IF pathtype(dpath) > 0
+      showmsg('that name already exists - e edits it')
+      RETURN
+    ENDIF
+    drawpaths()
+    r := editfile(dpath, tname)
+    IF r = 1
+      StrCopy(prevname, tname)
+      refreshall()
+      selectbyname(p)
+    ELSEIF r = 0
+      drawall()    -> nothing was saved, nothing exists
+    ENDIF
   ENDIF
 ENDPROC
 
@@ -2758,37 +3824,42 @@ PROC waitkey()
   ENDWHILE
 ENDPROC
 
-PROC helptext(s, y)
-  Move(rp, x0 + 152, y + baseline)
+-> a help line on pane row r (skipped when the grid is too short)
+PROC helptext(s, r)
+  IF r >= visrows THEN RETURN
+  Move(rp, x0 + (19 * cw), panetop + (r * ch) + baseline)
   Text(rp, s, StrLen(s))
 ENDPROC
 
 PROC helpscreen()
   DEF y
+  drawviewframe(TRUE)    -> closed border + the viewer's footer
   SetAPen(rp, 0)
-  RectFill(rp, x0 + 8, panetop, x0 + 631, panetop + (VISROWS * 8) - 1)
+  RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+           panetop + Mul(visrows, ch) - 1)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  y := panetop
-  helptext('CFile 0.1', y)
-  helptext('Tab ........ switch pane', y + 16)
-  helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 24)
-  helptext('Right/Left . enter / parent, then the volume list', y + 32)
-  helptext('Enter ...... open: enter dir, view text, run binary', y + 40)
-  helptext('v .......... view: text/ansi/hex, archives list', y + 48)
-  helptext('i .......... file info, edit protection bits', y + 56)
-  helptext('u .......... unpack archive(s), marks work', y + 64)
-  helptext('p .......... pack into an archive (.lha/.lzx/.zip)', y + 72)
-  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 80)
-  helptext('c / C ...... copy to the other pane (C overwrites)', y + 88)
-  helptext('m / M ...... move to the other pane (M overwrites)', y + 96)
-  helptext('r .......... rename (marks: one at a time)', y + 104)
-  helptext('n .......... new directory', y + 112)
-  helptext('Del / D .... delete, directories and all (asks first)', y + 120)
-  helptext(': .......... run a shell command here', y + 128)
-  helptext('? / Help ... this help', y + 136)
-  helptext('Esc ........ quit (asks first)', y + 144)
-  helptext('press any key', y + 160)
+  y := 0
+  helptext('CFile 0.2', y)
+  helptext('Tab ........ switch pane', y + 2)
+  helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 3)
+  helptext('Right/Left . enter / parent, then the volume list', y + 4)
+  helptext('Enter ...... open: enter dir, view text, run binary', y + 5)
+  helptext('v .......... view; marks tour with Right/Left', y + 6)
+  helptext('e .......... edit text file (e in the viewer works too)', y + 7)
+  helptext('i .......... file info, edit protection bits', y + 8)
+  helptext('u .......... unpack archive(s), marks work', y + 9)
+  helptext('p .......... pack into an archive (.lha/.lzx/.zip)', y + 10)
+  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 11)
+  helptext('c / C ...... copy to the other pane (C overwrites)', y + 12)
+  helptext('m / M ...... move to the other pane (M overwrites)', y + 13)
+  helptext('r .......... rename (marks: one at a time)', y + 14)
+  helptext('n .......... new file in the editor (name/ = dir)', y + 15)
+  helptext('Del / D .... delete, directories and all (asks first)', y + 16)
+  helptext(': .......... run a shell command here', y + 17)
+  helptext('? / Help ... this help', y + 18)
+  helptext('Esc ........ quit (asks first)', y + 19)
+  helptext('press any key', y + 21)
   waitkey()
   drawall()
 ENDPROC
@@ -2819,6 +3890,8 @@ PROC eventloop()
         doopen()
       ELSEIF (code = "v") OR (code = "V")
         doview()
+      ELSEIF (code = "e") OR (code = "E")
+        doedit()
       ELSEIF (code = "i") OR (code = "I")
         infowindow()
       ELSEIF code = "c"
@@ -2832,7 +3905,7 @@ PROC eventloop()
       ELSEIF (code = "r") OR (code = "R")
         dorename()
       ELSEIF (code = "n") OR (code = "N")
-        domakedir()
+        donew()
       ELSEIF (code = 127) OR (code = "D")    -> the Del key, or D
         dodelete()
       ELSEIF code = 32     -> Space: mark for a bulk copy/move/delete
@@ -2851,7 +3924,7 @@ PROC eventloop()
           IF qual AND IEQUALIFIER_CONTROL
             pagemove(-MAXENT)
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            pagemove(-(VISROWS - 1))
+            pagemove(-(visrows - 1))
           ELSE
             moveup()
           ENDIF
@@ -2859,7 +3932,7 @@ PROC eventloop()
           IF qual AND IEQUALIFIER_CONTROL
             pagemove(MAXENT)
           ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-            pagemove(VISROWS - 1)
+            pagemove(visrows - 1)
           ELSE
             movedown()
           ENDIF
@@ -2872,10 +3945,17 @@ PROC eventloop()
         ENDIF
       ENDIF
     ENDIF
+    IF wantreload    -> the config was saved from the editor
+      wantreload := FALSE
+      applyconfig()
+    ENDIF
   ENDWHILE
 ENDPROC
 
 PROC main() HANDLE
+  ensureassigns()
+  loadconfig()
+  parseargs()
   initpanes()
   readpane(0)
   readpane(1)
@@ -2883,6 +3963,8 @@ PROC main() HANDLE
   drawall()
   eventloop()
   closeui()
+  saveconfig()
+  dropassigns()
 EXCEPT DO
   closeui()
   SELECT exception
@@ -2901,6 +3983,74 @@ ENDPROC
 -> one - progart's dashes - as a phantom border)
 spaces: CHAR '                                                                                '
 
+-> frame pieces measured from his two mockups, composed at
+-> runtime for any grid: rowcodes 0-4 = logo rows, 21-23 =
+-> main footer (nrows-3..-1), 31-33 = view footer (viewbuf
+-> rows 1-3). Anchor 0 = col from left, 1 = centered, 2 =
+-> distance from the right edge. Table: row,anchor,param,
+-> width,blob offset; -99 ends it.
+cpieces: CHAR 46,95,32,32,32,95,46,32,32,32,32,32,95,95,32,32
+  CHAR 32,95,95,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,46,95,32,32,32,95,46,32,41,40,92,32,47,41
+  CHAR 40,32,32,32,32,47,32,47,32,32,47,32,47,95,32,32
+  CHAR 32,32,32,95,95,32,95,95,32,32,32,32,41,40,92,32
+  CHAR 47,41,40,32,96,46,32,94,32,46,39,32,32,95,47,32
+  CHAR 32,124,95,47,32,95,95,47,95,95,32,95,47,32,32,124
+  CHAR 32,32,92,95,32,32,96,32,32,94,32,32,39,32,32,33
+  CHAR 32,161,32,33,32,32,124,32,32,32,32,124,32,32,32,96
+  CHAR 41,32,32,32,124,62,32,32,32,95,32,32,32,60,46,32
+  CHAR 32,33,32,161,32,33,32,32,32,32,32,33,32,32,32,32
+  CHAR 96,45,45,45,45,94,45,45,46,95,95,95,95,95,124,45
+  CHAR 45,45,45,124,95,95,95,95,124,32,32,32,32,33,32,32
+  CHAR 32,32,183,183,124,124,124,32,32,32,32,32,32,92,32,33
+  CHAR 58,32,47,32,32,32,32,32,32,124,124,32,32,32,32,32
+  CHAR 32,92,92,63,32,61,32,104,101,108,112,183,69,115,99,32
+  CHAR 61,32,81,117,105,116,47,47,32,32,32,32,32,32,124,96
+  CHAR 45,45,45,45,45,45,32,92,45,32,45,45,45,45,45,32
+  CHAR 47,45,32,45,45,45,45,45,45,32,45,247,45,32,65,32
+  CHAR 76,65,84,69,88,32,80,82,79,68,85,67,84,105,79,78
+  CHAR 33,32,45,247,45,32,45,45,45,45,45,45,32,45,92,45
+  CHAR 45,45,45,45,32,45,47,32,45,45,45,45,45,45,39,183
+  CHAR 32,32,32,32,32,32,92,32,47,32,32,32,32,32,32,46
+  CHAR 33,32,32,32,32,32,32,92,92,69,115,99,32,61,32,82
+  CHAR 101,116,117,114,110,32,116,111,32,102,105,108,101,32,118,105
+  CHAR 101,119,47,47,32,32,32,32,32,32,58,96,45,45,45,45
+  CHAR 45,45,32,92,45,32,45,45,45,45,45,32,47,45,32,45
+  CHAR 45,45,45,45,45,32,45,247,45,32,65,32,76,65,84,69
+  CHAR 88,32,80,82,79,68,85,67,84,105,79,78,33,32,45,247
+  CHAR 45,32,45,45,45,45,45,45,32,45,92,45,45,45,45,45
+  CHAR 32,45,47,32,45,45,45,45,45,45,39
+
+ctab: LONG 0,0,14,8,0,0,1,0,25,8,0,2,24,9,33
+  LONG 1,0,14,8,42,1,1,0,25,50,1,2,24,9,75
+  LONG 2,0,14,8,84,2,1,0,25,92,2,2,24,9,117
+  LONG 3,0,14,8,126,3,1,0,25,134,3,2,24,9,159
+  LONG 4,0,14,8,168,4,1,0,25,176,4,2,24,9,201
+  LONG 3,0,0,1,210,3,2,1,1,211,4,0,0,1,212
+  LONG 4,2,1,1,213,21,0,0,9,214,21,1,0,2,223
+  LONG 21,2,9,9,225,22,0,0,9,234,22,0,19,8,243
+  LONG 22,1,0,1,251,22,2,28,10,252,22,2,9,9,262
+  LONG 23,0,0,27,271,23,1,0,27,298,23,2,26,26,325
+  LONG 31,0,0,8,351,31,2,9,9,359,32,0,0,9,368
+  LONG 32,1,0,25,377,32,2,9,9,402,33,0,0,27,411
+  LONG 33,1,0,27,438,33,2,26,26,465
+  LONG -99
+
+-> 200 pad spaces (grids can be wider than 80 cols)
+spaces2: CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
+  CHAR 32,32,32,32,32,32,32,32
+
 -> the progress bar box, 3 rows of 33 characters flat (his mockup):
 -> .-------------------------------. / | 31 spaces | / `31 dashes´
 -> Numeric bytes only: E-VO appends a NUL to every quoted string in
@@ -2913,195 +4063,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
--> the occupied top border (his layout row 6 update): text in
--> the border sits between guillemets instead of over dashes
-promptart: CHAR 166,45,187,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,171,45,166
-
--> the console/view frame deltas (his console-and-view-layout
--> mockup): row 6 as a closed border, rows 29-31 with the
--> "Esc = Return to file view" footer. 4 rows of 80, flat.
-viewart: CHAR 96,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,180
-  CHAR 183,32,32,32,32,32,32,92,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,47,32,32,32,32,32,32,46
-  CHAR 33,32,32,32,32,32,32,92,92,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,69,115,99,32
-  CHAR 61,32,82,101,116,117,114,110,32,116,111,32,102,105,108,101
-  CHAR 32,118,105,101,119,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,47,47,32,32,32,32,32,32,58
-  CHAR 96,45,45,45,45,45,45,32,92,45,32,45,45,45,45,45
-  CHAR 32,47,45,32,45,45,45,45,45,45,32,45,247,45,32,65
-  CHAR 32,76,65,84,69,88,32,80,82,79,68,85,67,84,105,79
-  CHAR 78,33,32,45,247,45,32,45,45,45,45,45,45,32,45,92
-  CHAR 45,45,45,45,45,32,45,47,32,45,45,45,45,45,45,39
-
--> the frame, compiled in: 31 rows of 80 characters, no separators.
--> Rows 7 and 28 are the mockup's first/last-listing-row markers with
--> the placeholder text blanked out.
-frameart: CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,46,95
-  CHAR 32,32,32,95,46,32,32,32,32,32,32,32,32,32,95,95
-  CHAR 32,32,32,95,95,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,46,95,32,32,32,95,46
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,41,40
-  CHAR 92,32,47,41,40,32,32,32,32,32,32,32,32,47,32,47
-  CHAR 32,32,47,32,47,95,32,32,32,32,32,95,95,32,95,95
-  CHAR 32,32,32,32,32,32,32,32,32,41,40,92,32,47,41,40
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,96,46
-  CHAR 32,94,32,46,39,32,32,32,32,32,32,95,47,32,32,124
-  CHAR 95,47,32,95,95,47,95,95,32,95,47,32,32,124,32,32
-  CHAR 92,95,32,32,32,32,32,32,32,96,32,32,94,32,32,39
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 183,32,32,32,32,32,32,32,32,32,32,32,32,32,32,33
-  CHAR 32,161,32,33,32,32,32,32,32,32,124,32,32,32,32,124
-  CHAR 32,32,32,96,41,32,32,32,124,62,32,32,32,95,32,32
-  CHAR 32,60,46,32,32,32,32,32,32,32,33,32,161,32,33,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,183
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,33,32,32,32,32,32,32,32,32,96,45,45,45,45,94
-  CHAR 45,45,46,95,95,95,95,95,124,45,45,45,45,124,95,95
-  CHAR 95,95,124,32,32,32,32,32,32,32,32,32,33,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 166,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,46,46,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
-  CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,166
-  CHAR 58,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,183
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,124,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,124,33,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,92,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,33,58,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,47,32,32,32,32,32,32,124
-  CHAR 124,32,32,32,32,32,32,92,92,32,32,32,32,32,32,32
-  CHAR 32,32,32,63,32,61,32,104,101,108,112,32,32,32,32,32
-  CHAR 32,32,32,32,32,32,32,32,183,32,32,32,32,32,32,32
-  CHAR 32,32,32,32,69,115,99,32,61,32,81,117,105,116,32,32
-  CHAR 32,32,32,32,32,32,32,47,47,32,32,32,32,32,32,124
-  CHAR 96,45,45,45,45,45,45,32,92,45,32,45,45,45,45,45
-  CHAR 32,47,45,32,45,45,45,45,45,45,32,45,247,45,32,65
-  CHAR 32,76,65,84,69,88,32,80,82,79,68,85,67,84,105,79
-  CHAR 78,33,32,45,247,45,32,45,45,45,45,45,45,32,45,92
-  CHAR 45,45,45,45,45,32,45,47,32,45,45,45,45,45,45,39
-
-version: CHAR '$VER: CFile 0.1 (15.7.26) E build',0
+version: CHAR '$VER: CFile 0.2 (16.7.26) E build',0

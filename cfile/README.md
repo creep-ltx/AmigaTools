@@ -4,11 +4,13 @@ A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
 ![CFile browsing DH0: and DH1: on AmigaOS 3.2](screenshot.png)
 
-Two directory panes inside a compiled-in 80x31 character frame. The
-selection bar is the only highlight and lives in the active pane;
-everything is done from the keyboard. Files are recognised by their
-headers (hunk executable, lha/lzx/zip, ANSI, text), and each verb
-does the natural thing for the type.
+Two directory panes inside a full-screen character frame. The frame
+is not a fixed bitmap: it is composed at startup for whatever font
+and screen it finds, so a small custom font gets a wider, taller
+grid and the same layout. The selection bar is the only highlight
+and lives in the active pane; everything is done from the keyboard.
+Files are recognised by their headers (hunk executable, lha/lzx/zip,
+ANSI, text), and each verb does the natural thing for the type.
 
 ## Keys
 
@@ -19,19 +21,23 @@ does the natural thing for the type.
 | `Right` | enter the selected directory or volume |
 | `Left` | parent directory; at a device root, the volume list |
 | `Enter` | open by type: enter a directory, view text/ANSI, run an executable (asks first), hex-view the rest |
-| `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives |
+| `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
+| `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live |
 | `Space` | mark/unmark the entry (and step down) |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
-| `n` | new directory |
+| `n` | new: a name ending in `/` makes a directory, any other name opens the editor on a new file (created only when saved) |
 | `Del` / `D` | delete the selection or marked set, directories recursively (asks first) |
 | `u` | unpack the selected archive — or every marked archive — into the other pane |
 | `p` | pack the selection or marked set into an archive in the other pane |
 | `:` | run a shell command in the active pane's directory |
 | `?` / `Help` / `h` | help screen |
 | `Esc` | quit (asks first) |
+
+In every text prompt the cursor walks with `Left`/`Right`, and
+`Shift+Left`/`Shift+Right` jump to the start and end of the line.
 
 ## File operations
 
@@ -47,7 +53,18 @@ Deleting is recursive and resilient: a delete-protected entry asks
 `unprotect? (y)es (n)o (a)ll`, an entry that will not go is skipped
 and the rest of the run continues, and the summary names what
 remains. Marks turn `c`/`m`/`Del`/`u` into bulk operations on the
-whole set at once; `r` walks the marked set one prompt at a time.
+whole set at once; `r` walks the marked set one prompt at a time,
+and `v` tours it.
+
+## The editor
+
+`e` opens a text file in the frame: arrows move the cursor (`Shift` =
+page and line ends, `Ctrl` = first/last line), `Enter` splits a line,
+`Backspace`/`Del` join across line ends, tabs become spaces on load.
+`Esc` asks `(y)es (n)o` about saving only when something changed —
+otherwise it just closes. `n` opens the same editor on a new file,
+which is created only if it is saved. Lines are capped at 200
+characters and files at 8192 lines; bigger files stay view-only.
 
 ## Archives
 
@@ -68,16 +85,52 @@ through up to 4000 lines of output; any other key returns to the
 panes. `:` commands run with the active pane's directory as their
 current directory, and both panes refresh afterwards.
 
+## Configuration
+
+CFile reads `PROGDIR:cfile.config` (plain text, `;` comments):
+
+```
+; CFile configuration
+LEFT      SYS:
+RIGHT     RAM:
+SAVEDIRS  ON
+FONT      MicroKnight7/7
+```
+
+- `LEFT` / `RIGHT` — start paths for the panes; the value
+  `(volumes)` starts a pane in the volume list. Command-line
+  arguments (`cfile [left] [right]`, quotes allowed) override them.
+- `SAVEDIRS ON` — on quit, the current pane paths are written back
+  as the next start's `LEFT`/`RIGHT`. Only those two lines are
+  rewritten; comments and every other line pass through verbatim,
+  so hand edits (and edits made from inside CFile) survive.
+- `FONT name/size` — any fixed-width disk font; `topaz` always
+  means the ROM font. The whole frame, both panes and the viewer
+  re-derive from the font cell, so a small font like a 7×7 gives
+  more columns and rows. A font that fails to open, is
+  proportional, or leaves less than an 80×18 grid is refused and
+  CFile falls back to Topaz/8.
+
+Editing `cfile.config` in CFile's own editor applies it on save:
+the font, grid and frames rebuild live, and a bad value keeps the
+last good setup. Without a config file the panes start in `SYS:`
+and `RAM:`.
+
+CFile also runs without a Startup-Sequence: if `ENV:` or `T:` is
+missing at start it creates them the standard way (`RAM:Env`,
+`RAM:T`) and removes only what it made, on a clean exit.
+
 ## Display
 
 CFile opens its own 8-colour screen (like Workbench, made public as
 `CFILE`): grey background, black text, blue directories, black
 selection bar that keeps the entry's type colour. Each pane's path
 lives in the frame's border row; prompts and messages take that row
-over between guillemets and give it back afterwards. Viewing ANSI art
-switches the palette to the classic ANSI colours and restores it on
-exit. If the screen cannot be opened, CFile falls back to a
-borderless window on the public screen without its own palette.
+over between guillemets and give it back afterwards. The volume list
+shows volumes first, assigns below them. Viewing ANSI art switches
+the palette to the classic ANSI colours and restores it on exit. If
+the screen cannot be opened, CFile falls back to a borderless window
+on the public screen without its own palette.
 
 ## Files
 
@@ -99,14 +152,17 @@ evo cfile.e
 ## Verified behaviour
 
 Exercised on an AmigaOS 3.2 install (FS-UAE): pane navigation with
-paging, the volume list, copy and move with collision prompts and
-bulk marks, recursive deletes including delete-protected entries and
-the unprotect prompts, sequential rename, the info window with live
-protection-bit editing, text/ANSI/hex viewing (with the palette
-restored on exit), archive unpacking singly and in bulk, `:`
-commands, running executables, and the live console with scrollback.
-The pack verb and the newest refinements (qualifier keys during
-scrollback, the occupied-border style) were built last and have had
-the least testing. One known limit: FS-UAE directory drives can hold
-host filenames the Amiga side cannot see; CFile reports these as
+paging, the volume list with assigns, copy and move with collision
+prompts and bulk marks, recursive deletes including delete-protected
+entries and the unprotect prompts, sequential rename, the info
+window with live protection-bit editing, text/ANSI/hex viewing (with
+the palette restored on exit), the bulk view tour, the editor
+including new files from `n`, archive unpacking singly and in bulk,
+`:` commands, running executables, the live console with scrollback,
+and the config file end to end — custom fonts (a 7×7 and an 8-pixel
+MicroKnight, plus Topaz/8), live reload from an in-CFile edit, and
+`SAVEDIRS` preserving hand edits. The pack verb, the prompt-line
+`Shift` jumps and the `ENV:`/`T:` bootstrap have had the least
+testing. One known limit: FS-UAE directory drives can hold host
+filenames the Amiga side cannot see; CFile reports these as
 "invisible entries remain" when they block a delete.
