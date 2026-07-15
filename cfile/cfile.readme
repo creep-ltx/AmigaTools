@@ -1,0 +1,113 @@
+CFile - a two-pane text-mode file manager for AmigaOS
+=======================================================
+
+WHAT IT IS
+
+  CFile is a keyboard-driven file manager: two directory panes inside
+  a full-screen 80x31 character frame, in the spirit of the classic
+  two-pane managers. Files are recognised by their headers (hunk
+  executable, lha/lzx/zip archive, ANSI, text), and each verb does
+  the natural thing for the type. Written in Amiga E, compiled to a
+  native AmigaOS loadseg()able executable. Needs AmigaOS 2.0+; the
+  panes start in DH0: and DH1: and the volume list reaches
+  everything else.
+
+KEYS
+
+  Tab          switch the active pane
+  Up/Down      move the selection (Shift = page, Ctrl = first/last)
+  Right        enter the selected directory or volume
+  Left         parent directory; at a device root, the volume list
+  Enter        open by type: enter a directory, view text or ANSI,
+               run an executable (asks first), hex-view the rest
+  v            view: text pager, ANSI art in the classic palette,
+               hex dump for binaries, contents listing for archives
+  i            info window: size, date, comment, protection bits -
+               h s p a r w e d toggle the bits live
+  Space        mark/unmark the entry (and step down)
+  c / C        copy the selection or marked set to the other pane
+               (C overwrites collisions without asking)
+  m / M        move likewise (same volume renames, across volumes
+               copies and deletes)
+  r            rename; with marks, one prompt per entry
+  n            new directory
+  Del / D      delete the selection or marked set, directories
+               recursively (asks first)
+  u            unpack the selected archive - or every marked
+               archive - into the other pane
+  p            pack the selection or marked set into an archive in
+               the other pane
+  :            run a shell command in the active pane's directory
+  ? / Help / h help screen
+  Esc          quit (asks first)
+
+FILE OPERATIONS
+
+  Copy and move ask about name collisions per file - (s)kip,
+  (o)verwrite or (r)ename - and every question is asked BEFORE
+  anything is transferred, so cancelling leaves everything
+  untouched. Directories go recursively; copying preserves
+  protection bits, datestamps and comments; a directory can be
+  merged into an existing one. A centered progress bar covers the
+  longer operations, byte-accurate for copies.
+
+  Deleting is recursive and does not give up easily: a
+  delete-protected entry asks unprotect? (y)es (n)o (a)ll, an entry
+  that will not go is skipped while the rest of the run continues,
+  and the summary names what remains.
+
+  Marks (Space) turn c, m, Del and u into bulk operations on the
+  whole set; r walks the marked set one prompt at a time.
+
+ARCHIVES
+
+  u unpacks lha, lzx and zip archives - recognised by their headers,
+  not their names - into the other pane's directory. p packs the
+  selection or marked set into a new archive there; the filename you
+  type picks the packer: .lha/.lzh, .lzx or .zip. The archiver runs
+  from the source directory, so archives contain clean relative
+  paths. v on an archive shows its contents listing in the viewer.
+  The archivers themselves (LhA, LZX, UnZip/Zip) must be in the
+  command path.
+
+THE CONSOLE
+
+  Commands - u, p, :, and running an executable with Enter - stream
+  their output live into the frame: CFile renders the bytes itself
+  through PIPE:, so there is no console window and no borders. When
+  the command finishes, the arrow keys (with Shift/Ctrl) scroll back
+  through up to 4000 lines of output; any other key returns to the
+  panes.
+
+DISPLAY
+
+  CFile opens its own 8-colour screen (like Workbench, made public
+  as CFILE): grey background, black text, blue directories, and a
+  black selection bar that keeps the entry's type colour. Each
+  pane's path lives in the frame's border row; prompts and messages
+  take that row over and give it back afterwards. Viewing ANSI art
+  switches the palette to the classic ANSI colours and restores it
+  on exit. If the screen cannot be opened, CFile falls back to a
+  borderless window on the public screen.
+
+BUILDING
+
+  A prebuilt cfile binary is included - no compiler needed.
+
+  The source lives in the AmigaTools repository:
+  https://github.com/creep-ltx/AmigaTools
+
+  To build it yourself, compile cfile.e with the E-VO E compiler:
+
+    evo cfile.e
+
+VERIFIED BEHAVIOUR
+
+  Exercised on an AmigaOS 3.2 install (FS-UAE): pane navigation with
+  paging, the volume list, copy and move with collision prompts and
+  bulk marks, recursive deletes including delete-protected entries,
+  sequential rename, the info window with live protection-bit
+  editing, text/ANSI/hex viewing, archive unpacking singly and in
+  bulk, shell commands, running executables, and the live console
+  with scrollback. The pack verb and the newest console refinements
+  have had the least testing so far.
