@@ -2,9 +2,9 @@
 
 A full-screen text boot menu for AmigaOS. CMenu is meant to run *before*
 the normal Startup-Sequence: it shows a centered menu of boot choices,
-and the item you pick — a script or an executable — is launched the same
-way [CBoot](../cboot) launches its boot scripts. CMenu exits after
-launching; it is a boot menu, not a dock.
+and the item you pick — a script or an executable — is handed to the
+shell to run. CMenu exits after launching; it is a boot menu, not a
+dock.
 
 CMenu lives in a few well-known places:
 
@@ -170,10 +170,17 @@ can't be edited from the config screen, but saving preserves them.
 - The countdown is driven by `IDCMP_INTUITICKS` (roughly ten per
   second) — accurate enough for a boot timeout, with no `timer.device`
   boilerplate.
-- Launching mirrors CBoot exactly: `protect "<path>" +srwed` first (so
-  scripts run even if their script bit was never set), then
+- Launching hands the quoted path to the shell with
   `Execute('"<path>"')` — the shell LoadSegs and runs executables, and
-  runs s-bit files as scripts.
+  runs s-bit files as scripts. Before that, CMenu checks the target's
+  first four bytes: files that are not hunk executables get
+  `protect "<path>" +srwed` (so scripts run even if their script bit
+  was never set), while executables (hunk magic `$000003F3`) get the
+  s-bit *cleared* — a binary with the script bit set is script-run by
+  the shell and silently does nothing. CMenu versions up to 0.4 set
+  the bit on everything, permanently breaking any executable item
+  until a manual `protect <file> rwed`; 0.5 repairs such files the
+  next time they are launched from the menu.
 
 ## Building
 
@@ -218,3 +225,10 @@ REPEAT modes (and stopping cleanly before the launched item takes
 over), and the framed config screen with its timed status messages
 and under-the-logo input prompts. The `FONT` setting has not been
 exercised yet.
+
+The 0.5 launcher fix has been exercised on an AmigaOS 3.2 install
+(FS-UAE): launching an executable that an older CMenu had stamped
+with the s-bit both repaired and ran it. The hunk-magic detection has
+also been exercised against a real executable, a text script, and a
+missing file (under vamos). The script launch path is unchanged from
+0.4, where it was verified at boot.

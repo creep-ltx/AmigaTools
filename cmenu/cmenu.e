@@ -3,9 +3,11 @@
 -> Meant to run *before* the normal Startup-Sequence (see
 -> Example-Startup-Sequence): it opens its own full-size screen, shows
 -> a centered menu of items from S:CMenu/Config, and launches the
--> chosen one the same way CBoot launches its boot scripts (protect
--> +srwed, then Execute). CMenu exits after launching - it is a boot
--> menu, not a dock.
+-> chosen one by handing it to the shell (Execute). Scripts get the
+-> s-bit set first so the shell will run them; executables (hunk
+-> magic $000003F3) get it cleared, since a binary with the s-bit is
+-> script-run by the shell and silently does nothing. CMenu exits
+-> after launching - it is a boot menu, not a dock.
 ->
 -> On-disk layout: C:CMenu, S:CMenu/Config, and the optional art in
 -> S:CMenu/Headers/ and S:CMenu/Backgrounds/.
@@ -1611,6 +1613,20 @@ PROC eventloop()
   ENDWHILE
 ENDPROC res
 
+-> TRUE if the file starts with the hunk magic $000003F3, i.e. it is
+-> a LoadSeg()able executable rather than a script
+PROC ishunkbin(path)
+  DEF fh, buf[4]:ARRAY OF CHAR, res=FALSE
+  IF fh := Open(path, OLDFILE)
+    IF Read(fh, buf, 4) = 4
+      IF (buf[0] = 0) AND (buf[1] = 0) AND (buf[2] = 3) AND (buf[3] = $F3)
+        res := TRUE
+      ENDIF
+    ENDIF
+    Close(fh)
+  ENDIF
+ENDPROC res
+
 PROC main() HANDLE
   DEF idx, cmd[360]:STRING
   loadconfig()
@@ -1623,10 +1639,17 @@ PROC main() HANDLE
   closeui()
   shutmusic()    -> free audio and CIA before launching anything
   IF idx >= 0
-    -> launch exactly the way CBoot launches boot scripts: make sure
-    -> the script bit is set, then hand the quoted path to the shell
-    -> (binaries LoadSeg and run; s-bit files run as scripts)
-    StringF(cmd, 'protect "\s" +srwed', paths[idx])
+    -> launch by handing the quoted path to the shell. Scripts need
+    -> the s-bit to run that way, but an executable must NOT have it:
+    -> the shell would script-run the binary, which silently does
+    -> nothing. So check the hunk magic and set the bit only on
+    -> scripts - and clear it from binaries, repairing any file an
+    -> older CMenu stamped.
+    IF ishunkbin(paths[idx])
+      StringF(cmd, 'protect "\s" -s', paths[idx])
+    ELSE
+      StringF(cmd, 'protect "\s" +srwed', paths[idx])
+    ENDIF
     Execute(cmd, NIL, NIL)
     StringF(cmd, '"\s"', paths[idx])
     Execute(cmd, NIL, NIL)
@@ -1802,4 +1825,4 @@ cfgart: CHAR 32,32,32,32,32,32,32,32,32,32,32,32,32,32,46,95
   CHAR 92,45,45,45,45,45,32,45,47,32,45,45,45,45,45,45
   CHAR 39,10
 
-version: CHAR '$VER: CMenu 0.4 (14.7.26)',0
+version: CHAR '$VER: CMenu 0.5 (15.7.26)',0
