@@ -8,6 +8,8 @@ else exists yet. The panes are hardcoded to `DH0:` (left) and `DH1:`
 rename or view. The point of this version is the frame, the pane
 machinery, and the keyboard feel.
 
+![CFile browsing DH0: and DH1: on AmigaOS 3.2](screenshot.png)
+
 ## Keys
 
 | Key | Action |
