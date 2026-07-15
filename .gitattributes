@@ -4,6 +4,7 @@
 /mv/mv binary
 /mv/mv-asm binary
 /cmenu/cmenu binary
+/cfile/cfile binary
 
 # Amiga E sources: GitHub's default guess for .e is Eiffel
 *.e linguist-language=E
@@ -11,3 +12,6 @@
 # ANSI art: escape bytes, never diff as text
 /cmenu/Headers/*.ANS binary
 /cmenu/Libs/ptreplay.library binary
+
+# CFile's frame mockup is ISO-8859-1 -- keep the bytes exact
+/cfile/layout binary
