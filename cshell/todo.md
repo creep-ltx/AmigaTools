@@ -9,46 +9,66 @@ Roughly in build order: a screen with nothing on it needs to exist
 before a prompt can blink on it, and a prompt needs to exist before
 history or completion mean anything.
 
-## Foundation
+## First test slice — built, not yet compiled/verified
 
-- [ ] **Own screen** — clone cmenu's `SA_LIKEWORKBENCH` approach so
-      PAL/NTSC/interlace/RTG all come out right with no mode
-      detection. Borderless-window fallback on the public screen if
-      the screen can't open, same as cfile/cmenu.
-- [ ] **Font handling** — disk font from config with a Topaz/8
-      fallback (cfile's rule: reject proportional fonts and anything
-      that leaves less than a usable grid).
-- [ ] **Frame/grid layout** — cfile's todo already flags an
-      `ltxui.m` split "when a second tool wants it, not before."
-      CShell is that second tool: decide whether the frame composer
-      and console-render code move to a shared module now, or get
-      re-derived once and reconciled later.
-- [ ] **REPL skeleton** — prompt, read a line, dispatch, redraw,
-      loop. This replaces cfile's `:` (run one command, return to
-      the panes) with a loop that never returns on its own — only
+Written in `cshell.e` but there is no E compiler in the dev
+environment this was built in, so **none of this has been compiled
+or run yet**. Needs a real `ecompile cshell.e` and a pass on
+FS-UAE/vamos before it counts as working, the same bar cfile and
+cmenu hold themselves to.
+
+- [x] **Own screen** — `SA_LIKEWORKBENCH` clone of cfile's `openui()`,
+      with the same borderless-public-screen fallback.
+- [x] **REPL skeleton** — prompt, read a line, dispatch, loop; only
       `exit`/`quit` ends it.
+- [x] **PIPE: streaming exec** — `runexternal()`, cfile's
+      `livepipe()` engine adapted (see Command execution below).
+- [x] **Persistent current directory** — `docd()` calls
+      `CurrentDir()` for real, so it holds for the process's life;
+      no per-command Lock/restore dance needed since spawned
+      commands just inherit it.
+- [x] **Prompt line** — `DH0:path >` with `...`-truncation, from
+      `cshell-mockup`, in `trimpath()`.
+- [x] **Background/decoration chrome** — header/footer bands loaded
+      at runtime from `PROGDIR:cshell-mockup` (not hand-transcribed
+      into the source — the art has raw high-bit bytes not safe to
+      retype by hand) and drawn once; the console area between them
+      scrolls independently via `ScrollRaster`.
+- [x] **ANSI passthrough — answered**: cfile's own live console
+      (`confeed`) only ever handled cursor-forward and erase-line,
+      never SGR colour, so there was no existing colour-handling
+      code to adapt. CShell's `confeed` swallows escape sequences
+      byte-by-byte for now; real SGR interpretation (colour) is
+      still open, tracked below.
+
+Simplifications specific to this slice, to keep it small enough to
+actually get right without a compiler to check against:
+
+- [ ] **Mid-line cursor editing** — typing is append/Backspace only
+      right now (`replinput()`); no Left/Right/Del, unlike cfile's
+      `lineinput()`. Worth lifting cfile's cursor-walk logic in
+      directly once the append-only version is confirmed working.
+- [ ] **Frame/grid module split** — `cshell.e` re-derives its own
+      small screen/console setup rather than sharing code with
+      cfile. cfile's todo flagged an `ltxui.m` split "when a second
+      tool wants it" — still not done; revisit once both tools'
+      consoles are proven and the duplication is annoying rather
+      than hypothetical.
 
 ## Command execution
 
-- [ ] **PIPE: streaming exec** — adapt cfile's console engine
-      (stream a running command's output straight into the frame,
-      no console window, no borders) as the execution path for
-      external commands.
-- [ ] **Persistent current directory** — cfile's `:` runs a command
-      in the active pane's directory and forgets it; CShell needs a
-      real shell-style `CurrentDir()` that persists across commands
-      for the life of the process.
-- [ ] **Built-in vs external split** — `cd` *must* be a built-in
-      (an external child process changing its own current directory
-      doesn't affect the parent). Candidates for built-in: `cd`,
-      `exit`/`quit`, `history`, `clear`, maybe `help`. Everything
-      else goes through the PIPE: exec path unchanged.
+- [x] **PIPE: streaming exec** — see above.
+- [x] **Persistent current directory** — see above.
+- [ ] **Built-in vs external split** — `cd`, `exit`/`quit` done.
+      `history` and `clear` still make sense once there's history to
+      show and a reason to clear the console; `help` too.
 - [ ] **Exit status** — decide whether/how a failed command's return
       code surfaces (prompt colour? inline marker? nothing yet?).
 
 ## Line editing & history
 
-- [ ] **Prompt-line editing** — reuse cfile's cursor walk and
+- [ ] **Prompt-line editing** — append/Backspace only so far (see
+      above); still needs cfile's cursor walk and
       `Shift`+`Left`/`Right` start/end jumps.
 - [ ] **Command history** — ring buffer, `Up`/`Down` to recall,
       size configurable.
@@ -58,20 +78,14 @@ history or completion mean anything.
 
 ## Display
 
-- [ ] **Scrollback** — reuse cfile's ~4000-line buffer and its
-      arrow-key (`Shift`/`Ctrl`) scroll-back behaviour.
-- [ ] **Prompt line** — current directory at minimum; format
-      probably wants to be configurable eventually, but a fixed
-      format is fine to start. `cshell-mockup` settles the shape:
-      `DH0:path >`, and long paths truncate with a leading `...`
-      rather than wrapping (`DH0:.../cfile/testfolder >`) — decide
-      the column budget that triggers truncation.
-- [ ] **ANSI passthrough** — check what cfile's PIPE: renderer
-      actually does with SGR colour codes in a command's output
-      (cfile's own header renderer parses SGR/cursor-forward, but
-      that's a different code path from the live console stream) —
-      confirm whether CLI tools that colour their own output show up
-      right, or whether that needs adding.
+- [x] **Prompt line** — done, see above.
+- [ ] **Scrollback** — output that scrolls off the console area is
+      gone for good right now (`ScrollRaster` with no backing
+      model); cfile's ~4000-line buffer approach is the template
+      once this needs revisiting.
+- [ ] **ANSI passthrough (colour)** — see the "answered" note above;
+      swallowing SGR codes instead of interpreting them is the
+      actual gap now, not an open question.
 
 ## Configuration
 
