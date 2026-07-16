@@ -8,12 +8,15 @@ option table), and commands talk to the handler, so no application
 can add it from outside. The endgame is CShell handing its frame
 window to `CCON:` instead of `CON:`.
 
-**Status: milestone 1 — proof of life, boot-verified on an
-AmigaOS 3.2 install (FS-UAE).** The skeleton mounts, answers the
-packet protocol (FINDINPUT/FINDOUTPUT/FINDUPDATE, READ as EOF,
-WRITE, END) and renders writes into a plain window. Nothing
-beyond that yet — see `todo.md` for the plan and the verified
-groundwork.
+**Status: milestones 1–3 boot-verified on an AmigaOS 3.2 install
+(FS-UAE).** `NewShell CCON:` runs a real AmigaShell in the
+handler's window — prompt, dir, list, EndShell — with the CShell
+0.1 line editor behind ACTION_READ (blip cursor, insert editing,
+word jumps, 32-line history, type-ahead, EOF on Ctrl+\) and
+Ctrl+C reaching a running command (break forwarding, AROS
+con-handler semantics). The renderer consumes CSI sequences
+whole, honouring cursor-forward and erase-to-EOL. Next: raw mode
+(M4), scrollback (M5) — see `todo.md`.
 
 ## Try it
 
