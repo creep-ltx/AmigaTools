@@ -1,112 +1,86 @@
 # CShell — build plan
 
-A full-screen, keyboard-driven CLI for AmigaOS. Standalone for now —
-no CMenu integration, no assumptions about being launched from or
-returning to anything else. That link comes later, once CShell and
-CMenu both know what shape it should take.
+**The ruling (2026-07-16): CShell is a real CLI.** Not a program
+that looks like a console — a mounted console *handler* (what CON:
+is, what KingCON and ViNCEd are), speaking the DOS packet protocol,
+hosting the actual AmigaDOS shell. Any command run inside it can
+write, read, ask, and go raw. The first build (the application +
+PIPE: renderer in today's `cshell.e`) hit its architectural ceiling
+the moment an interactive command needed stdin: commands got `NIL:`
+input by construction. That ceiling is not patchable — the handler
+architecture removes it.
 
-Roughly in build order: a screen with nothing on it needs to exist
-before a prompt can blink on it, and a prompt needs to exist before
-history or completion mean anything.
+## What transplants from the current build (the hard parts exist)
 
-## First test slice — compiled and run
+- **confeed** — the write-side renderer: CSI parsing (consume-whole,
+  C/K honoured), tabs, wrap, deferred bottom scroll → becomes
+  `ACTION_WRITE`.
+- **The scrollback model** — 4000 rendered lines + Ctrl/Shift
+  scrolling → a handler-side feature, exactly where KingCON keeps it.
+- **replinput** — blip cursor, insert editing, word jumps, Shift
+  ends, the 32-entry history ring → becomes the handler's
+  cooked-mode line editor (this is where KingCON does history too).
+- **The chrome** — screen, mockup bands, fixed input row: the
+  handler owns its window; all of it stays.
+- **ensureassigns, trimpath, the mockup loader** — unchanged.
 
-Compiled and exercised: screen open (chrome from `cshell-mockup`
-rendered correctly), typing/`Backspace`, `cd <name>` and `cd /`
-(AmigaDOS's parent-directory shorthand) both moving the shell's real
-current directory, `dir` as an external command proving the `PIPE:`
-streaming path and that spawned commands inherit the shell's current
-directory, long-path prompt truncation, and a clean `exit`. See
-`README.md`'s "Verified behaviour" for the exact list and what's
-still untried (`quit`, `Esc`, console scrolling, the error paths).
+The REPL/dispatch skeleton is what gets replaced: the *system
+shell* provides cd, path, prompt, scripts, S:Shell-Startup. The
+built-ins survive as tiny standalone C: commands (see M5) — usable
+from any shell, which is where they always belonged.
 
-- [x] **Own screen** — `SA_LIKEWORKBENCH` clone of cfile's `openui()`,
-      with the same borderless-public-screen fallback.
-- [x] **REPL skeleton** — prompt, read a line, dispatch, loop; only
-      `exit`/`quit` ends it.
-- [x] **PIPE: streaming exec** — `runexternal()`, cfile's
-      `livepipe()` engine adapted (see Command execution below).
-- [x] **Persistent current directory** — `docd()` calls
-      `CurrentDir()` for real, so it holds for the process's life;
-      no per-command Lock/restore dance needed since spawned
-      commands just inherit it.
-- [x] **Prompt line** — `DH0:path >` with `...`-truncation, from
-      `cshell-mockup`, in `trimpath()`.
-- [x] **Background/decoration chrome** — header/footer bands loaded
-      at runtime from `PROGDIR:cshell-mockup` (not hand-transcribed
-      into the source — the art has raw high-bit bytes not safe to
-      retype by hand) and drawn once; the console area between them
-      scrolls independently via `ScrollRaster`.
-- [x] **ANSI passthrough — answered**: cfile's own live console
-      (`confeed`) only ever handled cursor-forward and erase-line,
-      never SGR colour, so there was no existing colour-handling
-      code to adapt. CShell's `confeed` swallows escape sequences
-      byte-by-byte for now; real SGR interpretation (colour) is
-      still open, tracked below.
+## Milestones
 
-Simplifications specific to this slice, to keep it small enough to
-actually get right without a compiler to check against:
+- [ ] **M0: protocol homework** — before any code: verify the
+      console packet protocol against real sources (RKM: DOS
+      Manual, NDK autodocs/includes, the PIPE: handler source,
+      KingCON source if findable). Minimum set to confirm:
+      ACTION_READ / ACTION_WRITE, ACTION_SCREEN_MODE (cooked/raw),
+      ACTION_WAIT_CHAR, ACTION_CHANGE_SIGNAL, ACTION_DISK_INFO
+      (consoles answer it with their window!), FINDINPUT/
+      FINDOUTPUT/END (open/close), and how EOF (Ctrl+\) is
+      signalled. Packet numbers and reply rules from the docs, not
+      from memory — this protocol is exactly the territory where
+      recalled details lie.
+- [ ] **M1: handler skeleton** — a process with a packet port,
+      mounted at runtime (verify: MakeDosEntry/AddDosEntry vs a
+      DEVS:DOSDrivers mountfile) as `CSH:`. Opens, renders
+      ACTION_WRITE through the transplanted confeed into the
+      chrome'd screen, closes clean. Test from a normal shell:
+      `echo >CSH: hello` — vamos cannot test any of this, the loop
+      is FS-UAE boot tests from day one.
+- [ ] **M2: cooked reads** — ACTION_READ backed by the transplanted
+      line editor: blip, insert editing, word jumps, history,
+      scrollback keys; EOF handling. Test: `Ask` and a y/n Delete
+      prompt running inside CSH:.
+- [ ] **M3: host the real shell** — `NewShell CSH:` (and CShell the
+      launcher = mount + open + start shell + wait). Native cd,
+      prompt, path, scripts. **This is "real CLI" achieved.**
+- [ ] **M4: raw mode** — ACTION_SCREEN_MODE raw + WAIT_CHAR +
+      single-key reads. More, Ed, interactive fullscreen programs
+      work. The last of the ceiling gone.
+- [ ] **M5: the extras return** — `ls` (with its options), `df`,
+      `cat`/`less` as standalone AmigaTools C: commands; config
+      file (FONT like cfile, history/scrollback sizes, art paths);
+      the font-relative grid; CMenu integration (a menu item
+      opening a CSH: shell and getting control back).
 
-- [ ] **Mid-line cursor editing** — typing is append/Backspace only
-      right now (`replinput()`); no Left/Right/Del, unlike cfile's
-      `lineinput()`. Worth lifting cfile's cursor-walk logic in
-      directly once the append-only version is confirmed working.
-- [ ] **Frame/grid module split** — `cshell.e` re-derives its own
-      small screen/console setup rather than sharing code with
-      cfile. cfile's todo flagged an `ltxui.m` split "when a second
-      tool wants it" — still not done; revisit once both tools'
-      consoles are proven and the duplication is annoying rather
-      than hypothetical.
+## Design notes carried over
 
-## Command execution
+- The fixed input row + standing prompt: keep. It solved the
+  empty-row and mid-line-prompt problems structurally, and ViNCEd
+  proves the pattern in a real handler.
+- Bottom-up fill, deferred scroll, cls-pushes-into-scrollback:
+  keep - they are renderer behaviours, orthogonal to the protocol.
+- Break/Ctrl-C: in the handler world this becomes honest - the
+  handler knows the shell's process and can signal CTRL_C the way
+  real consoles do (verify the mechanism in M0).
+- The `more` name conflict resolved itself: system More will just
+  work in M4.
 
-- [x] **PIPE: streaming exec** — see above.
-- [x] **Persistent current directory** — see above.
-- [ ] **Built-in vs external split** — `cd`, `exit`/`quit` done.
-      `history` and `clear` still make sense once there's history to
-      show and a reason to clear the console; `help` too.
-- [ ] **Exit status** — decide whether/how a failed command's return
-      code surfaces (prompt colour? inline marker? nothing yet?).
+## The old build
 
-## Line editing & history
-
-- [ ] **Prompt-line editing** — append/Backspace only so far (see
-      above); still needs cfile's cursor walk and
-      `Shift`+`Left`/`Right` start/end jumps.
-- [ ] **Command history** — ring buffer, `Up`/`Down` to recall,
-      size configurable.
-- [ ] **Tab completion** — paths and (maybe) command names. Not in
-      cfile at all — the single biggest new piece of interaction
-      code this project needs. Flag as the riskiest estimate here.
-
-## Display
-
-- [x] **Prompt line** — done, see above.
-- [ ] **Scrollback** — output that scrolls off the console area is
-      gone for good right now (`ScrollRaster` with no backing
-      model); cfile's ~4000-line buffer approach is the template
-      once this needs revisiting.
-- [ ] **ANSI passthrough (colour)** — see the "answered" note above;
-      swallowing SGR codes instead of interpreting them is the
-      actual gap now, not an open question.
-
-## Configuration
-
-- [ ] **Config file** — same conventions as cfile/cmenu: plain text,
-      `;` comments, live-reload-on-edit-and-save. Needs at least
-      `FONT`, history size, scrollback size; style (LIGHT/DARK/ANSI
-      palette, cmenu-style) is a natural fit too.
-- [ ] **Startup directory** — where CShell's `CurrentDir()` starts;
-      probably `SAVEDIRS`-style persistence (cfile) is worth
-      matching rather than reinventing.
-
-## Later / deliberately deferred
-
-- [ ] **CMenu integration** — launch-from and return-to-hub. Not
-      started on purpose (see top of file); revisit once cmenu grows
-      the "wait and re-loop instead of exit" change it needs for
-      *any* sub-tool to hand control back.
-- [x] **Background/decoration art** — `cshell-mockup` added: header
-      band with flanking face icons, a wide-open scrollback area,
-      and a footer band with a group tag. Chrome is top/bottom
-      bands only; everything between is live console area.
+`cshell.e` as of the pivot still compiles and runs as the
+application-style frontend; it stays in history as the proving
+ground for the renderer, editor and scrollback until the handler
+supersedes it.
