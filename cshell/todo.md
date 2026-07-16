@@ -62,7 +62,10 @@ history or completion mean anything.
       arrow-key (`Shift`/`Ctrl`) scroll-back behaviour.
 - [ ] **Prompt line** — current directory at minimum; format
       probably wants to be configurable eventually, but a fixed
-      format is fine to start.
+      format is fine to start. `cshell-mockup` settles the shape:
+      `DH0:path >`, and long paths truncate with a leading `...`
+      rather than wrapping (`DH0:.../cfile/testfolder >`) — decide
+      the column budget that triggers truncation.
 - [ ] **ANSI passthrough** — check what cfile's PIPE: renderer
       actually does with SGR colour codes in a command's output
       (cfile's own header renderer parses SGR/cursor-forward, but
@@ -86,5 +89,7 @@ history or completion mean anything.
       started on purpose (see top of file); revisit once cmenu grows
       the "wait and re-loop instead of exit" change it needs for
       *any* sub-tool to hand control back.
-- [ ] **Background/decoration art** — mockup ASCII coming next, will
-      shape how much of the frame is "chrome" vs. live console area.
+- [x] **Background/decoration art** — `cshell-mockup` added: header
+      band with flanking face icons, a wide-open scrollback area,
+      and a footer band with a group tag. Chrome is top/bottom
+      bands only; everything between is live console area.
