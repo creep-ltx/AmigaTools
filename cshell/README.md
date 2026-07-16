@@ -38,7 +38,8 @@ truncates to its last two components with a leading `...`
 
 ## Files
 
-- `cshell.e` — the source, Amiga E. No prebuilt binary yet.
+- `cshell` — prebuilt AmigaOS binary.
+- `cshell.e` — the source, Amiga E.
 - `cshell-mockup` — the header/footer frame art, loaded at runtime
   (not compiled in — it has raw high-bit bytes that aren't safe to
   hand-transcribe into source).
@@ -46,21 +47,28 @@ truncates to its last two components with a leading `...`
 
 ## Building
 
+A prebuilt binary is committed. To build it yourself, compile
+`cshell.e` with the E-VO E compiler:
+
 ```
 evo cshell.e
 ```
 
 ## Verified behaviour
 
-**None yet.** This was written without access to an E compiler, so
-`cshell.e` has not been compiled, let alone run on real hardware or
-FS-UAE/vamos. Treat it as a draft to build and test, not working
-code — the same bar cfile and cmenu's own "Verified behaviour"
-sections hold themselves to, just not met yet here. Things most
-likely to need a fix once it actually compiles: the `PIPE:`
-streaming path (adapted from cfile's proven `livepipe`, but not
-retested here), `NameFromLock`/empty-string `Lock('')` for reading
-the current directory (used for the first time in this codebase —
-no prior tested reference for it in cfile or cmenu), and the console
-area's row/column math for whatever screen mode it actually opens
-on.
+Compiled and run: the screen opens with the header/footer chrome
+from `cshell-mockup` rendering correctly, typing and `Backspace`
+work, `cd <name>` and `cd /` (AmigaDOS's parent-directory shorthand)
+both correctly move the shell's own current directory via
+`CurrentDir()`, `dir` as an external command streams its output live
+through `PIPE:` and confirms a spawned command inherits the shell's
+current directory, long-path prompt truncation (`DH0:.../cfile/testfolder >`)
+works, and `exit` closes the session cleanly.
+
+Not yet exercised: `quit` (only `exit` has been tried, though they
+share the same code path), `Esc` to cancel a line, console-area
+scrolling once output runs past the bottom row (`dir` output so far
+hasn't been long enough to trigger it), the `cshell: PIPE: is not
+available` and `cshell: cd: cannot find "..."` error paths, and
+behaviour on a screen/font combination other than whatever this
+first run used.
