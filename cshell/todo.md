@@ -9,13 +9,16 @@ Roughly in build order: a screen with nothing on it needs to exist
 before a prompt can blink on it, and a prompt needs to exist before
 history or completion mean anything.
 
-## First test slice — built, not yet compiled/verified
+## First test slice — compiled and run
 
-Written in `cshell.e` but there is no E compiler in the dev
-environment this was built in, so **none of this has been compiled
-or run yet**. Needs a real `ecompile cshell.e` and a pass on
-FS-UAE/vamos before it counts as working, the same bar cfile and
-cmenu hold themselves to.
+Compiled and exercised: screen open (chrome from `cshell-mockup`
+rendered correctly), typing/`Backspace`, `cd <name>` and `cd /`
+(AmigaDOS's parent-directory shorthand) both moving the shell's real
+current directory, `dir` as an external command proving the `PIPE:`
+streaming path and that spawned commands inherit the shell's current
+directory, long-path prompt truncation, and a clean `exit`. See
+`README.md`'s "Verified behaviour" for the exact list and what's
+still untried (`quit`, `Esc`, console scrolling, the error paths).
 
 - [x] **Own screen** — `SA_LIKEWORKBENCH` clone of cfile's `openui()`,
       with the same borderless-public-screen fallback.
