@@ -1,0 +1,18 @@
+/* CCON-mountlist - the CCON: console handler.
+**
+** Install:  copy ccon-handler to L:
+**           copy CCON-mountlist to DEVS:
+** Mount:    Mount CCON: FROM DEVS:CCON-mountlist
+** Test:     echo >CCON: hello
+**
+** The handler process is created on first reference, not at Mount.
+** (The E runtime swaps to its own 10000-byte stack at startup, so
+** StackSize only needs to cover the startup prologue.)
+*/
+
+CCON:
+    Handler = L:ccon-handler
+    StackSize = 8192
+    Priority = 5
+    GlobVec = -1
+#
