@@ -1,0 +1,31 @@
+              ._   _.         __   __                    ._   _.
+              )(\ /)(        / /  / /_     __ __         )(\ /)(
+              `. ^ .'      _/  |_/ __/__ _/  |  \_       `  ^  '
+·              ! ¡ !      |    |   `)   |>   _   <.       ! ¡ !                ·
+|                !        `----^--._____|----|____|         !                  |
+`------------------------------------------------------------------------------´
+ DH0:AmigaTools/ > ls
+ a lot of files is listed
+ even more files and dirs
+ with date, size, flags, and so on
+ DH0:AmigaTools/ > cd cfile
+ DH0:AmigaTools/cfile > cd testfolder
+ DH0:.../cfile/testfolder > cd test2
+ DH0:.../testfolder/test2 > cd ..
+ DH0:.../cfile/testfolder > 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+.--------------\-------------------------------------------------/-------------.
+`----/ -------- \---- ---- -÷- A LATEX PRODUCTiON! -÷- ---- ----/ ------- \----'
