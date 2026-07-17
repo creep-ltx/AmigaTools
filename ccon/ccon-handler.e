@@ -87,7 +87,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     sbtop=0,                    -> ring index of the top visible row
     sbcnt=0,                    -> history lines above the screen (valid)
     viewoff=0,                  -> lines scrolled back; 0 = live
-    wtitle[48]:STRING,          -> title-bar scroll indicator (persists:
+    wtitle[112]:STRING,         -> title-bar scroll indicator (persists:
                                 -> Intuition keeps the pointer)
     -> tab completion (M5b): filesystem packets are HAND-ROLLED at exec
     -> level - built into fspkt, PutMsg'd to the filesystem's port,
@@ -97,6 +97,15 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fspkt=NIL:PTR TO standardpacket,
     fsfib=NIL:PTR TO fileinfoblock,  -> longword-aligned (BPTR arg)
     fsname=NIL:PTR TO CHAR,     -> BSTR build buffer, longword-aligned
+    -> M5c: per-open window spec, parsed from the open name
+    -> "CCON:x/y/w/h/title/options" (options: CLOSE, WAIT, WINDOW0x)
+    pwx=40, pwy=40, pww=520, pwh=160,
+    waitmode=FALSE, closegad=FALSE,
+    fwptr=NIL,                  -> WINDOW0xADDR: borrow this window
+    fwin=FALSE, oldidcmp=0,     -> borrowed-window bookkeeping
+    closereq=FALSE,             -> close gadget seen; close after drain
+    histdone=FALSE,             -> hist strings are made only once
+    wtitlebase[84]:STRING,      -> the parsed window title
     fsdirport=NIL:PTR TO mp,    -> resolved: the filesystem's port,
     fsdirlock=0,                -> the lock being scanned,
     fsdirfree=FALSE,            -> and whether WE made it (must free)
@@ -186,8 +195,13 @@ PROC main()
           IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
           IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
           IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
+          IF class = IDCMP_CLOSEWINDOW THEN doclosew()
         ENDIF
       UNTIL im = NIL
+      IF closereq                 -> deferred: never CloseWindow while
+        closereq := FALSE         -> draining the port it owns
+        closewin()
+      ENDIF
     ENDIF
     -> drain the timer port: an expiry times out the head WAIT_CHAR
     IF tport
@@ -261,8 +275,16 @@ PROC dopkt(pkt:PTR TO dospacket)
   CASE ACTION_FINDOUTPUT; dofind(pkt)
   CASE ACTION_FINDUPDATE; dofind(pkt)
   CASE ACTION_END
-    opens--                     -> window stays for inspection (M5: real
-    IF opens <= 0 THEN breaktask := NIL   -> open/close semantics)
+    opens--
+    IF opens <= 0
+      opens := 0
+      breaktask := NIL
+      IF win
+        IF waitmode = FALSE     -> stock CON: semantics: the window
+          closewin()            -> closes with its last handle; WAIT
+        ENDIF                   -> lingers for its close gadget (and a
+      ENDIF                     -> new open re-attaches to it)
+    ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_WRITE
     sender := pkt.port          -> the writer owns the break signal too:
@@ -350,14 +372,114 @@ PROC dopkt(pkt:PTR TO dospacket)
     ReplyPkt(pkt, DOSTRUE, ERROR_ACTION_NOT_KNOWN)
   CASE ACTION_IS_FILESYSTEM
     ReplyPkt(pkt, DOSFALSE, 0)  -> we are a console, not a filesystem
+  CASE ACTION_EXAMINE_FH
+    -> consoles fail this (the Guru Book rule); clib's isatty probes
+    -> it and takes the failure as "yes, a terminal"
+    ReplyPkt(pkt, DOSFALSE, ERROR_ACTION_NOT_KNOWN)
   DEFAULT
     ReplyPkt(pkt, DOSFALSE, ERROR_ACTION_NOT_KNOWN)
   ENDSELECT
 ENDPROC
 
+-> a decimal field; -1 = empty or not a number (keep the default)
+PROC tcnum(t:PTR TO CHAR)
+  DEF v=0, i=0
+  IF t[0] = 0 THEN RETURN -1
+  WHILE t[i]
+    IF (t[i] < "0") OR (t[i] > "9") THEN RETURN -1
+    v := Mul(v, 10) + (t[i] - 48)
+    IF v > 20000 THEN v := 20000
+    i++
+  ENDWHILE
+ENDPROC v
+
+-> parse the open name "CCON:x/y/w/h/title/options" into the pw*
+-> globals. Every field may be empty; options are CLOSE (close
+-> gadget = EOF), WAIT (window lingers for its close gadget) and
+-> WINDOW0xADDR (borrow an existing window - CON:-compatible, the
+-> exact string CShell's frame handoff sends). Unknown options are
+-> ignored. Field order is stock CON:'s.
+PROC parsecon(bname)
+  DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR
+  pwx := 40
+  pwy := 40
+  pww := 520
+  pwh := 160
+  StrCopy(wtitlebase, 'CCON:')
+  waitmode := FALSE
+  closegad := FALSE
+  fwptr := NIL
+  IF bname = 0 THEN RETURN
+  s := Shl(bname, 2)            -> a BSTR: length byte, then chars
+  l := s[0]
+  i := 1
+  WHILE (i <= l) AND (s[i] <> ":")
+    i++
+  ENDWHILE
+  IF i > l THEN RETURN          -> no ':' at all: all defaults
+  i++
+  f := 0
+  WHILE i <= l
+    tl := 0
+    WHILE (i <= l) AND (s[i] <> "/")
+      IF tl < 80
+        tok[tl] := s[i]
+        tl++
+      ENDIF
+      i++
+    ENDWHILE
+    i++                         -> past the '/'
+    tok[tl] := 0
+    IF f = 0
+      v := tcnum(tok)
+      IF v >= 0 THEN pwx := v
+    ELSEIF f = 1
+      v := tcnum(tok)
+      IF v >= 0 THEN pwy := v
+    ELSEIF f = 2
+      v := tcnum(tok)
+      IF v >= 0 THEN pww := v
+    ELSEIF f = 3
+      v := tcnum(tok)
+      IF v >= 0 THEN pwh := v
+    ELSEIF f = 4
+      IF tl > 0 THEN StrCopy(wtitlebase, tok)
+    ELSE
+      -> an option: fold to upper case in place, then compare
+      v := 0
+      WHILE tok[v]
+        tok[v] := tcfold(tok[v])
+        v++
+      ENDWHILE
+      IF StrCmp(tok, 'WAIT')
+        waitmode := TRUE
+        closegad := TRUE        -> WAIT needs the gadget to end
+      ELSEIF StrCmp(tok, 'CLOSE')
+        closegad := TRUE
+      ELSEIF StrCmp(tok, 'WINDOW0X', 8)
+        v := 0
+        c := 8
+        WHILE tok[c]
+          IF (tok[c] >= "0") AND (tok[c] <= "9")
+            v := Shl(v, 4) + (tok[c] - 48)
+          ELSEIF (tok[c] >= "A") AND (tok[c] <= "F")
+            v := Shl(v, 4) + (tok[c] - 55)
+          ENDIF
+          c++
+        ENDWHILE
+        fwptr := v
+      ENDIF
+    ENDIF
+    f++
+  ENDWHILE
+ENDPROC
+
 PROC dofind(pkt:PTR TO dospacket)
   DEF fh:PTR TO filehandle, sender:PTR TO mp
-  IF win = NIL THEN openwin()
+  IF win = NIL
+    parsecon(pkt.arg3)          -> the FIRST open decides the window;
+    openwin()                   -> later opens attach to it as-is
+  ENDIF
   IF win
     fh := Shl(pkt.arg1, 2)      -> BPTR to the FileHandle DOS made
     fh.args := 1                -> our stream id (single stream for now)
@@ -373,13 +495,30 @@ ENDPROC
 
 PROC openwin()
   DEF ta:PTR TO textattr, i
-  win := OpenWindowTagList(NIL,
-    [WA_TITLE, 'CCON: M5', WA_LEFT, 40, WA_TOP, 40,
-     WA_WIDTH, 520, WA_HEIGHT, 160,
-     WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
-     WA_ACTIVATE, TRUE,
-     WA_IDCMP, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK,
-     TAG_DONE, NIL])
+  fwin := FALSE
+  IF fwptr
+    -> WINDOW0x: render into a window someone else owns. We take its
+    -> IDCMP over (the owner must stop reading it - the Ed lesson:
+    -> two tasks on one UserPort kill the input chain) and hand it
+    -> back untouched on close.
+    win := fwptr
+    fwin := TRUE
+    oldidcmp := win.idcmpflags
+    ModifyIDCMP(win, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR
+                     IDCMP_MENUPICK OR IDCMP_CLOSEWINDOW)
+  ELSE
+    IF pww < 160 THEN pww := 160
+    IF pwh < 60 THEN pwh := 60
+    win := OpenWindowTagList(NIL,
+      [WA_TITLE, wtitlebase, WA_LEFT, pwx, WA_TOP, pwy,
+       WA_WIDTH, pww, WA_HEIGHT, pwh,
+       WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
+       WA_ACTIVATE, TRUE,
+       WA_CLOSEGADGET, closegad,
+       WA_IDCMP, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR
+                 IDCMP_MENUPICK OR IDCMP_CLOSEWINDOW,
+       TAG_DONE, NIL])
+  ENDIF
   IF win = NIL THEN RETURN
   rp := win.rport
   -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont would
@@ -407,11 +546,78 @@ PROC openwin()
   viewoff := 0
   SetAPen(rp, 1)
   SetBPen(rp, 0)
-  FOR i := 0 TO HISTMAX - 1
-    hist[i] := String(LINEMAX)
-  ENDFOR
+  IF histdone = FALSE           -> the history survives window
+    FOR i := 0 TO HISTMAX - 1   -> close/reopen; allocate once
+      hist[i] := String(LINEMAX)
+    ENDFOR
+    histdone := TRUE
+  ENDIF
+  -> a fresh console: every per-window state starts over
+  cx := 0
+  cy := 0
+  ancx := 0
+  ancy := 0
+  inqh := 0
+  inqt := 0
+  cesc := 0
+  eofpend := FALSE
+  rawmode := FALSE
+  evmask := 0
+  tcactive := FALSE
+  tcsel := -1
+  cpos := 0
+  hpos := -1
   StrCopy(ebuf, '')
   drawedit()                    -> the blip stands from the start
+ENDPROC
+
+-> real close semantics (M5c): pending reads answer EOF, pending
+-> WAIT_CHARs answer FALSE, the model is returned to the heap, and a
+-> borrowed window goes back to its owner with its IDCMP restored
+PROC closewin()
+  IF win = NIL THEN RETURN
+  canceltimer()
+  WHILE wcn > 0
+    wcn--
+    ReplyPkt(wcq[wcn], DOSFALSE, 0)
+  ENDWHILE
+  WHILE rdn > 0
+    rdn--
+    ReplyPkt(rdq[rdn], 0, 0)
+  ENDWHILE
+  tcactive := FALSE
+  tcsel := -1
+  IF fwin
+    ModifyIDCMP(win, oldidcmp)
+  ELSE
+    CloseWindow(win)
+  ENDIF
+  win := NIL
+  rp := NIL
+  fwin := FALSE
+  IF tf
+    CloseFont(tf)
+    tf := NIL
+  ENDIF
+  IF sb
+    Dispose(sb)
+    sb := NIL
+  ENDIF
+  eofpend := FALSE
+  rawmode := FALSE
+  evmask := 0
+ENDPROC
+
+-> the close gadget: EOF to the reader (stock CON: CLOSE semantics);
+-> a lingering WAIT window (no opens left) dies on the click. The
+-> actual CloseWindow is deferred past the event drain (closereq).
+PROC doclosew()
+  IF opens <= 0
+    closereq := TRUE
+  ELSE
+    eofpend := TRUE
+    satisfyreads()
+  ENDIF
 ENDPROC
 
 -> ---------- the scrollback model (M5) ----------
@@ -457,11 +663,12 @@ ENDPROC
 -> Known cosmetic gap: leaving scrollback restores our own title, so a
 -> client retitle (More does one via DISK_INFO) is overwritten.
 PROC settitle()
+  IF fwin THEN RETURN   -> a borrowed window keeps its owner's title
   IF viewoff > 0
-    StringF(wtitle, 'CCON: M5  [scrollback -\d]', viewoff)
+    StringF(wtitle, '\s  [scrollback -\d]', wtitlebase, viewoff)
     SetWindowTitles(win, wtitle, -1)
   ELSE
-    SetWindowTitles(win, 'CCON: M5', -1)
+    SetWindowTitles(win, wtitlebase, -1)
   ENDIF
 ENDPROC
 
@@ -1569,4 +1776,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.6 (17.7.26) CCON: LTX console handler M5b', 0
+vers: CHAR '$VER: ccon-handler 0.7 (17.7.26) CCON: LTX console handler M5c', 0

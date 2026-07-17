@@ -177,9 +177,44 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       scrolled-back output still snaps; then More a long file,
       Ctrl+Up mid-page (scrollback over raw), space (snaps live,
       paging continues), q; Ed still opens/edits/exits clean.
-      **Remaining M5 polish (separate slice):** multiple streams,
-      window-per-open semantics, CLOSE/WAIT option parsing from
-      the open name, fail EXAMINE_FH (clib isatty probes it).
+- [x] **M5c: real CON: open/close semantics — BOOT-PASSED
+      17.7.26** (EndShell closes the window, geometry+title,
+      WAIT lingers + gadget kills it, CLOSE=EOF, WAIT echo
+      inspection, reopen, scrollback+completion all confirmed;
+      WINDOW0x still needs its CShell 0.3 client). The open name is parsed stock-CON:
+      style: `CCON:x/y/w/h/title/options`, every field optional,
+      options CLOSE (close gadget = EOF to the reader), WAIT
+      (window lingers for its close gadget; a new open re-attaches)
+      and WINDOW0xADDR (borrow an existing window — accepts the
+      exact string CShell 0.2 sends to CON:; we ModifyIDCMP it
+      ours and restore on close, owner must stop reading its
+      UserPort — the Ed lesson). The window now CLOSES on the last
+      ACTION_END (stock semantics — `echo >CCON: hi` flashes;
+      use /WAIT to inspect): pending reads answer EOF, pending
+      WAIT_CHARs answer FALSE, the scrollback model is Dispose()d
+      (vamos-verified that Dispose really frees New memory —
+      50 cycles of the 252K model), fonts closed, and a fresh open
+      re-creates everything from its own spec (history ring
+      survives, allocated once). Close gadget handling is deferred
+      past the event drain (never CloseWindow the port you are
+      draining). EXAMINE_FH answers DOSFALSE +
+      ERROR_ACTION_NOT_KNOWN explicitly (Guru Book; clib isatty).
+      Title bar shows the parsed title; the scroll indicator
+      appends to it; borrowed windows keep their owner's title.
+      **Boot test:** `NewShell CCON:` (as before, but EndShell now
+      CLOSES the window), `NewShell CCON:60/30/500/120/LTX-Shell`
+      (geometry+title), `NewShell CCON:0/0/400/150/W8/WAIT` →
+      EndShell → window lingers → close gadget kills it,
+      a CLOSE-option shell → gadget click = EOF = shell ends,
+      `echo >CCON:0/0/400/100/hi/WAIT hello` (window stays,
+      shows hello), reopen after close (fresh model, history
+      kept), scrollback+completion still fine. WINDOW0x has no
+      client to exercise yet — that boot test belongs to the
+      CShell 0.3 handoff.
+      **Remaining polish (later):** multiple simultaneous streams
+      (needs research: how one-task handlers route `*`/CONSOLE:
+      opens — KingCON forks a process per window, ViNCEd doesn't;
+      until then a second open shares the window, documented).
       **M5 scrollback BOOT-PASSED 17.7.26** (scroll keys, type-snap,
       More over raw all confirmed; Ed menus render dead as parked —
       the M6 item, expected).

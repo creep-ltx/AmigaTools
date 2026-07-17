@@ -21,12 +21,19 @@ WAIT_CHAR with real timer.device timeouts. M5 — output
 scrollback, the reason the handler exists — is boot-verified too:
 a 4000-line model behind the renderer, viewed with Shift+Up/Down
 (page) and Ctrl+Up/Down (line, raw mode too); any output or other
-key snaps back to live. In progress: zsh-style tab completion in
-the cooked editor (menu below the prompt, Tab cycles, Enter
-accepts), built on hand-rolled filesystem packets — a handler
-cannot call packet-sending dos.library functions, so LOCATE/
-EXAMINE ride a private reply port straight to the filesystem.
-See `todo.md`.
+key snaps back to live. The cooked editor has zsh-style
+tab completion (menu below the prompt, Tab cycles, Shift+Tab
+backwards, Enter accepts), built on hand-rolled filesystem
+packets — a handler cannot call packet-sending dos.library
+functions, so LOCATE/EXAMINE ride a private reply port straight
+to the filesystem. Opens parse stock-CON: style —
+`CCON:x/y/w/h/title/options` with CLOSE (gadget = EOF), WAIT
+(window lingers for its gadget) and WINDOW0xADDR (borrow an
+existing window; not yet exercised by a client) — and the window
+closes with its last handle, so `EndShell` takes it away and
+`echo >CCON:0/0/400/100/hi/WAIT hello` leaves one to read.
+Next: M6, input.device-handler key input (Ed's menus). See
+`todo.md`.
 
 ## Try it
 
