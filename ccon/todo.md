@@ -229,7 +229,14 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       **First boot round (17.7.26): found+fixed — the bare Shift
       DOWN-STROKE is its own IDCMP_RAWKEY and closed the menu
       before Shift+Tab could arrive; menu-close now ignores
-      qualifier keys ($60-$67) and key releases (bit 7).**
+      qualifier keys ($60-$67) and key releases (bit 7). Second
+      finding: Shift+Tab can arrive as RAW $42 when the keymap
+      has no vanilla mapping for it — raw $42 now dispatches to
+      dotab too. AND THE TEST-LOOP LESSON: a running handler
+      keeps its loaded code — deploying L:ccon-handler does
+      NOTHING until the next boot/remount. Every handler fix
+      needs a reboot to actually test. Shift+Tab cycling
+      boot-confirmed after the reboot (17.7.26).**
 - [ ] **M6: input.device-handler input (the Ed-menus fix, and
       full console.device parity).** Move key acquisition out of
       IDCMP: add an input.device handler (IND_ADDHANDLER) below

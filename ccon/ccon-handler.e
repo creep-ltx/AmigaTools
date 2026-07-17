@@ -969,6 +969,13 @@ ENDPROC
 
 PROC dorawkey(code, qual)
   DEF s:PTR TO CHAR, l, avail, sh
+  sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+  -> Tab can arrive as a RAW key when the keymap has no vanilla
+  -> mapping for its shifted form: dispatch it to completion too
+  IF (code = $42) AND (rawmode = FALSE)
+    dotab(sh)
+    RETURN
+  ENDIF
   -> raw keys close an open completion menu - EXCEPT the qualifier
   -> keys themselves ($60-$67: Shift, Ctrl, Alt, Amiga - Shift+Tab
   -> starts with a bare Shift down-stroke) and key releases (bit 7)
@@ -981,7 +988,6 @@ PROC dorawkey(code, qual)
   -> line in BOTH modes (raw clients never receive Ctrl-arrows -
   -> rawcsikey ignores the qualifier), Shift+Up/Down by page in
   -> cooked only (raw clients own shifted arrows as CSI T/S)
-  sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   IF (code = RK_UP) OR (code = RK_DOWN)
     IF qual AND IEQUALIFIER_CONTROL
       scrollview(IF code = RK_UP THEN 1 ELSE -1)
