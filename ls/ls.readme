@@ -1,0 +1,75 @@
+ls - a Unix-style directory lister for AmigaDOS
+================================================
+
+WHAT IT IS
+
+  ls lists directories the way Unix fingers expect: multi-column,
+  alphabetical, with `-la` and friends as bundled flags. It comes as
+  two implementations with identical behaviour: one in Amiga E
+  (ls.e, 10936 bytes) and one in 68000 assembly (ls.asm, 5136
+  bytes). Build whichever you prefer and install it as C:ls.
+
+  Requires Kickstart 2.04 or newer.
+
+USAGE
+
+  ls [-1ahlrRSt] [path | pattern ...]
+
+    -l  long listing (protection, size, date, filenote)
+    -a  show .info files and hidden (h-bit) entries
+    -h  human-readable sizes (K, M, G)
+    -t  sort by date, newest first
+    -S  sort by size, largest first
+    -r  reverse sort order
+    -R  recurse into directories
+    -1  one entry per line
+
+  Flags are Unix-style bundles: `ls -lah work:` works, as does
+  `ls ?` for this usage text. Multiple paths and AmigaDOS patterns
+  are fine; `ls #?.e` lists the matches themselves, a directory
+  argument lists its contents, several arguments (or -R) get
+  `path:` group headers.
+
+  .info files play the role Unix dotfiles play: hidden by default,
+  revealed by -a, along with anything carrying the h protection
+  bit. The long format prints hsparwed where Unix prints
+  rwxrwxrwx, plus byte size (or the K/M/G tiers with -h), the DOS
+  datestamp, and the filenote on a continuation line.
+
+  Ctrl-C is honoured mid-listing. Return code: 0 clean, 5 a path
+  could not be accessed, 10 bad arguments, 20 break.
+
+HOW IT WORKS
+
+  The column layout is sized by asking the console itself: ls
+  writes the CSI `0 q` window-bounds request and reads back the
+  `CSI 1;1;rows;cols r` report -- the same exchange the shell's
+  own Dir uses, so it works in any conforming console window,
+  stock or replacement, and adapts when you resize. When output
+  is redirected to a file or pipe, ls detects it (IsInteractive)
+  and falls back to one entry per line with no color codes, so
+  `ls >file` stays parseable.
+
+  Directories are colored via plain console SGR sequences on
+  interactive output -- no rendering tricks, any console shows
+  them.
+
+  Plain names and patterns are handled uniformly through
+  ParsePatternNoCase() and MatchFirst()/MatchNext().
+
+BUILDING
+
+  Both prebuilt binaries are included: ls (the E build) and
+  ls-asm (the assembly build). No compiler needed; copy either
+  one to C:ls.
+
+  To build them yourself -- the E version, with the E-VO E
+  compiler:
+
+    evo ls.e
+
+  The assembly version, with vasm:
+
+    vasmm68k_mot -Fhunkexe -nosym -o ls-asm ls.asm
+
+  Both produce an AmigaOS loadseg()able executable.
