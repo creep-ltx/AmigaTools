@@ -5,12 +5,12 @@ KingCON, ViNCEd) grown at home. A mounted DOS handler speaking the
 packet protocol, with output scrollback as its reason to exist:
 the stock 3.2 con-handler has none (verified against its ROM
 option table), and commands talk to the handler, so no application
-can add it from outside. The endgame is CShell handing its frame
+can add it from outside. The endgame is CTerm handing its frame
 window to `CCON:` instead of `CON:`.
 
 **Status: milestones 1–4 boot-verified on an AmigaOS 3.2 install
 (FS-UAE).** `NewShell CCON:` runs a real AmigaShell in the
-handler's window — prompt, dir, list, EndShell — with the CShell
+handler's window — prompt, dir, list, EndShell — with the CTerm
 0.1 line editor behind ACTION_READ (blip cursor, insert editing,
 word jumps, 32-line history, type-ahead, EOF on Ctrl+\) and
 Ctrl+C reaching a running command (break forwarding, AROS

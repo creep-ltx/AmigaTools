@@ -1,13 +1,13 @@
-# CShell — what's next
+# CTerm — what's next
 
-**The architecture (settled 16.7.26, by experiment):** CShell = own
+**The architecture (settled 16.7.26, by experiment):** CTerm = own
 screen + mockup art bands + a borderless window handed to the
 standard console handler via `CON:`'s `WINDOW 0xaddr` option + a
 real UserShell via `Execute('', console, NIL)`. Proven by
 `contest.e` on the AmigaOS 3.2 install: real stdin, raw mode, Ed
 fullscreen in the frame with menus. The write-a-handler plan
 (M0–M5, see git history) is retired — the OS console already is
-the handler, and everything the application-style CShell simulated
+the handler, and everything the application-style CTerm simulated
 (and more) comes for free.
 
 ## Near
@@ -15,7 +15,7 @@ the handler, and everything the application-style CShell simulated
 - [ ] **Output scrollback (Shift+Up/Down)** — wanted; verified
       impossible from outside: the stock 3.2 con-handler (V47, its
       ROM option table checked directly) has no scrollback, and
-      commands talk to the handler, not to CShell. Two real paths:
+      commands talk to the handler, not to CTerm. Two real paths:
       **ViNCEd** (Richter's handler, scrollback + raw mode, solid
       enough that OS 3.9 shipped it as the system console — test
       the WINDOW option like KingCON was tested), or **our own
@@ -24,7 +24,7 @@ the handler, and everything the application-style CShell simulated
       already built and boot-tested in the 0.1 proving ground
       (commit 71e29b1).
 
-- [ ] **First boot test of the real cshell** — MicroKnight7 via
+- [ ] **First boot test of the real cterm** — MicroKnight7 via
       SA_FONT: does the console inherit the screen font? (The
       contest ran in Topaz.) If not, find the console's font
       switch (SetFont on the window rastport is already done;
@@ -32,18 +32,18 @@ the handler, and everything the application-style CShell simulated
       configuration instead — verify, don't guess).
 - [x] **KingCON as an optional upgrade — tried, dropped (16.7.26).**
       KingCON 1.3 gurus with AN_ASYNCPKT on this 3.2 install even
-      on a bare `NewShell KCON:`, no CShell involved (raised
+      on a bare `NewShell KCON:`, no CTerm involved (raised
       handler StackSize didn't help). Not our bug, not our
       dependency. If scrollback/completion in the frame is ever
       wanted again, candidates: a healthier modern handler
       (ViNCEd?) via the same WINDOW spec, or the retired
       own-handler plan below.
 - [ ] **Shell dress** — a `PROMPT` and greeting via an optional
-      `S:CShell-Startup` (Execute a script before the interactive
+      `S:CTerm-Startup` (Execute a script before the interactive
       shell, or document the user's own Shell-Startup aliases:
       `alias exit endshell` for the Linux reflex).
 
-## The standalone commands (rescued from the first CShell)
+## The standalone commands (rescued from the first CTerm)
 
 The first build's built-ins were good ideas that belong in `C:` as
 real commands, usable from ANY shell — each is a small tool in the
@@ -62,7 +62,7 @@ AmigaTools spirit:
 
 - [ ] **Config file** — font name/size, art paths, maybe the
       screen mode; same conventions as cfile/cmenu.
-- [ ] **CMenu integration** — a menu item that opens CShell and
+- [ ] **CMenu integration** — a menu item that opens CTerm and
       returns to the menu at EndShell (CMenu's wait-and-reloop
       change).
 - [ ] **Own console handler** — the retired M0–M5 plan, kept only

@@ -3,12 +3,12 @@
 **The goal:** CCON: — an LTX console handler. What CON: is, what
 KingCON and ViNCEd are: a mounted DOS handler speaking the packet
 protocol, hosting any client — including the real shell inside
-CShell's frame (swap one string: `CCON:0/0/0/0/CShell/WINDOW0x…`).
+CTerm's frame (swap one string: `CCON:0/0/0/0/CTerm/WINDOW0x…`).
 The one feature that justifies it: **output scrollback**, verified
 impossible with the stock V47 con-handler (no such option in its
 ROM option table). The renderer, the 4000-line scrollback model,
 the line editor and the scroll keys were already built and
-boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
+boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
 
 ## Verified facts (16.7.26, before any handler code)
 
@@ -181,12 +181,12 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       17.7.26** (EndShell closes the window, geometry+title,
       WAIT lingers + gadget kills it, CLOSE=EOF, WAIT echo
       inspection, reopen, scrollback+completion all confirmed;
-      WINDOW0x still needs its CShell 0.3 client). The open name is parsed stock-CON:
+      WINDOW0x still needs its CTerm 0.3 client). The open name is parsed stock-CON:
       style: `CCON:x/y/w/h/title/options`, every field optional,
       options CLOSE (close gadget = EOF to the reader), WAIT
       (window lingers for its close gadget; a new open re-attaches)
       and WINDOW0xADDR (borrow an existing window — accepts the
-      exact string CShell 0.2 sends to CON:; we ModifyIDCMP it
+      exact string CTerm 0.2 sends to CON:; we ModifyIDCMP it
       ours and restore on close, owner must stop reading its
       UserPort — the Ed lesson). The window now CLOSES on the last
       ACTION_END (stock semantics — `echo >CCON: hi` flashes;
@@ -210,7 +210,7 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       shows hello), reopen after close (fresh model, history
       kept), scrollback+completion still fine. WINDOW0x has no
       client to exercise yet — that boot test belongs to the
-      CShell 0.3 handoff.
+      CTerm 0.3 handoff.
       **Remaining polish (later):** multiple simultaneous streams
       (needs research: how one-task handlers route `*`/CONSOLE:
       opens — KingCON forks a process per window, ViNCEd doesn't;

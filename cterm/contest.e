@@ -1,4 +1,4 @@
--> contest - proof test for the CShell embedded-console architecture
+-> contest - proof test for the CTerm embedded-console architecture
 ->
 -> Opens a screen, paints stand-in header/footer bands, opens a
 -> BORDERLESS window covering the band between them, and hands that
@@ -32,7 +32,7 @@ PROC main() HANDLE
      SA_DEPTH,     3,
      SA_QUIET,     TRUE,
      SA_SHOWTITLE, FALSE,
-     SA_TITLE,     'CShell console test',
+     SA_TITLE,     'CTerm console test',
      SA_PUBNAME,   'CSHTEST',
      TAG_DONE,     NIL])
   IF scr = NIL THEN Throw("UI", 'screen')
@@ -67,7 +67,7 @@ PROC main() HANDLE
      TAG_DONE,    NIL])
   IF conwin = NIL THEN Throw("UI", 'console window')
   -> the whole experiment is this one line:
-  StringF(spec, 'CON:0/0/0/0/CShell/WINDOW0x\h', conwin)
+  StringF(spec, 'CON:0/0/0/0/CTerm/WINDOW0x\h', conwin)
   IF fh := Open(spec, NEWFILE)
     -> a real interactive shell in that console; returns at EndShell
     Execute('', fh, NIL)
@@ -101,4 +101,4 @@ PROC closeall()
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: contest 0.1 (16.7.26) CShell architecture proof',0
+version: CHAR '$VER: contest 0.1 (16.7.26) CTerm architecture proof',0

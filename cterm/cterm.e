@@ -1,4 +1,4 @@
--> CShell - a real AmigaDOS shell inside the LTX frame
+-> CTerm - a real AmigaDOS shell inside the LTX frame
 ->
 -> The whole trick, proven by contest.e and the Ed-in-the-frame
 -> boot test: open a screen, draw the mockup's header/footer bands
@@ -10,18 +10,27 @@
 -> interactive UserShell in it: real stdin, raw mode, More, Ed,
 -> menus, keymaps - the genuine article, zero protocol code.
 ->
--> The first CShell (an application rendering its own PIPE:-fed
+-> The first CTerm (an application rendering its own PIPE:-fed
 -> console - see git history) was the proving ground; its ceiling
 -> was that spawned commands could never read input. This one has
 -> no ceiling: the console is the OS's own.
 ->
--> EndShell (or EndCLI) ends the shell and CShell closes behind it.
+-> EndShell (or EndCLI) ends the shell and CTerm closes behind it.
+->
+-> Arguments (0.3): CONSOLE picks the handler the frame window is
+-> handed to - CON: (default), CCON:, KCON:, VNC:, any mounted
+-> console device; it is only a prefix on the open spec, so there
+-> is no list to maintain. FROM names a script the shell executes
+-> before going interactive (aliases set there stick - same CLI
+-> process, the NewShell FROM mechanism):
+->
+->   CTerm CCON: FROM S:Shell-Startup
 ->
 -> Font: MicroKnight7/7 when FONTS: has it (with the 91-column
 -> mockup), Topaz/8 otherwise (with the 80-column one). The screen
 -> carries the font (SA_FONT), so the console inherits it.
 ->
--> Build: ecompile cshell.e   (E-VO)
+-> Build: ecompile cterm.e   (E-VO)
 
 MODULE 'intuition/intuition','intuition/screens',
        'graphics/text','graphics/rastport',
@@ -48,7 +57,7 @@ DEF scr=NIL:PTR TO screen,
 
 -> without a Startup-Sequence there is no ENV: or T:; make them the
 -> standard way (RAM:Env, RAM:T) and remember what we made - the
--> shell and its commands need them even when CShell does not.
+-> shell and its commands need them even when CTerm does not.
 -> Existence is asked of the DosList: a Lock on an unassigned name
 -> would put up a "please insert volume" requester.
 PROC haveassign(name)
@@ -139,9 +148,9 @@ ENDPROC
 PROC loadmockup()
   DEF fh=NIL, n, i=0, j, s:PTR TO CHAR
   IF usemk
-    fh := Open('PROGDIR:cshell-mockup-microknight7', OLDFILE)
+    fh := Open('PROGDIR:cterm-mockup-microknight7', OLDFILE)
   ENDIF
-  IF fh = NIL THEN fh := Open('PROGDIR:cshell-mockup', OLDFILE)
+  IF fh = NIL THEN fh := Open('PROGDIR:cterm-mockup', OLDFILE)
   IF fh = NIL THEN RETURN
   mockbuf := New(MOCKBUFSZ)
   IF mockbuf = NIL
@@ -218,8 +227,8 @@ PROC openui()
      SA_DEPTH,     3,
      SA_QUIET,     TRUE,
      SA_SHOWTITLE, FALSE,
-     SA_TITLE,     'CShell',
-     SA_PUBNAME,   'CSHELL',
+     SA_TITLE,     'CTerm',
+     SA_PUBNAME,   'CTERM',
      SA_FONT,      ta,
      TAG_DONE,     NIL])
   IF scr = NIL THEN Throw("UI", 'screen')
@@ -265,7 +274,32 @@ PROC closeui()
 ENDPROC
 
 PROC main() HANDLE
-  DEF fh=NIL, spec[100]:STRING
+  DEF fh=NIL, spec[160]:STRING, rdargs=NIL, args[2]:ARRAY OF LONG,
+      dev[44]:STRING, cmd[280]:STRING, s:PTR TO CHAR, l
+  -> CONSOLE = the handler device the frame is handed to; FROM = a
+  -> startup script the shell runs before the first prompt. Copies
+  -> are taken before FreeArgs; the e-strings clamp silently.
+  args[0] := NIL
+  args[1] := NIL
+  IF (rdargs := ReadArgs('CONSOLE,FROM/K', args, NIL)) = NIL
+    Throw("ARG", NIL)
+  ENDIF
+  StrCopy(dev, 'CON:')
+  IF args[0]
+    s := args[0]
+    StrCopy(dev, s)
+    l := StrLen(dev)
+    IF l > 0
+      IF dev[l - 1] <> ":" THEN StrAdd(dev, ':')
+    ENDIF
+  ENDIF
+  StrCopy(cmd, '')
+  IF args[1]
+    s := args[1]
+    StringF(cmd, 'EXECUTE "\s"', s)
+  ENDIF
+  FreeArgs(rdargs)
+  rdargs := NIL
   ensureassigns()
   openui()
   loadmockup()
@@ -284,34 +318,42 @@ PROC main() HANDLE
   IF conwin = NIL THEN Throw("UI", 'console window')
   SetFont(conwin.rport, tf)
   -> the whole architecture is this one line:
-  StringF(spec, 'CON:0/0/0/0/CShell/WINDOW0x\h', conwin)
+  StringF(spec, '\s0/0/0/0/CTerm/WINDOW0x\h', dev, conwin)
   IF fh := Open(spec, NEWFILE)
     -> a real, interactive UserShell; returns at EndShell/EndCLI.
     -> Execute with output NIL is the boot-proven form of this
     -> call (a SystemTagList/SYS_USERSHELL variant crashed bootless
-    -> starts). One quirk: the new shell's banner goes to CShell's
-    -> own Output(), which from a boot script is the boot shell's
-    -> lazy console - launch as `cshell >NIL: <NIL:` there, and the
-    -> banner has nowhere chrome-producing to land.
-    Execute('', fh, NIL)
+    -> starts). The command string runs the FROM script (if any)
+    -> before the first prompt. One quirk: the new shell's banner
+    -> goes to CTerm's own Output(), which from a boot script is
+    -> the boot shell's lazy console - launch as `cterm >NIL:
+    -> <NIL:` there, and the banner has nowhere chrome-producing
+    -> to land.
+    Execute(cmd, fh, NIL)
     Close(fh)
   ELSE
     rc := 10
   ENDIF
   closeui()
   dropassigns()
-  IF rc = 10 THEN WriteF('CShell: the console handler refused the window\n')
+  IF rc = 10 THEN WriteF('CTerm: \s refused the window\n', dev)
 EXCEPT DO
   closeui()
   SELECT exception
     CASE "UI"
-      WriteF('CShell: cannot open UI (\s)\n', exceptioninfo)
+      WriteF('CTerm: cannot open UI (\s)\n', exceptioninfo)
       rc := 20
     CASE "MEM"
-      WriteF('CShell: out of memory\n')
+      WriteF('CTerm: out of memory\n')
       rc := 20
+    CASE "ARG"
+      WriteF('usage: CTerm [CONSOLE <device:>] [FROM <script>]\n')
+      WriteF('   the console device is CON:, CCON:, KCON:, VNC:,\n')
+      WriteF('   any mounted console handler; e.g.\n')
+      WriteF('   CTerm CCON: FROM S:Shell-Startup\n')
+      rc := 10
   ENDSELECT
   CleanUp(rc)
 ENDPROC
 
-version: CHAR '$VER: CShell 0.2 (16.7.26) real shell in the LTX frame',0
+version: CHAR '$VER: CTerm 0.3 (17.7.26) real shell in the LTX frame',0

@@ -5,6 +5,8 @@
 /mv/mv-asm binary
 /cmenu/cmenu binary
 /cfile/cfile binary
+/cterm/cterm binary
+/cterm/contest binary
 
 # Amiga E sources: GitHub's default guess for .e is Eiffel
 *.e linguist-language=E
@@ -16,3 +18,7 @@
 # CFile's frame mockups are ISO-8859-1 -- keep the bytes exact
 /cfile/layout binary
 /cfile/console-and-view-layout binary
+
+# CTerm's art mockups are raw high-bit bytes -- keep them exact
+/cterm/cterm-mockup binary
+/cterm/cterm-mockup-microknight7 binary

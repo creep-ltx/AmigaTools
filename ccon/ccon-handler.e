@@ -1,5 +1,5 @@
 -> ccon-handler.e - CCON: LTX console handler. Milestone 5: scrollback,
--> the point of it all. The 0.1 CShell scrollback model (commit 71e29b1)
+-> the point of it all. The 0.1 CTerm scrollback model (commit 71e29b1)
 -> transplanted and grown up for a full-screen console: a 4000-line byte
 -> ring where the last `rows` lines ARE the visible grid, so cursor
 -> positioning addresses into it and the top visible row slides into
@@ -42,7 +42,7 @@ CONST MARGIN=4,
       HISTMAX=32,       -> prompt history ring, entries
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
-      SBMAX=4000,       -> scrollback model, lines (like CShell 0.1)
+      SBMAX=4000,       -> scrollback model, lines (like CTerm 0.1)
       TCMAX=80,         -> tab completion: max candidates collected
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F
@@ -55,7 +55,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     left, topy, cols, rows,     -> the text grid inside the window
     cx=0, cy=0,                 -> output cursor, in cells
     opens=0,
-    -> the line editor (transplanted from CShell 0.1, commit 71e29b1)
+    -> the line editor (transplanted from CTerm 0.1, commit 71e29b1)
     ebuf[404]:STRING,           -> the line being typed
     stash[404]:STRING,          -> half-typed line parked during history
     cpos=0,                     -> cursor inside ebuf
@@ -397,7 +397,7 @@ ENDPROC v
 -> globals. Every field may be empty; options are CLOSE (close
 -> gadget = EOF), WAIT (window lingers for its close gadget) and
 -> WINDOW0xADDR (borrow an existing window - CON:-compatible, the
--> exact string CShell's frame handoff sends). Unknown options are
+-> exact string CTerm's frame handoff sends). Unknown options are
 -> ignored. Field order is stock CON:'s.
 PROC parsecon(bname)
   DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR
@@ -521,21 +521,29 @@ PROC openwin()
   ENDIF
   IF win = NIL THEN RETURN
   rp := win.rport
-  -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont would
-  NEW ta
-  ta.name := 'topaz.font'
-  ta.ysize := 8
-  ta.style := 0
-  ta.flags := 0
-  tf := OpenFont(ta)
-  IF tf THEN SetFont(rp, tf)
+  IF fwin = FALSE
+    -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont
+    -> would not be safe. A BORROWED window keeps the font its owner
+    -> set on the rastport (CTerm's frame carries MicroKnight).
+    NEW ta
+    ta.name := 'topaz.font'
+    ta.ysize := 8
+    ta.style := 0
+    ta.flags := 0
+    tf := OpenFont(ta)
+    IF tf THEN SetFont(rp, tf)
+  ENDIF
   cw := rp.txwidth
   ch := rp.txheight
   baseline := rp.txbaseline
-  left := win.borderleft + MARGIN
-  topy := win.bordertop + MARGIN
-  cols := Div(win.width - win.borderleft - win.borderright - MARGIN - MARGIN, cw)
-  rows := Div(win.height - win.bordertop - win.borderbottom - MARGIN - MARGIN, ch)
+  -> a borrowed window is sized to an exact grid by its owner: no
+  -> margin inset there, or the columns drift off the owner's art
+  i := MARGIN
+  IF fwin THEN i := 0
+  left := win.borderleft + i
+  topy := win.bordertop + i
+  cols := Div(win.width - win.borderleft - win.borderright - i - i, cw)
+  rows := Div(win.height - win.bordertop - win.borderbottom - i - i, ch)
   IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
   -> the scrollback ring: sized to the real grid width. New() zeroes
   -> (E heap is cleared), so the whole model starts as blank rows; a
@@ -694,7 +702,7 @@ PROC snaplive()
 ENDPROC
 
 -> ---------- output: a cell-grid renderer (CSI parsing comes with the
--> full CShell renderer transplant in a later milestone) ----------
+-> full CTerm renderer transplant in a later milestone) ----------
 
 -> scroll the whole screen up one line: pixels, model, edit anchor.
 -> The old top row becomes history - just advance the ring, no copying.
@@ -912,7 +920,7 @@ PROC eraseeol()
   ENDIF
 ENDPROC
 
--> the 0.1 CShell renderer's CSI discipline, transplanted and grown
+-> the 0.1 CTerm renderer's CSI discipline, transplanted and grown
 -> up: consume sequences WHOLE (state survives split writes via
 -> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
 -> the rest silently.
