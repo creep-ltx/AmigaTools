@@ -84,14 +84,84 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       longer prints), ACTION_WAIT_CHAR answered from the queue
       (DOSTRUE if input waits, immediate DOSFALSE otherwise — no
       timer yet), printable runs batched into single Text() calls.
-- [ ] **M4: raw mode** — ACTION_SCREEN_MODE honoured, WAIT_CHAR,
-      single-key reads; More and Ed work.
+- [x] **M4: raw mode — boot-verified 17.7.26** (multi-column dir
+      via our bounds report, More raw paging + its DISK_INFO
+      window-retitle trick, Ed fullscreen editing with å/ä/ö,
+      Esc-x exit; ONE parked gap: see the menu item below).
+- [ ] **Ed's menus (parked after four system freezes).** Ed
+      attaches menus to our window (DISK_INFO window ptr) and
+      requests raw event reports (`CSI 2;10;11;12{`). The TRUE
+      V47 report format was recovered from console.device 46.1's
+      ROM builder ($13de): `CSI class;subclass;ie_Code;
+      ie_Qualifier;addrhigh;addrlow;secs;micros|`. Reports in
+      exactly that shape froze the entire input chain (mouse
+      dead) with the address halves as mouse coords, as
+      ItemAddress(strip,code), AND as 0;0 — three value
+      experiments, identical freeze fingerprint (title-bar
+      black box: mp=2, rdn=0, ring all READs). **SOLVED by
+      disassembling C:Ed itself: Ed does IDCMP surgery on the
+      console window — 3× ModifyIDCMP, 6× GetMsg, WaitPort,
+      3× ReplyMsg on OUR UserPort. The report is just the wake-up
+      call; Ed then reads the window's IDCMP directly. Two tasks
+      consuming one message port (with the sigbit allocated in
+      ours) = stolen messages, blocked WaitPort, dead input
+      chain. Stock CON: survives because console.device never
+      touches the window's IDCMP — it taps keys upstream via an
+      input.device handler, so the UserPort is free for Ed to
+      commandeer.** The real fix is architectural and has its
+      own milestone below (input-handler input). Until then CCON
+      swallows picks: menus render, Esc-x exits, nothing
+      freezes, and no reports means Ed's IDCMP code stays
+      asleep.
+      **THE V47 SHELL HANDSHAKE (found by disassembling ROM
+      shell_47.47 after typing went dead):** at startup the shell
+      calls SetMode(fh,2), sends ACTION_DISK_INFO and compares
+      id_DiskType against 'CON\0' ($434F4E00, module offset $669A
+      onward). Match → the shell keeps mode 2 and runs ITS OWN
+      line editor (HISTSIZE/NOHISTSKIPDUPS env vars, ESC[0 q
+      bounds request — all in the shell, not the console). No
+      match → SetMode(fh,0) and the CONSOLE owns editing. CCON
+      answers id_DiskType='CCON' ($43434F4E) deliberately: the
+      shell reverts us to cooked and OUR editor (blip, history,
+      insert editing) owns the prompt — boot-verified: prompt,
+      typing, echo, list, dir all working, raw=0 confirmed via
+      title-bar telemetry. Undocumented anywhere; ROM bytes only.
+      Likely also why console-side editors like KingCON fight the
+      3.2 shell. AROS's 'CON\0' answer predates the V47 shell.
+      ACTION_SCREEN_MODE honoured (raw parks the line editor; keys
+      become bytes: Return = CR, Ctrl+C = byte 3 — no break, no
+      EOF, the RKM raw contract); special keys become console
+      sequences (arrows CSI A-D, shifted CSI T/S/SPACE@/SPACEA,
+      F1-F10 CSI 0~..9~, shifted 1x~, Help CSI ?~ — shifted/F-key
+      codes recalled from the RKM, need a boot check); reads
+      deliver byte-granular in raw. WAIT_CHAR with REAL timeouts
+      via timer.device (µs; input arrival wakes all waiters,
+      expiry answers the head; queued waiters restart their full
+      timeout on reaching the head — approximation). The renderer
+      grew the full-screen CSI set: multi-parameter parsing,
+      A/B/C/D moves, H/f position, J erase-below, K, L/M
+      insert/delete lines — and answers `CSI 0 SPACE q` with
+      CSI 1;1;rows;cols SPACE r on the input stream, so dir can
+      go multi-column. **Boot test:** `dir` (multi-column now?),
+      `more <file>` (single-key paging), Ed (fullscreen editing,
+      arrows), Ctrl+C still breaks list, cooked editing/history
+      unchanged after a raw program exits.
 - [ ] **M5: the point of it all** — scrollback (Shift+Up/Down /
       Ctrl+Up/Down from the 0.1 model), then polish: multiple
-      streams, ACTION_DISK_INFO (consoles answer it with their
-      window), CHANGE_SIGNAL break forwarding, fail EXAMINE_FH
-      (clib isatty probes it), window-per-open semantics, CLOSE/
-      WAIT option parsing from the open name.
+      streams, window-per-open semantics, CLOSE/WAIT option
+      parsing from the open name, fail EXAMINE_FH (clib isatty
+      probes it).
+- [ ] **M6: input.device-handler input (the Ed-menus fix, and
+      full console.device parity).** Move key acquisition out of
+      IDCMP: add an input.device handler (IND_ADDHANDLER) below
+      Intuition's priority, take the keys Intuition forwards when
+      our window is active, keymap-convert, feed the same queues.
+      The window's UserPort then stays untouched — free for Ed's
+      ModifyIDCMP/GetMsg takeover, exactly like stock. Then the
+      raw event reports (format recovered from console.device
+      46.1, ROM $13de) can come back and Ed's menus work. Input
+      handlers run in interrupt-ish context: queue events, signal
+      the handler task, do the work there.
 
 ## Design notes
 

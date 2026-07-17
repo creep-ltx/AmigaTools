@@ -28,9 +28,9 @@
 
 MODULE 'intuition/intuition',
        'utility/tagitem',
-       'exec/nodes','exec/ports',
+       'exec/nodes','exec/ports','exec/io',
        'graphics/text','graphics/rastport',
-       'devices/inputevent',
+       'devices/inputevent','devices/timer',
        'dos/dos','dos/dosextens','dos/filehandler'
 
 CONST MARGIN=4,
@@ -56,18 +56,26 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     hist[32]:ARRAY OF LONG, htotal=0, hpos=-1,
     -> cooked input plumbing
     inq[2048]:ARRAY OF CHAR, inqh=0, inqt=0,
-    cesc=0, cnum=0,             -> CSI parser state, global so sequences
-                                -> split across two writes still parse
+    cesc=0,                     -> CSI parser state, global so sequences
+    cpar[4]:ARRAY OF LONG,      -> split across two writes still parse;
+    cnp=0,                      -> up to 4 parameters (H needs row;col)
     rdq[16]:ARRAY OF LONG, rdn=0,
     eofpend=FALSE,
-    breaktask=NIL               -> who gets Ctrl+C..F (AROS con-handler
-                                -> pattern: last client to FIND or READ,
-                                -> unless ACTION_CHANGE_SIGNAL overrides)
+    breaktask=NIL,              -> who gets Ctrl+C..F (AROS con-handler
+                                -> pattern: last client to FIND, READ or
+                                -> WRITE, unless CHANGE_SIGNAL overrides)
+    rawmode=FALSE,              -> ACTION_SCREEN_MODE: DOSTRUE = raw
+    tport=NIL:PTR TO mp,        -> timer.device plumbing for WAIT_CHAR
+    treq=NIL:PTR TO timerequest,
+    timerarmed=FALSE,
+    wcq[8]:ARRAY OF LONG, wcn=0,-> pending ACTION_WAIT_CHAR packets
+    evmask=0                    -> raw input event classes requested via
+                                -> CSI n { (Ed asks for 10 = MENULIST)
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
-      class, code, qual
+      class, code, qual, mx, my, ia, secs, mics
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -86,10 +94,24 @@ PROC main()
   dnode.task := port              -> future opens come straight to us
   ReplyPkt(pkt, DOSTRUE, 0)       -> mount handshake done
 
+  -> timer.device for real WAIT_CHAR timeouts (all exec, no packets);
+  -> if any step fails, treq stays NIL and WAIT_CHAR answers at once
+  tport := CreateMsgPort()
+  IF tport
+    treq := CreateIORequest(tport, SIZEOF timerequest)
+    IF treq
+      IF OpenDevice('timer.device', UNIT_MICROHZ, treq, 0) <> 0
+        DeleteIORequest(treq)
+        treq := NIL
+      ENDIF
+    ENDIF
+  ENDIF
+
   psig := Shl(1, port.sigbit)
   WHILE TRUE
     wsig := 0
     IF win THEN wsig := Shl(1, win.userport.sigbit)
+    IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     Wait(psig OR wsig)
     -> drain the packet port
     REPEAT
@@ -104,13 +126,81 @@ PROC main()
           class := im.class
           code := im.code
           qual := im.qualifier
+          mx := im.mousex
+          my := im.mousey
+          ia := im.iaddress
+          secs := im.seconds
+          mics := im.micros
           ReplyMsg(im)
           IF class = IDCMP_VANILLAKEY THEN dovanilla(code)
           IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
+          IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
         ENDIF
       UNTIL im = NIL
     ENDIF
+    -> drain the timer port: an expiry times out the head WAIT_CHAR
+    IF tport
+      REPEAT
+        msg := GetMsg(tport)
+        IF msg
+          timerarmed := FALSE
+          timerexpired()
+        ENDIF
+      UNTIL msg = NIL
+    ENDIF
   ENDWHILE
+ENDPROC
+
+-> ---------- WAIT_CHAR timing ----------
+
+PROC armtimer(us)
+  IF treq = NIL THEN RETURN
+  IF us < 1 THEN us := 1
+  treq.io.command := TR_ADDREQUEST
+  treq.time.secs := Div(us, 1000000)
+  treq.time.micro := Mod(us, 1000000)
+  SendIO(treq)
+  timerarmed := TRUE
+ENDPROC
+
+PROC canceltimer()
+  IF timerarmed
+    AbortIO(treq)
+    WaitIO(treq)      -> eats the reply even if it completed first
+    timerarmed := FALSE
+  ENDIF
+ENDPROC
+
+PROC timerexpired()
+  DEF pkt:PTR TO dospacket, nxt:PTR TO dospacket, i
+  IF wcn = 0 THEN RETURN
+  pkt := wcq[0]
+  FOR i := 1 TO wcn - 1
+    wcq[i - 1] := wcq[i]
+  ENDFOR
+  wcn--
+  ReplyPkt(pkt, DOSFALSE, 0)
+  IF wcn > 0
+    nxt := wcq[0]     -> queued waiters restart their full timeout when
+    armtimer(nxt.arg1) -> they reach the head - approximate, noted
+  ENDIF
+ENDPROC
+
+-> input became available: wake every WAIT_CHAR, then feed the reads
+PROC satisfywaits()
+  DEF i
+  IF wcn = 0 THEN RETURN
+  IF inavail() = 0 THEN RETURN
+  canceltimer()
+  FOR i := 0 TO wcn - 1
+    ReplyPkt(wcq[i], DOSTRUE, 0)
+  ENDFOR
+  wcn := 0
+ENDPROC
+
+PROC inputarrived()
+  satisfywaits()
+  satisfyreads()
 ENDPROC
 
 PROC dopkt(pkt:PTR TO dospacket)
@@ -130,10 +220,14 @@ PROC dopkt(pkt:PTR TO dospacket)
                                 -> this line is what makes Ctrl+C reach it
                                 -> (AROS con-handler does the same)
     len := pkt.arg3
-    eraseedit()
-    render(pkt.arg2, len)
-    reanchor()
-    drawedit()
+    IF rawmode
+      render(pkt.arg2, len)     -> raw: the app owns the screen, no blip
+    ELSE
+      eraseedit()
+      render(pkt.arg2, len)
+      reanchor()
+      drawedit()
+    ENDIF
     ReplyPkt(pkt, len, 0)
   CASE ACTION_READ
     sender := pkt.port          -> the reader owns the break signal now
@@ -146,16 +240,34 @@ PROC dopkt(pkt:PTR TO dospacket)
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
     ENDIF
   CASE ACTION_WAIT_CHAR
-    -> arg1 = timeout in MICROseconds (AROS-verified). No timer.device
-    -> yet, so answer what is true right now: input queued = DOSTRUE,
-    -> nothing = DOSFALSE at once. M4 brings honest timed waits.
+    -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
+    -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
+    -> let timer.device answer (input arrival wakes all waiters)
     IF inavail() > 0
       ReplyPkt(pkt, DOSTRUE, 0)
-    ELSE
+    ELSEIF (pkt.arg1 <= 0) OR (treq = NIL) OR (wcn >= 8)
       ReplyPkt(pkt, DOSFALSE, 0)
+    ELSE
+      wcq[wcn] := pkt
+      wcn++
+      IF wcn = 1 THEN armtimer(pkt.arg1)
     ENDIF
   CASE ACTION_SCREEN_MODE
-    ReplyPkt(pkt, DOSTRUE, 0)   -> accepted, ignored; M4 brings raw mode
+    -> arg1: DOSTRUE = raw, 0 = cooked. Raw parks the line editor -
+    -> keys become bytes, the client owns echo and screen
+    IF pkt.arg1
+      IF rawmode = FALSE
+        rawmode := TRUE
+        eraseedit()
+      ENDIF
+    ELSE
+      IF rawmode
+        rawmode := FALSE
+        reanchor()
+        drawedit()
+      ENDIF
+    ENDIF
+    ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
     -> arg2 = Task to signal on Ctrl+C..F (0 = just query); res2 = old
     old := breaktask
@@ -169,7 +281,13 @@ PROC dopkt(pkt:PTR TO dospacket)
     FOR i := 0 TO 8
       zp[i] := 0
     ENDFOR
-    id.disktype := $434F4E00    -> 'CON\0'
+    -> 'CCON', deliberately NOT 'CON\0': the V47 shell probes
+    -> DISK_INFO and if it sees 'CON\0' it keeps SetMode(2) and runs
+    -> ITS OWN line editor (ROM shell_47.47, disassembled at $669A:
+    -> SetMode(fh,2), DISK_INFO, cmpi #'CON\0', else SetMode(fh,0)).
+    -> Answering 'CCON' makes the shell revert us to cooked and hand
+    -> editing to the console - which is the whole point of CCON.
+    id.disktype := $43434F4E
     id.volumenode := win
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_SEEK
@@ -202,11 +320,11 @@ ENDPROC
 PROC openwin()
   DEF ta:PTR TO textattr, i
   win := OpenWindowTagList(NIL,
-    [WA_TITLE, 'CCON: M3b', WA_LEFT, 40, WA_TOP, 40,
+    [WA_TITLE, 'CCON: M4', WA_LEFT, 40, WA_TOP, 40,
      WA_WIDTH, 520, WA_HEIGHT, 160,
      WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
      WA_ACTIVATE, TRUE,
-     WA_IDCMP, IDCMP_RAWKEY OR IDCMP_VANILLAKEY,
+     WA_IDCMP, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK,
      TAG_DONE, NIL])
   IF win = NIL THEN RETURN
   rp := win.rport
@@ -259,20 +377,156 @@ PROC outchr(c)
   cx++
 ENDPROC
 
+PROC csistart()
+  cesc := 2
+  cnp := 0
+  cpar[0] := 0
+  cpar[1] := 0
+  cpar[2] := 0
+  cpar[3] := 0
+ENDPROC
+
+-> the full-screen vocabulary: what More and Ed actually speak.
+-> A/B/C/D cursor moves, H/f position (row;col, 1-based), J erase
+-> below, K erase to EOL, L/M insert/delete lines, `0 q` = the
+-> window-bounds request, answered on the INPUT stream as
+-> CSI 1;1;rows;cols SPACE r (how dir learns it can do columns).
+-> Everything else is consumed silently.
+PROC csidispatch(c)
+  DEF n, i
+  n := cpar[0]
+  IF c = "A"
+    IF n < 1 THEN n := 1
+    cy := cy - n
+    IF cy < 0 THEN cy := 0
+  ELSEIF c = "B"
+    IF n < 1 THEN n := 1
+    cy := cy + n
+    IF cy >= rows THEN cy := rows - 1
+  ELSEIF c = "C"
+    IF n < 1 THEN n := 1
+    cx := cx + n
+    IF cx > cols THEN cx := cols
+  ELSEIF c = "D"
+    IF n < 1 THEN n := 1
+    cx := cx - n
+    IF cx < 0 THEN cx := 0
+  ELSEIF (c = "H") OR (c = "f")
+    cy := n - 1
+    IF cy < 0 THEN cy := 0
+    IF cy >= rows THEN cy := rows - 1
+    cx := cpar[1] - 1
+    IF cx < 0 THEN cx := 0
+    IF cx > cols THEN cx := cols
+  ELSEIF c = "J"
+    erasebelow()
+  ELSEIF c = "K"
+    eraseeol()
+  ELSEIF c = "L"
+    inslines(n)
+  ELSEIF c = "M"
+    dellines(n)
+  ELSEIF c = "q"
+    IF n = 0 THEN sendreport()
+  ELSEIF c = "{"
+    -> SET RAW EVENTS: report the listed IECLASSes on the input
+    -> stream (this is how Ed's menus reach it through the console)
+    FOR i := 0 TO cnp
+      IF (cpar[i] >= 0) AND (cpar[i] <= 31)
+        evmask := evmask OR Shl(1, cpar[i])
+      ENDIF
+    ENDFOR
+  ELSEIF c = "}"
+    -> RESET RAW EVENTS
+    FOR i := 0 TO cnp
+      IF (cpar[i] >= 0) AND (cpar[i] <= 31)
+        evmask := evmask - (evmask AND Shl(1, cpar[i]))
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC
+
+-> a menu pick becomes a raw input event report on the input stream:
+-> CSI class;subclass;keycode;qualifiers;x;y;seconds;micros| - Ed
+-> put the menu strip on our window (found via DISK_INFO's window
+-> pointer) and reads the picks back this way. THE TRAP (paid for
+-> with two full system freezes): for menu events x;y are NOT
+-> coordinates - the RKM says "Intuition address (x<<16+y)". The
+-> reader rebuilds a POINTER from them (to walk the NextSelect
+-> chain), so they must carry the IntuiMessage's IAddress - mouse
+-> coordinates in those fields become a wild dereference inside
+-> Intuition's menu handling, and the whole input chain dies.
+-> MENU PICKS ARE DELIBERATELY SWALLOWED. The experiment log
+-> (17.7.26, four system freezes): Ed attaches menus to our window
+-> and requests raw event reports (CSI 2;10;11;12{). The true V47
+-> report format was recovered from console.device 46.1's own
+-> builder (ROM offset $13de): CSI class;subclass;ie_Code;
+-> ie_Qualifier;addrhigh;addrlow;secs;micros| - and reports in
+-> exactly that format froze the whole input chain (mouse dead)
+-> no matter what the address halves carried: mouse coordinates,
+-> ItemAddress(strip,code), or 0;0. Whatever Ed's report parser
+-> expects, it is not decoded yet - the next step is disassembling
+-> Ed's own parser, not another guess. Until then: menus render
+-> but picks vanish, Ed exits with Esc-x - and every OTHER M4
+-> feature (raw mode, WAIT_CHAR, bounds report, More, editing)
+-> is boot-verified working.
+PROC domenupick(code, qual, ia, secs, mics)
+ENDPROC
+
+PROC erasebelow()
+  eraseeol()
+  IF cy < (rows - 1)
+    SetAPen(rp, 0)
+    RectFill(rp, left, topy + Mul(cy + 1, ch),
+             left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
+    SetAPen(rp, 1)
+  ENDIF
+ENDPROC
+
+PROC inslines(n)
+  IF n < 1 THEN n := 1
+  IF n > (rows - cy) THEN n := rows - cy
+  ScrollRaster(rp, 0, -Mul(n, ch),
+               left, topy + Mul(cy, ch),
+               left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
+ENDPROC
+
+PROC dellines(n)
+  IF n < 1 THEN n := 1
+  IF n > (rows - cy) THEN n := rows - cy
+  ScrollRaster(rp, 0, Mul(n, ch),
+               left, topy + Mul(cy, ch),
+               left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
+ENDPROC
+
+-> the answer to `CSI 0 SPACE q`, injected straight into the input
+-> stream where the asker's Read finds it
+PROC sendreport()
+  DEF b[24]:STRING, i
+  enqueue($9B)
+  StringF(b, '1;1;\d;\d', rows, cols)
+  FOR i := 0 TO StrLen(b) - 1
+    enqueue(b[i])
+  ENDFOR
+  enqueue(32)
+  enqueue("r")
+  inputarrived()
+ENDPROC
+
 -> erase from the output cursor to the end of its row (CSI K)
 PROC eraseeol()
   DEF y
+  IF cx >= cols THEN RETURN   -> inverted RectFill = wild writes
   y := topy + Mul(cy, ch)
   SetAPen(rp, 0)
   RectFill(rp, left + Mul(cx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
   SetAPen(rp, 1)
 ENDPROC
 
--> the 0.1 CShell renderer's CSI discipline, transplanted: consume
--> sequences WHOLE (state survives writes via cesc/cnum), honour C
--> (cursor forward) and K (erase to end of line), drop the rest
--> silently - dir's `ESC[0 q` window-bounds request included (M4
--> answers it; for now WAIT_CHAR = DOSFALSE makes dir fall back).
+-> the 0.1 CShell renderer's CSI discipline, transplanted and grown
+-> up: consume sequences WHOLE (state survives split writes via
+-> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
+-> the rest silently.
 PROC render(buf, len)
   DEF s:PTR TO CHAR, i=0, j, c, run, fit
   IF win = NIL THEN RETURN
@@ -281,36 +535,29 @@ PROC render(buf, len)
     c := s[i]
     IF cesc = 1    -> after ESC: '[' opens a CSI, else two-byte seq
       IF c = "["
-        cesc := 2
-        cnum := 0
+        csistart()
       ELSE
         cesc := 0
       ENDIF
       i := i + 1
     ELSEIF cesc = 2    -> CSI parameters end at the final byte >= $40
       IF (c >= "0") AND (c <= "9")
-        cnum := Mul(cnum, 10) + (c - 48)
-        IF cnum > 999 THEN cnum := 999
+        cpar[cnp] := Mul(cpar[cnp], 10) + (c - 48)
+        IF cpar[cnp] > 999 THEN cpar[cnp] := 999
       ELSEIF c = ";"
-        cnum := 0    -> multi-parameter: only the last one matters here
+        cnp := cnp + 1
+        IF cnp > 3 THEN cnp := 3
+        cpar[cnp] := 0
       ELSEIF c >= $40
-        IF c = "C"
-          IF cnum < 1 THEN cnum := 1
-          cx := cx + cnum
-          IF cx > cols THEN cx := cols
-        ELSEIF c = "K"
-          eraseeol()
-        ENDIF
+        csidispatch(c)
         cesc := 0
-        cnum := 0
       ENDIF
       i := i + 1
     ELSEIF c = 27
       cesc := 1
       i := i + 1
     ELSEIF c = $9B
-      cesc := 2
-      cnum := 0
+      csistart()
       i := i + 1
     ELSEIF c = 10
       outnl()
@@ -362,6 +609,7 @@ ENDPROC
 PROC eraseedit()
   DEF y
   IF win = NIL THEN RETURN
+  IF ancx >= cols THEN RETURN -> inverted RectFill = wild writes
   y := topy + Mul(ancy, ch)
   SetAPen(rp, 0)
   RectFill(rp, left + Mul(ancx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
@@ -400,6 +648,13 @@ ENDPROC
 
 PROC dovanilla(code)
   DEF s:PTR TO CHAR, l, j, dup
+  IF rawmode
+    -> raw: every key is just a byte for the client - Return is CR 13,
+    -> Ctrl+C is byte 3 (no break signal), Ctrl+\ is byte 28 (no EOF)
+    enqueue(code)
+    inputarrived()
+    RETURN
+  ENDIF
   s := ebuf
   l := StrLen(ebuf)
   IF code = 13
@@ -428,7 +683,7 @@ PROC dovanilla(code)
     hpos := -1
     reanchor()
     drawedit()
-    satisfyreads()
+    inputarrived()
   ELSEIF code = 28
     -> Ctrl+\ : EOF for the next (or a waiting) read
     eofpend := TRUE
@@ -476,8 +731,49 @@ PROC dovanilla(code)
   ENDIF
 ENDPROC
 
+-> raw-mode special keys become the console.device byte sequences.
+-> Mapping recalled from the RKM console chapter (arrows verified by
+-> use; shifted arrows and F-keys flagged for a boot check): Up/Down/
+-> Right/Left = CSI A/B/C/D, shifted = CSI T / S / SPACE @ / SPACE A,
+-> F1-F10 = CSI 0~..9~, shifted F = CSI 10~..19~, Help = CSI ?~
+PROC rawcsikey(code, qual)
+  DEF sh
+  sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+  IF code = RK_UP
+    enqueue($9B)
+    IF sh THEN enqueue("T") ELSE enqueue("A")
+  ELSEIF code = RK_DOWN
+    enqueue($9B)
+    IF sh THEN enqueue("S") ELSE enqueue("B")
+  ELSEIF code = RK_RIGHT
+    enqueue($9B)
+    IF sh THEN enqueue(32)
+    IF sh THEN enqueue("@") ELSE enqueue("C")
+  ELSEIF code = RK_LEFT
+    enqueue($9B)
+    IF sh THEN enqueue(32)
+    IF sh THEN enqueue("A") ELSE enqueue("D")
+  ELSEIF (code >= $50) AND (code <= $59)     -> F1..F10
+    enqueue($9B)
+    IF sh THEN enqueue("1")
+    enqueue(48 + (code - $50))
+    enqueue("~")
+  ELSEIF code = $5F                          -> Help
+    enqueue($9B)
+    enqueue("?")
+    enqueue("~")
+  ELSE
+    RETURN
+  ENDIF
+  inputarrived()
+ENDPROC
+
 PROC dorawkey(code, qual)
   DEF s:PTR TO CHAR, l, avail
+  IF rawmode
+    rawcsikey(code, qual)
+    RETURN
+  ENDIF
   s := ebuf
   l := StrLen(ebuf)
   IF code = RK_UP
@@ -571,11 +867,11 @@ PROC satisfyreads()
         inqh := Mod(inqh + 1, INQMAX)
         dst[n] := c
         n++
-        IF c = 10 THEN stop := TRUE
+        IF (c = 10) AND (rawmode = FALSE) THEN stop := TRUE
       ENDWHILE
       ReplyPkt(pkt, n, 0)
     ENDIF
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.3.1 (16.7.26) CCON: LTX console handler M3b', 0
+vers: CHAR '$VER: ccon-handler 0.4 (17.7.26) CCON: LTX console handler M4', 0
