@@ -1,13 +1,17 @@
--> ccon-handler.e - CCON: LTX console handler. Milestone 2: cooked reads.
--> The 0.1 CShell line editor (blip cursor, insert editing, word jumps,
--> history ring) transplanted into ACTION_READ: clients block on Read()
--> and get finished lines; typing, editing and type-ahead live here.
+-> ccon-handler.e - CCON: LTX console handler. Milestone 5: scrollback,
+-> the point of it all. The 0.1 CShell scrollback model (commit 71e29b1)
+-> transplanted and grown up for a full-screen console: a 4000-line byte
+-> ring where the last `rows` lines ARE the visible grid, so cursor
+-> positioning addresses into it and the top visible row slides into
+-> history on every bottom scroll. Every draw is mirrored into the model;
+-> viewing is a whole-grid redraw at an offset. Ctrl+Up/Down scrolls by
+-> line (works in raw mode too - More, Ed), Shift+Up/Down by page
+-> (cooked only; raw clients own shifted arrows as CSI T/S). Any output
+-> or any other key snaps back to live.
 ->
 -> Test:  Mount CCON: FROM DEVS:CCON-mountlist
-->        echo >CCON: hello            (writes still work)
-->        type CCON:                   (each Return = a line in the shell;
-->                                      Ctrl+\ = EOF ends it)
-->        copy CCON: ram:t.txt         (lines land in the file)
+->        NewShell CCON:
+->        list SYS: then Shift+Up/Down, Ctrl+Up/Down; type = snap live
 ->
 -> How an E binary survives being started as a handler (verified by
 -> disassembling E-VO's generated startup code): a handler process has no
@@ -28,7 +32,7 @@
 
 MODULE 'intuition/intuition',
        'utility/tagitem',
-       'exec/nodes','exec/ports','exec/io',
+       'exec/nodes','exec/ports','exec/io','exec/tasks',
        'graphics/text','graphics/rastport',
        'devices/inputevent','devices/timer',
        'dos/dos','dos/dosextens','dos/filehandler'
@@ -38,6 +42,9 @@ CONST MARGIN=4,
       HISTMAX=32,       -> prompt history ring, entries
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
+      SBMAX=4000,       -> scrollback model, lines (like CShell 0.1)
+      TCMAX=80,         -> tab completion: max candidates collected
+      TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F
 
 DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
@@ -69,13 +76,43 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     treq=NIL:PTR TO timerequest,
     timerarmed=FALSE,
     wcq[8]:ARRAY OF LONG, wcn=0,-> pending ACTION_WAIT_CHAR packets
-    evmask=0                    -> raw input event classes requested via
+    evmask=0,                   -> raw input event classes requested via
                                 -> CSI n { (Ed asks for 10 = MENULIST)
+    -> the scrollback model (M5): SBMAX rows of cols bytes in a ring.
+    -> The last `rows` ring lines are the VISIBLE grid: sbtop is the
+    -> ring index of the top visible row, so a bottom scroll is sbtop++
+    -> and the old top row becomes history with no copying. All index
+    -> math is add/subtract wraps - no Mod, no DIVU anywhere near it.
+    sb=NIL,                     -> the ring; NIL = scrollback disabled
+    sbtop=0,                    -> ring index of the top visible row
+    sbcnt=0,                    -> history lines above the screen (valid)
+    viewoff=0,                  -> lines scrolled back; 0 = live
+    wtitle[48]:STRING,          -> title-bar scroll indicator (persists:
+                                -> Intuition keeps the pointer)
+    -> tab completion (M5b): filesystem packets are HAND-ROLLED at exec
+    -> level - built into fspkt, PutMsg'd to the filesystem's port,
+    -> reply awaited on the PRIVATE fsport - so pr_MsgPort (the port
+    -> our clients send to) is never touched and the no-DOS rule holds
+    fsport=NIL:PTR TO mp,       -> private reply port for fs packets
+    fspkt=NIL:PTR TO standardpacket,
+    fsfib=NIL:PTR TO fileinfoblock,  -> longword-aligned (BPTR arg)
+    fsname=NIL:PTR TO CHAR,     -> BSTR build buffer, longword-aligned
+    fsdirport=NIL:PTR TO mp,    -> resolved: the filesystem's port,
+    fsdirlock=0,                -> the lock being scanned,
+    fsdirfree=FALSE,            -> and whether WE made it (must free)
+    tcc[80]:ARRAY OF LONG,      -> candidates: ptrs into tcpool, each
+    tcpool=NIL:PTR TO CHAR,     -> entry = [dirflag CHAR][name NUL]
+    tcpu=0, tcn=0, tcmore=FALSE,
+    tcactive=FALSE, tcsel=-1,   -> the menu: open?, highlighted index
+    tcws=0, tcwend=0,           -> the word being completed, in ebuf
+    tcmrows=0, tcmcols=0, tcmcolw=0, tcshown=0,
+    tctmp[416]:STRING,          -> completion scratch
+    tctail[404]:STRING          -> line tail during word replacement
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
-      class, code, qual, mx, my, ia, secs, mics
+      class, code, qual, mx, my, ia, secs, mics, tmp
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -107,6 +144,20 @@ PROC main()
     ENDIF
   ENDIF
 
+  -> tab-completion plumbing (M5b): a private reply port and one
+  -> hand-built StandardPacket; if anything fails, dotab just declines
+  fsport := CreateMsgPort()
+  fspkt := New(SIZEOF standardpacket)
+  IF fspkt
+    fspkt.msg.ln.name := fspkt.pkt   -> a packet rides in ln_Name,
+    fspkt.pkt.link := fspkt.msg      -> and points back at its message
+  ENDIF
+  tmp := New(SIZEOF fileinfoblock + 4)   -> BPTR args must be longword-
+  IF tmp THEN fsfib := Shl(Shr(tmp + 3, 2), 2)  -> aligned; round up
+  tmp := New(260)
+  IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
+  tcpool := New(TCPOOLSZ)
+
   psig := Shl(1, port.sigbit)
   WHILE TRUE
     wsig := 0
@@ -132,7 +183,7 @@ PROC main()
           secs := im.seconds
           mics := im.micros
           ReplyMsg(im)
-          IF class = IDCMP_VANILLAKEY THEN dovanilla(code)
+          IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
           IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
           IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
         ENDIF
@@ -220,6 +271,8 @@ PROC dopkt(pkt:PTR TO dospacket)
                                 -> this line is what makes Ctrl+C reach it
                                 -> (AROS con-handler does the same)
     len := pkt.arg3
+    snaplive()                  -> new output pulls the view back to live
+    tcclose()                   -> and closes an open completion menu
     IF rawmode
       render(pkt.arg2, len)     -> raw: the app owns the screen, no blip
     ELSE
@@ -258,6 +311,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     IF pkt.arg1
       IF rawmode = FALSE
         rawmode := TRUE
+        tcclose()
         eraseedit()
       ENDIF
     ELSE
@@ -320,7 +374,7 @@ ENDPROC
 PROC openwin()
   DEF ta:PTR TO textattr, i
   win := OpenWindowTagList(NIL,
-    [WA_TITLE, 'CCON: M4', WA_LEFT, 40, WA_TOP, 40,
+    [WA_TITLE, 'CCON: M5', WA_LEFT, 40, WA_TOP, 40,
      WA_WIDTH, 520, WA_HEIGHT, 160,
      WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
      WA_ACTIVATE, TRUE,
@@ -343,6 +397,14 @@ PROC openwin()
   topy := win.bordertop + MARGIN
   cols := Div(win.width - win.borderleft - win.borderright - MARGIN - MARGIN, cw)
   rows := Div(win.height - win.bordertop - win.borderbottom - MARGIN - MARGIN, ch)
+  IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
+  -> the scrollback ring: sized to the real grid width. New() zeroes
+  -> (E heap is cleared), so the whole model starts as blank rows; a
+  -> failed allocation just disables scrollback, the console still runs
+  sb := New(Mul(SBMAX, cols))
+  sbtop := 0
+  sbcnt := 0
+  viewoff := 0
   SetAPen(rp, 1)
   SetBPen(rp, 0)
   FOR i := 0 TO HISTMAX - 1
@@ -352,28 +414,116 @@ PROC openwin()
   drawedit()                    -> the blip stands from the start
 ENDPROC
 
+-> ---------- the scrollback model (M5) ----------
+
+-> pointer to the model row of visible screen row r (0 = top row).
+-> Callers guard with IF sb - a NIL model means scrollback is off.
+PROC visrow(r)
+  DEF i
+  i := sbtop + r
+  IF i >= SBMAX THEN i := i - SBMAX
+ENDPROC sb + Mul(i, cols)
+
+PROC clearrow(m:PTR TO CHAR)
+  DEF i
+  FOR i := 0 TO cols - 1
+    m[i] := 0
+  ENDFOR
+ENDPROC
+
+-> redraw the whole grid from the model at the current view offset;
+-> model zeroes render as spaces. viewoff = lines back, 0 = live.
+PROC redraw()
+  DEF r, idx, m:PTR TO CHAR, i, c, rowbuf[256]:ARRAY OF CHAR
+  IF sb = NIL THEN RETURN
+  SetAPen(rp, 1)
+  SetBPen(rp, 0)
+  FOR r := 0 TO rows - 1
+    idx := sbtop - viewoff + r
+    IF idx < 0 THEN idx := idx + SBMAX
+    IF idx >= SBMAX THEN idx := idx - SBMAX
+    m := sb + Mul(idx, cols)
+    FOR i := 0 TO cols - 1
+      c := m[i]
+      rowbuf[i] := IF c < 32 THEN 32 ELSE c
+    ENDFOR
+    Move(rp, left, topy + Mul(r, ch) + baseline)
+    Text(rp, rowbuf, cols)
+  ENDFOR
+ENDPROC
+
+-> the title bar doubles as the scroll-position indicator. The buffer
+-> is a global: Intuition keeps the POINTER (the M4 telemetry lesson).
+-> Known cosmetic gap: leaving scrollback restores our own title, so a
+-> client retitle (More does one via DISK_INFO) is overwritten.
+PROC settitle()
+  IF viewoff > 0
+    StringF(wtitle, 'CCON: M5  [scrollback -\d]', viewoff)
+    SetWindowTitles(win, wtitle, -1)
+  ELSE
+    SetWindowTitles(win, 'CCON: M5', -1)
+  ENDIF
+ENDPROC
+
+-> scroll the view by delta lines (positive = back in time), clamped
+-> to the history actually stored; landing on live restores the blip
+PROC scrollview(delta)
+  IF sb = NIL THEN RETURN
+  viewoff := viewoff + delta
+  IF viewoff > sbcnt THEN viewoff := sbcnt
+  IF viewoff < 0 THEN viewoff := 0
+  redraw()
+  settitle()
+  IF (viewoff = 0) AND (rawmode = FALSE) THEN drawedit()
+ENDPROC
+
+-> any output or any non-scroll key returns the view to live
+PROC snaplive()
+  IF viewoff = 0 THEN RETURN
+  viewoff := 0
+  redraw()
+  settitle()
+  IF rawmode = FALSE THEN drawedit()
+ENDPROC
+
 -> ---------- output: a cell-grid renderer (CSI parsing comes with the
 -> full CShell renderer transplant in a later milestone) ----------
+
+-> scroll the whole screen up one line: pixels, model, edit anchor.
+-> The old top row becomes history - just advance the ring, no copying.
+PROC screenscroll()
+  ScrollRaster(rp, 0, ch,
+               win.borderleft, win.bordertop,
+               win.width - win.borderright - 1,
+               win.height - win.borderbottom - 1)
+  IF ancy > 0 THEN ancy--       -> the edit anchor scrolled with the rest
+  IF sb
+    sbtop++
+    IF sbtop >= SBMAX THEN sbtop := 0
+    IF sbcnt < (SBMAX - rows) THEN sbcnt++
+    clearrow(visrow(rows - 1))
+  ENDIF
+ENDPROC
 
 PROC outnl()
   cx := 0
   cy++
   IF cy >= rows
-    ScrollRaster(rp, 0, ch,
-                 win.borderleft, win.bordertop,
-                 win.width - win.borderright - 1,
-                 win.height - win.borderbottom - 1)
+    screenscroll()
     cy := rows - 1
-    IF ancy > 0 THEN ancy--     -> the edit anchor scrolled with the rest
   ENDIF
 ENDPROC
 
 PROC outchr(c)
-  DEF b[2]:ARRAY OF CHAR
+  DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
   IF cx >= cols THEN outnl()
   b[0] := c
   Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
   Text(rp, b, 1)
+  IF sb
+    m := visrow(cy)
+    m[cx] := c
+  ENDIF
   cx++
 ENDPROC
 
@@ -474,29 +624,55 @@ PROC domenupick(code, qual, ia, secs, mics)
 ENDPROC
 
 PROC erasebelow()
+  DEF r
   eraseeol()
   IF cy < (rows - 1)
     SetAPen(rp, 0)
     RectFill(rp, left, topy + Mul(cy + 1, ch),
              left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
     SetAPen(rp, 1)
+    IF sb
+      FOR r := cy + 1 TO rows - 1
+        clearrow(visrow(r))
+      ENDFOR
+    ENDIF
   ENDIF
 ENDPROC
 
+-> L/M shift rows only inside the visible region, so the model copies
+-> row CONTENTS between visible slots - the history above stays intact
 PROC inslines(n)
+  DEF r
   IF n < 1 THEN n := 1
   IF n > (rows - cy) THEN n := rows - cy
   ScrollRaster(rp, 0, -Mul(n, ch),
                left, topy + Mul(cy, ch),
                left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
+  IF sb
+    FOR r := rows - 1 TO cy + n STEP -1
+      CopyMem(visrow(r - n), visrow(r), cols)
+    ENDFOR
+    FOR r := cy TO cy + n - 1
+      clearrow(visrow(r))
+    ENDFOR
+  ENDIF
 ENDPROC
 
 PROC dellines(n)
+  DEF r
   IF n < 1 THEN n := 1
   IF n > (rows - cy) THEN n := rows - cy
   ScrollRaster(rp, 0, Mul(n, ch),
                left, topy + Mul(cy, ch),
                left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
+  IF sb
+    FOR r := cy TO rows - 1 - n
+      CopyMem(visrow(r + n), visrow(r), cols)
+    ENDFOR
+    FOR r := rows - n TO rows - 1
+      clearrow(visrow(r))
+    ENDFOR
+  ENDIF
 ENDPROC
 
 -> the answer to `CSI 0 SPACE q`, injected straight into the input
@@ -515,12 +691,18 @@ ENDPROC
 
 -> erase from the output cursor to the end of its row (CSI K)
 PROC eraseeol()
-  DEF y
+  DEF y, m:PTR TO CHAR, j
   IF cx >= cols THEN RETURN   -> inverted RectFill = wild writes
   y := topy + Mul(cy, ch)
   SetAPen(rp, 0)
   RectFill(rp, left + Mul(cx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
   SetAPen(rp, 1)
+  IF sb
+    m := visrow(cy)
+    FOR j := cx TO cols - 1
+      m[j] := 0
+    ENDFOR
+  ENDIF
 ENDPROC
 
 -> the 0.1 CShell renderer's CSI discipline, transplanted and grown
@@ -587,6 +769,7 @@ PROC render(buf, len)
         IF fit > run THEN fit := run
         Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
         Text(rp, s + i, fit)
+        IF sb THEN CopyMem(s + i, visrow(cy) + cx, fit)
         cx := cx + fit
         i := i + fit
         run := run - fit
@@ -646,14 +829,30 @@ PROC histload(idx)
   ENDWHILE
 ENDPROC
 
-PROC dovanilla(code)
+PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, dup
+  snaplive()                    -> typing returns the view to live
   IF rawmode
     -> raw: every key is just a byte for the client - Return is CR 13,
     -> Ctrl+C is byte 3 (no break signal), Ctrl+\ is byte 28 (no EOF)
     enqueue(code)
     inputarrived()
     RETURN
+  ENDIF
+  IF code = 9
+    -> Tab: completion (M5b); Shift+Tab cycles the menu backwards
+    dotab(qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT))
+    RETURN
+  ENDIF
+  IF tcactive
+    IF code = 13
+      tcclose()   -> Enter ACCEPTS the selection and closes the menu;
+      RETURN      -> the line stays put for a second Enter (zsh style)
+    ELSEIF code = 27
+      tcclose()   -> Esc closes the menu, the line survives
+      RETURN
+    ENDIF
+    tcclose()     -> any other key closes it, then acts normally
   ENDIF
   s := ebuf
   l := StrLen(ebuf)
@@ -769,7 +968,30 @@ PROC rawcsikey(code, qual)
 ENDPROC
 
 PROC dorawkey(code, qual)
-  DEF s:PTR TO CHAR, l, avail
+  DEF s:PTR TO CHAR, l, avail, sh
+  -> raw keys close an open completion menu - EXCEPT the qualifier
+  -> keys themselves ($60-$67: Shift, Ctrl, Alt, Amiga - Shift+Tab
+  -> starts with a bare Shift down-stroke) and key releases (bit 7)
+  IF tcactive
+    IF ((code AND $80) = 0) AND ((code < $60) OR (code > $67))
+      tcclose()
+    ENDIF
+  ENDIF
+  -> M5 scroll keys, checked before anything else: Ctrl+Up/Down by
+  -> line in BOTH modes (raw clients never receive Ctrl-arrows -
+  -> rawcsikey ignores the qualifier), Shift+Up/Down by page in
+  -> cooked only (raw clients own shifted arrows as CSI T/S)
+  sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+  IF (code = RK_UP) OR (code = RK_DOWN)
+    IF qual AND IEQUALIFIER_CONTROL
+      scrollview(IF code = RK_UP THEN 1 ELSE -1)
+      RETURN
+    ELSEIF (sh <> 0) AND (rawmode = FALSE)
+      scrollview(IF code = RK_UP THEN rows - 1 ELSE -(rows - 1))
+      RETURN
+    ENDIF
+  ENDIF
+  snaplive()                    -> any other key returns the view to live
   IF rawmode
     rawcsikey(code, qual)
     RETURN
@@ -777,7 +999,8 @@ PROC dorawkey(code, qual)
   s := ebuf
   l := StrLen(ebuf)
   IF code = RK_UP
-    -> plain Up/Down walk the prompt history (output scrollback: M5)
+    -> plain Up/Down walk the prompt history (output scrollback lives
+    -> on Shift/Ctrl, above)
     avail := htotal
     IF avail > HISTMAX THEN avail := HISTMAX
     IF hpos < (avail - 1)
@@ -830,6 +1053,472 @@ PROC dorawkey(code, qual)
   ENDIF
 ENDPROC
 
+-> ---------- tab completion (M5b): the zsh menu, Amiga plumbing -----
+-> Completing a word means reading a directory, and a handler must not
+-> call packet-sending dos.library functions (Lock/ExNext would DoPkt
+-> and wait on pr_MsgPort - the port our own clients send to). So the
+-> packets are hand-rolled at exec level: LOCATE_OBJECT / EXAMINE_
+-> OBJECT / EXAMINE_NEXT / FREE_LOCK go straight to the FILESYSTEM's
+-> port with the private fsport as reply port. The client's current
+-> directory for relative words comes from the blocked reader's own
+-> process structure (pr_CurrentDir via the queued read packet's
+-> sender); words with a ':' resolve through the DOS list
+-> (LockDosList/FindDosEntry - semaphores, not packets). Struct
+-> offsets cross-checked against amitools' libstructs.
+
+-> one packet round-trip; the reply lands on fsport, never pr_MsgPort
+PROC fscall(tport:PTR TO mp, act, a1, a2, a3)
+  IF tport = NIL THEN RETURN 0
+  IF tport = port THEN RETURN 0   -> never send to OURSELVES: deadlock
+  fspkt.pkt.type := act
+  fspkt.pkt.arg1 := a1
+  fspkt.pkt.arg2 := a2
+  fspkt.pkt.arg3 := a3
+  fspkt.pkt.res1 := 0
+  fspkt.pkt.res2 := 0
+  fspkt.pkt.port := fsport
+  fspkt.msg.replyport := fsport
+  PutMsg(tport, fspkt.msg)
+  WaitPort(fsport)
+  GetMsg(fsport)
+ENDPROC fspkt.pkt.res1
+
+-> build a BSTR (length byte + chars) in the aligned buffer
+PROC tcbstr(s:PTR TO CHAR)
+  DEF l, i
+  l := StrLen(s)
+  IF l > 254 THEN l := 254
+  fsname[0] := l
+  FOR i := 0 TO l - 1
+    fsname[i + 1] := s[i]
+  ENDFOR
+ENDPROC Shr(fsname, 2)
+
+-> the FIB filename at packet level: some filesystems write a C
+-> string, some a BCPL one (length byte first). Filenames never start
+-> with a control byte, so first-byte < 32 = BCPL - covers both.
+PROC tcfibname(out:PTR TO CHAR)
+  DEF s:PTR TO CHAR, l, i
+  s := fsfib.filename
+  IF (s[0] > 0) AND (s[0] < 32)
+    l := s[0]
+    IF l > 107 THEN l := 107
+    FOR i := 0 TO l - 1
+      out[i] := s[i + 1]
+    ENDFOR
+    out[l] := 0
+  ELSE
+    i := 0
+    WHILE (s[i] <> 0) AND (i < 107)
+      out[i] := s[i]
+      i++
+    ENDWHILE
+    out[i] := 0
+  ENDIF
+ENDPROC
+
+-> case fold for matching: ASCII a-z and the Latin-1 lower half
+PROC tcfold(c)
+  IF (c >= "a") AND (c <= "z") THEN RETURN c - 32
+  IF (c >= 224) AND (c <= 254) AND (c <> 247) THEN RETURN c - 32
+ENDPROC c
+
+PROC tcpref(name:PTR TO CHAR, pfx:PTR TO CHAR, len)
+  DEF i
+  FOR i := 0 TO len - 1
+    IF name[i] = 0 THEN RETURN FALSE
+    IF tcfold(name[i]) <> tcfold(pfx[i]) THEN RETURN FALSE
+  ENDFOR
+ENDPROC TRUE
+
+PROC tccmp(a:PTR TO CHAR, b:PTR TO CHAR)
+  DEF i, ca, cb
+  i := 0
+  WHILE TRUE
+    ca := tcfold(a[i])
+    cb := tcfold(b[i])
+    IF ca < cb THEN RETURN -1
+    IF ca > cb THEN RETURN 1
+    IF ca = 0 THEN RETURN 0
+    i++
+  ENDWHILE
+ENDPROC 0
+
+-> the client whose directory a relative word completes in: the
+-> blocked reader (its Read packet is queued while it waits on our
+-> line), or the break owner as fallback; must be a Process
+PROC tcclient()
+  DEF t:PTR TO tc, pkt:PTR TO dospacket, sender:PTR TO mp
+  t := NIL
+  IF rdn > 0
+    pkt := rdq[0]
+    sender := pkt.port
+    t := sender.sigtask
+  ELSEIF breaktask
+    t := breaktask
+  ENDIF
+  IF t = NIL THEN RETURN NIL
+  IF t.ln.type <> NT_PROCESS THEN RETURN NIL
+ENDPROC t
+
+-> resolve the word's directory part into fsdirport + fsdirlock;
+-> fsdirfree marks a lock WE made (tcfreelock returns it). Returns
+-> FALSE when the path cannot be resolved without breaking the rules.
+PROC tcresolve(dirpart:PTR TO CHAR)
+  DEF proc:PTR TO process, fl:PTR TO filelock, i, colon, len, res,
+      dl:PTR TO doslist, dcopy[300]:ARRAY OF CHAR,
+      devname[40]:ARRAY OF CHAR
+  fsdirport := NIL
+  fsdirlock := 0
+  fsdirfree := FALSE
+  len := StrLen(dirpart)
+  IF len > 280 THEN RETURN FALSE
+  FOR i := 0 TO len
+    dcopy[i] := dirpart[i]
+  ENDFOR
+  -> strip ONE trailing '/' (a dir word like `Docs/`) - but keep it
+  -> after another '/' or a ':' (leading-slash parent refs, "SYS:/")
+  IF len > 1
+    IF (dcopy[len - 1] = "/") AND (dcopy[len - 2] <> "/") AND
+       (dcopy[len - 2] <> ":")
+      len := len - 1
+      dcopy[len] := 0
+    ENDIF
+  ENDIF
+  colon := -1
+  i := 0
+  WHILE (i < len) AND (colon = -1)
+    IF dcopy[i] = ":" THEN colon := i
+    i++
+  ENDWHILE
+  IF colon = -1
+    -> relative: base = the client's own current directory
+    proc := tcclient()
+    IF proc = NIL THEN RETURN FALSE
+    IF proc.currentdir = 0 THEN RETURN FALSE
+    fl := Shl(proc.currentdir, 2)
+    fsdirport := fl.task
+    IF len = 0
+      fsdirlock := proc.currentdir     -> scan the CWD itself; not ours
+      RETURN TRUE                      -> to free
+    ENDIF
+    res := fscall(fsdirport, ACTION_LOCATE_OBJECT, proc.currentdir,
+                  tcbstr(dcopy), SHARED_LOCK)
+    IF res = 0 THEN RETURN FALSE
+    fsdirlock := res
+    fsdirfree := TRUE
+    RETURN TRUE
+  ENDIF
+  -> a device, volume or assign name before the ':'
+  IF colon > 36 THEN RETURN FALSE
+  FOR i := 0 TO colon - 1
+    devname[i] := dcopy[i]
+  ENDFOR
+  devname[colon] := 0
+  dl := LockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
+  dl := FindDosEntry(dl, devname, LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
+  IF dl = NIL
+    UnLockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
+    RETURN FALSE
+  ENDIF
+  IF dl.type = DLT_DIRECTORY
+    -> an assign: its lock is the base, the rest is relative to it
+    fsdirlock := dl.lock
+    UnLockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
+    IF fsdirlock = 0 THEN RETURN FALSE  -> late/nonbinding, unresolved
+    fl := Shl(fsdirlock, 2)
+    fsdirport := fl.task
+    IF (colon + 1) < len
+      res := fscall(fsdirport, ACTION_LOCATE_OBJECT, fsdirlock,
+                    tcbstr(dcopy + colon + 1), SHARED_LOCK)
+      IF res = 0 THEN RETURN FALSE
+      fsdirlock := res
+      fsdirfree := TRUE
+    ENDIF
+    RETURN TRUE
+  ENDIF
+  -> a volume or device: its handler port takes the whole "NAME:path"
+  -> name against a zero lock (what dos.library itself does)
+  fsdirport := dl.task
+  UnLockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
+  IF fsdirport = NIL THEN RETURN FALSE  -> not mounted/started; starting
+  res := fscall(fsdirport, ACTION_LOCATE_OBJECT, 0,  -> it needs DOS
+                tcbstr(dcopy), SHARED_LOCK)
+  IF res = 0 THEN RETURN FALSE
+  fsdirlock := res
+  fsdirfree := TRUE
+ENDPROC TRUE
+
+PROC tcfreelock()
+  IF fsdirfree AND (fsdirlock <> 0)
+    fscall(fsdirport, ACTION_FREE_LOCK, fsdirlock, 0, 0)
+  ENDIF
+  fsdirlock := 0
+  fsdirfree := FALSE
+ENDPROC
+
+-> scan the resolved directory for names starting with the prefix
+PROC tcscan(pfx:PTR TO CHAR, plen)
+  DEF res, nbuf[112]:ARRAY OF CHAR, l, p:PTR TO CHAR
+  tcn := 0
+  tcpu := 0
+  tcmore := FALSE
+  res := fscall(fsdirport, ACTION_EXAMINE_OBJECT, fsdirlock,
+                Shr(fsfib, 2), 0)
+  IF res = 0 THEN RETURN
+  IF fsfib.direntrytype <= 0 THEN RETURN   -> a file, not a directory
+  WHILE fscall(fsdirport, ACTION_EXAMINE_NEXT, fsdirlock,
+               Shr(fsfib, 2), 0)
+    tcfibname(nbuf)
+    l := StrLen(nbuf)
+    IF l > 0
+      IF (plen = 0) OR tcpref(nbuf, pfx, plen)
+        IF (tcn < TCMAX) AND ((tcpu + l + 3) < TCPOOLSZ)
+          p := tcpool + tcpu
+          p[0] := IF fsfib.direntrytype > 0 THEN 1 ELSE 0
+          CopyMem(nbuf, p + 1, l + 1)
+          tcc[tcn] := p
+          tcn++
+          tcpu := tcpu + l + 2
+        ELSE
+          tcmore := TRUE
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC
+
+PROC tcsort()
+  DEF i, j, key, go
+  FOR i := 1 TO tcn - 1
+    key := tcc[i]
+    j := i - 1
+    go := TRUE
+    WHILE go
+      IF j < 0
+        go := FALSE
+      ELSEIF tccmp(tcc[j] + 1, key + 1) > 0
+        tcc[j + 1] := tcc[j]
+        j--
+      ELSE
+        go := FALSE
+      ENDIF
+    ENDWHILE
+    tcc[j + 1] := key
+  ENDFOR
+ENDPROC
+
+-> length of the folded common prefix of all candidates
+PROC tccommon()
+  DEF l, i, k, a:PTR TO CHAR, b:PTR TO CHAR
+  a := tcc[0] + 1
+  l := StrLen(a)
+  FOR k := 1 TO tcn - 1
+    b := tcc[k] + 1
+    i := 0
+    WHILE (i < l) AND (b[i] <> 0) AND (tcfold(a[i]) = tcfold(b[i]))
+      i++
+    ENDWHILE
+    l := i
+  ENDFOR
+ENDPROC l
+
+-> replace ebuf[tcws..tcwend) with nl bytes at nt; FALSE = no fit
+PROC tcreplace(nt:PTR TO CHAR, nl)
+  DEF s:PTR TO CHAR, t:PTR TO CHAR, l, newlen, i
+  s := ebuf
+  l := StrLen(ebuf)
+  newlen := tcws + nl + (l - tcwend)
+  IF newlen >= LINEMAX THEN RETURN FALSE
+  IF (ancx + newlen) >= (cols - 1) THEN RETURN FALSE
+  StrCopy(tctail, s + tcwend)
+  t := tctail
+  FOR i := 0 TO nl - 1
+    s[tcws + i] := nt[i]
+  ENDFOR
+  FOR i := 0 TO StrLen(tctail) - 1
+    s[tcws + nl + i] := t[i]
+  ENDFOR
+  SetStr(ebuf, newlen)
+  s[newlen] := 0
+  tcwend := tcws + nl
+  cpos := tcwend
+ENDPROC TRUE
+
+-> ---------- the menu below the prompt ----------
+
+-> repaint one screen row from the live model (menu cleanup)
+PROC drawmodelrow(r)
+  DEF idx, m:PTR TO CHAR, i, c, rowbuf[256]:ARRAY OF CHAR
+  IF sb = NIL THEN RETURN
+  idx := sbtop + r
+  IF idx >= SBMAX THEN idx := idx - SBMAX
+  m := sb + Mul(idx, cols)
+  FOR i := 0 TO cols - 1
+    c := m[i]
+    rowbuf[i] := IF c < 32 THEN 32 ELSE c
+  ENDFOR
+  SetAPen(rp, 1)
+  SetBPen(rp, 0)
+  Move(rp, left, topy + Mul(r, ch) + baseline)
+  Text(rp, rowbuf, cols)
+ENDPROC
+
+PROC tcmenucalc()
+  DEF i, l, maxl, p:PTR TO CHAR
+  maxl := 1
+  FOR i := 0 TO tcn - 1
+    p := tcc[i]
+    l := StrLen(p + 1) + p[0]   -> dirs show with a trailing '/'
+    IF l > maxl THEN maxl := l
+  ENDFOR
+  tcmcolw := maxl + 2
+  IF tcmcolw > cols THEN tcmcolw := cols
+  tcmcols := Div(cols, tcmcolw)
+  IF tcmcols < 1 THEN tcmcols := 1
+  tcmrows := Div(tcn + tcmcols - 1, tcmcols)
+  IF tcmrows > (rows - 1)       -> more than fits: show the first
+    tcmrows := rows - 1         -> page, cycle within it
+    tcmore := TRUE
+  ENDIF
+  tcshown := Mul(tcmrows, tcmcols)
+  IF tcshown > tcn THEN tcshown := tcn
+ENDPROC
+
+PROC tcmenudraw()
+  DEF idx, r, c, p:PTR TO CHAR, l, nb[260]:ARRAY OF CHAR
+  FOR idx := 0 TO tcshown - 1
+    r := Div(idx, tcmcols)
+    c := idx - Mul(r, tcmcols)
+    p := tcc[idx]
+    l := StrLen(p + 1)
+    CopyMem(p + 1, nb, l)
+    IF p[0]
+      nb[l] := "/"
+      l++
+    ENDIF
+    WHILE l < tcmcolw
+      nb[l] := 32
+      l++
+    ENDWHILE
+    IF idx = tcsel
+      SetAPen(rp, 0)
+      SetBPen(rp, 1)
+    ELSE
+      SetAPen(rp, 1)
+      SetBPen(rp, 0)
+    ENDIF
+    Move(rp, left + Mul(Mul(c, tcmcolw), cw),
+         topy + Mul(ancy + 1 + r, ch) + baseline)
+    Text(rp, nb, l)
+  ENDFOR
+  SetAPen(rp, 1)
+  SetBPen(rp, 0)
+ENDPROC
+
+-> close the menu: the rows under it come back from the model
+PROC tcclose()
+  DEF r
+  IF tcactive = FALSE THEN RETURN
+  FOR r := 1 TO tcmrows
+    drawmodelrow(ancy + r)
+  ENDFOR
+  tcactive := FALSE
+  tcsel := -1
+ENDPROC
+
+-> Tab in the cooked editor. First Tab completes (whole match, or the
+-> common prefix + the menu); further Tabs cycle the menu, Shift+Tab
+-> backwards; Enter accepts and closes, Esc closes, anything else
+-> closes and then acts normally.
+PROC dotab(back)
+  DEF s:PTR TO CHAR, l, i, sep, plen, cpl, p:PTR TO CHAR,
+      dirp[300]:ARRAY OF CHAR
+  IF tcactive
+    IF tcshown = 0 THEN RETURN
+    IF back
+      tcsel := tcsel - 1
+      IF tcsel < 0 THEN tcsel := tcshown - 1
+    ELSE
+      tcsel := tcsel + 1
+      IF tcsel >= tcshown THEN tcsel := 0
+    ENDIF
+    p := tcc[tcsel]
+    StrCopy(tctmp, p + 1)
+    IF p[0] THEN StrAdd(tctmp, '/')
+    IF tcreplace(tctmp, StrLen(tctmp)) THEN drawedit()
+    tcmenudraw()
+    RETURN
+  ENDIF
+  IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
+     (fsname = NIL) OR (tcpool = NIL) THEN RETURN
+  s := ebuf
+  l := StrLen(ebuf)
+  -> the word: back from the cursor to the last space (v1: no quotes)
+  i := cpos
+  WHILE (i > 0) AND (s[i - 1] <> 32)
+    i := i - 1
+  ENDWHILE
+  tcws := i
+  tcwend := cpos
+  -> split the word at its last '/' or ':': dirpart + prefix
+  sep := tcws
+  FOR i := tcws TO cpos - 1
+    IF (s[i] = "/") OR (s[i] = ":") THEN sep := i + 1
+  ENDFOR
+  IF (sep - tcws) > 280 THEN RETURN
+  FOR i := 0 TO sep - tcws - 1
+    dirp[i] := s[tcws + i]
+  ENDFOR
+  dirp[sep - tcws] := 0
+  plen := cpos - sep
+  IF tcresolve(dirp) = FALSE
+    DisplayBeep(NIL)
+    RETURN
+  ENDIF
+  tcscan(s + sep, plen)
+  tcfreelock()
+  IF tcn = 0
+    DisplayBeep(NIL)
+    RETURN
+  ENDIF
+  tcsort()
+  IF tcn = 1
+    -> the one match: complete it, '/' opens a dir, ' ' ends a file
+    p := tcc[0]
+    StrCopy(tctmp, p + 1)
+    StrAdd(tctmp, IF p[0] THEN '/' ELSE ' ')
+    IF tcreplace(tctmp, StrLen(tctmp))
+      drawedit()
+    ELSE
+      DisplayBeep(NIL)
+    ENDIF
+    RETURN
+  ENDIF
+  -> several: extend to the common prefix (filesystem case, from the
+  -> first candidate), then the menu
+  cpl := tccommon()
+  IF cpl > 0
+    p := tcc[0]
+    FOR i := 0 TO cpl - 1
+      tctmp[i] := p[1 + i]
+    ENDFOR
+    tctmp[cpl] := 0
+    SetStr(tctmp, cpl)
+    IF tcreplace(tctmp, cpl) THEN drawedit()
+  ENDIF
+  IF sb = NIL THEN RETURN   -> no model = no way to restore the rows
+  tcmenucalc()              -> under a menu; prefix-only completion
+  WHILE (ancy + tcmrows) > (rows - 1)
+    screenscroll()          -> make room below the prompt; the edit
+    IF cy > 0 THEN cy--     -> line's pixels scroll along, anchor and
+  ENDWHILE                  -> output cursor track it
+  tcsel := -1
+  tcactive := TRUE
+  tcmenudraw()
+  IF tcmore THEN DisplayBeep(NIL)  -> more than the menu shows
+ENDPROC
+
 -> ---------- cooked input plumbing ----------
 
 PROC enqueue(c)
@@ -874,4 +1563,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.4 (17.7.26) CCON: LTX console handler M4', 0
+vers: CHAR '$VER: ccon-handler 0.6 (17.7.26) CCON: LTX console handler M5b', 0

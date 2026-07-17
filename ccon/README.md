@@ -8,15 +8,25 @@ option table), and commands talk to the handler, so no application
 can add it from outside. The endgame is CShell handing its frame
 window to `CCON:` instead of `CON:`.
 
-**Status: milestones 1–3 boot-verified on an AmigaOS 3.2 install
+**Status: milestones 1–4 boot-verified on an AmigaOS 3.2 install
 (FS-UAE).** `NewShell CCON:` runs a real AmigaShell in the
 handler's window — prompt, dir, list, EndShell — with the CShell
 0.1 line editor behind ACTION_READ (blip cursor, insert editing,
 word jumps, 32-line history, type-ahead, EOF on Ctrl+\) and
 Ctrl+C reaching a running command (break forwarding, AROS
-con-handler semantics). The renderer consumes CSI sequences
-whole, honouring cursor-forward and erase-to-EOL. Next: raw mode
-(M4), scrollback (M5) — see `todo.md`.
+con-handler semantics). M4 added raw mode and the full-screen CSI
+set: multi-column `dir` via the window-bounds report (also probed
+by this repo's `ls`), More paging, Ed fullscreen editing,
+WAIT_CHAR with real timer.device timeouts. M5 — output
+scrollback, the reason the handler exists — is boot-verified too:
+a 4000-line model behind the renderer, viewed with Shift+Up/Down
+(page) and Ctrl+Up/Down (line, raw mode too); any output or other
+key snaps back to live. In progress: zsh-style tab completion in
+the cooked editor (menu below the prompt, Tab cycles, Enter
+accepts), built on hand-rolled filesystem packets — a handler
+cannot call packet-sending dos.library functions, so LOCATE/
+EXAMINE ride a private reply port straight to the filesystem.
+See `todo.md`.
 
 ## Try it
 

@@ -146,11 +146,90 @@ boot-tested in CShell 0.1 (commit 71e29b1) — they transplant in.
       `more <file>` (single-key paging), Ed (fullscreen editing,
       arrows), Ctrl+C still breaks list, cooked editing/history
       unchanged after a raw program exits.
-- [ ] **M5: the point of it all** — scrollback (Shift+Up/Down /
-      Ctrl+Up/Down from the 0.1 model), then polish: multiple
-      streams, window-per-open semantics, CLOSE/WAIT option
-      parsing from the open name, fail EXAMINE_FH (clib isatty
-      probes it).
+- [ ] **M5: the point of it all — scrollback BUILT 17.7.26,
+      awaiting its boot test.** The 0.1 model transplanted and
+      grown up for a full-screen console: a 4000-line byte ring
+      (SBMAX × cols, allocated at window-open, New() = zeroed)
+      where the last `rows` ring lines ARE the visible grid —
+      sbtop indexes the top visible row, so a bottom scroll is
+      sbtop++ and the old top line becomes history with no
+      copying. Every draw is mirrored into the model: text runs
+      (CopyMem beside each Text), tab spaces, K/J erases, L/M
+      insert/delete (row-content copies inside the visible region
+      only — history above stays intact); cursor moves touch
+      nothing. All ring math is add/subtract wraps — no Mod, no
+      DIVU (the ls lesson). Viewing = whole-grid redraw at
+      viewoff; keys: Ctrl+Up/Down by line in BOTH modes (raw
+      clients never receive Ctrl-arrows), Shift+Up/Down by page
+      in cooked only (raw clients own shifted arrows as CSI T/S).
+      Any write or any other key snaps the view back to live —
+      cooked snap redraws the edit line. Title bar shows
+      `[scrollback -n]` while scrolled (global buffer — Intuition
+      keeps the pointer). Known cosmetic gap: leaving scrollback
+      restores our own title, stomping a client retitle (More's).
+      E semantics vamos-verified before deploy: FOR empty ranges
+      (both directions) run zero times; inline IF-expression
+      arguments work.
+      **Boot test:** `NewShell CCON:`, `list SYS:` past a
+      screenful → Shift+Up (pages back, title shows offset),
+      Ctrl+Up/Down (line), Shift+Down back to live (blip
+      returns), type while scrolled (snaps live), `dir` while
+      scrolled-back output still snaps; then More a long file,
+      Ctrl+Up mid-page (scrollback over raw), space (snaps live,
+      paging continues), q; Ed still opens/edits/exits clean.
+      **Remaining M5 polish (separate slice):** multiple streams,
+      window-per-open semantics, CLOSE/WAIT option parsing from
+      the open name, fail EXAMINE_FH (clib isatty probes it).
+      **M5 scrollback BOOT-PASSED 17.7.26** (scroll keys, type-snap,
+      More over raw all confirmed; Ed menus render dead as parked —
+      the M6 item, expected).
+- [ ] **M5b: zsh-style tab completion — BUILT 17.7.26, awaiting
+      its boot test.** Tab completes the word at the cursor; one
+      match completes whole ('/' after a dir, ' ' after a file),
+      several complete to the common prefix and open a menu of
+      candidates below the prompt (drawn out-of-band, restored
+      from the scrollback model on close); further Tabs cycle
+      with the pick highlighted, Shift+Tab backwards, Enter
+      accepts and closes (the line stays for a second Enter, zsh
+      menu-select style), Esc closes, any other key closes and
+      acts normally. Row space is made by scrolling the prompt up.
+      **The plumbing (the interesting part):** a handler must not
+      call packet-sending dos.library functions, so directory
+      reading is HAND-ROLLED packets — ACTION_LOCATE_OBJECT /
+      EXAMINE_OBJECT / EXAMINE_NEXT / FREE_LOCK built into one
+      StandardPacket and PutMsg'd straight to the FILESYSTEM's
+      port with a private reply port (never pr_MsgPort, so the
+      no-DOS rule holds and clients can't interleave). The
+      client's CWD for relative words: the blocked reader's
+      pr_CurrentDir, found via the queued read packet's sender
+      (its Read is parked in rdq while it waits for our line).
+      Words with ':' resolve via LockDosList/FindDosEntry
+      (semaphores, not packets): assigns scan from dol_Lock,
+      volumes/devices get the whole "NAME:path" against a zero
+      lock. fscall refuses to send to our own port (deadlock
+      guard, covers `CCON:` paths). FIB filenames at packet level
+      are C strings from some filesystems, BCPL from others —
+      first-byte<32 heuristic covers both (filenames never start
+      with a control byte). Struct offsets (pr_CurrentDir 152,
+      fl_Task 12, dol_Task/dol_Lock 8/12, fib_FileName 8)
+      cross-checked against amitools' libstructs. String logic
+      (sort/common-prefix/replace/fold) vamos-tested VERBATIM via
+      extracted procs; E AND/OR line continuation also
+      vamos-verified. Limits (v1, deliberate): no quoted-word
+      parsing, no completion when the reader's CWD lock is 0, ≤80
+      candidates / one menu page (beep signals more), no
+      volume-name completion for a bare word.
+      **Boot test:** `NewShell CCON:`, `cd SYS:` then `cd Ut<Tab>`
+      (completes to Utilities/), `type S:Startup-se<Tab>`,
+      something ambiguous like `dir D<Tab>` (menu appears, Tab
+      cycles, Shift+Tab back, Enter accepts, Esc closes, typing
+      closes), `dir RAM:<Tab>`, `dir SYS:Prefs/<Tab>`, a
+      no-match beep, and completion while type-ahead (no Read
+      pending) after `list` — plus More/Ed still fine after.
+      **First boot round (17.7.26): found+fixed — the bare Shift
+      DOWN-STROKE is its own IDCMP_RAWKEY and closed the menu
+      before Shift+Tab could arrive; menu-close now ignores
+      qualifier keys ($60-$67) and key releases (bit 7).**
 - [ ] **M6: input.device-handler input (the Ed-menus fix, and
       full console.device parity).** Move key acquisition out of
       IDCMP: add an input.device handler (IND_ADDHANDLER) below
