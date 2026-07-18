@@ -605,6 +605,70 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       steps through ghost words; Shift+Tab with a ghost showing
       opens the completion menu; Tab with NO ghost still
       completes filenames.
+      AND THE 1.0 MONSTER LAP (18.7.26, his call: "let's ship a
+      fucking monster") — the whole readline tier in one build:
+      (1) WHEEL SCROLLBACK: NewMouse rawkeys $7A/$7B pass ihkey's
+      button filter and scroll 3 lines/tick in both modes, never
+      snapping, never reaching the client; an open completion menu
+      closes first (no smear). (2) KILL KEYS: Ctrl+U (kill to
+      start), Ctrl+K (kill to end), Ctrl+W (word back, trailing
+      spaces first), Ctrl+L (screen scrolls into HISTORY — a
+      non-destructive clear, Shift+Up undoes it; prompt row lands
+      at top). Ctrl+A/E deliberately NOT taken (Ctrl+C..F are
+      break signals; Shift+arrows are the house home/end).
+      (3) CTRL+R SEARCH: substring case-folded over the ring,
+      newest first; the TITLE BAR carries [search: frag] (the
+      prompt is client output — the title is ours; borrowed
+      windows lose only the feedback), edit line shows the match
+      live, Ctrl+R steps older, Backspace widens (re-searches
+      from newest), Enter exits-and-COMMITS (falls through to the
+      normal commit path), Esc restores the stashed line, cursor
+      keys keep the match for editing, beep = no match (line
+      kept, bash-style). srbuf/srstash per console.
+      (4) DOUBLE/TRIPLE CLICK: DoubleClick() prefs timing, same
+      row only; 2 = the clicked cell's class-run (word, or the
+      whitespace gap), 3 = whole line; copied on the spot, no
+      drag, no release needed, writers never parked (selon stays
+      FALSE).
+      **First monster boot: wheel, kill keys, clicks all GREEN;
+      Ctrl+R "did nothing" — the TWO-PASS KEY TRAP, third sighting
+      tonight (menu-Enter and the bare-Shift snap were the first
+      two): every key runs dorawkey on its RAW pass before the
+      keymap makes its vanilla byte, and the movement-exits-search
+      hook sat unconditionally in dorawkey's cooked section — so
+      the first letter after Ctrl+R exited search on its raw pass
+      and typed normally. Fixed: only the four arrows exit search
+      there. LESSON FOR ALL FUTURE dovanilla FEATURES: any state
+      entered via a vanilla byte must not be torn down in dorawkey
+      except by keys dorawkey itself consumes.
+      Second boot: search WORKED but "the prompt is not changing" —
+      title-bar feedback was the wrong place (bash eyes look at
+      the prompt, and CTerm's borrowed frame has no title of ours
+      anyway). Now an INVERSE [search: frag] chip draws in the
+      line itself, ghost-style (pixels only, clipped to the blip's
+      row, suppresses the autosuggestion while searching), srenter
+      draws it immediately and srexit erases it; the title still
+      mirrors it on owned windows.
+      Third round, his design review: "shouldn't search replace
+      the prompt?" — bash replaces, zsh goes below, fish pagers;
+      his fingers are bash. And CCON can do bash BETTER than a
+      terminal can: the prompt cells are IN the model, so the
+      banner overdraws them (inverse, fragment tail kept when
+      long, space-padded to the prompt width when short, pixels
+      only) and srexit/srcancel restore the true prompt with one
+      drawmodelrow. The after-line chip is retired. Re-test:
+      Ctrl+R → the prompt becomes (search: ) instantly; the
+      fragment fills it; Enter/Esc/arrows bring the real prompt
+      back unharmed; works inside CTerm's frame too.**
+      **Boot test:** wheel up/down over long output (cooked, and
+      inside More for raw), wheel with menu open closes it then
+      scrolls; Ctrl+W/U/K surgery on a fat command line; Ctrl+L
+      then Shift+Up (the cleared screen is IN history); Ctrl+R
+      → type a mid-line fragment → title shows it, match appears
+      → Ctrl+R steps older → Enter RUNS it; Ctrl+R → Esc gives
+      the old line back; double-click a filename in ls output →
+      RAMIGA-V pastes it; triple-click a line; ghosts/completion/
+      history/copy-paste regression.
       Final 1.0 fix: a bare qualifier down-stroke no longer snaps
       a scrolled view to live — pressing Shift mid-Ctrl+Up-scroll
       to switch to paging used to throw the view to the prompt

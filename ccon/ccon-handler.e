@@ -130,6 +130,15 @@ OBJECT console
                                 -> history entry the typed line
                                 -> prefixes (NIL = none); ghost text
                                 -> is its tail, drawn grey
+  -> Ctrl+R incremental history search (readline)
+  srch                          -> search mode is on
+  sridx                         -> history index of the match; -1 none
+  srbuf:PTR TO CHAR             -> the search fragment (E-string)
+  srstash:PTR TO CHAR           -> the line as it was at Ctrl+R
+  -> double/triple click (word/line select)
+  dcsec, dcmic                  -> time of the last SELECTDOWN
+  dccnt                         -> click run length: 1 drag, 2 word,
+  dcrow                         -> 3 line; same-row clicks only
   tcmrow0                       -> completion menu's first row, frozen
   hist[32]:ARRAY OF LONG        -> prompt history: E-string ptrs
   htotal, hpos
@@ -380,8 +389,8 @@ PROC main()
               IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
               IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
               IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
-              IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code)
-              IF class = IDCMP_MOUSEMOVE THEN selmouse($FF)
+              IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code, secs, mics)
+              IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
               IF class = IDCMP_NEWSIZE THEN doresize()
               IF class = IDCMP_CLOSEWINDOW THEN doclosew()
             ENDIF
@@ -434,8 +443,12 @@ PROC coninit(c:PTR TO console)
   c.tctmp := String(416)
   c.tctail := String(404)
   c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
+  c.srbuf := String(64)
+  c.srstash := String(404)
+  c.sridx := -1
   IF (c.ebuf = NIL) OR (c.stash = NIL) OR (c.wtitle = NIL) OR
-     (c.wtitlebase = NIL) OR (c.tctmp = NIL) OR (c.tctail = NIL)
+     (c.wtitlebase = NIL) OR (c.tctmp = NIL) OR (c.tctail = NIL) OR
+     (c.srbuf = NIL) OR (c.srstash = NIL)
     RETURN FALSE
   ENDIF
 ENDPROC TRUE
@@ -551,6 +564,8 @@ PROC condispose(c:PTR TO console)
   IF c.tctmp THEN Dispose(c.tctmp)
   IF c.tctail THEN Dispose(c.tctail)
   IF c.tcpool THEN Dispose(c.tcpool)
+  IF c.srbuf THEN Dispose(c.srbuf)
+  IF c.srstash THEN Dispose(c.srstash)
   Dispose(c)
 ENDPROC
 
@@ -1697,19 +1712,67 @@ ENDPROC
 -> SELECTDOWN $68, SELECTUP $E8, or $FF for a MOUSEMOVE). Positions
 -> come from the window NOW, not the message - coarse under a fast
 -> drag, and exactly what Ed's own class-2 handler does.
-PROC selmouse(cd)
-  DEF c, lo, hi, plo, phi
+-> a run of quick clicks on the same row escalates the selection:
+-> one = drag anchor as ever, two = the word under the pointer,
+-> three = the whole line - xterm manners, DoubleClick() timing
+-> (the user's own prefs), copy on the spot with no release needed
+PROC selclicks(c)
+  DEF r, x, x0, x1, m:PTR TO CHAR, sp, base
+  r := c / curcon.cols
+  x := c - Mul(r, curcon.cols)
+  base := Mul(r, curcon.cols)
+  curcon.selvo := curcon.viewoff
+  m := curcon.sb + Mul(selvidx(r), curcon.cols)
+  IF curcon.dccnt = 2
+    -> the word: the run of the clicked cell's class - text selects
+    -> text, a click in whitespace selects the gap
+    sp := m[x] <= 32
+    x0 := x
+    WHILE (x0 > 0) AND ((m[x0 - 1] <= 32) = sp)
+      x0--
+    ENDWHILE
+    x1 := x
+    WHILE (x1 < (curcon.cols - 1)) AND ((m[x1 + 1] <= 32) = sp)
+      x1++
+    ENDWHILE
+    curcon.sello := base + x0
+    curcon.selhi := base + x1 + 1
+  ELSE
+    curcon.sello := base       -> the whole line; selcopy trims the
+    curcon.selhi := base + curcon.cols  -> trailing blanks anyway
+  ENDIF
+  selrepaint(r, r, curcon.sello, curcon.selhi)
+  selcopy()
+ENDPROC
+
+PROC selmouse(cd, csec, cmic)
+  DEF c, lo, hi, plo, phi, r
   IF curcon.sb = NIL THEN RETURN       -> no model, no selection
   IF cd = IECODE_LBUTTON
     clearsel()
     IF (curcon.rawmode = FALSE) AND curcon.tcactive THEN tcclose()
     c := cellat()
     IF c >= 0
-      curcon.selon := TRUE
-      curcon.selvo := curcon.viewoff
-      curcon.selanc := c
-      curcon.selcur := c
-      setidcmp()                -> motion reports on for the drag
+      r := c / curcon.cols
+      IF DoubleClick(curcon.dcsec, curcon.dcmic, csec, cmic) AND
+         (r = curcon.dcrow)
+        curcon.dccnt := curcon.dccnt + 1
+        IF curcon.dccnt > 3 THEN curcon.dccnt := 3
+      ELSE
+        curcon.dccnt := 1
+      ENDIF
+      curcon.dcsec := csec
+      curcon.dcmic := cmic
+      curcon.dcrow := r
+      IF curcon.dccnt >= 2
+        selclicks(c)            -> word/line select + copy; no drag
+      ELSE
+        curcon.selon := TRUE
+        curcon.selvo := curcon.viewoff
+        curcon.selanc := c
+        curcon.selcur := c
+        setidcmp()              -> motion reports on for the drag
+      ENDIF
     ENDIF
   ELSEIF cd = (IECODE_LBUTTON OR IECODE_UP_PREFIX)
     IF curcon.selon
@@ -2329,7 +2392,8 @@ ENDPROC
 -> commit erases it and renders the real line over the same cells.
 PROC drawedit()
   DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc,
-      m:PTR TO CHAR, a:PTR TO CHAR, j, gp, g:PTR TO CHAR, gn, gcol
+      m:PTR TO CHAR, a:PTR TO CHAR, j, gp, g:PTR TO CHAR, gn, gcol,
+      sd[80]:STRING
   IF curcon.win = NIL THEN RETURN
   l := StrLen(curcon.ebuf)
   edroom(l)
@@ -2363,7 +2427,7 @@ PROC drawedit()
   -> row to its right edge, so the ghost needs no bookkeeping.
   curcon.sghost := NIL
   gp := ghostpen()
-  IF (curcon.cpos = l) AND (gp >= 0) THEN sgfind()
+  IF (curcon.cpos = l) AND (gp >= 0) AND (curcon.srch = FALSE) THEN sgfind()
   cch[0] := 32
   IF curcon.cpos < l
     cch[0] := s[curcon.cpos]
@@ -2390,9 +2454,154 @@ PROC drawedit()
       Text(curcon.rp, g + l + 1, gn)
     ENDIF
   ENDIF
+  -> Ctrl+R feedback REPLACES the prompt, the bash way: the prompt
+  -> cells (0..ancx-1 on the anchor row) are overdrawn with an
+  -> inverse (search: frag) banner - pixels only, the model still
+  -> holds the real prompt, so srexit/srcancel restore it
+  -> perfectly with one drawmodelrow. Long fragments keep their
+  -> TAIL visible; short banners pad inverse to the full prompt
+  -> width so no prompt fragment peeks out.
+  IF curcon.srch
+    IF curcon.ancx > 0
+      StringF(sd, '(search: \s)', curcon.srbuf)
+      gn := StrLen(sd)
+      WHILE (StrLen(sd) < curcon.ancx) AND (StrLen(sd) < 79)
+        StrAdd(sd, ' ')
+      ENDWHILE
+      SetAPen(curcon.rp, 0)
+      SetBPen(curcon.rp, curcon.deffg)
+      Move(curcon.rp, curcon.left,
+           curcon.topy + Mul(curcon.ancy, curcon.ch) + curcon.baseline)
+      IF gn > curcon.ancx
+        Text(curcon.rp, sd + (gn - curcon.ancx), curcon.ancx)
+      ELSE
+        Text(curcon.rp, sd, Min(StrLen(sd), curcon.ancx))
+      ENDIF
+    ENDIF
+  ENDIF
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
   curcon.edlast := l
+ENDPROC
+
+-> ---------- Ctrl+R incremental history search (readline) ----------
+-> The prompt is CLIENT output, so the search state lives where the
+-> console owns pixels: the edit line shows the current match live,
+-> the TITLE BAR shows the fragment - [search: frag]. Typing narrows
+-> (substring, case-folded, anywhere in the line - unlike the ghost,
+-> which is prefix-only), Ctrl+R again steps to older matches, Enter
+-> takes the match and RUNS it, Esc restores the pre-search line,
+-> and any movement key keeps the match for editing. No readable
+-> title on a borrowed window (CTerm's frame) - search still works,
+-> only the fragment display is lost there.
+
+PROC srtitle()
+  DEF f:PTR TO CHAR, i
+  IF curcon.fwin THEN RETURN
+  IF curcon.win = NIL THEN RETURN
+  StrCopy(curcon.wtitle, '[search: ')
+  f := curcon.srbuf
+  i := 0
+  WHILE (f[i] <> 0) AND (i < 60)
+    StrAdd(curcon.wtitle, f + i, 1)
+    i++
+  ENDWHILE
+  StrAdd(curcon.wtitle, ']')
+  SetWindowTitles(curcon.win, curcon.wtitle, -1)
+ENDPROC
+
+-> newest match at index >= from whose line CONTAINS the fragment;
+-> TRUE = found (ebuf/cpos/sridx updated), FALSE = kept as it was
+PROC srfind(from)
+  DEF avail, idx, h:PTR TO CHAR, fl, hl, i, j, ok, f:PTR TO CHAR,
+      got
+  IF curcon.histdone = FALSE THEN RETURN FALSE
+  fl := StrLen(curcon.srbuf)
+  IF fl = 0 THEN RETURN FALSE
+  f := curcon.srbuf
+  got := FALSE
+  avail := Min(curcon.htotal, HISTMAX)
+  IF from < 0 THEN from := 0
+  FOR idx := from TO avail - 1
+    IF got = FALSE
+      h := curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)]
+      hl := StrLen(h)
+      i := 0
+      WHILE (got = FALSE) AND (i <= (hl - fl))
+        ok := TRUE
+        FOR j := 0 TO fl - 1
+          IF tcfold(h[i + j]) <> tcfold(f[j]) THEN ok := FALSE
+        ENDFOR
+        IF ok
+          got := TRUE
+          curcon.sridx := idx
+          StrCopy(curcon.ebuf, h)
+          WHILE StrLen(curcon.ebuf) > edcap()
+            SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
+          ENDWHILE
+          curcon.cpos := StrLen(curcon.ebuf)
+        ENDIF
+        i++
+      ENDWHILE
+    ENDIF
+  ENDFOR
+ENDPROC got
+
+PROC srenter()
+  IF curcon.srbuf = NIL THEN RETURN
+  curcon.srch := TRUE
+  StrCopy(curcon.srstash, curcon.ebuf)
+  StrCopy(curcon.srbuf, '')
+  curcon.sridx := -1
+  srtitle()
+  drawedit()                    -> the [search: ] chip appears NOW
+ENDPROC
+
+PROC sradd(code)
+  IF StrLen(curcon.srbuf) >= 60 THEN RETURN
+  StrAdd(curcon.srbuf, [code, 0]:CHAR, 1)
+  IF srfind(curcon.sridx) = FALSE THEN DisplayBeep(NIL)
+  srtitle()                     -> the current match may still hold -
+  drawedit()                    -> bash keeps it, so do we
+ENDPROC
+
+PROC srback()
+  DEF l
+  l := StrLen(curcon.srbuf)
+  IF l > 0
+    SetStr(curcon.srbuf, l - 1)
+    curcon.sridx := -1
+    srfind(0)                   -> widening prefers the newest again
+  ENDIF
+  srtitle()
+  drawedit()
+ENDPROC
+
+PROC srnext()
+  IF srfind(curcon.sridx + 1) = FALSE THEN DisplayBeep(NIL)
+  srtitle()
+  drawedit()
+ENDPROC
+
+-> leave search mode keeping the match in the line (Enter commits
+-> it right after; movement keys edit it)
+PROC srexit()
+  curcon.srch := FALSE
+  curcon.hpos := -1
+  settitle()
+  IF curcon.sb THEN drawmodelrow(curcon.ancy)  -> the real prompt
+  drawedit()                                   -> comes back from
+ENDPROC                                        -> the model
+
+-> Esc: the search never happened
+PROC srcancel()
+  curcon.srch := FALSE
+  StrCopy(curcon.ebuf, curcon.srstash)
+  curcon.cpos := StrLen(curcon.ebuf)
+  curcon.hpos := -1
+  settitle()
+  IF curcon.sb THEN drawmodelrow(curcon.ancy)
+  drawedit()
 ENDPROC
 
 -> ---------- fish-style autosuggestions ----------
@@ -2478,13 +2687,37 @@ PROC histload(idx)
 ENDPROC
 
 PROC dovanilla(code, qual)
-  DEF s:PTR TO CHAR, l, j, dup
+  DEF s:PTR TO CHAR, l, j, dup, k
   snaplive()                    -> typing returns the view to live
   IF curcon.rawmode
     -> raw: every key is just a byte for the client - Return is CR 13,
     -> Ctrl+C is byte 3 (no break signal), Ctrl+\ is byte 28 (no EOF)
     enqueue(code)
     inputarrived()
+    RETURN
+  ENDIF
+  -> Ctrl+R search mode swallows its own keys; Enter exits keeping
+  -> the match and FALLS THROUGH to the normal commit (bash runs the
+  -> match), any unhandled key exits keeping the match and acts
+  IF curcon.srch
+    IF code = 18
+      srnext()
+      RETURN
+    ELSEIF code = 27
+      srcancel()
+      RETURN
+    ELSEIF code = 8
+      srback()
+      RETURN
+    ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
+      sradd(code)
+      RETURN
+    ELSE
+      srexit()
+    ENDIF
+  ENDIF
+  IF code = 18
+    srenter()                   -> Ctrl+R: into search mode
     RETURN
   ENDIF
   IF code = 9
@@ -2563,6 +2796,51 @@ PROC dovanilla(code, qual)
       SetStr(curcon.ebuf, l - 1)
       drawedit()
     ENDIF
+  ELSEIF code = 21
+    -> Ctrl+U (readline): kill from line start to the cursor
+    IF curcon.cpos > 0
+      FOR j := curcon.cpos TO l - 1
+        s[j - curcon.cpos] := s[j]
+      ENDFOR
+      SetStr(curcon.ebuf, l - curcon.cpos)
+      curcon.cpos := 0
+      drawedit()
+    ENDIF
+  ELSEIF code = 11
+    -> Ctrl+K (readline): kill from the cursor to line end
+    IF curcon.cpos < l
+      SetStr(curcon.ebuf, curcon.cpos)
+      s[curcon.cpos] := 0
+      drawedit()
+    ENDIF
+  ELSEIF code = 23
+    -> Ctrl+W (readline): delete the word before the cursor -
+    -> trailing spaces first, then the token, gap closed
+    IF curcon.cpos > 0
+      j := curcon.cpos
+      WHILE (j > 0) AND (s[j - 1] = 32)
+        j--
+      ENDWHILE
+      WHILE (j > 0) AND (s[j - 1] <> 32)
+        j--
+      ENDWHILE
+      FOR k := curcon.cpos TO l - 1
+        s[k - (curcon.cpos - j)] := s[k]
+      ENDFOR
+      SetStr(curcon.ebuf, l - (curcon.cpos - j))
+      curcon.cpos := j
+      drawedit()
+    ENDIF
+  ELSEIF code = 12
+    -> Ctrl+L (readline): clear the screen, keep the line - the
+    -> visible rows scroll into HISTORY (Shift+Up brings them back;
+    -> nothing is destroyed), the prompt row lands at the top
+    eraseedit()
+    WHILE curcon.cy > 0
+      screenscroll()
+      curcon.cy := curcon.cy - 1
+    ENDWHILE
+    drawedit()
   ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
     -> Latin-1 high half too: Swedish keymaps type beyond ASCII;
     -> typed characters insert at the cursor, not just append
@@ -2624,6 +2902,7 @@ PROC dorawkey(code, qual)
   -> Tab can arrive as a RAW key when the keymap has no vanilla
   -> mapping for its shifted form: dispatch it to completion too
   IF (code = $42) AND (curcon.rawmode = FALSE)
+    IF curcon.srch THEN srexit()
     dotab(sh)
     RETURN TRUE
   ENDIF
@@ -2642,6 +2921,17 @@ PROC dorawkey(code, qual)
        (code <> $44) AND (code <> $43) AND (code <> $45)
       tcclose()
     ENDIF
+  ENDIF
+  -> the mouse wheel scrolls the view in BOTH modes, three lines a
+  -> tick (NewMouse: wheel up/down ride the input stream as rawkeys
+  -> $7A/$7B); like Ctrl-arrows it never snaps and never reaches
+  -> the client
+  IF code = $7A
+    scrollview(3)
+    RETURN TRUE
+  ELSEIF code = $7B
+    scrollview(-3)
+    RETURN TRUE
   ENDIF
   -> M5 scroll keys, checked before anything else: Ctrl+Up/Down by
   -> line in BOTH modes (raw clients never receive Ctrl-arrows -
@@ -2665,6 +2955,15 @@ PROC dorawkey(code, qual)
   snaplive()                    -> any other key returns the view to live
   IF curcon.rawmode
     RETURN rawcsikey(code, qual)
+  ENDIF
+  -> ONLY the arrows exit search mode here (keeping the match for
+  -> editing): every ordinary key passes through this proc on its
+  -> RAW pass before the keymap makes its vanilla byte - an
+  -> unconditional exit killed the search before the letter could
+  -> reach it (the two-pass trap, third sighting tonight)
+  IF curcon.srch
+    IF (code = RK_UP) OR (code = RK_DOWN) OR
+       (code = RK_LEFT) OR (code = RK_RIGHT) THEN srexit()
   ENDIF
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
@@ -2852,7 +3151,10 @@ PROC ihkey(e:PTR TO ihev)
   cd := e.code AND $FFFF
   q := e.qual AND $FFFF
   IF cd AND IECODE_UP_PREFIX THEN RETURN
-  IF (cd >= $68) AND (cd <= $7F) THEN RETURN  -> buttons, comm codes
+  IF ((cd >= $68) AND (cd <= $7F)) AND
+     (cd <> $7A) AND (cd <> $7B) THEN RETURN  -> buttons, comm codes
+                                -> - but the NewMouse wheel pair
+                                -> passes: dorawkey scrolls on them
   IF cd < $60 THEN clearsel()   -> any real key drops the highlight
                                 -> (bare qualifiers keep it)
   IF (curcon.selon = FALSE) AND (curcon.wqn > 0) THEN flushwq()

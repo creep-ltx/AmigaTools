@@ -1,0 +1,441 @@
+==========================================================================
+                                CCON: 1.0
+            a console handler with output scrollback and a
+                   modern line editor, for AmigaOS.
+==========================================================================
+
+  CONTENTS
+
+    1. What CCON: is
+    2. Requirements
+    3. Installation
+    4. Opening windows: the name syntax
+    5. The options, one by one
+    6. The line editor
+    7. Autosuggestions (the grey ghost)
+    8. Tab completion
+    9. Ctrl+R history search
+   10. Scrollback
+   11. Copy and paste
+   12. Raw mode and CRAW:
+   13. Running fullscreen programs (Ed, More)
+   14. How it works, briefly
+   15. Known limitations
+   16. Building from source
+   17. Files
+
+
+1. WHAT CCON: IS
+--------------------------------------------------------------------------
+
+  CCON: is a mounted console handler - the same kind of thing CON:,
+  KingCON and ViNCEd are. You mount it once, and from then on any
+  program can open a console window through it, exactly as it would
+  through CON:.
+
+  The reason it exists is OUTPUT SCROLLBACK. The stock 3.2 console
+  has none, and cannot be given any from the outside: commands talk
+  to the handler, so a terminal program cannot bolt scrollback on.
+  CCON: keeps 4000 lines of history behind every window.
+
+  Around that core it grew into a full console with a modern shell
+  feel:
+
+    - every open gets its OWN window, stock CON: fashion
+    - a real AmigaShell runs in it (NewShell CCON:)
+    - fish-style autosuggestions from your command history
+    - zsh-style tab completion with a cycling menu
+    - bash-style Ctrl+R incremental history search
+    - readline line surgery (Ctrl+W/U/K/L)
+    - scrollback by keys and mouse wheel, in raw mode too
+    - copy and paste with the stock console, both directions,
+      with double-click word and triple-click line selection
+    - SGR colour with a careful ANSI/Workbench pen separation
+    - fullscreen programs work: Ed with working menus, More
+    - a raw twin device, CRAW:, for RAW:-style uses
+
+
+2. REQUIREMENTS
+--------------------------------------------------------------------------
+
+  AmigaOS 3.2. Boot-verified on 3.2 with a 68030 (FS-UAE).
+  Older OS versions are untested.
+
+  CCON: deliberately answers the 3.2 shell's console probe in a way
+  that makes the shell hand line editing to the console - that is
+  where the history, completion, ghosts and search live.
+
+  Memory: each window allocates its scrollback model at open time,
+  roughly 600K at 80 columns. Plenty on an expanded machine; mind
+  it on a 2MB one.
+
+
+3. INSTALLATION
+--------------------------------------------------------------------------
+
+  From the archive (the drawers mirror SYS:):
+
+    copy L/ccon-handler L:
+    copy DEVS/CCON-mountlist DEVS:
+    copy DEVS/CRAW-mountlist DEVS:
+    Mount CCON: FROM DEVS:CCON-mountlist
+    Mount CRAW: FROM DEVS:CRAW-mountlist
+
+  Add the two Mount lines to S:User-Startup to make them permanent.
+
+  Try it:
+
+    NewShell CCON:
+    echo >CCON:0/0/300/80/hi/WAIT hello
+    type S:Startup-sequence >CRAW:0/0/500/150/t/WAIT
+
+  A note on updating: a running handler keeps its loaded code. After
+  replacing L:ccon-handler, reboot - a re-Mount alone is not enough.
+
+
+4. OPENING WINDOWS: THE NAME SYNTAX
+--------------------------------------------------------------------------
+
+  The open name is stock CON: syntax. Every field may be left empty
+  and options may come in any order:
+
+    CCON:x/y/width/height/title/option/option/...
+
+  Examples:
+
+    NewShell CCON:
+    NewShell CCON:60/30/500/120/My-Shell
+    dir >CCON:0/0/400/200/dir/WAIT
+    echo >CCON:0/0/300/80/log/AUTO/WAIT starting...
+
+  EVERY open gets its own console and window, exactly as with stock
+  CON:. A redirect like `list >CCON:` opens (and, without WAIT,
+  closes) a window of its own. The window closes when the last
+  handle on it closes.
+
+  Opens of `*` and of CONSOLE: attach to the console the calling
+  program is already running on, instead of making a new window.
+  This is how a command reopens its own shell window.
+
+
+5. THE OPTIONS, ONE BY ONE
+--------------------------------------------------------------------------
+
+  CLOSE      Put a close gadget on the window. The gadget is ON by
+             default (like a 3.2 shell window); clicking it sends
+             end-of-file to the program reading the window.
+
+  NOCLOSE    Remove the close gadget.
+
+  WAIT       Keep the window open after the last handle closes,
+             until its close gadget is clicked. Without it, output
+             windows flash by:  dir >CCON:0/0//200/d/WAIT
+
+  AUTO       The open succeeds without a window; the window only
+             appears on the first actual I/O. The classic idiom for
+             debug consoles that should not open until they have
+             something to say.
+
+  SCREENname Open on the named public screen, e.g. SCREENWorkbench
+             or a terminal's own screen name.
+
+  NOBORDER   No window border.
+  NODRAG     No drag bar.
+  NODEPTH    No depth gadget.
+  NOSIZE     No sizing gadget.
+  BACKDROP   A backdrop window.
+  INACTIVE   Do not activate the window on open.
+
+  WINDOW0xADDR
+             Render into an EXISTING window at that address instead
+             of opening one. This is how a terminal program hands
+             its frame window to CCON:. The window is returned to
+             its owner untouched on close.
+
+  PENn       Default text pen number, 1-15. A terminal with an ANSI
+             palette typically passes PEN7.
+
+  WBPENS     Declares the screen's palette truly ANSI. Plain SGR
+             30-33 from programs are then treated as WORKBENCH pen
+             numbers and retargeted at the theme (C:Ed hardcodes
+             WB pens; without this it would render in ANSI red).
+             See section 14 for the full colour story.
+
+  Not implemented: SMART, SIMPLE, ALT, ICONIFY.
+
+
+6. THE LINE EDITOR
+--------------------------------------------------------------------------
+
+  Cooked mode - the shell prompt - is edited by the console:
+
+    typing            inserts at the cursor
+    Left / Right      move by one character
+    Ctrl+Left/Right   jump by word
+    Shift+Left/Right  jump to start / end of line
+    Backspace         delete before the cursor
+    Del               delete under the cursor
+    Esc               clear the line
+    Return            commit the line
+    Up / Down         walk the history (32 entries; the half-typed
+                      line is stashed and comes back)
+    Ctrl+W            delete the word before the cursor
+    Ctrl+U            delete from line start to the cursor
+    Ctrl+K            delete from the cursor to line end
+    Ctrl+L            clear the screen, keeping the line - the
+                      cleared rows scroll into HISTORY, so Shift+Up
+                      brings them back; nothing is destroyed
+    Ctrl+\            end-of-file (EndShell on an interactive shell)
+    Ctrl+C..F         break signals to the running command, as on
+                      any Amiga console
+
+  Long lines wrap across rows like the stock shell: growing past
+  the bottom of the window scrolls the screen, and the prompt walks
+  up with it.
+
+
+7. AUTOSUGGESTIONS (THE GREY GHOST)
+--------------------------------------------------------------------------
+
+  As you type, CCON: looks for the newest history entry that begins
+  with your line (case-blind) and shows the rest of it as grey
+  ghost text at the cursor:
+
+    4.Work:> ls _-la AmigaTools/        <- "-la AmigaTools/" is
+                                           grey: a suggestion
+
+    Right / Shift+Right   accept the whole suggestion
+    Ctrl+Right / Tab      accept ONE word of it (leading space
+                          included: from `ls`, one stroke takes
+                          ` -la`)
+    anything else         just keep typing; the ghost adapts or
+                          disappears
+
+  The ghost is display only. It is never part of what Return
+  commits, never copied by a selection, and it only appears at all
+  on screens that have a readable grey pen - a ghost that looked
+  like typed text would be worse than none.
+
+  While a ghost is showing, Shift+Tab forces the tab completion
+  menu instead (see below) - for when your history shadows a
+  filename you actually want completed.
+
+
+8. TAB COMPLETION
+--------------------------------------------------------------------------
+
+  Tab completes the word at the cursor as a filename:
+
+    - one match: completed fully; a directory gets a trailing '/',
+      a file a trailing space
+    - several matches: completed to the common prefix, then a MENU
+      of candidates opens below the prompt
+
+  In the menu:
+
+    Tab          cycle forward
+    Shift+Tab    cycle backwards
+    Return       accept the highlighted candidate and close; the
+                 line stays put, so a second Return runs it
+    Esc          close the menu, line unchanged
+    any other    close the menu, then act normally
+
+  Menu colours mirror the ls scheme: directories blue, hidden-class
+  entries (h-bit or .info) grey.
+
+  Relative words complete in the current directory of the shell
+  that is reading the window; words with ':' resolve through
+  assigns, volumes and devices.
+
+  Limits, by design: no quoted words, one menu page (80 candidates;
+  a beep means there are more), no volume-name completion for a
+  bare word.
+
+
+9. CTRL+R HISTORY SEARCH
+--------------------------------------------------------------------------
+
+  Ctrl+R searches your history incrementally, the bash way. The
+  prompt itself is replaced by an inverse banner:
+
+    (search: fra_)  matching-command-line
+
+  Type any fragment - it matches ANYWHERE in the line, not just at
+  the start (that is the difference from the ghost). The newest
+  matching history entry appears in the edit line as you type.
+
+    Ctrl+R (again)   step to the next older match
+    Backspace        shorten the fragment (search widens back)
+    Return           run the shown match
+    cursor keys      keep the match and edit it normally
+    Esc              forget it all; your original line comes back
+
+  A beep means no entry matches; the line keeps the last match.
+  When the search ends, the real prompt returns - CCON: restores
+  it from the scrollback model, pixel for pixel.
+
+
+10. SCROLLBACK
+--------------------------------------------------------------------------
+
+  Every window remembers 4000 lines. Viewing:
+
+    Shift+Up / Shift+Down   page back / forward  (cooked mode)
+    Ctrl+Up / Ctrl+Down     one line at a time   (ALL modes)
+    mouse wheel             three lines a tick   (ALL modes)
+
+  "All modes" means raw mode too: you can wheel back through More's
+  display or a fullscreen program's output while it runs. Raw
+  programs never see the scroll keys or the wheel.
+
+  While you are back, the title bar shows [scrollback -n]. Any new
+  output, or any other key, snaps the view to live. Colours are
+  remembered per cell and survive the trip.
+
+
+11. COPY AND PASTE
+--------------------------------------------------------------------------
+
+  Selecting:
+
+    drag                  select a range; output FREEZES while you
+                          hold the button, exactly like the stock
+                          console, and resumes on release
+    double-click          select the word under the pointer
+    triple-click          select the whole line
+
+  Releasing a drag - or the click selections immediately - copies
+  the text to clipboard.device unit 0 as IFF FTXT, the format the
+  stock console family uses. So:
+
+    - copy in CCON:, paste in a stock CON: window: works
+    - copy in stock CON:, paste in CCON:: works
+
+  Pasting:
+
+    RAMIGA-V   paste the clipboard as typed input. In cooked mode
+               it runs through the line editor (a multi-line clip
+               executes line by line); in raw mode the program
+               receives the bytes (pasting into Ed works).
+    RAMIGA-C   re-copy the standing highlight.
+
+  Selection works on the scrollback view as well - scroll back,
+  copy an old error, snap live, paste it.
+
+  You can select the line you are still typing; the prompt and the
+  edit line are ordinary cells to the selection machinery.
+
+
+12. RAW MODE AND CRAW:
+--------------------------------------------------------------------------
+
+  Programs switch a CCON: stream between cooked and raw with the
+  usual SetMode/ACTION_SCREEN_MODE - fullscreen programs do this
+  themselves. In raw mode every key becomes bytes for the program
+  (arrows and F-keys as CSI sequences, Ctrl+C as a plain byte 3),
+  and the console shows the classic block cursor.
+
+  CRAW: is the same handler mounted a second time with a startup
+  argument that opens every stream raw from the first byte - the
+  RAW: counterpart:
+
+    type somefile >CRAW:0/0/500/150/t/WAIT
+
+  Both devices can be mounted and used at the same time; each runs
+  as its own handler process.
+
+
+13. RUNNING FULLSCREEN PROGRAMS (ED, MORE)
+--------------------------------------------------------------------------
+
+  Ed and More work as they do on stock CON:, including the parts
+  that usually break on replacement consoles:
+
+    - Ed's MENUS drop and pick. Menu picks travel the same route
+      they take over stock CON: (as input events, not IDCMP), which
+      is the route Ed is actually written against.
+    - Ed re-measures itself when you resize the window.
+    - More's single-key paging uses real timed WAIT_CHARs.
+    - The block cursor is drawn by the console, as Ed expects.
+    - Swedish (and other) dead-key composition works in raw mode.
+
+  And unlike stock CON:, Ctrl+Up/Down and the wheel still scroll
+  the view while these programs run.
+
+
+14. HOW IT WORKS, BRIEFLY
+--------------------------------------------------------------------------
+
+  CCON: is a DOS packet handler written in Amiga E. A few of its
+  load-bearing choices:
+
+  Keys arrive the way console.device's own do: an input.device
+  handler sits just below Intuition in the input chain, takes
+  events for the active CCON: window, and runs them through
+  keymap.library. If the chain cannot be installed, the handler
+  falls back to window (IDCMP) input automatically.
+
+  The 3.2 shell probes each console at startup and, if it likes
+  the answer, runs its OWN line editor. CCON: answers the probe so
+  the shell leaves editing to the console - which is what makes
+  history, ghosts, completion and search possible at the prompt.
+
+  Colour lives in two worlds that must not mix. With WBPENS the
+  palette is declared truly ANSI: pen conventions apply as-is and
+  bold maps to the bright pens. On any other screen, plain SGR
+  30-37 stay raw pen numbers (what Workbench-pen programs like Ed
+  mean), while the bold forms - ANSI colour intent, the ls scheme -
+  are translated BY COLOUR to the screen's nearest real pens. So
+  directories are genuinely blue everywhere, and Ed is never red.
+
+  Each window's display is backed by a 4000-line model with one
+  attribute byte per cell. Redraws, scrollback, selection repaints,
+  menu restores and the Ctrl+R prompt restore all read from it.
+
+  The window closes with its last handle; WAIT windows linger for
+  their gadget. Every open parses its own name, so all options
+  apply per window.
+
+
+15. KNOWN LIMITATIONS
+--------------------------------------------------------------------------
+
+  - History is per window and ends with it.
+  - The scrollback model costs about 600K per window at 80 columns.
+  - Leaving scrollback restores CCON:'s own title, overwriting a
+    title a program set (More's, for instance). Cosmetic.
+  - CSI K under a coloured background erases to black.
+  - Completion: no quoted words, one menu page, no volume-name
+    completion for a bare word.
+  - SMART/SIMPLE, ALT and ICONIFY are not implemented.
+  - The font is topaz 8 (a borrowed window keeps its owner's font);
+    there is no FONT option yet.
+  - SGR italic/underline (3/4) are not rendered.
+
+
+16. BUILDING FROM SOURCE
+--------------------------------------------------------------------------
+
+  The prebuilt binary is included; nothing needs compiling. To
+  build it yourself, with the E-VO E compiler:
+
+    evo ccon-handler.e LARGE
+
+  The LARGE model is required as of 1.0. The source is one file,
+  ccon-handler.e, and carries its design history as comments -
+  including how an E binary survives being started as a handler,
+  verified by disassembling the compiler's generated startup code.
+
+
+17. FILES
+--------------------------------------------------------------------------
+
+  L/ccon-handler         the handler
+  DEVS/CCON-mountlist    Mount CCON: FROM this
+  DEVS/CRAW-mountlist    the raw-by-default second device
+  ccon.readme            short-form readme
+  ccon.doc               this manual
+
+==========================================================================
+  CCON: is part of the LTX AmigaTools collection.
+==========================================================================
