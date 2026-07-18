@@ -20,7 +20,8 @@
      report back in raw mode -- the same exchange C:Dir uses.
      Non-interactive output falls back to one entry per line, so
      redirected/piped output stays parseable.
-   - Directories are colored (SGR pen 3) on interactive output.
+   - Colors on interactive output: directories blue (1;34),
+     hidden-class entries - h-bit or .info - grey (1;30).
    - A pattern argument lists the matches themselves (like ls -d):
      `ls #?.e` does what it says; a plain directory argument lists
      the directory's contents.
@@ -68,7 +69,8 @@ DEF gtmp=NIL:PTR TO CHAR                    -> estring, size field
 DEF gdate=NIL:PTR TO CHAR, gtime=NIL:PTR TO CHAR
 DEF gpatbuf[1030]:ARRAY OF CHAR
 DEF pendhead=NIL:PTR TO pnode               -> -R work list, depth-first
-DEF seqon[8]:ARRAY OF CHAR                  -> CSI 33m, dir color
+DEF seqdir[8]:ARRAY OF CHAR                 -> CSI 1;34m, dirs: blue
+DEF seqhid[8]:ARRAY OF CHAR                 -> CSI 1;30m, hidden: grey
 DEF seqoff[8]:ARRAY OF CHAR                 -> CSI 0m
 
 PROC main() HANDLE
@@ -83,7 +85,10 @@ PROC main() HANDLE
   gtmp  := String(64)
   gdate := String(LEN_DATSTRING)
   gtime := String(LEN_DATSTRING)
-  seqon[0]  := $9B; seqon[1]  := "3"; seqon[2] := "3"; seqon[3] := "m"; seqon[4] := 0
+  seqdir[0] := $9B; seqdir[1] := "1"; seqdir[2] := ";"; seqdir[3] := "3"
+  seqdir[4] := "4"; seqdir[5] := "m"; seqdir[6] := 0
+  seqhid[0] := $9B; seqhid[1] := "1"; seqhid[2] := ";"; seqhid[3] := "3"
+  seqhid[4] := "0"; seqhid[5] := "m"; seqhid[6] := 0
   seqoff[0] := $9B; seqoff[1] := "0"; seqoff[2] := "m"; seqoff[3] := 0
 
   npaths := parseargs(paths)
@@ -679,9 +684,25 @@ PROC columns(arr:PTR TO LONG, count)
   ENDFOR
 ENDPROC
 
+-> the colour scheme: directories blue, hidden-class entries (h-bit
+-> or .info) grey - grey wins, dimming is the point - plain files in
+-> the terminal's default
+PROC ishid(e:PTR TO dent)
+  DEF l
+  IF e.prot AND $80 THEN RETURN TRUE
+  l := StrLen(e.name)
+  IF l >= 6
+    IF suffinfo(e.name + l - 5) THEN RETURN TRUE
+  ENDIF
+ENDPROC FALSE
+
 PROC addname(e:PTR TO dent)
-  IF tinter AND e.isdir
-    StrAdd(gline, seqon)
+  IF tinter AND ishid(e)
+    StrAdd(gline, seqhid)
+    StrAdd(gline, e.name)
+    StrAdd(gline, seqoff)
+  ELSEIF tinter AND e.isdir
+    StrAdd(gline, seqdir)
     StrAdd(gline, e.name)
     StrAdd(gline, seqoff)
   ELSE

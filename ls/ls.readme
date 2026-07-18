@@ -50,9 +50,10 @@ HOW IT WORKS
   and falls back to one entry per line with no color codes, so
   `ls >file` stays parseable.
 
-  Directories are colored via plain console SGR sequences on
-  interactive output -- no rendering tricks, any console shows
-  them.
+  Colors on interactive output, via plain console SGR
+  sequences -- no rendering tricks, any console shows them:
+  directories blue (1;34), hidden-class entries (h-bit or .info)
+  grey (1;30), grey winning when both apply.
 
   Plain names and patterns are handled uniformly through
   ParsePatternNoCase() and MatchFirst()/MatchNext().

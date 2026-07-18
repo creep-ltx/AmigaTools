@@ -1193,21 +1193,64 @@ columns:
 .done:  movem.l (sp)+,d2-d6/a2-a3
         rts
 
-; appname: entry a2's name at (a3)+, wrapped in color when it's a
-; directory on an interactive console
+; appname: entry a2's name at (a3)+, wrapped in color on an
+; interactive console: hidden-class grey (grey wins - dimming is
+; the point), directories blue, plain files bare (E parity)
 appname:
         tst.b   tinter
         beq.s   .plain
+        bsr     enthid
+        tst.l   d0
+        bne.s   .hid
         tst.l   ent_isdir(a2)
         beq.s   .plain
-        lea     seqon(pc),a0
-        bsr     appstr
+        lea     seqdir(pc),a0
+        bra.s   .col
+.hid:   lea     seqhid(pc),a0
+.col:   bsr     appstr
         lea     ent_name(a2),a0
         bsr     appstr
         lea     seqoff(pc),a0
         bra     appstr
 .plain: lea     ent_name(a2),a0
         bra     appstr
+
+; enthid: d0 nonzero when entry a2 is hidden-class - h-bit set, or
+; a case-blind ".info" suffix with a stem (the E build's ishid)
+enthid:
+        move.l  ent_prot(a2),d0
+        btst    #7,d0
+        bne.s   .hid
+        lea     ent_name(a2),a0
+        bsr     strlen
+        cmp.l   #6,d0
+        blt.s   .no
+        lea     ent_name(a2),a0
+        add.l   d0,a0
+        moveq   #0,d1
+        move.b  -(a0),d1
+        bsr     ucase
+        cmp.b   #'O',d1
+        bne.s   .no
+        move.b  -(a0),d1
+        bsr     ucase
+        cmp.b   #'F',d1
+        bne.s   .no
+        move.b  -(a0),d1
+        bsr     ucase
+        cmp.b   #'N',d1
+        bne.s   .no
+        move.b  -(a0),d1
+        bsr     ucase
+        cmp.b   #'I',d1
+        bne.s   .no
+        move.b  -(a0),d1
+        cmp.b   #'.',d1
+        bne.s   .no
+.hid:   moveq   #1,d0
+        rts
+.no:    moveq   #0,d0
+        rts
 
 ;----------------------------------------------------------------------
 ; longline: one -l row for entry a0: hsparwed, size (or Dir), date,
@@ -1588,7 +1631,8 @@ msg_break:   dc.b '***Break: ls',10,0
 msg_total:   dc.b 'total ',0
 str_dir:     dc.b 'Dir',0
 dashes:      dc.b '------------------',0
-seqon:       dc.b $9b,'33m',0
+seqdir:      dc.b $9b,'1;34m',0
+seqhid:      dc.b $9b,'1;30m',0
 seqoff:      dc.b $9b,'0m',0
 csireq:      dc.b $9b,'0 q'
 ; prottab: bit, letter, 1 = set-means-lit (h/s/p/a), 0 = clear (rwed)

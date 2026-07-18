@@ -29,7 +29,8 @@ How ls semantics map onto AmigaDOS:
 - Multi-column output is sized by asking the console: the CSI
   `0 q` window-bounds request, the same exchange C:Dir uses.
   Redirected or piped output falls back to one entry per line.
-- Directories are colored on interactive output.
+- Colors on interactive output: directories blue, hidden-class
+  entries (h-bit or `.info`) grey — grey wins when both apply.
 - A pattern argument (`ls #?.e`) lists the matches themselves;
   a directory argument lists its contents.
 
