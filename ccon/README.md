@@ -64,7 +64,26 @@ the cursor position): full-screen programs like Ed draw no
 marker of their own and rely on the console's, exactly as on
 stock CON:. If the chain hookup fails, keys fall back to the
 window path and the window title gains a ` [no chain]` marker.
-See `todo.md`.
+M7 — boot-verified — is copy & paste: drag-select with the left
+button — inverse-video highlight, output frozen mid-drag exactly
+like the stock console (writers wait, unreplied, until the
+button releases) — and releasing copies the text to
+clipboard.device unit 0 as IFF FTXT, the format the stock
+console family shares, so selections travel both ways between
+CCON and CON: windows. RAMIGA-V pastes (RAMIGA-C re-copies a
+standing highlight): the clip is injected as typed input —
+through the line editor when cooked, straight to the client when
+raw, which is how text lands in Ed. Selection works on whatever
+the view shows, scrollback included. The mouse events ride
+IDCMP, not the input chain — a telemetry boot proved Intuition
+consumes select-up and motion below its own chain position, so a
+drag simply cannot be seen from down there; the flag juggling
+this requires (MOUSEBUTTONS out while a client holds `CSI 2{`,
+MOUSEMOVE in only mid-drag) lives in one place. The cooked edit
+line also wraps across rows now, stock-shell style: growing past
+the bottom scrolls the screen, the prompt walks up, and the
+completion menu freezes its rows so cycling candidates cannot
+overwrite it. See `todo.md`.
 
 ## Try it
 

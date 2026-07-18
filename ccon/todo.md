@@ -412,6 +412,80 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       (blue dirs, grey hidden); (5) two-window check: a stock
       CON: shell alongside — keys go to whichever window is
       active.
+- [x] **M7: copy & paste — 0.13 built on chain mouse, DISPROVEN
+      by the 0.14 telemetry boot (title counters M40 S1: button
+      DOWNS reach pri 20, select-up and motion NEVER do —
+      Intuition consumes them; V412 P0 proved RAMIGA-V arrives
+      and maps fine, clip was just empty). 0.15 reroutes mouse
+      onto IDCMP, the KingCON way: setidcmp() recomputes the
+      window's flags from state — MOUSEBUTTONS in whenever no
+      client holds CSI 2{ (out while Ed owns the mouse: class-2
+      reports need the events downstream, the MENUPICK lesson
+      applied to mouse), MOUSEMOVE in only mid-drag
+      (WA-less ReportMouse(TRUE) makes motion exist, the IDCMP
+      bit gates delivery). Selection therefore works in the
+      IDCMP fallback too; paste stays chain-only (keymap path).
+      RAMIGA-C re-copies a standing highlight (the +400 tell was
+      him trying it — free muscle-memory win). Still in: 0.14
+      title telemetry, strip before commit.** The selection
+      machine itself is unchanged, reading positions live from
+      win.mousex/y (the pattern Ed's own class-2 handler uses,
+      per its disassembly). **0.15 selection/copy/paste
+      BOOT-CONFIRMED same day ("It works!").**
+- [x] **Wrapped edit line — 0.16 (18.7.26), BOOT-CONFIRMED same
+      day. Telemetry stripped in 0.17 (the committed build).** The
+      cooked line was hard-capped at one row (insert refused past
+      the right edge). Now it wraps like the stock shell: the
+      overlay spans rows below the anchor, growing past the
+      bottom scrolls the whole screen (edroom — the dotab menu
+      loop's pattern, anchor and output cursor track), the blip
+      wraps with it, eraseedit clears every row the previous
+      draw used (edlast), and capacity is LINEMAX or the grid
+      below the anchor, whichever is smaller (edcap). History
+      recall truncates to the same cap. The completion menu's
+      rows freeze at open (tcmrow0) and cycling rejects
+      candidates that would grow the line down into the menu.
+      **Boot test:** type past the right edge — the line wraps
+      and editing works across rows (cursor keys, word jumps,
+      backspace over the boundary, blip on the right row); type
+      until the screen scrolls (prompt walks up); Return
+      commits a wrapped line correctly into the transcript and
+      scrollback; history-recall a long line; Tab completion
+      with a wrapped line (menu sits below the LAST row, cycling
+      candidates never overwrites the menu); paste a long line
+      (RAMIGA-V) — it wraps as it types. Cells highlight in inverse video
+      (drawselrow: attr-batched runs split at the selection
+      boundary, fg=bg empties get deffg like the block cursor);
+      RELEASE copies to clipboard.device unit 0 as IFF FORM
+      FTXT/CHRS — the stock console family's format, so CCON⇄
+      stock CON: interop both ways is the acid test. While the
+      button is down, ACTION_WRITEs are PARKED unreplied (wq,
+      16 deep) — output freezes under a drag like the stock
+      console — and flushed FIFO on release; closewin and a
+      lost-button-up belt (any key while wqn>0) also flush, so
+      writers can never hang. RAMIGA-V pastes: CMD_READ unit 0
+      (read cycle run dry — clipboard rule), parse FTXT, inject
+      CHRS text as typed input — cooked feeds the line editor
+      byte by byte (LF→Return, so a pasted command executes),
+      raw enqueues verbatim (pasting into Ed). Selection lives
+      on whatever the view shows, scrollback included (copy an
+      old error without snapping). Clipboard.device is
+      IO-request-only = handler-safe (the timer.device rule),
+      opened lazily, kept. Any output/real key/fresh click
+      clears the highlight; bare qualifiers keep it. Chain-only:
+      the IDCMP fallback has no selection and no paste.
+      **Boot test:** reboot, Version = 0.13; (1) drag over shell
+      text — inverse highlight follows, release keeps it; (2)
+      `RAMIGA-V` in the same window — the text types back
+      (multi-line = lines execute); (3) drag during `list` of
+      something long — output FREEZES mid-drag, resumes on
+      release; (4) interop: copy in CCON, RAMIGA-V into a stock
+      CON: shell; select+copy in stock CON:, RAMIGA-V into CCON;
+      (5) scroll back (Shift+Up), select old text, copy, snap
+      live, paste; (6) paste into Ed (raw path); click in Ed
+      does NOT start a selection (Ed owns the mouse via CSI 2{);
+      (7) regression: menus in Ed still pick, block cursor
+      clean, completion menu closes on click.
 
 ## Design notes
 

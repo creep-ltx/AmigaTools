@@ -40,6 +40,7 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'exec/interrupts',
        'graphics/text','graphics/rastport','graphics/gfx',
        'devices/inputevent','devices/timer','devices/input',
+       'devices/clipboard',
        'dos/dos','dos/dosextens','dos/filehandler',
        'keymap'
 
@@ -51,6 +52,8 @@ CONST MARGIN=4,
       SBMAX=4000,       -> scrollback model, lines (like CTerm 0.1)
       TCMAX=80,         -> tab completion: max candidates collected
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
+      WQMAX=16,         -> writes parked during a selection drag
+      CLIPMAX=16384,    -> clipboard transfer buffer, bytes
       IHMAX=64,         -> input-event ring, slots (power of two)
       IHPRI=20,         -> chain position: below Intuition's 50, above
                         -> console.device's 0 - menu operations arrive
@@ -80,12 +83,29 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     cx=0, cy=0,                 -> output cursor, in cells
     cursx=-1, cursy=0,          -> where the raw-mode block cursor is
                                 -> painted right now; -1 = not painted
+    -> copy & paste (M7): drag-select on the M6 chain's mouse events,
+    -> copy to clipboard.device unit 0 as IFF FTXT on release,
+    -> RAMIGA-V injects the clip as typed input
+    selon=FALSE,                -> a drag is in progress
+    selanc=-1, selcur=-1,       -> anchor/current cell, row*cols+x
+    sello=-1, selhi=-1,         -> the standing highlight, [lo,hi)
+    selvo=0,                    -> viewoff the selection was made at
+    wq[16]:ARRAY OF LONG,       -> writers wait while a drag holds
+    wqn=0,                      -> the screen still (stock behaviour)
+    clipport=NIL:PTR TO mp,
+    clipreq=NIL:PTR TO ioclipreq,
+    clipbuf=NIL:PTR TO CHAR,
     opens=0,
     -> the line editor (transplanted from CTerm 0.1, commit 71e29b1)
     ebuf[404]:STRING,           -> the line being typed
     stash[404]:STRING,          -> half-typed line parked during history
     cpos=0,                     -> cursor inside ebuf
     ancx=0, ancy=0,             -> cell where the edit line is drawn
+    edlast=0,                   -> chars the last drawedit painted
+                                -> (eraseedit must clear that many)
+    tcmrow0=0,                  -> completion menu's first row, frozen
+                                -> at open (the wrapped edit line may
+                                -> change height while cycling)
     hist[32]:ARRAY OF LONG, htotal=0, hpos=-1,
     -> cooked input plumbing
     inq[2048]:ARRAY OF CHAR, inqh=0, inqt=0,
@@ -305,6 +325,8 @@ PROC main()
             IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
             IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
             IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
+            IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code)
+            IF class = IDCMP_MOUSEMOVE THEN selmouse($FF)
             IF class = IDCMP_CLOSEWINDOW THEN doclosew()
           ENDIF
         UNTIL im = NIL
@@ -398,25 +420,12 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_WRITE
-    sender := pkt.port          -> the writer owns the break signal too:
-    breaktask := sender.sigtask -> `list >CCON:` is opened by the SHELL,
-                                -> but the WRITEs come from list itself -
-                                -> this line is what makes Ctrl+C reach it
-                                -> (AROS con-handler does the same)
-    len := pkt.arg3
-    snaplive()                  -> new output pulls the view back to live
-    tcclose()                   -> and closes an open completion menu
-    IF rawmode
-      curserase()               -> raw: the app owns the screen, no blip
-      render(pkt.arg2, len)     -> - but the console owns the block
-      cursdraw()                -> cursor (Ed's only position marker)
-    ELSE
-      eraseedit()
-      render(pkt.arg2, len)
-      reanchor()
-      drawedit()
-    ENDIF
-    ReplyPkt(pkt, len, 0)
+    IF selon AND (wqn < WQMAX)
+      wq[wqn] := pkt            -> a drag holds the screen still: the
+      wqn++                     -> writer waits, unreplied, until the
+    ELSE                        -> button releases (stock console
+      dowrite(pkt)              -> behaviour - output freezes while
+    ENDIF                       -> you select)
   CASE ACTION_READ
     sender := pkt.port          -> the reader owns the break signal now
     breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -461,6 +470,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       -> reports too (Ed does not send CSI } on exit); clearing the
       -> mask also resumes the parked UserPort drain (M6)
       evmask := 0
+      setidcmp()                -> and MOUSEBUTTONS comes back
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
@@ -498,6 +508,42 @@ PROC dopkt(pkt:PTR TO dospacket)
   DEFAULT
     ReplyPkt(pkt, DOSFALSE, ERROR_ACTION_NOT_KNOWN)
   ENDSELECT
+ENDPROC
+
+-> one ACTION_WRITE, for the dispatcher and for the parked-write
+-> flush after a selection drag ends
+PROC dowrite(pkt:PTR TO dospacket)
+  DEF sender:PTR TO mp, len
+  sender := pkt.port            -> the writer owns the break signal too:
+  breaktask := sender.sigtask   -> `list >CCON:` is opened by the SHELL,
+                                -> but the WRITEs come from list itself -
+                                -> this line is what makes Ctrl+C reach it
+                                -> (AROS con-handler does the same)
+  len := pkt.arg3
+  clearsel()                    -> output takes the highlight with it
+  snaplive()                    -> new output pulls the view back to live
+  tcclose()                     -> and closes an open completion menu
+  IF rawmode
+    curserase()                 -> raw: the app owns the screen, no blip
+    render(pkt.arg2, len)       -> - but the console owns the block
+    cursdraw()                  -> cursor (Ed's only position marker)
+  ELSE
+    eraseedit()
+    render(pkt.arg2, len)
+    reanchor()
+    drawedit()
+  ENDIF
+  ReplyPkt(pkt, len, 0)
+ENDPROC
+
+PROC flushwq()
+  DEF i
+  i := 0
+  WHILE i < wqn
+    dowrite(wq[i])              -> FIFO: writers resume in order
+    i++
+  ENDWHILE
+  wqn := 0
 ENDPROC
 
 -> a decimal field; -1 = empty or not a number (keep the default)
@@ -744,6 +790,9 @@ PROC openwin()
   hpos := -1
   StrCopy(ebuf, '')
   drawedit()                    -> the blip stands from the start
+  setidcmp()                    -> selection's MOUSEBUTTONS joins the
+  ReportMouse(TRUE, win)        -> set (evmask is 0 here) and motion
+                                -> events exist when a drag asks
   -> armed last: the chain handler takes nothing until the per-window
   -> state above is fully rebuilt
   ihwin := win
@@ -757,6 +806,10 @@ PROC closewin()
   ihwin := NIL                  -> disarm the chain handler FIRST; then
   ihtail := ihhead              -> discard whatever it already captured
   cursx := -1                   -> the window takes the cursor with it
+  selon := FALSE                -> a drag dies with the window; parked
+  sello := -1                   -> writers MUST be replied or their
+  selhi := -1                   -> tasks hang forever
+  flushwq()
   canceltimer()
   WHILE wcn > 0
     wcn--
@@ -769,7 +822,8 @@ PROC closewin()
   tcactive := FALSE
   tcsel := -1
   IF fwin
-    ModifyIDCMP(win, oldidcmp)
+    ReportMouse(FALSE, win)     -> hand the flag back the way the
+    ModifyIDCMP(win, oldidcmp)  -> owner had it
   ELSE
     CloseWindow(win)
   ENDIF
@@ -911,6 +965,296 @@ PROC curserase()
     Text(rp, b, 1)
   ENDIF
   cursx := -1
+ENDPROC
+
+-> ---------- copy & paste (M7) ----------
+-> Drag-select with the left button: the M6 chain hands us button and
+-> motion events (positions read live from the window, the pattern
+-> Ed's own class-2 handler uses), cells highlight in inverse video,
+-> and RELEASE copies the marked text to clipboard.device unit 0 as
+-> IFF FTXT - the format the stock console family shares, so a CCON
+-> copy pastes into a stock CON: shell and the other way around.
+-> While the button is down, ACTION_WRITEs are parked unreplied -
+-> output freezes under a drag exactly like the stock console - and
+-> flushed on release. RAMIGA-V reads unit 0 and injects the text as
+-> typed input: through the line editor when cooked (LF becomes
+-> Return), straight to the client's queue when raw (pasting into Ed).
+-> Selection rides IDCMP (setidcmp - the 0.14 telemetry boot proved
+-> Intuition passes only button DOWNS below it, so the chain cannot
+-> carry a drag), and therefore works in the fallback too; paste
+-> needs the chain's keymap path (ihon).
+
+-> model ring index of view row r, at the viewoff the selection holds
+PROC selvidx(r)
+  DEF i
+  i := sbtop - selvo + r
+  IF i < 0 THEN i := i + SBMAX
+  IF i >= SBMAX THEN i := i - SBMAX
+ENDPROC i
+
+-> the mouse position as a linear cell (row*cols+x); -1 = off-grid
+PROC cellat()
+  DEF mx, my, x, r
+  IF win = NIL THEN RETURN -1
+  mx := win.mousex - left
+  my := win.mousey - topy
+  IF (mx < 0) OR (my < 0) THEN RETURN -1
+  x := mx / cw                  -> cell metrics are single digits -
+  r := my / ch                  -> DIVU-safe
+  IF (x >= cols) OR (r >= rows) THEN RETURN -1
+ENDPROC Mul(r, cols) + x
+
+-> paint one view row like drawmrow, but cells inside [lo,hi) draw
+-> inverse video (fg=bg empties get deffg, the block-cursor rule)
+PROC drawselrow(r, lo, hi)
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c, s, fg, bg, base, y,
+      rowbuf[256]:ARRAY OF CHAR
+  m := sb + Mul(selvidx(r), cols)
+  a := sa + Mul(selvidx(r), cols)
+  y := topy + Mul(r, ch)
+  base := Mul(r, cols)
+  FOR i := 0 TO cols - 1
+    c := m[i]
+    rowbuf[i] := IF c < 32 THEN 32 ELSE c
+  ENDFOR
+  i := 0
+  WHILE i < cols
+    at := a[i]
+    s := ((base + i) >= lo) AND ((base + i) < hi)
+    j := i
+    WHILE (j < cols) AND (a[j] = at) AND
+          ((((base + j) >= lo) AND ((base + j) < hi)) = s)
+      j++
+    ENDWHILE
+    fg := at AND 15
+    bg := Shr(at, 4) AND 7
+    IF s
+      IF fg = bg THEN fg := deffg
+      SetAPen(rp, bg)
+      SetBPen(rp, fg)
+    ELSE
+      SetAPen(rp, fg)
+      SetBPen(rp, bg)
+    ENDIF
+    Move(rp, left + Mul(i, cw), y + baseline)
+    Text(rp, rowbuf + i, j - i)
+    i := j
+  ENDWHILE
+ENDPROC
+
+-> repaint view rows rmin..rmax against selection [lo,hi)
+PROC selrepaint(rmin, rmax, lo, hi)
+  DEF r
+  IF sb = NIL THEN RETURN
+  curserase()
+  IF rmin < 0 THEN rmin := 0
+  IF rmax > (rows - 1) THEN rmax := rows - 1
+  FOR r := rmin TO rmax
+    drawselrow(r, lo, hi)
+  ENDFOR
+  IF rawmode THEN cursdraw()
+ENDPROC
+
+-> drop the standing highlight (any output, any key, a fresh click)
+PROC clearsel()
+  DEF lo
+  IF sello >= 0
+    lo := sello
+    sello := -1
+    IF viewoff = selvo THEN selrepaint(lo / cols, (selhi - 1) / cols, 0, 0)
+    selhi := -1                 -> (a scrolled view was repainted by
+  ENDIF                         -> redraw already - state only)
+ENDPROC
+
+-> recompute the window's IDCMP from state. The rules, each one a
+-> paid-for lesson: keys ride the chain when ihon (M6); MENUPICK
+-> must stay OUT so menu picks pass downstream as IECLASS_MENULIST
+-> (the Ed fix); MOUSEBUTTONS is how selection gets its clicks -
+-> Intuition passes only button DOWNS below it, the 0.14 telemetry
+-> boot proved it, so drag-select cannot ride the chain - but it
+-> must come OUT while a client holds CSI 2{ (Ed's mouse reports
+-> need the events downstream, the MENUPICK lesson again);
+-> MOUSEMOVE is in only mid-drag, so no motion flood otherwise.
+PROC setidcmp()
+  DEF idc
+  IF win = NIL THEN RETURN
+  idc := IDCMP_CLOSEWINDOW
+  IF ihon = FALSE
+    idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
+  ENDIF
+  IF (evmask AND Shl(1, IECLASS_RAWMOUSE)) = 0
+    idc := idc OR IDCMP_MOUSEBUTTONS
+    IF selon THEN idc := idc OR IDCMP_MOUSEMOVE
+  ENDIF
+  ModifyIDCMP(win, idc)
+ENDPROC
+
+-> the selection machine: one IDCMP mouse message (cd = the code:
+-> SELECTDOWN $68, SELECTUP $E8, or $FF for a MOUSEMOVE). Positions
+-> come from the window NOW, not the message - coarse under a fast
+-> drag, and exactly what Ed's own class-2 handler does.
+PROC selmouse(cd)
+  DEF c, lo, hi, plo, phi
+  IF sb = NIL THEN RETURN       -> no model, no selection
+  IF cd = IECODE_LBUTTON
+    clearsel()
+    IF (rawmode = FALSE) AND tcactive THEN tcclose()
+    c := cellat()
+    IF c >= 0
+      selon := TRUE
+      selvo := viewoff
+      selanc := c
+      selcur := c
+      setidcmp()                -> motion reports on for the drag
+    ENDIF
+  ELSEIF cd = (IECODE_LBUTTON OR IECODE_UP_PREFIX)
+    IF selon
+      selon := FALSE
+      setidcmp()                -> and off again
+      IF selcur <> selanc
+        sello := Min(selanc, selcur)
+        selhi := Max(selanc, selcur) + 1
+        selcopy()               -> release = copy, no extra keystroke
+      ELSE
+        selrepaint(selanc / cols, selanc / cols, 0, 0)
+      ENDIF
+      flushwq()                 -> the parked writers resume
+    ENDIF
+  ELSEIF cd = IECODE_NOBUTTON
+    IF selon
+      c := cellat()
+      IF (c >= 0) AND (c <> selcur)
+        plo := Min(selanc, selcur)
+        phi := Max(selanc, selcur)
+        selcur := c
+        lo := Min(selanc, selcur)
+        hi := Max(selanc, selcur)
+        selrepaint(Min(lo, plo) / cols, Max(hi, phi) / cols, lo, hi + 1)
+      ENDIF
+    ENDIF
+  ENDIF
+ENDPROC
+
+-> clipboard.device is IO-request-only - no DOS packets, so it is
+-> handler-safe the same way timer.device is. Opened lazily on the
+-> first copy or paste, then kept.
+PROC clipopen()
+  IF clipreq THEN RETURN TRUE
+  IF clipport = NIL THEN clipport := CreateMsgPort()
+  IF clipport = NIL THEN RETURN FALSE
+  clipreq := CreateIORequest(clipport, SIZEOF ioclipreq)
+  IF clipreq = NIL THEN RETURN FALSE
+  IF OpenDevice('clipboard.device', PRIMARY_CLIP, clipreq, 0) <> 0
+    DeleteIORequest(clipreq)
+    clipreq := NIL
+    RETURN FALSE
+  ENDIF
+  IF clipbuf = NIL THEN clipbuf := New(CLIPMAX)
+  IF clipbuf = NIL THEN RETURN FALSE
+ENDPROC TRUE
+
+-> the marked cells as text: model rows joined with LF, trailing
+-> blanks trimmed per row - wrapped in IFF FORM FTXT / CHRS, written
+-> to unit 0 (CMD_WRITE the whole form, CMD_UPDATE commits)
+PROC selcopy()
+  DEF p:PTR TO CHAR, lw:PTR TO LONG, len, r, base, x0, x1, x, c,
+      m:PTR TO CHAR, r0, r1, pad
+  IF sb = NIL THEN RETURN
+  IF clipopen() = FALSE THEN RETURN
+  p := clipbuf + 20             -> text starts after the IFF headers
+  len := 0
+  r0 := sello / cols
+  r1 := (selhi - 1) / cols
+  FOR r := r0 TO r1
+    base := Mul(r, cols)
+    x0 := Max(sello - base, 0)
+    x1 := Min(selhi - base, cols)
+    m := sb + Mul(selvidx(r), cols)
+    WHILE (x1 > x0) AND (m[x1 - 1] < 33)
+      x1--                      -> trailing blanks go
+    ENDWHILE
+    FOR x := x0 TO x1 - 1
+      c := m[x]
+      IF len < (CLIPMAX - 64)
+        p[len] := IF c < 32 THEN 32 ELSE c
+        len++
+      ENDIF
+    ENDFOR
+    IF r < r1
+      p[len] := 10              -> LF between rows, the FTXT way
+      len++
+    ENDIF
+  ENDFOR
+  IF len = 0 THEN RETURN
+  pad := len AND 1
+  lw := clipbuf
+  lw[0] := $464F524D            -> 'FORM'
+  lw[1] := 12 + len + pad       -> FTXT + CHRS header + text
+  lw[2] := $46545854            -> 'FTXT'
+  lw[3] := $43485253            -> 'CHRS'
+  lw[4] := len
+  IF pad THEN p[len] := 0
+  clipreq.command := CMD_WRITE
+  clipreq.data := clipbuf
+  clipreq.length := 20 + len + pad
+  clipreq.offset := 0
+  clipreq.clipid := 0
+  DoIO(clipreq)
+  IF clipreq.error = 0
+    clipreq.command := CMD_UPDATE
+    DoIO(clipreq)
+  ENDIF
+ENDPROC
+
+-> RAMIGA-V: read unit 0, dig the CHRS text out of the FTXT form,
+-> inject it as typed input. Cooked runs every byte through the line
+-> editor (LF becomes Return, so a pasted command line executes like
+-> a typed one); raw hands the client the bytes as they are.
+PROC dopaste()
+  DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
+      lw:PTR TO LONG, b:PTR TO CHAR
+  IF selon THEN RETURN
+  IF clipopen() = FALSE THEN RETURN
+  clipreq.command := CMD_READ
+  clipreq.data := clipbuf
+  clipreq.length := CLIPMAX
+  clipreq.offset := 0
+  clipreq.clipid := 0
+  DoIO(clipreq)
+  got := IF clipreq.error = 0 THEN clipreq.actual ELSE 0
+  REPEAT                        -> the read cycle must run dry to
+    clipreq.command := CMD_READ -> release the clip, clipbook rule
+    clipreq.data := scr
+    clipreq.length := 32
+    DoIO(clipreq)
+  UNTIL (clipreq.actual <= 0) OR (clipreq.error <> 0)
+  IF got < 20 THEN RETURN
+  lw := clipbuf
+  IF (lw[0] <> $464F524D) OR (lw[2] <> $46545854) THEN RETURN
+  i := 12
+  WHILE (i + 8) <= got
+    lw := clipbuf + i
+    id := lw[0]
+    sz := lw[1]
+    IF id = $43485253           -> CHRS: inject its text
+      b := clipbuf + i + 8
+      take := Min(sz, got - i - 8)
+      FOR c := 0 TO take - 1
+        injectbyte(b[c])
+      ENDFOR
+    ENDIF
+    i := i + 8 + sz + (sz AND 1)
+  ENDWHILE
+  IF rawmode THEN inputarrived()
+ENDPROC
+
+PROC injectbyte(c)
+  IF rawmode
+    enqueue(c)                  -> the client sees paste as input
+  ELSE
+    IF c = 10 THEN c := 13      -> LF = Return to the line editor
+    dovanilla(c, 0)
+  ENDIF
 ENDPROC
 
 -> redraw the whole grid from the model at the current view offset;
@@ -1109,6 +1453,10 @@ PROC csidispatch(c)
         evmask := evmask OR Shl(1, cpar[i])
       ENDIF
     ENDFOR
+    setidcmp()                  -> CSI 2{ pulls MOUSEBUTTONS out of
+                                -> IDCMP: the client's class-2
+                                -> reports need the events to pass
+                                -> downstream (the MENUPICK lesson)
   ELSEIF c = "}"
     -> RESET RAW EVENTS
     FOR i := 0 TO cnp
@@ -1116,6 +1464,7 @@ PROC csidispatch(c)
         evmask := evmask - (evmask AND Shl(1, cpar[i]))
       ENDIF
     ENDFOR
+    setidcmp()
   ENDIF
 ENDPROC
 
@@ -1319,43 +1668,83 @@ PROC reanchor()
   ancy := cy
 ENDPROC
 
+-> the edit line WRAPS (stock shell behaviour): it may span several
+-> rows below the anchor, and growing past the bottom row scrolls
+-> the whole screen up, prompt and all - the anchor tracks it.
+
+-> the most chars the line can hold: LINEMAX, or every cell from
+-> the anchor to the bottom-right corner minus one for the blip
+PROC edcap() IS Min(LINEMAX - 1, Mul(rows, cols) - ancx - 1)
+
+-> the last row a line of n chars (plus its blip cell) touches
+PROC edlastrow(n) IS ancy + ((ancx + n) / cols)
+
+-> scroll until that fits on screen (the dotab menu loop's pattern)
+PROC edroom(n)
+  WHILE (edlastrow(n) > (rows - 1)) AND (ancy > 0)
+    screenscroll()
+    IF cy > 0 THEN cy--
+  ENDWHILE
+ENDPROC
+
 PROC eraseedit()
-  DEF y
+  DEF y, r, r1, x0
   IF win = NIL THEN RETURN
   IF ancx >= cols THEN RETURN -> inverted RectFill = wild writes
-  y := topy + Mul(ancy, ch)
+  r1 := edlastrow(edlast)
+  IF r1 > (rows - 1) THEN r1 := rows - 1
+  x0 := ancx
   SetAPen(rp, 0)
-  RectFill(rp, left + Mul(ancx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
+  FOR r := ancy TO r1
+    y := topy + Mul(r, ch)
+    RectFill(rp, left + Mul(x0, cw), y,
+             left + Mul(cols, cw) - 1, y + ch - 1)
+    x0 := 0                   -> continuation rows clear full width
+  ENDFOR
   SetAPen(rp, deffg)
 ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
--> visible for mid-line editing (transplant of 0.1 redrawinput)
+-> visible for mid-line editing (transplant of 0.1 redrawinput,
+-> grown row-wrapping)
 PROC drawedit()
-  DEF y, s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR
+  DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc
   IF win = NIL THEN RETURN
+  l := StrLen(ebuf)
+  edroom(l)
   eraseedit()
-  y := topy + Mul(ancy, ch)
+  s := ebuf
   SetAPen(rp, deffg)
   SetBPen(rp, 0)
-  Move(rp, left + Mul(ancx, cw), y + baseline)
-  Text(rp, ebuf, StrLen(ebuf))
-  s := ebuf
-  l := StrLen(ebuf)
+  i := 0
+  r := ancy
+  xc := ancx
+  WHILE i < l
+    n := Min(cols - xc, l - i)
+    Move(rp, left + Mul(xc, cw), topy + Mul(r, ch) + baseline)
+    Text(rp, s + i, n)
+    i := i + n
+    xc := 0
+    r := r + 1
+  ENDWHILE
   cch[0] := 32
   IF cpos < l THEN cch[0] := s[cpos]
+  bc := ancx + cpos
+  r := bc / cols
   SetAPen(rp, 0)
   SetBPen(rp, deffg)
-  Move(rp, left + Mul(ancx + cpos, cw), y + baseline)
+  Move(rp, left + Mul(bc - Mul(r, cols), cw),
+       topy + Mul(ancy + r, ch) + baseline)
   Text(rp, cch, 1)
   SetAPen(rp, deffg)
   SetBPen(rp, 0)
+  edlast := l
 ENDPROC
 
--> put history entry idx (0 = newest) into ebuf, cut to fit the row
+-> put history entry idx (0 = newest) into ebuf, cut to fit
 PROC histload(idx)
   StrCopy(ebuf, hist[Mod(htotal - 1 - idx, HISTMAX)])
-  WHILE (ancx + StrLen(ebuf)) >= (cols - 1)
+  WHILE StrLen(ebuf) > edcap()
     SetStr(ebuf, StrLen(ebuf) - 1)
   ENDWHILE
 ENDPROC
@@ -1449,7 +1838,7 @@ PROC dovanilla(code, qual)
   ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
     -> Latin-1 high half too: Swedish keymaps type beyond ASCII;
     -> typed characters insert at the cursor, not just append
-    IF (l < LINEMAX) AND ((ancx + l) < (cols - 1))
+    IF l < edcap()
       FOR j := l - 1 TO cpos STEP -1
         s[j + 1] := s[j]
       ENDFOR
@@ -1643,6 +2032,10 @@ PROC ihchain(list:PTR TO inputevent)
       WHILE ev
         c := ev.class
         take := FALSE
+        -> mouse events are NOT taken for selection here: the 0.14
+        -> telemetry boot proved Intuition passes only the button
+        -> DOWNS this far - select-up and motion never reach pri 20.
+        -> Selection rides IDCMP instead (setidcmp), like KingCON.
         IF c = IECLASS_RAWKEY
           take := TRUE
         ELSEIF (c > IECLASS_RAWKEY) AND (c <= IECLASS_MAX)
@@ -1687,8 +2080,8 @@ PROC ihdrain()
           ihkey(e)
         ENDIF
       ELSE
-        ihreport(e)
-      ENDIF
+        ihreport(e)             -> every other class only enters the
+      ENDIF                     -> ring under the client's CSI n{ mask
     ENDIF
     ihtail := ihtail + 1
   ENDWHILE
@@ -1704,6 +2097,29 @@ PROC ihkey(e:PTR TO ihev)
   q := e.qual AND $FFFF
   IF cd AND IECODE_UP_PREFIX THEN RETURN
   IF (cd >= $68) AND (cd <= $7F) THEN RETURN  -> buttons, comm codes
+  IF cd < $60 THEN clearsel()   -> any real key drops the highlight
+                                -> (bare qualifiers keep it)
+  IF (selon = FALSE) AND (wqn > 0) THEN flushwq()
+                                -> belt: a lost button-up (ring
+                                -> overflow) must not park writers
+                                -> forever
+  IF q AND IEQUALIFIER_RCOMMAND
+    -> RAMIGA-V pastes (M7). Other RAMIGA combos fall through
+    -> unchanged.
+    n := ihmaprawkey(e)
+    IF n = 1
+      IF (ihmap[0] = "v") OR (ihmap[0] = "V")
+        dopaste()
+        RETURN
+      ENDIF
+      IF (ihmap[0] = "c") OR (ihmap[0] = "C")
+        -> RAMIGA-C re-copies the standing highlight - release
+        -> already copied, but the stock muscle memory is free
+        IF sello >= 0 THEN selcopy()
+        RETURN
+      ENDIF
+    ENDIF
+  ENDIF
   IF dorawkey(cd, q) THEN RETURN
   n := ihmaprawkey(e)
   IF rawmode
@@ -2042,8 +2458,12 @@ PROC tcreplace(nt:PTR TO CHAR, nl)
   s := ebuf
   l := StrLen(ebuf)
   newlen := tcws + nl + (l - tcwend)
-  IF newlen >= LINEMAX THEN RETURN FALSE
-  IF (ancx + newlen) >= (cols - 1) THEN RETURN FALSE
+  IF newlen > edcap() THEN RETURN FALSE
+  IF tcactive
+    -> the menu's rows are frozen (tcmrow0): while it is open a
+    -> candidate may not grow the line down into it
+    IF (ancx + newlen + 1) > Mul(tcmrow0 - ancy, cols) THEN RETURN FALSE
+  ENDIF
   StrCopy(tctail, s + tcwend)
   t := tctail
   FOR i := 0 TO nl - 1
@@ -2138,7 +2558,7 @@ PROC tcmenudraw()
       SetBPen(rp, 0)
     ENDIF
     Move(rp, left + Mul(Mul(c, tcmcolw), cw),
-         topy + Mul(ancy + 1 + r, ch) + baseline)
+         topy + Mul(tcmrow0 + r, ch) + baseline)
     Text(rp, nb, l)
   ENDFOR
   SetAPen(rp, deffg)
@@ -2149,8 +2569,8 @@ ENDPROC
 PROC tcclose()
   DEF r
   IF tcactive = FALSE THEN RETURN
-  FOR r := 1 TO tcmrows
-    drawmodelrow(ancy + r)
+  FOR r := 0 TO tcmrows - 1
+    drawmodelrow(tcmrow0 + r)
   ENDFOR
   tcactive := FALSE
   tcsel := -1
@@ -2238,10 +2658,11 @@ PROC dotab(back)
   ENDIF
   IF sb = NIL THEN RETURN   -> no model = no way to restore the rows
   tcmenucalc()              -> under a menu; prefix-only completion
-  WHILE (ancy + tcmrows) > (rows - 1)
-    screenscroll()          -> make room below the prompt; the edit
-    IF cy > 0 THEN cy--     -> line's pixels scroll along, anchor and
-  ENDWHILE                  -> output cursor track it
+  WHILE ((edlastrow(StrLen(ebuf)) + tcmrows) > (rows - 1)) AND (ancy > 0)
+    screenscroll()          -> make room below the (wrapped) edit
+    IF cy > 0 THEN cy--     -> line; its pixels scroll along, anchor
+  ENDWHILE                  -> and output cursor track it
+  tcmrow0 := edlastrow(StrLen(ebuf)) + 1
   tcsel := -1
   tcactive := TRUE
   tcmenudraw()
@@ -2292,4 +2713,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.12 (18.7.26) CCON: LTX console handler M6', 0
+vers: CHAR '$VER: ccon-handler 0.17 (18.7.26) CCON: LTX console handler M7', 0
