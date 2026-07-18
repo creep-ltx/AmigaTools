@@ -159,7 +159,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       `more <file>` (single-key paging), Ed (fullscreen editing,
       arrows), Ctrl+C still breaks list, cooked editing/history
       unchanged after a raw program exits.
-- [ ] **M5: the point of it all — scrollback BUILT 17.7.26,
+- [x] **M5: the point of it all — scrollback BUILT 17.7.26,
       awaiting its boot test.** The 0.1 model transplanted and
       grown up for a full-screen console: a 4000-line byte ring
       (SBMAX × cols, allocated at window-open, New() = zeroed)
@@ -231,7 +231,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       **M5 scrollback BOOT-PASSED 17.7.26** (scroll keys, type-snap,
       More over raw all confirmed; Ed menus render dead as parked —
       the M6 item, expected).
-- [ ] **M5b: zsh-style tab completion — BUILT 17.7.26, awaiting
+- [x] **M5b: zsh-style tab completion — BUILT 17.7.26, awaiting
       its boot test.** Tab completes the word at the cursor; one
       match completes whole ('/' after a dir, ' ' after a file),
       several complete to the common prefix and open a menu of
@@ -285,7 +285,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       NOTHING until the next boot/remount. Every handler fix
       needs a reboot to actually test. Shift+Tab cycling
       boot-confirmed after the reboot (17.7.26).**
-- [ ] **M5d: SGR colours — BUILT 17.7.26, awaiting its boot
+- [x] **M5d: SGR colours — BUILT 17.7.26, awaiting its boot
       test.** The renderer speaks CSI ...m: 0 reset, 1 bold
       (bright pens 8-15 when the screen has 16 — the ANSI-art
       convention; depth probed via rp.bitmap), 22, 30-37 fg,
@@ -312,7 +312,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       on screens without 16 pens), and CTerm opens 16 pens in
       BOTH themes (non-ANSI = CMenu-LIGHT grown to 16) so the
       scheme works on the classic light look too.
-- [ ] **M6: input.device-handler input — BUILT 17.7.26 ($VER 0.9),
+- [x] **M6: input.device-handler input — BUILT 17.7.26 ($VER 0.9),
       deployed as a SEPARATE TEST DEVICE, awaiting its boot test.**
       Key acquisition moved out of IDCMP: an Interrupt added with
       IND_ADDHANDLER at priority 20 (below Intuition's 50 — menu
@@ -566,9 +566,23 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       explicitly; (6) regression: CTerm WINDOW0x unaffected,
       resize/colours/copy-paste as before.
 
-- [ ] **M10: a window per open — DESIGNED 18.7.26; STEP A
-      BOOT-PASSED 18.7.26 ($VER 0.21): the full regression sweep
-      green on one shell. A bonus specimen from the boot: two
+- [x] **M10: a window per open — COMPLETE, the full B/C/D/E ladder
+      BOOT-PASSED 18.7.26 on the 0.24/0.25 boots: two shells two
+      windows, options per open (AUTO/WAIT confirmed), cross-window
+      copy/paste both directions including INTO a raw CRAW: window,
+      CRAW: process alongside CCON:'s (item E's screenshot shows
+      Startup-sequence in a CRaw window with a paste landed in it).
+      Edit-line selection works since 0.25 (the drawedit mirror).
+      Final 1.0 fix: a bare qualifier down-stroke no longer snaps
+      a scrolled view to live — pressing Shift mid-Ctrl+Up-scroll
+      to switch to paging used to throw the view to the prompt
+      first (the M5b bare-Shift menu lesson, applied to snaplive;
+      bit-7 releases excepted too for the IDCMP fallback).
+      CTerm's WINDOW0x handoff carried forward from its 0.20
+      verification (architecture beneath it unchanged) - re-verify
+      casually on the next CTerm session. Released as 1.0.
+      STEP A BOOT-PASSED 18.7.26 ($VER 0.21): the full regression
+      sweep green on one shell. A bonus specimen from the boot: two
       shells on the shared console showed `ls`'s bounds-report
       being stolen by the other shell's queued read ("nknown
       command" - the report's CSI bytes eaten by the renderer in
@@ -610,8 +624,119 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       resize/EndShell closes; `echo >CCON:0/0/300/80/auto/AUTO/WAIT
       hi`; CRAW: raw window; CTerm WINDOW0x handoff. Anything that
       behaves differently from 0.20 is a step-A bug.
-      **Remaining steps (B–E ladder below): the console LIST,
-      per-open routing, curcon set at dispatch boundaries.**
+      **STEP B BUILT 18.7.26 ($VER 0.22), awaiting its boot test —
+      a window per open, live.** Consoles are a singly-linked list
+      (mutations Forbid-bracketed: ihchain walks it from
+      input.device's TASK, which Forbid holds off — it is not a
+      real interrupt). Every create-open builds its own console:
+      coninit + parsecon per open (the M9 options finally apply to
+      every window), openwin per open, destroyed on the last END
+      (conclose: closewin → unlink → ring-scrub → Dispose).
+      `*` and CONSOLE: opens ATTACH to the sender's console instead:
+      pr_CLI → cli_StandardInput → fh_Args = the console pointer,
+      validated against the list before trust; fallbacks are the
+      sender-as-breaktask walk (WB-launched clients with no CLI —
+      More's Open-then-SetMode pattern), the active window, the
+      list head. curcon is set ONLY at dispatch boundaries:
+      END/READ/WRITE by fh_Arg1 (validated — a stale handle gets
+      ERROR_OBJECT_NOT_FOUND, not a guru), WAIT_CHAR/SCREEN_MODE/
+      CHANGE_SIGNAL/DISK_INFO by conbysender (they carry NO handle),
+      window events by the per-console UserPort walk (closereq may
+      destroy a console mid-walk: next pointer taken first), chain
+      events by a console tag in the ring slot (ihev grew `con`;
+      conclose scrubs dead tags — ihdrain validates too, but a
+      later console could reuse the address), timer expiry by
+      `timercon`. The ONE timer request serves one console's head
+      waiter at a time; the next console with waiters gets a fresh
+      full timeout (the documented approximation, per-console now).
+      Arming: `armed` per console, set LAST in openwin, cleared
+      FIRST in closewin — conbywin gates the chain on it, so a
+      half-built window takes nothing (the old ihwin discipline,
+      per console). A windowless console (failed AUTO open) replies
+      its parked packets before its memory goes away.
+      **Behaviour changes, both stock-CON:-faithful:** a WAIT
+      window still lingers for its gadget but nothing RE-ATTACHES
+      to it any more — a new open is a new window (0.20's re-attach
+      was the single-window rule's workaround); and a bare
+      `list >CCON:` redirect gets its own default window now, like
+      `>CON:0/0//100` does on stock.
+      **Memory knob (punted as designed):** every window gets the
+      full SBMAX model — ~600K/window at 80 cols. Fine on the 64MB
+      FS-UAE box; revisit for small real hardware (a SECONDARY
+      option or a smaller default ring are the candidates).
+      **Boot test (the B/C/D/E ladder):**
+      (B) `Version L:ccon-handler` = 0.22; `NewShell CCON:` twice —
+      TWO windows now, CLI numbers distinct; type in each: input
+      stays with its window (the stolen-bounds-report screenshot
+      cannot recur: `ls` in both windows, correct columns in both);
+      EndShell in one closes ONLY that window; keys follow the
+      ACTIVE window (the chain routes by ActiveWindow).
+      (C) the M9 option list, per open at last:
+      `NewShell CCON:60/30/500/120/LTX-Shell` (geometry+title with
+      another shell already up), `echo >CCON:0/0/300/80/a/AUTO/WAIT
+      hi` (window on first write, lingers), NOBORDER/BACKDROP/
+      INACTIVE/NOSIZE/SCREENWorkbench opens, a CLOSE-gadget EOF,
+      `NewShell CCON:0/0/400/150/W8/WAIT` → EndShell → linger →
+      gadget kills it, and a NEW open while it lingers opens its
+      OWN window (the behaviour change, deliberate).
+      (D) per-window regression: Ed in window 1 while a shell works
+      in window 2 (menus, block cursor, class-12 resize), More
+      paging in one while the other scrolls, copy in one window →
+      RAMIGA-V into the other (and into stock CON:), scrollback/
+      completion/history per window, Ctrl+C breaks the RIGHT
+      window's command, drag-select freezes only ITS window's
+      writer, resize each window independently.
+      (E) `Mount CRAW: FROM DEVS:CRAW-mountlist` + a CRAW window
+      beside two CCON windows — separate process, both lists alive;
+      CTerm's WINDOW0x handoff still lands on its frame.
+      **Step B also retires:** the M5c "second open shares the
+      window" documented limitation, and the M9 "options parse on
+      the first open only" wall — re-test both READMEs' claims
+      after the boot and update them.
+      **First 0.22 boot (18.7.26): two windows with distinct CLI
+      numbers CONFIRMED. Found on the same boot — a LATENT M5b
+      completion bug, fixed in 0.23:** tcreplace replaced the word
+      from tcws (the WHOLE word, dirpart included) while candidates
+      are bare names, so `version l:c<Tab>` completed to
+      `version ccon-handler` — the `l:` eaten. Plain words never
+      showed it, which is how it survived every M5b boot. Fix:
+      `tcws := sep` once the dirpart is split off, so replacement
+      starts after it. Re-test on the next reboot:
+      `version l:c<Tab>` → `version l:ccon-handler`,
+      `type S:Startup-se<Tab>` → keeps its `S:`,
+      `dir SYS:Prefs/<Tab>` → menu candidates keep `SYS:Prefs/`
+      while cycling, and plain `cd Ut<Tab>` unchanged.
+      **Second latent find, fixed in 0.24 — Enter in the menu
+      EXECUTED the line (his `ed S:<Tab>` pick ran `ed S:CMenu/`),
+      Esc would have WIPED it. Latent since M6:** every key goes
+      through dorawkey now, and its close-menu-on-any-raw-key
+      clause fired on Return's raw $44 BEFORE dovanilla could see
+      tcactive - so the zsh accept-and-stay semantics (boot-proven
+      on the pre-M6 IDCMP path, where Return arrives as VANILLAKEY
+      only) silently died there. Fix: the clause excepts $44/$43
+      (Return/keypad Enter) and $45 (Esc) so dovanilla's tcactive
+      guards run again. Re-test: menu open → Enter accepts, line
+      STAYS (second Enter executes); menu open → Esc closes, line
+      survives; any other key still closes the menu and acts.
+      **0.24 boot (18.7.26): completion fixes CONFIRMED (l:c keeps
+      its l:, menu-Enter accepts-and-stays, menu-Esc keeps the
+      line), AUTO/WAIT window confirmed, two shells two windows
+      confirmed, cross-window copy/paste from committed text
+      confirmed. Third latent find, fixed in 0.25: drag-selecting
+      the EDIT LINE blanked its text and copied nothing - the
+      overlay was pixels only, so drawselrow repainted its rows
+      from empty model cells. Fix: drawedit MIRRORS the typed text
+      into the model (deffg attr) and eraseedit empties the mirror
+      with the pixels - the prompt line now selects, copies and
+      survives selection repaints like any cell; commit renders
+      the real line over the same cells, so the transcript path is
+      unchanged. Known cosmetic remainder: the blip vanishes
+      between a copy-release and the next keypress.
+      Re-test on the 0.25 boot: type at the prompt WITHOUT Enter,
+      drag over the typed text - it highlights and STAYS VISIBLE -
+      release, RAMIGA-V in another window pastes it; then the
+      commit/history/scrollback/completion quick sweep (the edit
+      line took a new code path).**
       **Decision: ONE process, many windows** (the AROS
       con-handler shape), NOT the KingCON per-window fork:
       CreateNewProc from inside a handler risks internal DOS

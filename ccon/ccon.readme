@@ -1,0 +1,170 @@
+CCON: - a console handler with output scrollback for AmigaOS 3.2
+=================================================================
+
+WHAT IT IS
+
+  CCON: is a mounted console handler - what CON: is, what KingCON
+  and ViNCEd are - with the one feature the stock 3.2 console
+  cannot be given from outside: output scrollback. The stock V47
+  con-handler has no such option (verified against its ROM option
+  table), and since commands talk to the handler, no terminal
+  program can bolt it on. So this is the handler grown at home:
+  4000 lines of history behind every window, viewed with the
+  shifted arrows, snapping back to live the moment anything
+  happens.
+
+  Around that core it is a full CON: family member: it hosts real
+  AmigaShells (NewShell CCON:), gives every open its own window
+  like stock CON: does, runs fullscreen programs (Ed, More - menus,
+  block cursor and all), speaks SGR colour, completes filenames
+  zsh-style, and copies and pastes with the stock console family
+  in both directions. A second device, CRAW:, mounts the same
+  binary with streams raw from the first byte - the RAW:
+  counterpart.
+
+  Requires AmigaOS 3.2. Boot-verified on 3.2/68030 (FS-UAE); the
+  handler deliberately answers the V47 shell's console probe so
+  the 3.2 shell hands line editing to the console, where the
+  scrollback-aware editor lives.
+
+INSTALL
+
+  copy L/ccon-handler L:
+  copy DEVS/CCON-mountlist DEVS:
+  copy DEVS/CRAW-mountlist DEVS:
+  Mount CCON: FROM DEVS:CCON-mountlist
+  Mount CRAW: FROM DEVS:CRAW-mountlist
+
+  (The archive's L/ and DEVS/ drawers mirror SYS:, so extracting
+  straight over SYS: works too. Add the Mounts to S:User-Startup
+  to make them permanent.)
+
+  Then:
+
+  NewShell CCON:
+  NewShell CCON:60/30/500/120/LTX-Shell
+  echo >CCON:0/0/300/80/hi/WAIT hello
+  type S:Startup-sequence >CRAW:0/0/500/150/t/WAIT
+
+USAGE
+
+  The open name is stock CON: syntax, every field optional:
+
+    CCON:x/y/width/height/title/option/option/...
+
+  Options (the stock set, plus two of its own):
+
+    CLOSE       close gadget = EOF to the reader (gadget is on by
+    NOCLOSE     default, like a 3.2 shell window; NOCLOSE removes)
+    WAIT        window lingers for its close gadget after the
+                last handle closes
+    AUTO        open succeeds windowless; the window appears on
+                the first real I/O (the debug-console idiom)
+    SCREENname  open on the named public screen
+    NOBORDER NODRAG NODEPTH NOSIZE BACKDROP INACTIVE
+                the stock window-dressing options
+    WINDOW0xADDR  render into an existing window (how a terminal
+                hands CCON: its frame)
+    PENn        default text pen (a terminal with an ANSI palette
+                sends PEN7)
+    WBPENS      declares the screen's palette truly ANSI: plain
+                SGR 30-33 are then treated as Workbench pen
+                numbers and retargeted at the theme - see below
+
+  Every open gets its OWN console and window, stock CON: fashion:
+  `dir >CCON:` flashes a window of its own, a second NewShell is a
+  second window. Opens of `*` and CONSOLE: attach to the opener's
+  existing console, which is how commands reopen their shell's
+  window.
+
+THE KEYS
+
+  Editing (cooked mode - the shell prompt):
+    typing inserts at the cursor; Left/Right move, Ctrl+Left/Right
+    jump words, Shift+Left/Right go to the ends; Backspace/Del as
+    expected; Esc clears the line; the line wraps across rows and
+    scrolls the screen when it outgrows it, stock-shell style.
+    Up/Down walk a 32-line history (the half-typed line is stashed
+    and comes back). Return commits. Ctrl+\ is EOF, Ctrl+C..F
+    signal the running command.
+
+  Tab completion (zsh menu style):
+    Tab completes the word at the cursor - one match completes
+    whole ('/' after a directory, ' ' after a file), several
+    extend to the common prefix and open a menu below the prompt.
+    Tab cycles the menu, Shift+Tab cycles backwards, Enter accepts
+    and keeps the line (a second Enter runs it), Esc closes with
+    the line intact, any other key closes and acts. Directories
+    show blue, hidden-class entries grey, the ls colour scheme.
+
+  Scrollback (the point of it all):
+    Shift+Up/Down page through history (cooked mode), Ctrl+Up/Down
+    move by line in BOTH modes - raw fullscreen programs included.
+    The title bar shows [scrollback -n] while you are back; any
+    output or any other key snaps the view to live. Colours
+    survive the trip: the model keeps an attribute per cell.
+
+  Copy and paste:
+    drag-select with the left button - inverse highlight, output
+    freezes mid-drag exactly like the stock console. Release
+    copies to the clipboard as IFF FTXT, the stock family format,
+    so selections travel both ways between CCON: and CON: windows.
+    RAMIGA-V pastes as typed input (a pasted command line runs;
+    pasting into Ed lands in the text), RAMIGA-C re-copies a
+    standing highlight. Selection works on the scrollback view
+    too - copy an old error without losing your place.
+
+HOW IT WORKS (briefly)
+
+  A DOS packet handler in Amiga E. Keys are captured where
+  console.device captures its own: an input.device handler below
+  Intuition's chain position, run through keymap.library (dead-key
+  composition survives), with menu picks arriving as
+  IECLASS_MENULIST events exactly as they do over stock CON: -
+  which is the route Ed's menu parser is actually built against
+  (its dispatcher was disassembled to prove it). Raw input event
+  reports use the true V47 format, recovered from console.device's
+  ROM. The 3.2 shell's undocumented console probe (DISK_INFO,
+  compared against 'CON\0') is answered with 'CCON' on purpose:
+  the shell then leaves line editing to the console, so the
+  editor with history, completion and scrollback owns the prompt.
+
+  Colour keeps two worlds apart: with WBPENS declared (a terminal
+  that owns a real ANSI palette), pen conventions apply as-is and
+  bold maps to the bright pens. On any other screen, plain SGR 3x
+  stays raw pens - what Workbench-pen programs like Ed mean - and
+  ANSI colour intent (the bold+3x forms) is translated by COLOUR
+  through ObtainBestPen against the screen's own palette, so
+  directories are genuinely blue on a stock Workbench too.
+
+KNOWN LIMITATIONS
+
+  - Each window's history ring dies with the window.
+  - The scrollback model costs about 600K per window at 80
+    columns (4000 lines, two planes). Generous on a big-RAM
+    machine; mind it on a 2MB one.
+  - Leaving scrollback restores CCON's own title, so a client
+    retitle (More's) is overwritten - cosmetic.
+  - CSI K under a coloured background erases to black.
+  - Completion v1: no quoted words, one menu page (80 candidates,
+    a beep signals more), no volume-name completion for a bare
+    word.
+  - SMART/SIMPLE, ALT and ICONIFY are not implemented.
+
+BUILDING
+
+  The prebuilt binary is included; no compiler needed. To build
+  it yourself, with the E-VO E compiler:
+
+    evo ccon-handler.e LARGE
+
+  The source carries the war stories as comments - including how
+  an E binary survives being started as a handler at all (the
+  startup-code trick was verified by disassembly, not assumed).
+
+FILES
+
+  L/ccon-handler        the handler
+  DEVS/CCON-mountlist   Mount CCON: FROM this
+  DEVS/CRAW-mountlist   the raw-by-default second device
+  ccon.readme           this file

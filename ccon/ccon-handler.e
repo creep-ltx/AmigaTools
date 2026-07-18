@@ -17,6 +17,15 @@
 -> struct-ification the window-per-open design (todo.md M10) needs
 -> first. One console still; behaviour must be identical to 0.20.
 ->
+-> M10 step B (0.22): a window per open. Consoles live on a list;
+-> every create-open builds its own (options parse per open - the M9
+-> wall comes down), `*`/CONSOLE: opens attach to the sender's
+-> console via its CLI StandardInput fh_Args. curcon is set at the
+-> dispatch boundaries only: packets by fh_Arg1 or sender, window
+-> events by UserPort, chain events by the console tag in the ring
+-> slot, timer expiry by timercon. WAIT windows linger but nothing
+-> re-attaches: a new open is a new window, the stock CON: way.
+->
 -> Test:  Mount CCON: FROM DEVS:CCON-mountlist
 ->        NewShell CCON:
 ->        list SYS: then Shift+Up/Down, Ctrl+Up/Down; type = snap live
@@ -79,6 +88,7 @@ OBJECT ihev
   addr:LONG
   secs:LONG
   mics:LONG
+  con:LONG          -> M10b: the console the event was captured for
 ENDOBJECT
 
 -> M10 step A: everything per-window lives in ONE console object; the
@@ -89,6 +99,11 @@ ENDOBJECT
 -> the next steps (todo.md M10). Byte arrays sit at the end so every
 -> LONG field keeps its natural alignment.
 OBJECT console
+  next:LONG                     -> M10b: the console list (singly
+                                -> linked; ihchain walks it too, so
+                                -> mutations are Forbid-bracketed)
+  armed                         -> chain may take keys: set LAST in
+                                -> openwin, cleared FIRST in closewin
   -> the window and its text grid
   win:PTR TO window
   rp:PTR TO rastport
@@ -173,7 +188,9 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> M10a: THE console. Everything per-window is inside it; what
     -> stays out here is genuinely shared across any future windows -
     -> the ports, the devices, the one input chain, the fs plumbing.
-    curcon:PTR TO console,
+    curcon:PTR TO console,      -> NIL between dispatches is legal now
+    conlist=NIL:PTR TO console, -> every living console (M10b)
+    timercon=NIL:PTR TO console,-> whose WAIT_CHAR head the timer serves
     clipport=NIL:PTR TO mp,     -> clipboard.device (M7), opened lazily
     clipreq=NIL:PTR TO ioclipreq,
     clipbuf=NIL:PTR TO CHAR,
@@ -195,8 +212,6 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     ihport=NIL:PTR TO mp,
     ihreq=NIL:PTR TO iostd,
     ihon=FALSE,
-    ihwin=NIL,                  -> take events for THIS window when it
-                                -> is the active one; NIL = take nothing
     ihtask=NIL, ihsigbit=-1, ihsig=0,
     ihring=NIL:PTR TO CHAR,     -> IHMAX slots, stride 32
     ihhead=0, ihtail=0,         -> free-running; slot = n AND (IHMAX-1)
@@ -209,7 +224,7 @@ PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
-      stps:PTR TO CHAR
+      stps:PTR TO CHAR, c:PTR TO console, cnext
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -237,16 +252,9 @@ PROC main()
          (tcfold(stps[3]) = "W") THEN rawdef := TRUE
     ENDIF
   ENDIF
-  -> M10a: the one console object; no console, no mount - failing
-  -> the handshake beats running with nowhere to keep window state
-  curcon := New(SIZEOF console)
-  IF curcon
-    IF coninit(curcon) = FALSE THEN curcon := NIL
-  ENDIF
-  IF curcon = NIL
-    ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
-    RETURN 10
-  ENDIF
+  -> M10b: no console exists until the first open makes one - dofind
+  -> builds them, the list carries them, curcon may be NIL between
+  -> dispatches and every dispatch boundary sets it before use
   dnode.task := port              -> future opens come straight to us
   ReplyPkt(pkt, DOSTRUE, 0)       -> mount handshake done
 
@@ -275,7 +283,6 @@ PROC main()
   IF tmp THEN fsfib := Shl(Shr(tmp + 3, 2), 2)  -> aligned; round up
   tmp := New(260)
   IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
-  curcon.tcpool := New(TCPOOLSZ)
 
   -> M6: hook into the input.device chain (console.device's own
   -> architecture: keys are taken upstream, the window's UserPort
@@ -321,7 +328,11 @@ PROC main()
   psig := Shl(1, port.sigbit)
   WHILE TRUE
     wsig := 0
-    IF curcon.win THEN wsig := Shl(1, curcon.win.userport.sigbit)
+    c := conlist                  -> M10b: every console's UserPort
+    WHILE c                       -> joins the wait mask
+      IF c.win THEN wsig := wsig OR Shl(1, c.win.userport.sigbit)
+      c := c.next
+    ENDWHILE
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
     Wait(psig OR wsig)
@@ -332,45 +343,53 @@ PROC main()
     UNTIL msg = NIL
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
-    -> drain the window port - UNLESS a client asked for raw event
-    -> reports (Ed). Disassembling C:Ed (18.7.26) showed it never
-    -> touches this port at all (no ModifyIDCMP/GetMsg on our window;
-    -> the LVO hits that suggested it were rexxsyslib collisions -
-    -> Ed's ARexx machinery). The park stays anyway: with the chain
-    -> on, the only IDCMP class left is CLOSEWINDOW, and deferring a
-    -> close-gadget click while a raw-events client (Ed fullscreen)
-    -> owns the session beats tearing the window down under it.
-    -> Leftovers drain when the mask clears (CSI }, cooked
-    -> reversion, close).
-    IF curcon.win
-      IF (ihon = FALSE) OR (curcon.evmask = 0)
-        REPEAT
-          im := GetMsg(curcon.win.userport)
-          IF im
-            class := im.class
-            code := im.code
-            qual := im.qualifier
-            mx := im.mousex
-            my := im.mousey
-            ia := im.iaddress
-            secs := im.seconds
-            mics := im.micros
-            ReplyMsg(im)
-            IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
-            IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
-            IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
-            IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code)
-            IF class = IDCMP_MOUSEMOVE THEN selmouse($FF)
-            IF class = IDCMP_NEWSIZE THEN doresize()
-            IF class = IDCMP_CLOSEWINDOW THEN doclosew()
-          ENDIF
-        UNTIL im = NIL
+    -> drain every console's window port - UNLESS that console's
+    -> client asked for raw event reports (Ed). Disassembling C:Ed
+    -> (18.7.26) showed it never touches this port at all (no
+    -> ModifyIDCMP/GetMsg on our window; the LVO hits that suggested
+    -> it were rexxsyslib collisions - Ed's ARexx machinery). The
+    -> park stays anyway: with the chain on, the only IDCMP class
+    -> left is CLOSEWINDOW, and deferring a close-gadget click while
+    -> a raw-events client (Ed fullscreen) owns the session beats
+    -> tearing the window down under it. Leftovers drain when the
+    -> mask clears (CSI }, cooked reversion, close). A closereq may
+    -> destroy the console inside the walk - the next pointer is
+    -> taken FIRST.
+    c := conlist
+    WHILE c
+      cnext := c.next
+      IF c.win
+        curcon := c
+        IF (ihon = FALSE) OR (c.evmask = 0)
+          REPEAT
+            im := GetMsg(c.win.userport)
+            IF im
+              class := im.class
+              code := im.code
+              qual := im.qualifier
+              mx := im.mousex
+              my := im.mousey
+              ia := im.iaddress
+              secs := im.seconds
+              mics := im.micros
+              ReplyMsg(im)
+              IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
+              IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
+              IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
+              IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code)
+              IF class = IDCMP_MOUSEMOVE THEN selmouse($FF)
+              IF class = IDCMP_NEWSIZE THEN doresize()
+              IF class = IDCMP_CLOSEWINDOW THEN doclosew()
+            ENDIF
+          UNTIL im = NIL
+        ENDIF
+        IF c.closereq             -> deferred: never CloseWindow while
+          c.closereq := FALSE     -> draining the port it owns
+          conclose(c)
+        ENDIF
       ENDIF
-      IF curcon.closereq                 -> deferred: never CloseWindow while
-        curcon.closereq := FALSE         -> draining the port it owns
-        closewin()
-      ENDIF
-    ENDIF
+      c := cnext
+    ENDWHILE
     -> drain the timer port: an expiry times out the head WAIT_CHAR
     IF tport
       REPEAT
@@ -417,6 +436,140 @@ PROC coninit(c:PTR TO console)
   ENDIF
 ENDPROC TRUE
 
+-> ---------- the console list (M10b) ----------
+
+-> only ever trust a console pointer that is ON the list: packets
+-> carry fh_Arg1 from clients, ring slots carry tags captured before
+-> a close could land - both are validated here before use
+PROC conok(c)
+  DEF p:PTR TO console
+  p := conlist
+  WHILE p
+    IF p = c THEN RETURN TRUE
+    p := p.next
+  ENDWHILE
+ENDPROC FALSE
+
+-> ihchain walks the list from input.device's task, so mutations are
+-> Forbid-bracketed (it IS a task, not a real interrupt - Forbid
+-> holds it off; single stores would almost be enough, but paid-for
+-> lessons say almost is not a word for a handler)
+PROC conadd(c:PTR TO console)
+  Forbid()
+  c.next := conlist
+  conlist := c
+  Permit()
+ENDPROC
+
+PROC conrm(c:PTR TO console)
+  DEF p:PTR TO console
+  Forbid()
+  IF conlist = c
+    conlist := c.next
+  ELSE
+    p := conlist
+    WHILE p
+      IF p.next = c
+        p.next := c.next
+        p := NIL
+      ELSE
+        p := p.next
+      ENDIF
+    ENDWHILE
+  ENDIF
+  Permit()
+ENDPROC
+
+-> the ARMED console whose window this is; NIL = not ours (armed
+-> gates the chain: a half-built openwin window takes nothing yet)
+PROC conbywin(w)
+  DEF p:PTR TO console
+  IF w = NIL THEN RETURN NIL
+  p := conlist
+  WHILE p
+    IF p.armed AND (p.win = w) THEN RETURN p
+    p := p.next
+  ENDWHILE
+ENDPROC NIL
+
+-> route a handle-less packet (WAIT_CHAR, SCREEN_MODE, DISK_INFO,
+-> CHANGE_SIGNAL) or a `*`/CONSOLE: open to the SENDER's console:
+-> its CLI's StandardInput filehandle carries our console pointer in
+-> fh_Args - the routing the packet protocol always wanted (commands
+-> run inside the CLI process on AmigaDOS, so More and Ed resolve
+-> this way too). Fallbacks: the active window, then the list head.
+PROC conbysender(pkt:PTR TO dospacket)
+  DEF sender:PTR TO mp, t:PTR TO tc, proc:PTR TO process,
+      cli:PTR TO commandlineinterface, fh:PTR TO filehandle,
+      c, ib:PTR TO intuitionbase, p:PTR TO console
+  t := NIL
+  sender := pkt.port
+  IF sender THEN t := sender.sigtask
+  IF t
+    IF t.ln.type = NT_PROCESS
+      proc := t
+      IF proc.cli
+        cli := Shl(proc.cli, 2)
+        IF cli.standardinput
+          fh := Shl(cli.standardinput, 2)
+          c := fh.args
+          IF conok(c) THEN RETURN c
+        ENDIF
+      ENDIF
+    ENDIF
+    -> a WB-launched client has no CLI: the console this task last
+    -> opened, read or wrote is its best claim (More does Open then
+    -> SetMode from the same task, breaktask tracks exactly that)
+    p := conlist
+    WHILE p
+      IF p.breaktask = t THEN RETURN p
+      p := p.next
+    ENDWHILE
+  ENDIF
+  ib := intuitionbase
+  c := conbywin(ib.activewindow)
+  IF c THEN RETURN c
+ENDPROC conlist
+
+-> everything a console owns goes back to the heap (the window
+-> resources went down in closewin already)
+PROC condispose(c:PTR TO console)
+  DEF i
+  IF c.histdone
+    FOR i := 0 TO HISTMAX - 1
+      IF c.hist[i] THEN Dispose(c.hist[i])
+    ENDFOR
+  ENDIF
+  IF c.ebuf THEN Dispose(c.ebuf)
+  IF c.stash THEN Dispose(c.stash)
+  IF c.wtitle THEN Dispose(c.wtitle)
+  IF c.wtitlebase THEN Dispose(c.wtitlebase)
+  IF c.tctmp THEN Dispose(c.tctmp)
+  IF c.tctail THEN Dispose(c.tctail)
+  IF c.tcpool THEN Dispose(c.tcpool)
+  Dispose(c)
+ENDPROC
+
+-> a console dies: window resources down, off the list, ring slots
+-> scrubbed (ihdrain validates against the list too, but a LATER
+-> console could reuse the same heap address - scrub, don't hope),
+-> memory freed. curcon may come out NIL; every dispatch sets it.
+PROC conclose(c:PTR TO console)
+  DEF e:PTR TO ihev, n
+  curcon := c
+  closewin()                    -> replies parked writers/reads/waits
+  conrm(c)
+  n := ihtail
+  WHILE n <> ihhead
+    e := ihring + Shl(n AND (IHMAX - 1), 5)
+    IF e.con = c THEN e.con := NIL
+    n := n + 1
+  ENDWHILE
+  condispose(c)
+  curcon := conlist
+  rearmtimer()                  -> another console's waiters may be
+ENDPROC                         -> owed the timer now
+
 -> ---------- WAIT_CHAR timing ----------
 
 PROC armtimer(us)
@@ -437,31 +590,59 @@ PROC canceltimer()
   ENDIF
 ENDPROC
 
-PROC timerexpired()
-  DEF pkt:PTR TO dospacket, nxt:PTR TO dospacket, i
-  IF curcon.wcn = 0 THEN RETURN
-  pkt := curcon.wcq[0]
-  FOR i := 1 TO curcon.wcn - 1
-    curcon.wcq[i - 1] := curcon.wcq[i]
-  ENDFOR
-  curcon.wcn := curcon.wcn - 1
-  ReplyPkt(pkt, DOSFALSE, 0)
-  IF curcon.wcn > 0
-    nxt := curcon.wcq[0]     -> queued waiters restart their full timeout when
-    armtimer(nxt.arg1) -> they reach the head - approximate, noted
-  ENDIF
+-> the ONE timer request serves one console at a time: timercon's
+-> head waiter. When it goes quiet, the next console with waiters
+-> gets a fresh full timeout - the same approximation the single
+-> queue already documented, per console now.
+PROC rearmtimer()
+  DEF p:PTR TO console, pkt:PTR TO dospacket
+  IF timerarmed THEN RETURN
+  IF treq = NIL THEN RETURN
+  p := conlist
+  WHILE p
+    IF p.wcn > 0
+      pkt := p.wcq[0]
+      timercon := p
+      armtimer(pkt.arg1)
+      RETURN
+    ENDIF
+    p := p.next
+  ENDWHILE
+  timercon := NIL
 ENDPROC
 
--> input became available: wake every WAIT_CHAR, then feed the reads
+PROC timerexpired()
+  DEF pkt:PTR TO dospacket, i, c:PTR TO console
+  c := timercon
+  timercon := NIL
+  IF conok(c)
+    IF c.wcn > 0
+      pkt := c.wcq[0]
+      FOR i := 1 TO c.wcn - 1
+        c.wcq[i - 1] := c.wcq[i]
+      ENDFOR
+      c.wcn := c.wcn - 1
+      ReplyPkt(pkt, DOSFALSE, 0)
+    ENDIF
+  ENDIF
+  rearmtimer()
+ENDPROC
+
+-> input became available on curcon: wake every one of ITS
+-> WAIT_CHARs, then feed the reads
 PROC satisfywaits()
   DEF i
   IF curcon.wcn = 0 THEN RETURN
   IF inavail() = 0 THEN RETURN
-  canceltimer()
+  IF timercon = curcon
+    canceltimer()
+    timercon := NIL
+  ENDIF
   FOR i := 0 TO curcon.wcn - 1
     ReplyPkt(curcon.wcq[i], DOSTRUE, 0)
   ENDFOR
   curcon.wcn := 0
+  rearmtimer()
 ENDPROC
 
 PROC inputarrived()
@@ -469,26 +650,45 @@ PROC inputarrived()
   satisfyreads()
 ENDPROC
 
+-> M10b routing: handle-carrying packets (END/READ/WRITE) find their
+-> console in fh_Arg1 - the pointer dofind stored, validated against
+-> the list before trust; handle-less console packets (WAIT_CHAR,
+-> SCREEN_MODE, CHANGE_SIGNAL, DISK_INFO) route by their SENDER
+-> (conbysender). curcon is set at exactly these boundaries.
 PROC dopkt(pkt:PTR TO dospacket)
-  DEF len, old, id:PTR TO infodata, zp:PTR TO LONG, i, sender:PTR TO mp
+  DEF len, old, id:PTR TO infodata, zp:PTR TO LONG, i, sender:PTR TO mp,
+      c:PTR TO console
   SELECT pkt.type
   CASE ACTION_FINDINPUT;  dofind(pkt)
   CASE ACTION_FINDOUTPUT; dofind(pkt)
   CASE ACTION_FINDUPDATE; dofind(pkt)
   CASE ACTION_END
-    curcon.opens := curcon.opens - 1
-    IF curcon.opens <= 0
-      curcon.opens := 0
-      curcon.breaktask := NIL
-      curcon.autopend := FALSE         -> an AUTO that never opened resets
-      IF curcon.win
-        IF curcon.waitmode = FALSE     -> stock CON: semantics: the window
-          closewin()            -> closes with its last handle; WAIT
-        ENDIF                   -> lingers for its close gadget (and a
-      ENDIF                     -> new open re-attaches to it)
+    c := pkt.arg1
+    IF conok(c) = FALSE
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
+    c.opens := c.opens - 1
+    IF c.opens <= 0
+      c.opens := 0
+      c.breaktask := NIL
+      IF c.win
+        IF c.waitmode = FALSE   -> stock CON: semantics: the window
+          conclose(c)           -> dies with its last handle; WAIT
+        ENDIF                   -> lingers for its close gadget and
+      ELSE                      -> dies by conclose there. A window-
+        conclose(c)             -> less console (AUTO never opened)
+      ENDIF                     -> has nothing to linger for.
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_WRITE
+    c := pkt.arg1
+    IF conok(c) = FALSE
+      ReplyPkt(pkt, -1, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
     IF curcon.selon AND (curcon.wqn < WQMAX)
       curcon.wq[curcon.wqn] := pkt            -> a drag holds the screen still: the
       curcon.wqn := curcon.wqn + 1                     -> writer waits, unreplied, until the
@@ -496,6 +696,12 @@ PROC dopkt(pkt:PTR TO dospacket)
       dowrite(pkt)              -> behaviour - output freezes while
     ENDIF                       -> you select)
   CASE ACTION_READ
+    c := pkt.arg1
+    IF conok(c) = FALSE
+      ReplyPkt(pkt, -1, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -507,6 +713,12 @@ PROC dopkt(pkt:PTR TO dospacket)
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
     ENDIF
   CASE ACTION_WAIT_CHAR
+    c := conbysender(pkt)       -> no handle rides this packet
+    IF c = NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
     ensurewin()
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
@@ -518,9 +730,15 @@ PROC dopkt(pkt:PTR TO dospacket)
     ELSE
       curcon.wcq[curcon.wcn] := pkt
       curcon.wcn := curcon.wcn + 1
-      IF curcon.wcn = 1 THEN armtimer(pkt.arg1)
+      rearmtimer()              -> no-op while another head is armed
     ENDIF
   CASE ACTION_SCREEN_MODE
+    c := conbysender(pkt)       -> no handle here either
+    IF c = NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
     ensurewin()                 -> mode changes imply a console soon
     -> arg1: DOSTRUE = raw, 0 = cooked. Raw parks the line editor -
     -> keys become bytes, the client owns echo and screen
@@ -546,11 +764,23 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
+    c := conbysender(pkt)
+    IF c = NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+    curcon := c
     -> arg2 = Task to signal on Ctrl+C..F (0 = just query); res2 = old
     old := curcon.breaktask
     IF pkt.arg2 THEN curcon.breaktask := pkt.arg2
     ReplyPkt(pkt, DOSTRUE, old)
   CASE ACTION_DISK_INFO
+    c := conbysender(pkt)       -> which window? the sender's console
+    IF c = NIL                  -> (More's retitle, Ed's menu strip
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN                    -> both hang off this pointer)
+    ENDIF
+    curcon := c
     -> the console curiosity: id_VolumeNode carries the WINDOW pointer,
     -> which is how programs find the console's window
     ensurewin()                 -> the asker wants a window pointer
@@ -773,27 +1003,82 @@ PROC parsecon(bname)
   ENDWHILE
 ENDPROC
 
+-> M10b: a window per open - the stock CON: family shape. Every
+-> create-open builds its OWN console (its options finally parse per
+-> open: the M9 wall comes down); `*` and CONSOLE: opens attach to
+-> the SENDER's console instead - the reopen-your-own-console idiom
+-> (AROS con-handler does the same split). WAIT windows linger until
+-> their gadget, but nothing re-attaches to them any more: a new
+-> open is a new window now, which is what stock CON: does too.
 PROC dofind(pkt:PTR TO dospacket)
-  DEF fh:PTR TO filehandle, sender:PTR TO mp
-  IF (curcon.win = NIL) AND (curcon.autopend = FALSE)
-    parsecon(pkt.arg3)          -> the FIRST open decides the window;
-    IF curcon.pauto                    -> later opens attach to it as-is.
-      curcon.autopend := TRUE          -> AUTO (M9): the open succeeds
+  DEF fh:PTR TO filehandle, sender:PTR TO mp, c:PTR TO console,
+      s:PTR TO CHAR, l, i, att
+  -> classify the name: no ':' with a leading '*' = attach; device
+  -> part CONSOLE = attach; no name at all can only mean the
+  -> sender's console; anything else = a fresh window
+  att := FALSE
+  IF pkt.arg3
+    s := Shl(pkt.arg3, 2)       -> a BSTR: length byte, then chars
+    l := s[0]
+    i := 1
+    WHILE (i <= l) AND (s[i] <> ":")
+      i++
+    ENDWHILE
+    IF i > l
+      IF l > 0
+        IF s[1] = "*" THEN att := TRUE
+      ENDIF
+    ELSEIF i = 8
+      IF (tcfold(s[1]) = "C") AND (tcfold(s[2]) = "O") AND
+         (tcfold(s[3]) = "N") AND (tcfold(s[4]) = "S") AND
+         (tcfold(s[5]) = "O") AND (tcfold(s[6]) = "L") AND
+         (tcfold(s[7]) = "E") THEN att := TRUE
+    ENDIF
+  ELSE
+    att := TRUE
+  ENDIF
+  IF att
+    c := conbysender(pkt)
+    IF c = NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
+      RETURN
+    ENDIF
+  ELSE
+    c := New(SIZEOF console)
+    IF c
+      IF coninit(c) = FALSE
+        condispose(c)           -> frees whatever coninit got
+        c := NIL
+      ENDIF
+    ENDIF
+    IF c = NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
+      RETURN
+    ENDIF
+    curcon := c
+    parsecon(pkt.arg3)          -> THIS open's spec, nobody else's
+    conadd(c)                   -> listed unarmed: the chain ignores
+    IF c.pauto                  -> it until openwin's last line
+      c.autopend := TRUE        -> AUTO (M9): the open succeeds
     ELSE                        -> windowless; first real I/O makes
       openwin()                 -> the window (ensurewin)
+      IF c.win = NIL
+        conrm(c)
+        condispose(c)
+        curcon := conlist
+        ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
+        RETURN
+      ENDIF
     ENDIF
   ENDIF
-  IF curcon.win OR curcon.autopend
-    fh := Shl(pkt.arg1, 2)      -> BPTR to the FileHandle DOS made
-    fh.args := 1                -> our stream id (single stream for now)
-    fh.interactive := DOSTRUE   -> we are a console
-    curcon.opens := curcon.opens + 1
-    sender := pkt.port
-    curcon.breaktask := sender.sigtask -> opener gets Ctrl+C..F by default
-    ReplyPkt(pkt, DOSTRUE, 0)
-  ELSE
-    ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
-  ENDIF
+  curcon := c
+  fh := Shl(pkt.arg1, 2)        -> BPTR to the FileHandle DOS made
+  fh.args := c                  -> the console pointer IS the stream
+  fh.interactive := DOSTRUE     -> id: packets route by it now
+  c.opens := c.opens + 1
+  sender := pkt.port
+  c.breaktask := sender.sigtask -> opener gets Ctrl+C..F by default
+  ReplyPkt(pkt, DOSTRUE, 0)
 ENDPROC
 
 -> an AUTO window materializes on the first packet that needs one
@@ -989,8 +1274,8 @@ PROC openwin()
   ReportMouse(TRUE, curcon.win)        -> set (evmask is 0 here) and motion
                                 -> events exist when a drag asks
   -> armed last: the chain handler takes nothing until the per-window
-  -> state above is fully rebuilt
-  ihwin := curcon.win
+  -> state above is fully rebuilt (conbywin checks this flag)
+  curcon.armed := TRUE
 ENDPROC
 
 -> real close semantics (M5c): pending reads answer EOF, pending
@@ -998,15 +1283,37 @@ ENDPROC
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
   DEF i
-  IF curcon.win = NIL THEN RETURN
-  ihwin := NIL                  -> disarm the chain handler FIRST; then
-  ihtail := ihhead              -> discard whatever it already captured
+  IF curcon.win = NIL
+    -> a windowless console (an AUTO whose open failed) can still
+    -> hold parked packets - they MUST be replied before the console
+    -> memory goes away, or their senders hang forever
+    IF timercon = curcon
+      canceltimer()
+      timercon := NIL
+    ENDIF
+    WHILE curcon.wcn > 0
+      curcon.wcn := curcon.wcn - 1
+      ReplyPkt(curcon.wcq[curcon.wcn], DOSFALSE, 0)
+    ENDWHILE
+    WHILE curcon.rdn > 0
+      curcon.rdn := curcon.rdn - 1
+      ReplyPkt(curcon.rdq[curcon.rdn], 0, 0)
+    ENDWHILE
+    RETURN
+  ENDIF
+  curcon.armed := FALSE         -> disarm the chain handler FIRST;
+                                -> its captured leftovers are scrubbed
+                                -> by conclose (other consoles' events
+                                -> stay in the ring untouched now)
   curcon.cursx := -1                   -> the window takes the cursor with it
   curcon.selon := FALSE                -> a drag dies with the window; parked
   curcon.sello := -1                   -> writers MUST be replied or their
   curcon.selhi := -1                   -> tasks hang forever
   flushwq()
-  canceltimer()
+  IF timercon = curcon          -> the timer may be serving another
+    canceltimer()               -> console's waiters - leave it be
+    timercon := NIL             -> then (conclose rearms after us)
+  ENDIF
   WHILE curcon.wcn > 0
     curcon.wcn := curcon.wcn - 1
     ReplyPkt(curcon.wcq[curcon.wcn], DOSFALSE, 0)
@@ -1984,7 +2291,7 @@ PROC edroom(n)
 ENDPROC
 
 PROC eraseedit()
-  DEF y, r, r1, x0
+  DEF y, r, r1, x0, m:PTR TO CHAR, a:PTR TO CHAR, j
   IF curcon.win = NIL THEN RETURN
   IF curcon.ancx >= curcon.cols THEN RETURN -> inverted RectFill = wild writes
   r1 := edlastrow(curcon.edlast)
@@ -1995,6 +2302,14 @@ PROC eraseedit()
     y := curcon.topy + Mul(r, curcon.ch)
     RectFill(curcon.rp, curcon.left + Mul(x0, curcon.cw), y,
              curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
+    IF curcon.sb                -> the mirror empties with the pixels
+      m := visrow(r)            -> (the edit line lives in the model
+      a := sarow(r)             -> now - see drawedit)
+      FOR j := x0 TO curcon.cols - 1
+        m[j] := 0
+        a[j] := 0
+      ENDFOR
+    ENDIF
     x0 := 0                   -> continuation rows clear full width
   ENDFOR
   SetAPen(curcon.rp, curcon.deffg)
@@ -2002,9 +2317,15 @@ ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
 -> visible for mid-line editing (transplant of 0.1 redrawinput,
--> grown row-wrapping)
+-> grown row-wrapping). The typed text is MIRRORED into the model
+-> (0.25): the overlay used to be pixels only, so drag-selecting the
+-> prompt line repainted its rows from empty model cells - the text
+-> vanished and the copy came out blank. In the model it selects,
+-> copies and survives selection repaints like any other cell;
+-> commit erases it and renders the real line over the same cells.
 PROC drawedit()
-  DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc
+  DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc,
+      m:PTR TO CHAR, a:PTR TO CHAR, j
   IF curcon.win = NIL THEN RETURN
   l := StrLen(curcon.ebuf)
   edroom(l)
@@ -2019,6 +2340,13 @@ PROC drawedit()
     n := Min(curcon.cols - xc, l - i)
     Move(curcon.rp, curcon.left + Mul(xc, curcon.cw), curcon.topy + Mul(r, curcon.ch) + curcon.baseline)
     Text(curcon.rp, s + i, n)
+    IF curcon.sb
+      CopyMem(s + i, visrow(r) + xc, n)
+      a := sarow(r) + xc
+      FOR j := 0 TO n - 1
+        a[j] := curcon.deffg    -> deffg on background 0, the same
+      ENDFOR                    -> attr the pixels are drawn with
+    ENDIF
     i := i + n
     xc := 0
     r := r + 1
@@ -2197,9 +2525,17 @@ PROC dorawkey(code, qual)
   ENDIF
   -> raw keys close an open completion menu - EXCEPT the qualifier
   -> keys themselves ($60-$67: Shift, Ctrl, Alt, Amiga - Shift+Tab
-  -> starts with a bare Shift down-stroke) and key releases (bit 7)
+  -> starts with a bare Shift down-stroke), key releases (bit 7),
+  -> and the keys dovanilla treats specially WHILE the menu is open:
+  -> Return $44 / keypad Enter $43 (accept + close, line stays for a
+  -> second Enter - zsh menu-select) and Esc $45 (close, line
+  -> survives). Closing here first made Enter EXECUTE the line and
+  -> Esc WIPE it - dovanilla saw tcactive already FALSE. Latent
+  -> since M6 put every key through this proc; the IDCMP path
+  -> delivered Return as VANILLAKEY only and never showed it.
   IF curcon.tcactive
-    IF ((code AND $80) = 0) AND ((code < $60) OR (code > $67))
+    IF ((code AND $80) = 0) AND ((code < $60) OR (code > $67)) AND
+       (code <> $44) AND (code <> $43) AND (code <> $45)
       tcclose()
     ENDIF
   ENDIF
@@ -2216,6 +2552,12 @@ PROC dorawkey(code, qual)
       RETURN TRUE
     ENDIF
   ENDIF
+  -> a bare qualifier down-stroke is not "any other key": Shift
+  -> pressed to BEGIN Shift+Up paging must not snap a scrolled view
+  -> back to live (the M5b menu lesson, applied to the view at
+  -> last). Bit 7 covers releases for the IDCMP fallback - the
+  -> chain path already drops those in ihkey.
+  IF ((code AND $80) <> 0) OR ((code >= $60) AND (code <= $67)) THEN RETURN TRUE
   snaplive()                    -> any other key returns the view to live
   IF curcon.rawmode
     RETURN rawcsikey(code, qual)
@@ -2315,15 +2657,18 @@ ENDPROC
 -> the one Signal - copy, neutralize, get out. Events for our window
 -> while it is the active one are copied into the ring and turned
 -> into IECLASS_NULL; everything else passes through untouched.
--> ihwin is the arming switch: the main task sets it only while a
--> fully initialized window exists.
+-> Each console's `armed` flag is the arming switch: the main task
+-> sets it only while a fully initialized window exists, and the
+-> console list itself is only ever mutated under Forbid (this proc
+-> runs in input.device's TASK, which Forbid holds off).
 PROC ihchain(list:PTR TO inputevent)
   DEF ev:PTR TO inputevent, ib:PTR TO intuitionbase, e:PTR TO ihev,
-      take, got, c
+      take, got, c, k:PTR TO console
   got := FALSE
-  IF ihwin
-    ib := intuitionbase
-    IF ib.activewindow = ihwin
+  IF conlist                    -> M10b: whichever ARMED console owns
+    ib := intuitionbase         -> the active window takes the events;
+    k := conbywin(ib.activewindow)  -> its pointer rides the ring slot
+    IF k
       ev := list
       WHILE ev
         c := ev.class
@@ -2335,7 +2680,7 @@ PROC ihchain(list:PTR TO inputevent)
         IF c = IECLASS_RAWKEY
           take := TRUE
         ELSEIF (c > IECLASS_RAWKEY) AND (c <= IECLASS_MAX)
-          IF curcon.evmask AND Shl(1, c) THEN take := TRUE
+          IF k.evmask AND Shl(1, c) THEN take := TRUE
         ENDIF
         IF take
           IF (ihhead - ihtail) < IHMAX
@@ -2347,6 +2692,7 @@ PROC ihchain(list:PTR TO inputevent)
             e.addr := ev.eventaddress
             e.secs := ev.timestamp.secs
             e.mics := ev.timestamp.micro
+            e.con := k
             ihhead := ihhead + 1
             got := TRUE
           ELSE
@@ -2365,10 +2711,12 @@ ENDPROC list
 -> through the same procs the IDCMP path used; every other captured
 -> class was requested via CSI n{ and becomes a raw event report.
 PROC ihdrain()
-  DEF e:PTR TO ihev
+  DEF e:PTR TO ihev, c
   WHILE ihtail <> ihhead
     e := ihring + Shl(ihtail AND (IHMAX - 1), 5)
-    IF curcon.win                      -> late events after closewin: dropped
+    c := e.con                  -> the console the chain captured for;
+    IF conok(c)                 -> a scrubbed or dead tag is dropped
+      curcon := c
       IF e.cls = IECLASS_RAWKEY
         IF curcon.evmask AND Shl(1, IECLASS_RAWKEY)
           ihreport(e)           -> class 1 requested as reports: the
@@ -2925,6 +3273,10 @@ PROC dotab(back)
   ENDFOR
   dirp[sep - curcon.tcws] := 0
   plen := curcon.cpos - sep
+  -> candidates are BARE names: replacement must start after the
+  -> dirpart, or `version l:c<Tab>` eats its "l:" (latent since
+  -> M5b - plain words never showed it, path words always did)
+  curcon.tcws := sep
   IF tcresolve(dirp) = FALSE
     DisplayBeep(NIL)
     RETURN
@@ -3017,4 +3369,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.21 (18.7.26) CCON: LTX console handler M10a', 0
+vers: CHAR '$VER: ccon-handler 1.0 (18.7.26) CCON: LTX console handler', 0

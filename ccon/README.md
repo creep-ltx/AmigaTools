@@ -8,8 +8,8 @@ option table), and commands talk to the handler, so no application
 can add it from outside. The endgame is CTerm handing its frame
 window to `CCON:` instead of `CON:`.
 
-**Status: milestones 1–4 boot-verified on an AmigaOS 3.2 install
-(FS-UAE).** `NewShell CCON:` runs a real AmigaShell in the
+**Status: 1.0 — every milestone boot-verified on an AmigaOS 3.2
+install (FS-UAE, 68030). The release archive is `ccon.lha`.** `NewShell CCON:` runs a real AmigaShell in the
 handler's window — prompt, dir, list, EndShell — with the CTerm
 0.1 line editor behind ACTION_READ (blip cursor, insert editing,
 word jumps, 32-line history, type-ahead, EOF on Ctrl+\) and
@@ -104,7 +104,17 @@ plain SGR 3x stays raw pens (stock semantics, what WB-pen
 programs like Ed mean) while the bold+3x forms — ANSI colour
 intent, the `ls` scheme — are translated by colour through
 ObtainBestPen against the screen's own palette, so directories
-are genuinely blue on a stock Workbench too. See `todo.md`.
+are genuinely blue on a stock Workbench too.
+And M10 makes it a real family member: **a window per open**.
+Consoles live on a list — every create-open builds its own
+(coninit + parsecon + openwin per open, so the M9 option set
+finally applies to every window), `*`/CONSOLE: opens attach to
+the sender's console via its CLI streams, and packets route to
+their console by handle or by sender at the dispatch boundaries.
+Two shells are two windows now; keys follow the active window
+down the one input chain; a WAIT window still lingers for its
+gadget but nothing re-attaches — a new open is a new window,
+exactly as on stock CON:. See `todo.md`.
 
 ## Try it
 
@@ -124,6 +134,7 @@ and prints the line.
 - `ccon-handler` — prebuilt AmigaOS binary.
 - `CCON-mountlist` — mountlist for `DEVS:`.
 - `CRAW-mountlist` — the raw-by-default second device.
+- `ccon.readme` — the Aminet-style readme for the release archive.
 - `todo.md` — milestones and the verified protocol facts.
 
 ## Building
