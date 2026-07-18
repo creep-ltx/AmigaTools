@@ -129,8 +129,14 @@ and prints the line.
 ## Building
 
 ```
-evo ccon-handler.e
+evo ccon-handler.e LARGE
 ```
+
+`LARGE` became necessary with 0.21 (M10 step A): the console-object
+indirection pushed references past the small model's 32k range. The
+generated startup was disassembled against the 0.20 build to confirm
+the E handler trick below survives the model change — it does,
+byte-identically.
 
 ## The E handler trick
 

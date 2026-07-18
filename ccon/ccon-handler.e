@@ -12,6 +12,11 @@
 -> hookup fails, ihon stays FALSE and the boot-proven IDCMP path is
 -> the fallback, end to end.
 ->
+-> M10 step A (0.21): every per-window global lives in the one
+-> `console` OBJECT now, reached only through `curcon` - the
+-> struct-ification the window-per-open design (todo.md M10) needs
+-> first. One console still; behaviour must be identical to 0.20.
+->
 -> Test:  Mount CCON: FROM DEVS:CCON-mountlist
 ->        NewShell CCON:
 ->        list SYS: then Shift+Up/Down, Ctrl+Up/Down; type = snap live
@@ -76,122 +81,114 @@ OBJECT ihev
   mics:LONG
 ENDOBJECT
 
+-> M10 step A: everything per-window lives in ONE console object; the
+-> globals this file grew through M1-M9 became these fields, reached
+-> only through `curcon` - the current console. For now exactly one is
+-> made, at mount time: behaviour must be identical to 0.20. The
+-> console LIST, per-open routing and window-per-open semantics are
+-> the next steps (todo.md M10). Byte arrays sit at the end so every
+-> LONG field keeps its natural alignment.
+OBJECT console
+  -> the window and its text grid
+  win:PTR TO window
+  rp:PTR TO rastport
+  tf:PTR TO textfont
+  cw, ch, baseline              -> cell metrics (topaz: fixed)
+  left, topy, cols, rows        -> the text grid inside the window
+  cx, cy                        -> output cursor, in cells
+  cursx, cursy                  -> raw block cursor; -1 = not painted
+  -> copy & paste (M7)
+  selon                         -> a drag is in progress
+  selanc, selcur                -> anchor/current cell, row*cols+x
+  sello, selhi                  -> the standing highlight, [lo,hi)
+  selvo                         -> viewoff the selection was made at
+  wq[16]:ARRAY OF LONG          -> writers parked during a drag
+  wqn
+  opens                         -> open handles on this console
+  -> the line editor (CTerm 0.1 transplant)
+  ebuf:PTR TO CHAR              -> the line being typed (E-string)
+  stash:PTR TO CHAR             -> half-typed line parked during history
+  cpos                          -> cursor inside ebuf
+  ancx, ancy                    -> cell where the edit line is drawn
+  edlast                        -> chars the last drawedit painted
+  tcmrow0                       -> completion menu's first row, frozen
+  hist[32]:ARRAY OF LONG        -> prompt history: E-string ptrs
+  htotal, hpos
+  histdone                      -> hist strings are made only once
+  -> cooked input plumbing
+  inqh, inqt                    -> head/tail of the inq ring below
+  cesc                          -> CSI parser state (survives split
+  cpar[4]:ARRAY OF LONG         -> writes; up to 4 parameters)
+  cnp
+  rdq[16]:ARRAY OF LONG         -> pending ACTION_READ packets
+  rdn
+  eofpend
+  breaktask                     -> who gets Ctrl+C..F (AROS pattern)
+  rawmode                       -> ACTION_SCREEN_MODE: DOSTRUE = raw
+  wcq[8]:ARRAY OF LONG          -> pending ACTION_WAIT_CHAR packets
+  wcn
+  evmask                        -> raw event classes via CSI n{
+  -> the scrollback model (M5)
+  sb                            -> the ring; NIL = scrollback disabled
+  sa                            -> its attr plane: fg/bg nibble per cell
+  sbtop                         -> ring index of the top visible row
+  sbcnt                         -> history lines above the screen
+  viewoff                       -> lines scrolled back; 0 = live
+  -> SGR state (M5d)
+  deffg, curfg, curbg, bold, can16
+  wbpens                        -> WBPENS: plain 30-33 are WB pens
+  cursgr                        -> an explicit 3x is in effect
+  anstab[8]:ARRAY OF LONG       -> foreign screens: ObtainBestPen picks
+  anscm                         -> the colormap they came from
+  -> per-open window spec (M5c/M9), parsed from the open name
+  pwx, pwy, pww, pwh
+  waitmode, closegad
+  fwptr                         -> WINDOW0xADDR: borrow this window
+  fwin, oldidcmp                -> borrowed-window bookkeeping
+  closereq                      -> close gadget seen; close after drain
+  pauto                         -> AUTO: window on first I/O
+  autopend                      -> an AUTO open waits, windowless
+  pnoborder, pnodrag, pnodepth, pnosize, pbackdrop, pinactive
+  wtitle:PTR TO CHAR            -> title + scroll indicator (E-string;
+                                -> persists: Intuition keeps the ptr)
+  wtitlebase:PTR TO CHAR        -> the parsed window title (E-string)
+  -> tab completion (M5b)
+  fsdirport:PTR TO mp           -> resolved: the filesystem's port,
+  fsdirlock                     -> the lock being scanned,
+  fsdirfree                     -> and whether WE made it (must free)
+  tcc[80]:ARRAY OF LONG         -> candidates: ptrs into tcpool, each
+  tcpool:PTR TO CHAR            -> entry = [flags CHAR][name NUL]
+  tcpu, tcn, tcmore
+  tcactive, tcsel               -> the menu: open?, highlighted index
+  tcws, tcwend                  -> the word being completed, in ebuf
+  tcmrows, tcmcols, tcmcolw, tcshown
+  tctmp:PTR TO CHAR             -> completion scratch (E-string)
+  tctail:PTR TO CHAR            -> line tail during word replacement
+  -> byte arrays last (alignment)
+  inq[2048]:ARRAY OF CHAR       -> input byte queue (finished lines)
+  pscrname[64]:ARRAY OF CHAR    -> SCREENname: a public screen
+ENDOBJECT
+
 DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
-    win=NIL:PTR TO window,
-    rp=NIL:PTR TO rastport,
-    tf=NIL:PTR TO textfont,
-    cw, ch, baseline,           -> cell metrics (topaz: fixed)
-    left, topy, cols, rows,     -> the text grid inside the window
-    cx=0, cy=0,                 -> output cursor, in cells
-    cursx=-1, cursy=0,          -> where the raw-mode block cursor is
-                                -> painted right now; -1 = not painted
-    -> copy & paste (M7): drag-select on the M6 chain's mouse events,
-    -> copy to clipboard.device unit 0 as IFF FTXT on release,
-    -> RAMIGA-V injects the clip as typed input
-    selon=FALSE,                -> a drag is in progress
-    selanc=-1, selcur=-1,       -> anchor/current cell, row*cols+x
-    sello=-1, selhi=-1,         -> the standing highlight, [lo,hi)
-    selvo=0,                    -> viewoff the selection was made at
-    wq[16]:ARRAY OF LONG,       -> writers wait while a drag holds
-    wqn=0,                      -> the screen still (stock behaviour)
-    clipport=NIL:PTR TO mp,
+    -> M10a: THE console. Everything per-window is inside it; what
+    -> stays out here is genuinely shared across any future windows -
+    -> the ports, the devices, the one input chain, the fs plumbing.
+    curcon:PTR TO console,
+    clipport=NIL:PTR TO mp,     -> clipboard.device (M7), opened lazily
     clipreq=NIL:PTR TO ioclipreq,
     clipbuf=NIL:PTR TO CHAR,
-    opens=0,
-    -> the line editor (transplanted from CTerm 0.1, commit 71e29b1)
-    ebuf[404]:STRING,           -> the line being typed
-    stash[404]:STRING,          -> half-typed line parked during history
-    cpos=0,                     -> cursor inside ebuf
-    ancx=0, ancy=0,             -> cell where the edit line is drawn
-    edlast=0,                   -> chars the last drawedit painted
-                                -> (eraseedit must clear that many)
-    tcmrow0=0,                  -> completion menu's first row, frozen
-                                -> at open (the wrapped edit line may
-                                -> change height while cycling)
-    hist[32]:ARRAY OF LONG, htotal=0, hpos=-1,
-    -> cooked input plumbing
-    inq[2048]:ARRAY OF CHAR, inqh=0, inqt=0,
-    cesc=0,                     -> CSI parser state, global so sequences
-    cpar[4]:ARRAY OF LONG,      -> split across two writes still parse;
-    cnp=0,                      -> up to 4 parameters (H needs row;col)
-    rdq[16]:ARRAY OF LONG, rdn=0,
-    eofpend=FALSE,
-    breaktask=NIL,              -> who gets Ctrl+C..F (AROS con-handler
-                                -> pattern: last client to FIND, READ or
-                                -> WRITE, unless CHANGE_SIGNAL overrides)
-    rawmode=FALSE,              -> ACTION_SCREEN_MODE: DOSTRUE = raw
     tport=NIL:PTR TO mp,        -> timer.device plumbing for WAIT_CHAR
     treq=NIL:PTR TO timerequest,
     timerarmed=FALSE,
-    wcq[8]:ARRAY OF LONG, wcn=0,-> pending ACTION_WAIT_CHAR packets
-    evmask=0,                   -> raw input event classes requested via
-                                -> CSI n { (Ed asks for 10 = MENULIST)
-    -> the scrollback model (M5): SBMAX rows of cols bytes in a ring.
-    -> The last `rows` ring lines are the VISIBLE grid: sbtop is the
-    -> ring index of the top visible row, so a bottom scroll is sbtop++
-    -> and the old top row becomes history with no copying. All index
-    -> math is add/subtract wraps - no Mod, no DIVU anywhere near it.
-    sb=NIL,                     -> the ring; NIL = scrollback disabled
-    sa=NIL,                     -> its attr plane: one byte per cell -
-                                -> fg pen in the low nibble, bg in the
-                                -> high - so colours survive redraws
-    sbtop=0,                    -> ring index of the top visible row
-    sbcnt=0,                    -> history lines above the screen (valid)
-    viewoff=0,                  -> lines scrolled back; 0 = live
-    -> SGR state (M5d): CSI ...m renders now. deffg comes from the
-    -> open name's PEN option (CTerm passes PEN7 on its ANSI screen);
-    -> bold maps to the bright pens 8-15 when the screen is deep
-    -> enough (can16), the 1996 ANSI-art convention
-    deffg=1, curfg=1, curbg=0, bold=FALSE, can16=FALSE,
-    wbpens=FALSE,               -> WBPENS option: plain SGR 30-33
-                                -> are WB pens, retarget at theme
-    -> M9: the stock CON: option set + the CRAW: device
-    rawdef=FALSE,               -> Startup="RAW": streams open raw
-    pauto=FALSE,                -> AUTO: window on first I/O
-    autopend=FALSE,             -> an AUTO open waits, windowless
-    pnoborder=FALSE, pnodrag=FALSE, pnodepth=FALSE,
-    pnosize=FALSE, pbackdrop=FALSE, pinactive=FALSE,
-    pscrname[64]:ARRAY OF CHAR, -> SCREENname: a public screen
-    cursgr=FALSE,               -> an explicit 3x is in effect (bare
-                                -> bold must not recolour anything)
-    anstab[8]:ARRAY OF LONG,    -> foreign screens: the ANSI bright
-                                -> colours as ObtainBestPen results
-    anscm=NIL,                  -> the colormap they came from
-    wtitle[112]:STRING,         -> title-bar scroll indicator (persists:
-                                -> Intuition keeps the pointer)
-    -> tab completion (M5b): filesystem packets are HAND-ROLLED at exec
-    -> level - built into fspkt, PutMsg'd to the filesystem's port,
-    -> reply awaited on the PRIVATE fsport - so pr_MsgPort (the port
-    -> our clients send to) is never touched and the no-DOS rule holds
+    rawdef=FALSE,               -> Startup="RAW": streams open raw (M9)
+    -> tab-completion fs plumbing (M5b): hand-rolled packets ride a
+    -> private reply port so pr_MsgPort is never touched (no-DOS rule)
     fsport=NIL:PTR TO mp,       -> private reply port for fs packets
     fspkt=NIL:PTR TO standardpacket,
     fsfib=NIL:PTR TO fileinfoblock,  -> longword-aligned (BPTR arg)
     fsname=NIL:PTR TO CHAR,     -> BSTR build buffer, longword-aligned
-    -> M5c: per-open window spec, parsed from the open name
-    -> "CCON:x/y/w/h/title/options" (options: CLOSE, WAIT, WINDOW0x)
-    pwx=40, pwy=40, pww=520, pwh=160,
-    waitmode=FALSE, closegad=FALSE,
-    fwptr=NIL,                  -> WINDOW0xADDR: borrow this window
-    fwin=FALSE, oldidcmp=0,     -> borrowed-window bookkeeping
-    closereq=FALSE,             -> close gadget seen; close after drain
-    histdone=FALSE,             -> hist strings are made only once
-    wtitlebase[84]:STRING,      -> the parsed window title
-    fsdirport=NIL:PTR TO mp,    -> resolved: the filesystem's port,
-    fsdirlock=0,                -> the lock being scanned,
-    fsdirfree=FALSE,            -> and whether WE made it (must free)
-    tcc[80]:ARRAY OF LONG,      -> candidates: ptrs into tcpool, each
-    tcpool=NIL:PTR TO CHAR,     -> entry = [dirflag CHAR][name NUL]
-    tcpu=0, tcn=0, tcmore=FALSE,
-    tcactive=FALSE, tcsel=-1,   -> the menu: open?, highlighted index
-    tcws=0, tcwend=0,           -> the word being completed, in ebuf
-    tcmrows=0, tcmcols=0, tcmcolw=0, tcshown=0,
-    tctmp[416]:STRING,          -> completion scratch
-    tctail[404]:STRING,         -> line tail during word replacement
-    -> M6: keys come from the input.device chain, not the window's
-    -> IDCMP - console.device's architecture. The interrupt's code is
-    -> gluestub; ihchain runs in input.device's task and fills ihring;
-    -> the main loop drains it on ihsig. ihon=FALSE falls back to the
-    -> boot-proven IDCMP path (0.8 behaviour) end to end.
+    -> M6: the input.device chain - ONE per process, by design (the
+    -> M10 decision: N chain handlers is the wrong shape)
     ihgd[2]:ARRAY OF LONG,      -> glue data: [E's A4][{ihchain}]
     ihcapa4=0,                  -> A4, captured by inline asm at start
     ihis=NIL:PTR TO is,         -> the interrupt in input.device's chain
@@ -228,7 +225,6 @@ PROC main()
   pkt := msg.ln.name              -> a packet rides in its message's ln_Name
 
   dnode := Shl(pkt.arg3, 2)       -> BPTR to our DeviceNode
-  dnode.task := port              -> future opens come straight to us
   -> M9: one binary, two devices - a mountlist with Startup = "RAW"
   -> (CRAW-mountlist) makes this instance open its streams raw by
   -> default, the RAW: counterpart. dn_Startup holds a BPTR to a
@@ -241,6 +237,17 @@ PROC main()
          (tcfold(stps[3]) = "W") THEN rawdef := TRUE
     ENDIF
   ENDIF
+  -> M10a: the one console object; no console, no mount - failing
+  -> the handshake beats running with nowhere to keep window state
+  curcon := New(SIZEOF console)
+  IF curcon
+    IF coninit(curcon) = FALSE THEN curcon := NIL
+  ENDIF
+  IF curcon = NIL
+    ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
+    RETURN 10
+  ENDIF
+  dnode.task := port              -> future opens come straight to us
   ReplyPkt(pkt, DOSTRUE, 0)       -> mount handshake done
 
   -> timer.device for real WAIT_CHAR timeouts (all exec, no packets);
@@ -268,7 +275,7 @@ PROC main()
   IF tmp THEN fsfib := Shl(Shr(tmp + 3, 2), 2)  -> aligned; round up
   tmp := New(260)
   IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
-  tcpool := New(TCPOOLSZ)
+  curcon.tcpool := New(TCPOOLSZ)
 
   -> M6: hook into the input.device chain (console.device's own
   -> architecture: keys are taken upstream, the window's UserPort
@@ -314,7 +321,7 @@ PROC main()
   psig := Shl(1, port.sigbit)
   WHILE TRUE
     wsig := 0
-    IF win THEN wsig := Shl(1, win.userport.sigbit)
+    IF curcon.win THEN wsig := Shl(1, curcon.win.userport.sigbit)
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
     Wait(psig OR wsig)
@@ -335,10 +342,10 @@ PROC main()
     -> owns the session beats tearing the window down under it.
     -> Leftovers drain when the mask clears (CSI }, cooked
     -> reversion, close).
-    IF win
-      IF (ihon = FALSE) OR (evmask = 0)
+    IF curcon.win
+      IF (ihon = FALSE) OR (curcon.evmask = 0)
         REPEAT
-          im := GetMsg(win.userport)
+          im := GetMsg(curcon.win.userport)
           IF im
             class := im.class
             code := im.code
@@ -359,8 +366,8 @@ PROC main()
           ENDIF
         UNTIL im = NIL
       ENDIF
-      IF closereq                 -> deferred: never CloseWindow while
-        closereq := FALSE         -> draining the port it owns
+      IF curcon.closereq                 -> deferred: never CloseWindow while
+        curcon.closereq := FALSE         -> draining the port it owns
         closewin()
       ENDIF
     ENDIF
@@ -376,6 +383,39 @@ PROC main()
     ENDIF
   ENDWHILE
 ENDPROC
+
+-> M10a: a console starts life here. New() zeroed it; these are the
+-> fields whose ground state is not zero, plus the six strings that
+-> were static globals before the OBJECT move (an OBJECT field cannot
+-> be a STRING - they are E-strings off the heap now, made once).
+-> FALSE = allocation failure: the caller refuses the mount rather
+-> than run half-built.
+PROC coninit(c:PTR TO console)
+  c.cursx := -1                 -> no block cursor painted
+  c.selanc := -1
+  c.selcur := -1
+  c.sello := -1                 -> no standing highlight
+  c.selhi := -1
+  c.hpos := -1                  -> not walking the history
+  c.tcsel := -1                 -> no completion pick
+  c.deffg := 1
+  c.curfg := 1
+  c.pwx := 40                   -> parsecon() re-derives these per
+  c.pwy := 40                   -> first-open; ground them anyway
+  c.pww := 520
+  c.pwh := 160
+  c.ebuf := String(404)
+  c.stash := String(404)
+  c.wtitle := String(112)
+  c.wtitlebase := String(84)
+  c.tctmp := String(416)
+  c.tctail := String(404)
+  c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
+  IF (c.ebuf = NIL) OR (c.stash = NIL) OR (c.wtitle = NIL) OR
+     (c.wtitlebase = NIL) OR (c.tctmp = NIL) OR (c.tctail = NIL)
+    RETURN FALSE
+  ENDIF
+ENDPROC TRUE
 
 -> ---------- WAIT_CHAR timing ----------
 
@@ -399,15 +439,15 @@ ENDPROC
 
 PROC timerexpired()
   DEF pkt:PTR TO dospacket, nxt:PTR TO dospacket, i
-  IF wcn = 0 THEN RETURN
-  pkt := wcq[0]
-  FOR i := 1 TO wcn - 1
-    wcq[i - 1] := wcq[i]
+  IF curcon.wcn = 0 THEN RETURN
+  pkt := curcon.wcq[0]
+  FOR i := 1 TO curcon.wcn - 1
+    curcon.wcq[i - 1] := curcon.wcq[i]
   ENDFOR
-  wcn--
+  curcon.wcn := curcon.wcn - 1
   ReplyPkt(pkt, DOSFALSE, 0)
-  IF wcn > 0
-    nxt := wcq[0]     -> queued waiters restart their full timeout when
+  IF curcon.wcn > 0
+    nxt := curcon.wcq[0]     -> queued waiters restart their full timeout when
     armtimer(nxt.arg1) -> they reach the head - approximate, noted
   ENDIF
 ENDPROC
@@ -415,13 +455,13 @@ ENDPROC
 -> input became available: wake every WAIT_CHAR, then feed the reads
 PROC satisfywaits()
   DEF i
-  IF wcn = 0 THEN RETURN
+  IF curcon.wcn = 0 THEN RETURN
   IF inavail() = 0 THEN RETURN
   canceltimer()
-  FOR i := 0 TO wcn - 1
-    ReplyPkt(wcq[i], DOSTRUE, 0)
+  FOR i := 0 TO curcon.wcn - 1
+    ReplyPkt(curcon.wcq[i], DOSTRUE, 0)
   ENDFOR
-  wcn := 0
+  curcon.wcn := 0
 ENDPROC
 
 PROC inputarrived()
@@ -436,32 +476,32 @@ PROC dopkt(pkt:PTR TO dospacket)
   CASE ACTION_FINDOUTPUT; dofind(pkt)
   CASE ACTION_FINDUPDATE; dofind(pkt)
   CASE ACTION_END
-    opens--
-    IF opens <= 0
-      opens := 0
-      breaktask := NIL
-      autopend := FALSE         -> an AUTO that never opened resets
-      IF win
-        IF waitmode = FALSE     -> stock CON: semantics: the window
+    curcon.opens := curcon.opens - 1
+    IF curcon.opens <= 0
+      curcon.opens := 0
+      curcon.breaktask := NIL
+      curcon.autopend := FALSE         -> an AUTO that never opened resets
+      IF curcon.win
+        IF curcon.waitmode = FALSE     -> stock CON: semantics: the window
           closewin()            -> closes with its last handle; WAIT
         ENDIF                   -> lingers for its close gadget (and a
       ENDIF                     -> new open re-attaches to it)
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_WRITE
-    IF selon AND (wqn < WQMAX)
-      wq[wqn] := pkt            -> a drag holds the screen still: the
-      wqn++                     -> writer waits, unreplied, until the
+    IF curcon.selon AND (curcon.wqn < WQMAX)
+      curcon.wq[curcon.wqn] := pkt            -> a drag holds the screen still: the
+      curcon.wqn := curcon.wqn + 1                     -> writer waits, unreplied, until the
     ELSE                        -> button releases (stock console
       dowrite(pkt)              -> behaviour - output freezes while
     ENDIF                       -> you select)
   CASE ACTION_READ
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
-    breaktask := sender.sigtask -> (the AROS con-handler does the same)
-    IF rdn < RDMAX
-      rdq[rdn] := pkt           -> queue it; a finished line replies it
-      rdn++
+    curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
+    IF curcon.rdn < RDMAX
+      curcon.rdq[curcon.rdn] := pkt           -> queue it; a finished line replies it
+      curcon.rdn := curcon.rdn + 1
       satisfyreads()
     ELSE
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
@@ -473,27 +513,27 @@ PROC dopkt(pkt:PTR TO dospacket)
     -> let timer.device answer (input arrival wakes all waiters)
     IF inavail() > 0
       ReplyPkt(pkt, DOSTRUE, 0)
-    ELSEIF (pkt.arg1 <= 0) OR (treq = NIL) OR (wcn >= 8)
+    ELSEIF (pkt.arg1 <= 0) OR (treq = NIL) OR (curcon.wcn >= 8)
       ReplyPkt(pkt, DOSFALSE, 0)
     ELSE
-      wcq[wcn] := pkt
-      wcn++
-      IF wcn = 1 THEN armtimer(pkt.arg1)
+      curcon.wcq[curcon.wcn] := pkt
+      curcon.wcn := curcon.wcn + 1
+      IF curcon.wcn = 1 THEN armtimer(pkt.arg1)
     ENDIF
   CASE ACTION_SCREEN_MODE
     ensurewin()                 -> mode changes imply a console soon
     -> arg1: DOSTRUE = raw, 0 = cooked. Raw parks the line editor -
     -> keys become bytes, the client owns echo and screen
     IF pkt.arg1
-      IF rawmode = FALSE
-        rawmode := TRUE
+      IF curcon.rawmode = FALSE
+        curcon.rawmode := TRUE
         tcclose()
         eraseedit()
         cursdraw()              -> the block cursor appears at once
       ENDIF
     ELSE
-      IF rawmode
-        rawmode := FALSE
+      IF curcon.rawmode
+        curcon.rawmode := FALSE
         curserase()             -> the blip owns cooked mode
         reanchor()
         drawedit()
@@ -501,14 +541,14 @@ PROC dopkt(pkt:PTR TO dospacket)
       -> a client reverting to cooked is done with its raw event
       -> reports too (Ed does not send CSI } on exit); clearing the
       -> mask also resumes the parked UserPort drain (M6)
-      evmask := 0
+      curcon.evmask := 0
       setidcmp()                -> and MOUSEBUTTONS comes back
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
     -> arg2 = Task to signal on Ctrl+C..F (0 = just query); res2 = old
-    old := breaktask
-    IF pkt.arg2 THEN breaktask := pkt.arg2
+    old := curcon.breaktask
+    IF pkt.arg2 THEN curcon.breaktask := pkt.arg2
     ReplyPkt(pkt, DOSTRUE, old)
   CASE ACTION_DISK_INFO
     -> the console curiosity: id_VolumeNode carries the WINDOW pointer,
@@ -526,7 +566,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     -> Answering 'CCON' makes the shell revert us to cooked and hand
     -> editing to the console - which is the whole point of CCON.
     id.disktype := $43434F4E
-    id.volumenode := win
+    id.volumenode := curcon.win
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_SEEK
     -> Seek on a console fails-with-style: -1 result, reason in res2
@@ -548,12 +588,12 @@ ENDPROC
 PROC dowrite(pkt:PTR TO dospacket)
   DEF sender:PTR TO mp, len
   ensurewin()                   -> an AUTO window appears on first
-  IF win = NIL                  -> output; no window at all = the
+  IF curcon.win = NIL                  -> output; no window at all = the
     ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)  -> write cannot land
     RETURN
   ENDIF
   sender := pkt.port            -> the writer owns the break signal too:
-  breaktask := sender.sigtask   -> `list >CCON:` is opened by the SHELL,
+  curcon.breaktask := sender.sigtask   -> `list >CCON:` is opened by the SHELL,
                                 -> but the WRITEs come from list itself -
                                 -> this line is what makes Ctrl+C reach it
                                 -> (AROS con-handler does the same)
@@ -561,7 +601,7 @@ PROC dowrite(pkt:PTR TO dospacket)
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
-  IF rawmode
+  IF curcon.rawmode
     curserase()                 -> raw: the app owns the screen, no blip
     render(pkt.arg2, len)       -> - but the console owns the block
     cursdraw()                  -> cursor (Ed's only position marker)
@@ -577,11 +617,11 @@ ENDPROC
 PROC flushwq()
   DEF i
   i := 0
-  WHILE i < wqn
-    dowrite(wq[i])              -> FIFO: writers resume in order
+  WHILE i < curcon.wqn
+    dowrite(curcon.wq[i])              -> FIFO: writers resume in order
     i++
   ENDWHILE
-  wqn := 0
+  curcon.wqn := 0
 ENDPROC
 
 -> a decimal field; -1 = empty or not a number (keep the default)
@@ -605,24 +645,24 @@ ENDPROC v
 PROC parsecon(bname)
   DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR,
       tok2[84]:ARRAY OF CHAR
-  pwx := 40
-  pwy := 40
-  pww := 520
-  pwh := 160
-  StrCopy(wtitlebase, 'CCON:')
-  waitmode := FALSE
-  closegad := TRUE              -> stock 3.2 shape: close gadget on
-  fwptr := NIL                  -> (NOCLOSE removes it)
-  deffg := 1
-  wbpens := FALSE
-  pauto := FALSE
-  pnoborder := FALSE
-  pnodrag := FALSE
-  pnodepth := FALSE
-  pnosize := FALSE
-  pbackdrop := FALSE
-  pinactive := FALSE
-  pscrname[0] := 0              -> global array: garbage until set
+  curcon.pwx := 40
+  curcon.pwy := 40
+  curcon.pww := 520
+  curcon.pwh := 160
+  StrCopy(curcon.wtitlebase, 'CCON:')
+  curcon.waitmode := FALSE
+  curcon.closegad := TRUE              -> stock 3.2 shape: close gadget on
+  curcon.fwptr := NIL                  -> (NOCLOSE removes it)
+  curcon.deffg := 1
+  curcon.wbpens := FALSE
+  curcon.pauto := FALSE
+  curcon.pnoborder := FALSE
+  curcon.pnodrag := FALSE
+  curcon.pnodepth := FALSE
+  curcon.pnosize := FALSE
+  curcon.pbackdrop := FALSE
+  curcon.pinactive := FALSE
+  curcon.pscrname[0] := 0              -> global array: garbage until set
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -646,18 +686,18 @@ PROC parsecon(bname)
     tok[tl] := 0
     IF f = 0
       v := tcnum(tok)
-      IF v >= 0 THEN pwx := v
+      IF v >= 0 THEN curcon.pwx := v
     ELSEIF f = 1
       v := tcnum(tok)
-      IF v >= 0 THEN pwy := v
+      IF v >= 0 THEN curcon.pwy := v
     ELSEIF f = 2
       v := tcnum(tok)
-      IF v >= 0 THEN pww := v
+      IF v >= 0 THEN curcon.pww := v
     ELSEIF f = 3
       v := tcnum(tok)
-      IF v >= 0 THEN pwh := v
+      IF v >= 0 THEN curcon.pwh := v
     ELSEIF f = 4
-      IF tl > 0 THEN StrCopy(wtitlebase, tok)
+      IF tl > 0 THEN StrCopy(curcon.wtitlebase, tok)
     ELSE
       -> an option: fold to upper case in place, then compare -
       -> keeping the raw token (tok2) for case-preserving values
@@ -669,37 +709,37 @@ PROC parsecon(bname)
       ENDWHILE
       tok2[v] := 0
       IF StrCmp(tok, 'WAIT')
-        waitmode := TRUE
-        closegad := TRUE        -> WAIT needs the gadget to end
+        curcon.waitmode := TRUE
+        curcon.closegad := TRUE        -> WAIT needs the gadget to end
       ELSEIF StrCmp(tok, 'CLOSE')
-        closegad := TRUE
+        curcon.closegad := TRUE
       ELSEIF StrCmp(tok, 'NOCLOSE')
-        closegad := FALSE
+        curcon.closegad := FALSE
       ELSEIF StrCmp(tok, 'AUTO')
-        pauto := TRUE           -> the window waits for first I/O
+        curcon.pauto := TRUE           -> the window waits for first I/O
       ELSEIF StrCmp(tok, 'NOBORDER')
-        pnoborder := TRUE
+        curcon.pnoborder := TRUE
       ELSEIF StrCmp(tok, 'NODRAG')
-        pnodrag := TRUE
+        curcon.pnodrag := TRUE
       ELSEIF StrCmp(tok, 'NODEPTH')
-        pnodepth := TRUE
+        curcon.pnodepth := TRUE
       ELSEIF StrCmp(tok, 'NOSIZE')
-        pnosize := TRUE
+        curcon.pnosize := TRUE
       ELSEIF StrCmp(tok, 'BACKDROP')
-        pbackdrop := TRUE
+        curcon.pbackdrop := TRUE
       ELSEIF StrCmp(tok, 'INACTIVE')
-        pinactive := TRUE
+        curcon.pinactive := TRUE
       ELSEIF StrCmp(tok, 'SCREEN', 6)
         -> SCREENname, stock syntax: open on that public screen
         -> (name taken case-preserved from the raw token)
         v := 6
         c := 0
         WHILE tok2[v] AND (c < 63)
-          pscrname[c] := tok2[v]
+          curcon.pscrname[c] := tok2[v]
           c++
           v++
         ENDWHILE
-        pscrname[c] := 0
+        curcon.pscrname[c] := 0
       ELSEIF StrCmp(tok, 'WBPENS')
         -> translate the classic Workbench pens when a program
         -> hardcodes them: C:Ed prints its body text as SGR 31
@@ -709,12 +749,12 @@ PROC parsecon(bname)
         -> sends WBPENS and plain 30-33 become theme pens
         -> instead: 30->0, 31->deffg, 32->15, 33->12. Bold forms
         -> (1;3x - the ls scheme) and backgrounds are untouched.
-        wbpens := TRUE
+        curcon.wbpens := TRUE
       ELSEIF StrCmp(tok, 'PEN', 3)
         -> PENn: the default text pen (CTerm sends PEN7 with its
         -> ANSI palette, where pen 1 is ANSI red)
         v := tcnum(tok + 3)
-        IF (v >= 1) AND (v <= 15) THEN deffg := v
+        IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v
       ELSEIF StrCmp(tok, 'WINDOW0X', 8)
         v := 0
         c := 8
@@ -726,7 +766,7 @@ PROC parsecon(bname)
           ENDIF
           c++
         ENDWHILE
-        fwptr := v
+        curcon.fwptr := v
       ENDIF
     ENDIF
     f++
@@ -735,21 +775,21 @@ ENDPROC
 
 PROC dofind(pkt:PTR TO dospacket)
   DEF fh:PTR TO filehandle, sender:PTR TO mp
-  IF (win = NIL) AND (autopend = FALSE)
+  IF (curcon.win = NIL) AND (curcon.autopend = FALSE)
     parsecon(pkt.arg3)          -> the FIRST open decides the window;
-    IF pauto                    -> later opens attach to it as-is.
-      autopend := TRUE          -> AUTO (M9): the open succeeds
+    IF curcon.pauto                    -> later opens attach to it as-is.
+      curcon.autopend := TRUE          -> AUTO (M9): the open succeeds
     ELSE                        -> windowless; first real I/O makes
       openwin()                 -> the window (ensurewin)
     ENDIF
   ENDIF
-  IF win OR autopend
+  IF curcon.win OR curcon.autopend
     fh := Shl(pkt.arg1, 2)      -> BPTR to the FileHandle DOS made
     fh.args := 1                -> our stream id (single stream for now)
     fh.interactive := DOSTRUE   -> we are a console
-    opens++
+    curcon.opens := curcon.opens + 1
     sender := pkt.port
-    breaktask := sender.sigtask -> opener gets Ctrl+C..F by default
+    curcon.breaktask := sender.sigtask -> opener gets Ctrl+C..F by default
     ReplyPkt(pkt, DOSTRUE, 0)
   ELSE
     ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
@@ -758,7 +798,7 @@ ENDPROC
 
 -> an AUTO window materializes on the first packet that needs one
 PROC ensurewin()
-  IF (win = NIL) AND autopend THEN openwin()
+  IF (curcon.win = NIL) AND curcon.autopend THEN openwin()
 ENDPROC
 
 -> the text grid from the window's current dimensions. A borrowed
@@ -767,21 +807,21 @@ ENDPROC
 PROC gridcalc()
   DEF i
   i := MARGIN
-  IF fwin THEN i := 0
-  left := win.borderleft + i
-  topy := win.bordertop + i
-  cols := Div(win.width - win.borderleft - win.borderright - i - i, cw)
-  rows := Div(win.height - win.bordertop - win.borderbottom - i - i, ch)
-  IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
-  IF cols < 2 THEN cols := 2
-  IF rows < 1 THEN rows := 1
+  IF curcon.fwin THEN i := 0
+  curcon.left := curcon.win.borderleft + i
+  curcon.topy := curcon.win.bordertop + i
+  curcon.cols := Div(curcon.win.width - curcon.win.borderleft - curcon.win.borderright - i - i, curcon.cw)
+  curcon.rows := Div(curcon.win.height - curcon.win.bordertop - curcon.win.borderbottom - i - i, curcon.ch)
+  IF curcon.cols > 255 THEN curcon.cols := 255      -> redraw's row buffer is 256
+  IF curcon.cols < 2 THEN curcon.cols := 2
+  IF curcon.rows < 1 THEN curcon.rows := 1
 ENDPROC
 
 PROC openwin()
   DEF ta:PTR TO textattr, i, idc, scrn:PTR TO screen, v,
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
       pubscr:PTR TO screen
-  fwin := FALSE
+  curcon.fwin := FALSE
   -> M6: with the input.device handler on, keys never touch IDCMP -
   -> the UserPort carries only the close gadget, stock console.device
   -> shape. IDCMP_MENUPICK must NOT be set: with it, Intuition delivers
@@ -794,38 +834,38 @@ PROC openwin()
   -> Without the chain, the boot-proven IDCMP key path stays as it was.
   idc := IDCMP_CLOSEWINDOW
   IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
-  IF fwptr
+  IF curcon.fwptr
     -> WINDOW0x: render into a window someone else owns. We take its
     -> IDCMP over (the owner must stop reading it - the Ed lesson:
     -> two tasks on one UserPort kill the input chain) and hand it
     -> back untouched on close.
-    win := fwptr
-    fwin := TRUE
-    oldidcmp := win.idcmpflags
-    ModifyIDCMP(win, idc)
+    curcon.win := curcon.fwptr
+    curcon.fwin := TRUE
+    curcon.oldidcmp := curcon.win.idcmpflags
+    ModifyIDCMP(curcon.win, idc)
   ELSE
-    IF pww < 160 THEN pww := 160
-    IF pwh < 60 THEN pwh := 60
+    IF curcon.pww < 160 THEN curcon.pww := 160
+    IF curcon.pwh < 60 THEN curcon.pwh := 60
     -> the fallback is a failure state now - say so where a
     -> screenshot shows it (chain-on and fallback windows behave
     -> identically until Ed's menus are tried)
-    IF ihon = FALSE THEN StrAdd(wtitlebase, ' [no chain]')
+    IF ihon = FALSE THEN StrAdd(curcon.wtitlebase, ' [no chain]')
     -> M9: SCREENname opens on that public screen (locked for the
     -> OpenWindow only - the window itself then holds the screen);
     -> the no-name/failed case is NIL = the default public screen,
     -> which is exactly where windows went before
     pubscr := NIL
-    IF pscrname[0] THEN pubscr := LockPubScreen(pscrname)
-    win := OpenWindowTagList(NIL,
-      [WA_TITLE, wtitlebase, WA_LEFT, pwx, WA_TOP, pwy,
-       WA_WIDTH, pww, WA_HEIGHT, pwh,
-       WA_DRAGBAR, IF pnodrag THEN FALSE ELSE TRUE,
-       WA_DEPTHGADGET, IF pnodepth THEN FALSE ELSE TRUE,
-       WA_ACTIVATE, IF pinactive THEN FALSE ELSE TRUE,
-       WA_CLOSEGADGET, closegad,
-       WA_SIZEGADGET, IF pnosize THEN FALSE ELSE TRUE,
-       WA_BORDERLESS, pnoborder,
-       WA_BACKDROP, pbackdrop,
+    IF curcon.pscrname[0] THEN pubscr := LockPubScreen(curcon.pscrname)
+    curcon.win := OpenWindowTagList(NIL,
+      [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
+       WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
+       WA_DRAGBAR, IF curcon.pnodrag THEN FALSE ELSE TRUE,
+       WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
+       WA_ACTIVATE, IF curcon.pinactive THEN FALSE ELSE TRUE,
+       WA_CLOSEGADGET, curcon.closegad,
+       WA_SIZEGADGET, IF curcon.pnosize THEN FALSE ELSE TRUE,
+       WA_BORDERLESS, curcon.pnoborder,
+       WA_BACKDROP, curcon.pbackdrop,
        WA_PUBSCREEN, pubscr,
        WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
        WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
@@ -833,9 +873,9 @@ PROC openwin()
        TAG_DONE, NIL])
     IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   ENDIF
-  IF win = NIL THEN RETURN
-  rp := win.rport
-  IF fwin = FALSE
+  IF curcon.win = NIL THEN RETURN
+  curcon.rp := curcon.win.rport
+  IF curcon.fwin = FALSE
     -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont
     -> would not be safe. A BORROWED window keeps the font its owner
     -> set on the rastport (CTerm's frame carries MicroKnight).
@@ -844,33 +884,33 @@ PROC openwin()
     ta.ysize := 8
     ta.style := 0
     ta.flags := 0
-    tf := OpenFont(ta)
-    IF tf THEN SetFont(rp, tf)
+    curcon.tf := OpenFont(ta)
+    IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
   ENDIF
-  cw := rp.txwidth
-  ch := rp.txheight
-  baseline := rp.txbaseline
+  curcon.cw := curcon.rp.txwidth
+  curcon.ch := curcon.rp.txheight
+  curcon.baseline := curcon.rp.txbaseline
   gridcalc()
   -> the scrollback ring + its attr plane: sized to the real grid
   -> width. New() zeroes (E heap is cleared), so the model starts as
   -> blank rows with attr 0; a failed allocation just disables
   -> scrollback, the console still runs
-  sb := New(Mul(SBMAX, cols))
-  sa := New(Mul(SBMAX, cols))
-  IF (sb = NIL) OR (sa = NIL)
-    IF sb THEN Dispose(sb)
-    IF sa THEN Dispose(sa)
-    sb := NIL
-    sa := NIL
+  curcon.sb := New(Mul(SBMAX, curcon.cols))
+  curcon.sa := New(Mul(SBMAX, curcon.cols))
+  IF (curcon.sb = NIL) OR (curcon.sa = NIL)
+    IF curcon.sb THEN Dispose(curcon.sb)
+    IF curcon.sa THEN Dispose(curcon.sa)
+    curcon.sb := NIL
+    curcon.sa := NIL
   ENDIF
-  sbtop := 0
-  sbcnt := 0
-  viewoff := 0
+  curcon.sbtop := 0
+  curcon.sbcnt := 0
+  curcon.viewoff := 0
   -> SGR ground state; bright pens exist when the screen is deep
   -> enough (rp.bitmap is the screen's for a normal window)
-  can16 := FALSE
-  IF rp.bitmap
-    IF rp.bitmap.depth >= 4 THEN can16 := TRUE
+  curcon.can16 := FALSE
+  IF curcon.rp.bitmap
+    IF curcon.rp.bitmap.depth >= 4 THEN curcon.can16 := TRUE
   ENDIF
   -> the ANSI/WB separation (the two colour worlds must not share
   -> pen numbers): WBPENS in the open name declares the screen's
@@ -883,74 +923,74 @@ PROC openwin()
   -> console semantics - what Ed and every WB-pen program wants).
   -> Pens above 15 will not fit the attr plane's nibble and are
   -> released on the spot; -1 falls back to the default pen.
-  anscm := NIL
+  curcon.anscm := NIL
   FOR i := 0 TO 7
-    anstab[i] := -1             -> E global arrays start as garbage
+    curcon.anstab[i] := -1             -> E global arrays start as garbage
   ENDFOR
-  IF wbpens = FALSE
+  IF curcon.wbpens = FALSE
     -> the bright half of the CTerm palette, one nibble per gun
     pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
     pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
     pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
-    scrn := win.wscreen
+    scrn := curcon.win.wscreen
     IF scrn
-      anscm := scrn.viewport.colormap
-      IF anscm
+      curcon.anscm := scrn.viewport.colormap
+      IF curcon.anscm
         FOR i := 0 TO 7
-          v := ObtainBestPenA(anscm,
+          v := ObtainBestPenA(curcon.anscm,
                  Mul(pr[i], $11111111),
                  Mul(pg[i], $11111111),
                  Mul(pb[i], $11111111), NIL)
           IF v > 15
-            ReleasePen(anscm, v)
+            ReleasePen(curcon.anscm, v)
             v := -1
           ENDIF
-          anstab[i] := v
+          curcon.anstab[i] := v
         ENDFOR
       ENDIF
     ENDIF
   ENDIF
-  curfg := deffg
-  curbg := 0
-  bold := FALSE
-  cursgr := FALSE
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
-  IF histdone = FALSE           -> the history survives window
+  curcon.curfg := curcon.deffg
+  curcon.curbg := 0
+  curcon.bold := FALSE
+  curcon.cursgr := FALSE
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+  IF curcon.histdone = FALSE           -> the history survives window
     FOR i := 0 TO HISTMAX - 1   -> close/reopen; allocate once
-      hist[i] := String(LINEMAX)
+      curcon.hist[i] := String(LINEMAX)
     ENDFOR
-    histdone := TRUE
+    curcon.histdone := TRUE
   ENDIF
   -> a fresh console: every per-window state starts over
-  cx := 0
-  cy := 0
-  ancx := 0
-  ancy := 0
-  inqh := 0
-  inqt := 0
-  cesc := 0
-  eofpend := FALSE
-  rawmode := FALSE
-  evmask := 0
-  tcactive := FALSE
-  tcsel := -1
-  cpos := 0
-  hpos := -1
-  StrCopy(ebuf, '')
-  rawmode := rawdef             -> the CRAW: device opens raw
-  autopend := FALSE             -> an AUTO wait ends here
-  IF rawmode
+  curcon.cx := 0
+  curcon.cy := 0
+  curcon.ancx := 0
+  curcon.ancy := 0
+  curcon.inqh := 0
+  curcon.inqt := 0
+  curcon.cesc := 0
+  curcon.eofpend := FALSE
+  curcon.rawmode := FALSE
+  curcon.evmask := 0
+  curcon.tcactive := FALSE
+  curcon.tcsel := -1
+  curcon.cpos := 0
+  curcon.hpos := -1
+  StrCopy(curcon.ebuf, '')
+  curcon.rawmode := rawdef             -> the CRAW: device opens raw
+  curcon.autopend := FALSE             -> an AUTO wait ends here
+  IF curcon.rawmode
     cursdraw()                  -> raw: the block cursor at home
   ELSE
     drawedit()                  -> the blip stands from the start
   ENDIF
   setidcmp()                    -> selection's MOUSEBUTTONS joins the
-  ReportMouse(TRUE, win)        -> set (evmask is 0 here) and motion
+  ReportMouse(TRUE, curcon.win)        -> set (evmask is 0 here) and motion
                                 -> events exist when a drag asks
   -> armed last: the chain handler takes nothing until the per-window
   -> state above is fully rebuilt
-  ihwin := win
+  ihwin := curcon.win
 ENDPROC
 
 -> real close semantics (M5c): pending reads answer EOF, pending
@@ -958,57 +998,57 @@ ENDPROC
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
   DEF i
-  IF win = NIL THEN RETURN
+  IF curcon.win = NIL THEN RETURN
   ihwin := NIL                  -> disarm the chain handler FIRST; then
   ihtail := ihhead              -> discard whatever it already captured
-  cursx := -1                   -> the window takes the cursor with it
-  selon := FALSE                -> a drag dies with the window; parked
-  sello := -1                   -> writers MUST be replied or their
-  selhi := -1                   -> tasks hang forever
+  curcon.cursx := -1                   -> the window takes the cursor with it
+  curcon.selon := FALSE                -> a drag dies with the window; parked
+  curcon.sello := -1                   -> writers MUST be replied or their
+  curcon.selhi := -1                   -> tasks hang forever
   flushwq()
   canceltimer()
-  WHILE wcn > 0
-    wcn--
-    ReplyPkt(wcq[wcn], DOSFALSE, 0)
+  WHILE curcon.wcn > 0
+    curcon.wcn := curcon.wcn - 1
+    ReplyPkt(curcon.wcq[curcon.wcn], DOSFALSE, 0)
   ENDWHILE
-  WHILE rdn > 0
-    rdn--
-    ReplyPkt(rdq[rdn], 0, 0)
+  WHILE curcon.rdn > 0
+    curcon.rdn := curcon.rdn - 1
+    ReplyPkt(curcon.rdq[curcon.rdn], 0, 0)
   ENDWHILE
-  tcactive := FALSE
-  tcsel := -1
+  curcon.tcactive := FALSE
+  curcon.tcsel := -1
   -> obtained ANSI pens go back to the screen with the window
-  IF anscm
+  IF curcon.anscm
     FOR i := 0 TO 7
-      IF anstab[i] >= 0 THEN ReleasePen(anscm, anstab[i])
-      anstab[i] := -1
+      IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
+      curcon.anstab[i] := -1
     ENDFOR
-    anscm := NIL
+    curcon.anscm := NIL
   ENDIF
-  IF fwin
-    ReportMouse(FALSE, win)     -> hand the flag back the way the
-    ModifyIDCMP(win, oldidcmp)  -> owner had it
+  IF curcon.fwin
+    ReportMouse(FALSE, curcon.win)     -> hand the flag back the way the
+    ModifyIDCMP(curcon.win, curcon.oldidcmp)  -> owner had it
   ELSE
-    CloseWindow(win)
+    CloseWindow(curcon.win)
   ENDIF
-  win := NIL
-  rp := NIL
-  fwin := FALSE
-  IF tf
-    CloseFont(tf)
-    tf := NIL
+  curcon.win := NIL
+  curcon.rp := NIL
+  curcon.fwin := FALSE
+  IF curcon.tf
+    CloseFont(curcon.tf)
+    curcon.tf := NIL
   ENDIF
-  IF sb
-    Dispose(sb)
-    sb := NIL
+  IF curcon.sb
+    Dispose(curcon.sb)
+    curcon.sb := NIL
   ENDIF
-  IF sa
-    Dispose(sa)
-    sa := NIL
+  IF curcon.sa
+    Dispose(curcon.sa)
+    curcon.sa := NIL
   ENDIF
-  eofpend := FALSE
-  rawmode := FALSE
-  evmask := 0
+  curcon.eofpend := FALSE
+  curcon.rawmode := FALSE
+  curcon.evmask := 0
 ENDPROC
 
 -> M8: the window has a new size (the gadget, or a borrowed
@@ -1023,67 +1063,67 @@ ENDPROC
 PROC doresize()
   DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, r, n,
       evb[8]:ARRAY OF LONG, e:PTR TO ihev
-  IF win = NIL THEN RETURN
+  IF curcon.win = NIL THEN RETURN
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
-  selon := FALSE                -> a drag dies with the old grid
-  cursx := -1                   -> a full repaint follows anyway
-  viewoff := 0
-  oc := cols
+  curcon.selon := FALSE                -> a drag dies with the old grid
+  curcon.cursx := -1                   -> a full repaint follows anyway
+  curcon.viewoff := 0
+  oc := curcon.cols
   gridcalc()
-  IF sb
-    IF cols <> oc
-      nsb := New(Mul(SBMAX, cols))
-      nsa := New(Mul(SBMAX, cols))
+  IF curcon.sb
+    IF curcon.cols <> oc
+      nsb := New(Mul(SBMAX, curcon.cols))
+      nsa := New(Mul(SBMAX, curcon.cols))
       IF (nsb = NIL) OR (nsa = NIL)
         IF nsb THEN Dispose(nsb)
         IF nsa THEN Dispose(nsa)
-        Dispose(sb)             -> degraded: the console runs on
-        Dispose(sa)             -> without scrollback rather than
-        sb := NIL               -> rendering through a wrong-stride
-        sa := NIL               -> model
+        Dispose(curcon.sb)             -> degraded: the console runs on
+        Dispose(curcon.sa)             -> without scrollback rather than
+        curcon.sb := NIL               -> rendering through a wrong-stride
+        curcon.sa := NIL               -> model
       ELSE
-        n := Min(oc, cols)
+        n := Min(oc, curcon.cols)
         FOR r := 0 TO SBMAX - 1
-          CopyMem(sb + Mul(r, oc), nsb + Mul(r, cols), n)
-          CopyMem(sa + Mul(r, oc), nsa + Mul(r, cols), n)
+          CopyMem(curcon.sb + Mul(r, oc), nsb + Mul(r, curcon.cols), n)
+          CopyMem(curcon.sa + Mul(r, oc), nsa + Mul(r, curcon.cols), n)
         ENDFOR
-        Dispose(sb)
-        Dispose(sa)
-        sb := nsb
-        sa := nsa
+        Dispose(curcon.sb)
+        Dispose(curcon.sa)
+        curcon.sb := nsb
+        curcon.sa := nsa
       ENDIF
     ENDIF
   ENDIF
-  IF cx > cols THEN cx := cols  -> cols itself = pending wrap, legal
-  WHILE cy > (rows - 1)         -> height shrank: the rows above the
-    sbtop++                     -> cursor scroll into history
-    IF sbtop >= SBMAX THEN sbtop := 0
-    IF sbcnt < (SBMAX - rows) THEN sbcnt++
-    cy--
-    IF ancy > 0 THEN ancy--
+  IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols  -> cols itself = pending wrap, legal
+  WHILE curcon.cy > (curcon.rows - 1)         -> height shrank: the rows above the
+    curcon.sbtop := curcon.sbtop + 1                     -> cursor scroll into history
+    IF curcon.sbtop >= SBMAX THEN curcon.sbtop := 0
+    IF curcon.sbcnt < (SBMAX - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
+    curcon.cy := curcon.cy - 1
+    IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1
   ENDWHILE
-  IF ancx > (cols - 1) THEN ancx := cols - 1
-  IF ancy > (rows - 1) THEN ancy := rows - 1
-  SetAPen(rp, 0)                -> clear the inner window (margins
-  RectFill(rp, win.borderleft, win.bordertop,  -> included), then
-           win.width - win.borderright - 1,    -> repaint from the
-           win.height - win.borderbottom - 1)  -> model
-  SetAPen(rp, deffg)
+  IF curcon.ancx > (curcon.cols - 1) THEN curcon.ancx := curcon.cols - 1
+  IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
+  SetAPen(curcon.rp, 0)                -> clear the inner window (margins
+  RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,  -> included), then
+           curcon.win.width - curcon.win.borderright - 1,    -> repaint from the
+           curcon.win.height - curcon.win.borderbottom - 1)  -> model
+  SetAPen(curcon.rp, curcon.deffg)
   redraw()
   settitle()
-  IF rawmode
+  IF curcon.rawmode
     cursdraw()
   ELSE
     drawedit()
   ENDIF
-  IF evmask AND Shl(1, IECLASS_SIZEWINDOW)
+  IF curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW)
     e := evb
     e.cls := IECLASS_SIZEWINDOW
     e.sub := 0
     e.code := 0
     e.qual := 0
-    e.addr := win
+    e.addr := curcon.win
     e.secs := 0
     e.mics := 0
     ihreport(e)
@@ -1095,10 +1135,10 @@ ENDPROC
 -> a lingering WAIT window (no opens left) dies on the click. The
 -> actual CloseWindow is deferred past the event drain (closereq).
 PROC doclosew()
-  IF opens <= 0
-    closereq := TRUE
+  IF curcon.opens <= 0
+    curcon.closereq := TRUE
   ELSE
-    eofpend := TRUE
+    curcon.eofpend := TRUE
     satisfyreads()
   ENDIF
 ENDPROC
@@ -1109,16 +1149,16 @@ ENDPROC
 -> Callers guard with IF sb - a NIL model means scrollback is off.
 PROC visrow(r)
   DEF i
-  i := sbtop + r
+  i := curcon.sbtop + r
   IF i >= SBMAX THEN i := i - SBMAX
-ENDPROC sb + Mul(i, cols)
+ENDPROC curcon.sb + Mul(i, curcon.cols)
 
 -> the attr-plane twin of visrow
 PROC sarow(r)
   DEF i
-  i := sbtop + r
+  i := curcon.sbtop + r
   IF i >= SBMAX THEN i := i - SBMAX
-ENDPROC sa + Mul(i, cols)
+ENDPROC curcon.sa + Mul(i, curcon.cols)
 
 -> the pen SGR state draws with right now. On an ANSI screen
 -> (WBPENS) bold lifts the 8 base colours to the bright pens; on
@@ -1126,22 +1166,22 @@ ENDPROC sa + Mul(i, cols)
 -> ObtainBestPen table instead (real colours on the user's
 -> palette), and bare bold recolours nothing.
 PROC fgpen()
-  IF bold AND (curfg < 8)
-    IF wbpens
-      IF can16 THEN RETURN curfg + 8
-    ELSEIF cursgr
-      IF anstab[curfg] >= 0 THEN RETURN anstab[curfg]
+  IF curcon.bold AND (curcon.curfg < 8)
+    IF curcon.wbpens
+      IF curcon.can16 THEN RETURN curcon.curfg + 8
+    ELSEIF curcon.cursgr
+      IF curcon.anstab[curcon.curfg] >= 0 THEN RETURN curcon.anstab[curcon.curfg]
     ENDIF
   ENDIF
-ENDPROC curfg
+ENDPROC curcon.curfg
 
-PROC curattr() IS fgpen() OR Shl(curbg, 4)
+PROC curattr() IS fgpen() OR Shl(curcon.curbg, 4)
 
 PROC clearrow(r)
   DEF i, m:PTR TO CHAR, a:PTR TO CHAR
   m := visrow(r)
   a := sarow(r)
-  FOR i := 0 TO cols - 1
+  FOR i := 0 TO curcon.cols - 1
     m[i] := 0
     a[i] := 0
   ENDFOR
@@ -1153,23 +1193,23 @@ ENDPROC
 PROC drawmrow(idx, y)
   DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c,
       rowbuf[256]:ARRAY OF CHAR
-  m := sb + Mul(idx, cols)
-  a := sa + Mul(idx, cols)
-  FOR i := 0 TO cols - 1
+  m := curcon.sb + Mul(idx, curcon.cols)
+  a := curcon.sa + Mul(idx, curcon.cols)
+  FOR i := 0 TO curcon.cols - 1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
   ENDFOR
   i := 0
-  WHILE i < cols
+  WHILE i < curcon.cols
     at := a[i]
     j := i
-    WHILE (j < cols) AND (a[j] = at)
+    WHILE (j < curcon.cols) AND (a[j] = at)
       j++
     ENDWHILE
-    SetAPen(rp, at AND 15)
-    SetBPen(rp, Shr(at, 4) AND 7)
-    Move(rp, left + Mul(i, cw), y + baseline)
-    Text(rp, rowbuf + i, j - i)
+    SetAPen(curcon.rp, at AND 15)
+    SetBPen(curcon.rp, Shr(at, 4) AND 7)
+    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
+    Text(curcon.rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
 ENDPROC
@@ -1185,39 +1225,39 @@ ENDPROC
 PROC cursdraw()
   DEF m:PTR TO CHAR, a:PTR TO CHAR, x, c, at, fg, bg,
       b[2]:ARRAY OF CHAR
-  IF (win = NIL) OR (sb = NIL) OR (viewoff > 0) THEN RETURN
-  x := IF cx >= cols THEN cols - 1 ELSE cx
-  m := visrow(cy)
-  a := sarow(cy)
+  IF (curcon.win = NIL) OR (curcon.sb = NIL) OR (curcon.viewoff > 0) THEN RETURN
+  x := IF curcon.cx >= curcon.cols THEN curcon.cols - 1 ELSE curcon.cx
+  m := visrow(curcon.cy)
+  a := sarow(curcon.cy)
   c := m[x]
   b[0] := IF c < 32 THEN 32 ELSE c
   at := a[x]
   fg := at AND 15
   bg := Shr(at, 4) AND 7
-  IF fg = bg THEN fg := deffg
-  SetAPen(rp, bg)               -> inverse video: glyph in the cell's
-  SetBPen(rp, fg)               -> background, block in its foreground
-  Move(rp, left + Mul(x, cw), topy + Mul(cy, ch) + baseline)
-  Text(rp, b, 1)
-  cursx := x
-  cursy := cy
+  IF fg = bg THEN fg := curcon.deffg
+  SetAPen(curcon.rp, bg)               -> inverse video: glyph in the cell's
+  SetBPen(curcon.rp, fg)               -> background, block in its foreground
+  Move(curcon.rp, curcon.left + Mul(x, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
+  Text(curcon.rp, b, 1)
+  curcon.cursx := x
+  curcon.cursy := curcon.cy
 ENDPROC
 
 PROC curserase()
   DEF m:PTR TO CHAR, a:PTR TO CHAR, c, at, b[2]:ARRAY OF CHAR
-  IF cursx < 0 THEN RETURN
-  IF win AND sb
-    m := visrow(cursy)
-    a := sarow(cursy)
-    c := m[cursx]
+  IF curcon.cursx < 0 THEN RETURN
+  IF curcon.win AND curcon.sb
+    m := visrow(curcon.cursy)
+    a := sarow(curcon.cursy)
+    c := m[curcon.cursx]
     b[0] := IF c < 32 THEN 32 ELSE c
-    at := a[cursx]
-    SetAPen(rp, at AND 15)      -> the cell exactly as drawmrow paints
-    SetBPen(rp, Shr(at, 4) AND 7)
-    Move(rp, left + Mul(cursx, cw), topy + Mul(cursy, ch) + baseline)
-    Text(rp, b, 1)
+    at := a[curcon.cursx]
+    SetAPen(curcon.rp, at AND 15)      -> the cell exactly as drawmrow paints
+    SetBPen(curcon.rp, Shr(at, 4) AND 7)
+    Move(curcon.rp, curcon.left + Mul(curcon.cursx, curcon.cw), curcon.topy + Mul(curcon.cursy, curcon.ch) + curcon.baseline)
+    Text(curcon.rp, b, 1)
   ENDIF
-  cursx := -1
+  curcon.cursx := -1
 ENDPROC
 
 -> ---------- copy & paste (M7) ----------
@@ -1240,7 +1280,7 @@ ENDPROC
 -> model ring index of view row r, at the viewoff the selection holds
 PROC selvidx(r)
   DEF i
-  i := sbtop - selvo + r
+  i := curcon.sbtop - curcon.selvo + r
   IF i < 0 THEN i := i + SBMAX
   IF i >= SBMAX THEN i := i - SBMAX
 ENDPROC i
@@ -1248,49 +1288,49 @@ ENDPROC i
 -> the mouse position as a linear cell (row*cols+x); -1 = off-grid
 PROC cellat()
   DEF mx, my, x, r
-  IF win = NIL THEN RETURN -1
-  mx := win.mousex - left
-  my := win.mousey - topy
+  IF curcon.win = NIL THEN RETURN -1
+  mx := curcon.win.mousex - curcon.left
+  my := curcon.win.mousey - curcon.topy
   IF (mx < 0) OR (my < 0) THEN RETURN -1
-  x := mx / cw                  -> cell metrics are single digits -
-  r := my / ch                  -> DIVU-safe
-  IF (x >= cols) OR (r >= rows) THEN RETURN -1
-ENDPROC Mul(r, cols) + x
+  x := mx / curcon.cw                  -> cell metrics are single digits -
+  r := my / curcon.ch                  -> DIVU-safe
+  IF (x >= curcon.cols) OR (r >= curcon.rows) THEN RETURN -1
+ENDPROC Mul(r, curcon.cols) + x
 
 -> paint one view row like drawmrow, but cells inside [lo,hi) draw
 -> inverse video (fg=bg empties get deffg, the block-cursor rule)
 PROC drawselrow(r, lo, hi)
   DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c, s, fg, bg, base, y,
       rowbuf[256]:ARRAY OF CHAR
-  m := sb + Mul(selvidx(r), cols)
-  a := sa + Mul(selvidx(r), cols)
-  y := topy + Mul(r, ch)
-  base := Mul(r, cols)
-  FOR i := 0 TO cols - 1
+  m := curcon.sb + Mul(selvidx(r), curcon.cols)
+  a := curcon.sa + Mul(selvidx(r), curcon.cols)
+  y := curcon.topy + Mul(r, curcon.ch)
+  base := Mul(r, curcon.cols)
+  FOR i := 0 TO curcon.cols - 1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
   ENDFOR
   i := 0
-  WHILE i < cols
+  WHILE i < curcon.cols
     at := a[i]
     s := ((base + i) >= lo) AND ((base + i) < hi)
     j := i
-    WHILE (j < cols) AND (a[j] = at) AND
+    WHILE (j < curcon.cols) AND (a[j] = at) AND
           ((((base + j) >= lo) AND ((base + j) < hi)) = s)
       j++
     ENDWHILE
     fg := at AND 15
     bg := Shr(at, 4) AND 7
     IF s
-      IF fg = bg THEN fg := deffg
-      SetAPen(rp, bg)
-      SetBPen(rp, fg)
+      IF fg = bg THEN fg := curcon.deffg
+      SetAPen(curcon.rp, bg)
+      SetBPen(curcon.rp, fg)
     ELSE
-      SetAPen(rp, fg)
-      SetBPen(rp, bg)
+      SetAPen(curcon.rp, fg)
+      SetBPen(curcon.rp, bg)
     ENDIF
-    Move(rp, left + Mul(i, cw), y + baseline)
-    Text(rp, rowbuf + i, j - i)
+    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
+    Text(curcon.rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
 ENDPROC
@@ -1298,24 +1338,24 @@ ENDPROC
 -> repaint view rows rmin..rmax against selection [lo,hi)
 PROC selrepaint(rmin, rmax, lo, hi)
   DEF r
-  IF sb = NIL THEN RETURN
+  IF curcon.sb = NIL THEN RETURN
   curserase()
   IF rmin < 0 THEN rmin := 0
-  IF rmax > (rows - 1) THEN rmax := rows - 1
+  IF rmax > (curcon.rows - 1) THEN rmax := curcon.rows - 1
   FOR r := rmin TO rmax
     drawselrow(r, lo, hi)
   ENDFOR
-  IF rawmode THEN cursdraw()
+  IF curcon.rawmode THEN cursdraw()
 ENDPROC
 
 -> drop the standing highlight (any output, any key, a fresh click)
 PROC clearsel()
   DEF lo
-  IF sello >= 0
-    lo := sello
-    sello := -1
-    IF viewoff = selvo THEN selrepaint(lo / cols, (selhi - 1) / cols, 0, 0)
-    selhi := -1                 -> (a scrolled view was repainted by
+  IF curcon.sello >= 0
+    lo := curcon.sello
+    curcon.sello := -1
+    IF curcon.viewoff = curcon.selvo THEN selrepaint(lo / curcon.cols, (curcon.selhi - 1) / curcon.cols, 0, 0)
+    curcon.selhi := -1                 -> (a scrolled view was repainted by
   ENDIF                         -> redraw already - state only)
 ENDPROC
 
@@ -1330,16 +1370,16 @@ ENDPROC
 -> MOUSEMOVE is in only mid-drag, so no motion flood otherwise.
 PROC setidcmp()
   DEF idc
-  IF win = NIL THEN RETURN
+  IF curcon.win = NIL THEN RETURN
   idc := IDCMP_CLOSEWINDOW OR IDCMP_NEWSIZE
   IF ihon = FALSE
     idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
   ENDIF
-  IF (evmask AND Shl(1, IECLASS_RAWMOUSE)) = 0
+  IF (curcon.evmask AND Shl(1, IECLASS_RAWMOUSE)) = 0
     idc := idc OR IDCMP_MOUSEBUTTONS
-    IF selon THEN idc := idc OR IDCMP_MOUSEMOVE
+    IF curcon.selon THEN idc := idc OR IDCMP_MOUSEMOVE
   ENDIF
-  ModifyIDCMP(win, idc)
+  ModifyIDCMP(curcon.win, idc)
 ENDPROC
 
 -> the selection machine: one IDCMP mouse message (cd = the code:
@@ -1348,41 +1388,41 @@ ENDPROC
 -> drag, and exactly what Ed's own class-2 handler does.
 PROC selmouse(cd)
   DEF c, lo, hi, plo, phi
-  IF sb = NIL THEN RETURN       -> no model, no selection
+  IF curcon.sb = NIL THEN RETURN       -> no model, no selection
   IF cd = IECODE_LBUTTON
     clearsel()
-    IF (rawmode = FALSE) AND tcactive THEN tcclose()
+    IF (curcon.rawmode = FALSE) AND curcon.tcactive THEN tcclose()
     c := cellat()
     IF c >= 0
-      selon := TRUE
-      selvo := viewoff
-      selanc := c
-      selcur := c
+      curcon.selon := TRUE
+      curcon.selvo := curcon.viewoff
+      curcon.selanc := c
+      curcon.selcur := c
       setidcmp()                -> motion reports on for the drag
     ENDIF
   ELSEIF cd = (IECODE_LBUTTON OR IECODE_UP_PREFIX)
-    IF selon
-      selon := FALSE
+    IF curcon.selon
+      curcon.selon := FALSE
       setidcmp()                -> and off again
-      IF selcur <> selanc
-        sello := Min(selanc, selcur)
-        selhi := Max(selanc, selcur) + 1
+      IF curcon.selcur <> curcon.selanc
+        curcon.sello := Min(curcon.selanc, curcon.selcur)
+        curcon.selhi := Max(curcon.selanc, curcon.selcur) + 1
         selcopy()               -> release = copy, no extra keystroke
       ELSE
-        selrepaint(selanc / cols, selanc / cols, 0, 0)
+        selrepaint(curcon.selanc / curcon.cols, curcon.selanc / curcon.cols, 0, 0)
       ENDIF
       flushwq()                 -> the parked writers resume
     ENDIF
   ELSEIF cd = IECODE_NOBUTTON
-    IF selon
+    IF curcon.selon
       c := cellat()
-      IF (c >= 0) AND (c <> selcur)
-        plo := Min(selanc, selcur)
-        phi := Max(selanc, selcur)
-        selcur := c
-        lo := Min(selanc, selcur)
-        hi := Max(selanc, selcur)
-        selrepaint(Min(lo, plo) / cols, Max(hi, phi) / cols, lo, hi + 1)
+      IF (c >= 0) AND (c <> curcon.selcur)
+        plo := Min(curcon.selanc, curcon.selcur)
+        phi := Max(curcon.selanc, curcon.selcur)
+        curcon.selcur := c
+        lo := Min(curcon.selanc, curcon.selcur)
+        hi := Max(curcon.selanc, curcon.selcur)
+        selrepaint(Min(lo, plo) / curcon.cols, Max(hi, phi) / curcon.cols, lo, hi + 1)
       ENDIF
     ENDIF
   ENDIF
@@ -1412,17 +1452,17 @@ ENDPROC TRUE
 PROC selcopy()
   DEF p:PTR TO CHAR, lw:PTR TO LONG, len, r, base, x0, x1, x, c,
       m:PTR TO CHAR, r0, r1, pad
-  IF sb = NIL THEN RETURN
+  IF curcon.sb = NIL THEN RETURN
   IF clipopen() = FALSE THEN RETURN
   p := clipbuf + 20             -> text starts after the IFF headers
   len := 0
-  r0 := sello / cols
-  r1 := (selhi - 1) / cols
+  r0 := curcon.sello / curcon.cols
+  r1 := (curcon.selhi - 1) / curcon.cols
   FOR r := r0 TO r1
-    base := Mul(r, cols)
-    x0 := Max(sello - base, 0)
-    x1 := Min(selhi - base, cols)
-    m := sb + Mul(selvidx(r), cols)
+    base := Mul(r, curcon.cols)
+    x0 := Max(curcon.sello - base, 0)
+    x1 := Min(curcon.selhi - base, curcon.cols)
+    m := curcon.sb + Mul(selvidx(r), curcon.cols)
     WHILE (x1 > x0) AND (m[x1 - 1] < 33)
       x1--                      -> trailing blanks go
     ENDWHILE
@@ -1466,7 +1506,7 @@ ENDPROC
 PROC dopaste()
   DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
       lw:PTR TO LONG, b:PTR TO CHAR
-  IF selon THEN RETURN
+  IF curcon.selon THEN RETURN
   IF clipopen() = FALSE THEN RETURN
   clipreq.command := CMD_READ
   clipreq.data := clipbuf
@@ -1498,11 +1538,11 @@ PROC dopaste()
     ENDIF
     i := i + 8 + sz + (sz AND 1)
   ENDWHILE
-  IF rawmode THEN inputarrived()
+  IF curcon.rawmode THEN inputarrived()
 ENDPROC
 
 PROC injectbyte(c)
-  IF rawmode
+  IF curcon.rawmode
     enqueue(c)                  -> the client sees paste as input
   ELSE
     IF c = 10 THEN c := 13      -> LF = Return to the line editor
@@ -1514,15 +1554,15 @@ ENDPROC
 -> model zeroes render as spaces. viewoff = lines back, 0 = live.
 PROC redraw()
   DEF r, idx
-  IF sb = NIL THEN RETURN
-  FOR r := 0 TO rows - 1
-    idx := sbtop - viewoff + r
+  IF curcon.sb = NIL THEN RETURN
+  FOR r := 0 TO curcon.rows - 1
+    idx := curcon.sbtop - curcon.viewoff + r
     IF idx < 0 THEN idx := idx + SBMAX
     IF idx >= SBMAX THEN idx := idx - SBMAX
-    drawmrow(idx, topy + Mul(r, ch))
+    drawmrow(idx, curcon.topy + Mul(r, curcon.ch))
   ENDFOR
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
 ENDPROC
 
 -> the title bar doubles as the scroll-position indicator. The buffer
@@ -1530,38 +1570,38 @@ ENDPROC
 -> Known cosmetic gap: leaving scrollback restores our own title, so a
 -> client retitle (More does one via DISK_INFO) is overwritten.
 PROC settitle()
-  IF fwin THEN RETURN   -> a borrowed window keeps its owner's title
-  IF viewoff > 0
-    StringF(wtitle, '\s  [scrollback -\d]', wtitlebase, viewoff)
-    SetWindowTitles(win, wtitle, -1)
+  IF curcon.fwin THEN RETURN   -> a borrowed window keeps its owner's title
+  IF curcon.viewoff > 0
+    StringF(curcon.wtitle, '\s  [scrollback -\d]', curcon.wtitlebase, curcon.viewoff)
+    SetWindowTitles(curcon.win, curcon.wtitle, -1)
   ELSE
-    SetWindowTitles(win, wtitlebase, -1)
+    SetWindowTitles(curcon.win, curcon.wtitlebase, -1)
   ENDIF
 ENDPROC
 
 -> scroll the view by delta lines (positive = back in time), clamped
 -> to the history actually stored; landing on live restores the blip
 PROC scrollview(delta)
-  IF sb = NIL THEN RETURN
-  viewoff := viewoff + delta
-  IF viewoff > sbcnt THEN viewoff := sbcnt
-  IF viewoff < 0 THEN viewoff := 0
+  IF curcon.sb = NIL THEN RETURN
+  curcon.viewoff := curcon.viewoff + delta
+  IF curcon.viewoff > curcon.sbcnt THEN curcon.viewoff := curcon.sbcnt
+  IF curcon.viewoff < 0 THEN curcon.viewoff := 0
   redraw()                      -> the grid repaint wiped any block
-  cursx := -1                   -> cursor pixels with it
+  curcon.cursx := -1                   -> cursor pixels with it
   settitle()
-  IF viewoff = 0
-    IF rawmode THEN cursdraw() ELSE drawedit()
+  IF curcon.viewoff = 0
+    IF curcon.rawmode THEN cursdraw() ELSE drawedit()
   ENDIF
 ENDPROC
 
 -> any output or any non-scroll key returns the view to live
 PROC snaplive()
-  IF viewoff = 0 THEN RETURN
-  viewoff := 0
+  IF curcon.viewoff = 0 THEN RETURN
+  curcon.viewoff := 0
   redraw()
-  cursx := -1
+  curcon.cursx := -1
   settitle()
-  IF rawmode THEN cursdraw() ELSE drawedit()
+  IF curcon.rawmode THEN cursdraw() ELSE drawedit()
 ENDPROC
 
 -> ---------- output: a cell-grid renderer (CSI parsing comes with the
@@ -1570,52 +1610,52 @@ ENDPROC
 -> scroll the whole screen up one line: pixels, model, edit anchor.
 -> The old top row becomes history - just advance the ring, no copying.
 PROC screenscroll()
-  ScrollRaster(rp, 0, ch,
-               win.borderleft, win.bordertop,
-               win.width - win.borderright - 1,
-               win.height - win.borderbottom - 1)
-  IF ancy > 0 THEN ancy--       -> the edit anchor scrolled with the rest
-  IF sb
-    sbtop++
-    IF sbtop >= SBMAX THEN sbtop := 0
-    IF sbcnt < (SBMAX - rows) THEN sbcnt++
-    clearrow(rows - 1)
+  ScrollRaster(curcon.rp, 0, curcon.ch,
+               curcon.win.borderleft, curcon.win.bordertop,
+               curcon.win.width - curcon.win.borderright - 1,
+               curcon.win.height - curcon.win.borderbottom - 1)
+  IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1       -> the edit anchor scrolled with the rest
+  IF curcon.sb
+    curcon.sbtop := curcon.sbtop + 1
+    IF curcon.sbtop >= SBMAX THEN curcon.sbtop := 0
+    IF curcon.sbcnt < (SBMAX - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
+    clearrow(curcon.rows - 1)
   ENDIF
 ENDPROC
 
 PROC outnl()
-  cx := 0
-  cy++
-  IF cy >= rows
+  curcon.cx := 0
+  curcon.cy := curcon.cy + 1
+  IF curcon.cy >= curcon.rows
     screenscroll()
-    cy := rows - 1
+    curcon.cy := curcon.rows - 1
   ENDIF
 ENDPROC
 
 PROC outchr(c)
   DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
-  IF cx >= cols THEN outnl()
+  IF curcon.cx >= curcon.cols THEN outnl()
   b[0] := c
-  SetAPen(rp, fgpen())
-  SetBPen(rp, curbg)
-  Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
-  Text(rp, b, 1)
-  IF sb
-    m := visrow(cy)
-    m[cx] := c
-    m := sarow(cy)
-    m[cx] := curattr()
+  SetAPen(curcon.rp, fgpen())
+  SetBPen(curcon.rp, curcon.curbg)
+  Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
+  Text(curcon.rp, b, 1)
+  IF curcon.sb
+    m := visrow(curcon.cy)
+    m[curcon.cx] := c
+    m := sarow(curcon.cy)
+    m[curcon.cx] := curattr()
   ENDIF
-  cx++
+  curcon.cx := curcon.cx + 1
 ENDPROC
 
 PROC csistart()
-  cesc := 2
-  cnp := 0
-  cpar[0] := 0
-  cpar[1] := 0
-  cpar[2] := 0
-  cpar[3] := 0
+  curcon.cesc := 2
+  curcon.cnp := 0
+  curcon.cpar[0] := 0
+  curcon.cpar[1] := 0
+  curcon.cpar[2] := 0
+  curcon.cpar[3] := 0
 ENDPROC
 
 -> the full-screen vocabulary: what More and Ed actually speak.
@@ -1626,30 +1666,30 @@ ENDPROC
 -> Everything else is consumed silently.
 PROC csidispatch(c)
   DEF n, i, v
-  n := cpar[0]
+  n := curcon.cpar[0]
   IF c = "A"
     IF n < 1 THEN n := 1
-    cy := cy - n
-    IF cy < 0 THEN cy := 0
+    curcon.cy := curcon.cy - n
+    IF curcon.cy < 0 THEN curcon.cy := 0
   ELSEIF c = "B"
     IF n < 1 THEN n := 1
-    cy := cy + n
-    IF cy >= rows THEN cy := rows - 1
+    curcon.cy := curcon.cy + n
+    IF curcon.cy >= curcon.rows THEN curcon.cy := curcon.rows - 1
   ELSEIF c = "C"
     IF n < 1 THEN n := 1
-    cx := cx + n
-    IF cx > cols THEN cx := cols
+    curcon.cx := curcon.cx + n
+    IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols
   ELSEIF c = "D"
     IF n < 1 THEN n := 1
-    cx := cx - n
-    IF cx < 0 THEN cx := 0
+    curcon.cx := curcon.cx - n
+    IF curcon.cx < 0 THEN curcon.cx := 0
   ELSEIF (c = "H") OR (c = "f")
-    cy := n - 1
-    IF cy < 0 THEN cy := 0
-    IF cy >= rows THEN cy := rows - 1
-    cx := cpar[1] - 1
-    IF cx < 0 THEN cx := 0
-    IF cx > cols THEN cx := cols
+    curcon.cy := n - 1
+    IF curcon.cy < 0 THEN curcon.cy := 0
+    IF curcon.cy >= curcon.rows THEN curcon.cy := curcon.rows - 1
+    curcon.cx := curcon.cpar[1] - 1
+    IF curcon.cx < 0 THEN curcon.cx := 0
+    IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols
   ELSEIF c = "J"
     erasebelow()
   ELSEIF c = "K"
@@ -1661,42 +1701,42 @@ PROC csidispatch(c)
   ELSEIF c = "m"
     -> SGR (M5d): reset, bold (bright pens on a 16-pen screen),
     -> 30-37 fg, 39 default fg, 40-47 bg, 49 default bg
-    FOR i := 0 TO cnp
-      v := cpar[i]
+    FOR i := 0 TO curcon.cnp
+      v := curcon.cpar[i]
       IF v = 0
-        curfg := deffg
-        curbg := 0
-        bold := FALSE
-        cursgr := FALSE
+        curcon.curfg := curcon.deffg
+        curcon.curbg := 0
+        curcon.bold := FALSE
+        curcon.cursgr := FALSE
       ELSEIF v = 1
-        bold := TRUE
+        curcon.bold := TRUE
       ELSEIF v = 22
-        bold := FALSE
+        curcon.bold := FALSE
       ELSEIF (v >= 30) AND (v <= 37)
-        curfg := v - 30
-        cursgr := TRUE
+        curcon.curfg := v - 30
+        curcon.cursgr := TRUE
         -> WBPENS (see parsecon): plain 30-33 are WB pen numbers
         -> from programs like Ed, not ANSI colours - retarget them
         -> at the theme. Bold forms keep ANSI positions (fgpen()
         -> lifts to the bright half before this map could matter).
-        IF wbpens AND can16 AND (bold = FALSE) AND (v <= 33)
+        IF curcon.wbpens AND curcon.can16 AND (curcon.bold = FALSE) AND (v <= 33)
           IF v = 30
-            curfg := 0
+            curcon.curfg := 0
           ELSEIF v = 31
-            curfg := deffg
+            curcon.curfg := curcon.deffg
           ELSEIF v = 32
-            curfg := 15
+            curcon.curfg := 15
           ELSE
-            curfg := 12
+            curcon.curfg := 12
           ENDIF
         ENDIF
       ELSEIF v = 39
-        curfg := deffg
-        cursgr := FALSE
+        curcon.curfg := curcon.deffg
+        curcon.cursgr := FALSE
       ELSEIF (v >= 40) AND (v <= 47)
-        curbg := v - 40
+        curcon.curbg := v - 40
       ELSEIF v = 49
-        curbg := 0
+        curcon.curbg := 0
       ENDIF
     ENDFOR
   ELSEIF c = "q"
@@ -1704,9 +1744,9 @@ PROC csidispatch(c)
   ELSEIF c = "{"
     -> SET RAW EVENTS: report the listed IECLASSes on the input
     -> stream (this is how Ed's menus reach it through the console)
-    FOR i := 0 TO cnp
-      IF (cpar[i] >= 0) AND (cpar[i] <= 31)
-        evmask := evmask OR Shl(1, cpar[i])
+    FOR i := 0 TO curcon.cnp
+      IF (curcon.cpar[i] >= 0) AND (curcon.cpar[i] <= 31)
+        curcon.evmask := curcon.evmask OR Shl(1, curcon.cpar[i])
       ENDIF
     ENDFOR
     setidcmp()                  -> CSI 2{ pulls MOUSEBUTTONS out of
@@ -1715,9 +1755,9 @@ PROC csidispatch(c)
                                 -> downstream (the MENUPICK lesson)
   ELSEIF c = "}"
     -> RESET RAW EVENTS
-    FOR i := 0 TO cnp
-      IF (cpar[i] >= 0) AND (cpar[i] <= 31)
-        evmask := evmask - (evmask AND Shl(1, cpar[i]))
+    FOR i := 0 TO curcon.cnp
+      IF (curcon.cpar[i] >= 0) AND (curcon.cpar[i] <= 31)
+        curcon.evmask := curcon.evmask - (curcon.evmask AND Shl(1, curcon.cpar[i]))
       ENDIF
     ENDFOR
     setidcmp()
@@ -1749,13 +1789,13 @@ ENDPROC
 PROC erasebelow()
   DEF r
   eraseeol()
-  IF cy < (rows - 1)
-    SetAPen(rp, 0)
-    RectFill(rp, left, topy + Mul(cy + 1, ch),
-             left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
-    SetAPen(rp, deffg)
-    IF sb
-      FOR r := cy + 1 TO rows - 1
+  IF curcon.cy < (curcon.rows - 1)
+    SetAPen(curcon.rp, 0)
+    RectFill(curcon.rp, curcon.left, curcon.topy + Mul(curcon.cy + 1, curcon.ch),
+             curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+    SetAPen(curcon.rp, curcon.deffg)
+    IF curcon.sb
+      FOR r := curcon.cy + 1 TO curcon.rows - 1
         clearrow(r)
       ENDFOR
     ENDIF
@@ -1767,16 +1807,16 @@ ENDPROC
 PROC inslines(n)
   DEF r
   IF n < 1 THEN n := 1
-  IF n > (rows - cy) THEN n := rows - cy
-  ScrollRaster(rp, 0, -Mul(n, ch),
-               left, topy + Mul(cy, ch),
-               left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
-  IF sb
-    FOR r := rows - 1 TO cy + n STEP -1
-      CopyMem(visrow(r - n), visrow(r), cols)
-      CopyMem(sarow(r - n), sarow(r), cols)
+  IF n > (curcon.rows - curcon.cy) THEN n := curcon.rows - curcon.cy
+  ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
+               curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF curcon.sb
+    FOR r := curcon.rows - 1 TO curcon.cy + n STEP -1
+      CopyMem(visrow(r - n), visrow(r), curcon.cols)
+      CopyMem(sarow(r - n), sarow(r), curcon.cols)
     ENDFOR
-    FOR r := cy TO cy + n - 1
+    FOR r := curcon.cy TO curcon.cy + n - 1
       clearrow(r)
     ENDFOR
   ENDIF
@@ -1785,16 +1825,16 @@ ENDPROC
 PROC dellines(n)
   DEF r
   IF n < 1 THEN n := 1
-  IF n > (rows - cy) THEN n := rows - cy
-  ScrollRaster(rp, 0, Mul(n, ch),
-               left, topy + Mul(cy, ch),
-               left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
-  IF sb
-    FOR r := cy TO rows - 1 - n
-      CopyMem(visrow(r + n), visrow(r), cols)
-      CopyMem(sarow(r + n), sarow(r), cols)
+  IF n > (curcon.rows - curcon.cy) THEN n := curcon.rows - curcon.cy
+  ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
+               curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF curcon.sb
+    FOR r := curcon.cy TO curcon.rows - 1 - n
+      CopyMem(visrow(r + n), visrow(r), curcon.cols)
+      CopyMem(sarow(r + n), sarow(r), curcon.cols)
     ENDFOR
-    FOR r := rows - n TO rows - 1
+    FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
     ENDFOR
   ENDIF
@@ -1805,7 +1845,7 @@ ENDPROC
 PROC sendreport()
   DEF b[24]:STRING, i
   enqueue($9B)
-  StringF(b, '1;1;\d;\d', rows, cols)
+  StringF(b, '1;1;\d;\d', curcon.rows, curcon.cols)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
   ENDFOR
@@ -1817,15 +1857,15 @@ ENDPROC
 -> erase from the output cursor to the end of its row (CSI K)
 PROC eraseeol()
   DEF y, m:PTR TO CHAR, a:PTR TO CHAR, j
-  IF cx >= cols THEN RETURN   -> inverted RectFill = wild writes
-  y := topy + Mul(cy, ch)
-  SetAPen(rp, 0)
-  RectFill(rp, left + Mul(cx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
-  SetAPen(rp, deffg)
-  IF sb
-    m := visrow(cy)
-    a := sarow(cy)
-    FOR j := cx TO cols - 1
+  IF curcon.cx >= curcon.cols THEN RETURN   -> inverted RectFill = wild writes
+  y := curcon.topy + Mul(curcon.cy, curcon.ch)
+  SetAPen(curcon.rp, 0)
+  RectFill(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), y, curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
+  SetAPen(curcon.rp, curcon.deffg)
+  IF curcon.sb
+    m := visrow(curcon.cy)
+    a := sarow(curcon.cy)
+    FOR j := curcon.cx TO curcon.cols - 1
       m[j] := 0
       a[j] := 0
     ENDFOR
@@ -1838,32 +1878,32 @@ ENDPROC
 -> the rest silently.
 PROC render(buf, len)
   DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2
-  IF win = NIL THEN RETURN
+  IF curcon.win = NIL THEN RETURN
   s := buf
   WHILE i < len
     c := s[i]
-    IF cesc = 1    -> after ESC: '[' opens a CSI, else two-byte seq
+    IF curcon.cesc = 1    -> after ESC: '[' opens a CSI, else two-byte seq
       IF c = "["
         csistart()
       ELSE
-        cesc := 0
+        curcon.cesc := 0
       ENDIF
       i := i + 1
-    ELSEIF cesc = 2    -> CSI parameters end at the final byte >= $40
+    ELSEIF curcon.cesc = 2    -> CSI parameters end at the final byte >= $40
       IF (c >= "0") AND (c <= "9")
-        cpar[cnp] := Mul(cpar[cnp], 10) + (c - 48)
-        IF cpar[cnp] > 999 THEN cpar[cnp] := 999
+        curcon.cpar[curcon.cnp] := Mul(curcon.cpar[curcon.cnp], 10) + (c - 48)
+        IF curcon.cpar[curcon.cnp] > 999 THEN curcon.cpar[curcon.cnp] := 999
       ELSEIF c = ";"
-        cnp := cnp + 1
-        IF cnp > 3 THEN cnp := 3
-        cpar[cnp] := 0
+        curcon.cnp := curcon.cnp + 1
+        IF curcon.cnp > 3 THEN curcon.cnp := 3
+        curcon.cpar[curcon.cnp] := 0
       ELSEIF c >= $40
         csidispatch(c)
-        cesc := 0
+        curcon.cesc := 0
       ENDIF
       i := i + 1
     ELSEIF c = 27
-      cesc := 1
+      curcon.cesc := 1
       i := i + 1
     ELSEIF c = $9B
       csistart()
@@ -1872,15 +1912,15 @@ PROC render(buf, len)
       outnl()
       i := i + 1
     ELSEIF c = 13
-      cx := 0
+      curcon.cx := 0
       i := i + 1
     ELSEIF c = 8
-      IF cx > 0 THEN cx--
+      IF curcon.cx > 0 THEN curcon.cx := curcon.cx - 1
       i := i + 1
     ELSEIF c = 9
       REPEAT
         outchr(32)
-      UNTIL (Mod(cx, 8) = 0) OR (cx >= cols)
+      UNTIL (Mod(curcon.cx, 8) = 0) OR (curcon.cx >= curcon.cols)
       i := i + 1
     ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
       -> printable run: ASCII and Latin-1; $7F-$9F are controls.
@@ -1891,21 +1931,21 @@ PROC render(buf, len)
       ENDWHILE
       run := j - i
       WHILE run > 0
-        IF cx >= cols THEN outnl()
-        fit := cols - cx
+        IF curcon.cx >= curcon.cols THEN outnl()
+        fit := curcon.cols - curcon.cx
         IF fit > run THEN fit := run
-        SetAPen(rp, fgpen())
-        SetBPen(rp, curbg)
-        Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
-        Text(rp, s + i, fit)
-        IF sb
-          CopyMem(s + i, visrow(cy) + cx, fit)
-          m := sarow(cy) + cx
+        SetAPen(curcon.rp, fgpen())
+        SetBPen(curcon.rp, curcon.curbg)
+        Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
+        Text(curcon.rp, s + i, fit)
+        IF curcon.sb
+          CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
+          m := sarow(curcon.cy) + curcon.cx
           FOR j2 := 0 TO fit - 1
             m[j2] := curattr()
           ENDFOR
         ENDIF
-        cx := cx + fit
+        curcon.cx := curcon.cx + fit
         i := i + fit
         run := run - fit
       ENDWHILE
@@ -1920,8 +1960,8 @@ ENDPROC
 -> anchor exactly where the client's prompt left the output ----------
 
 PROC reanchor()
-  ancx := cx
-  ancy := cy
+  curcon.ancx := curcon.cx
+  curcon.ancy := curcon.cy
 ENDPROC
 
 -> the edit line WRAPS (stock shell behaviour): it may span several
@@ -1930,34 +1970,34 @@ ENDPROC
 
 -> the most chars the line can hold: LINEMAX, or every cell from
 -> the anchor to the bottom-right corner minus one for the blip
-PROC edcap() IS Min(LINEMAX - 1, Mul(rows, cols) - ancx - 1)
+PROC edcap() IS Min(LINEMAX - 1, Mul(curcon.rows, curcon.cols) - curcon.ancx - 1)
 
 -> the last row a line of n chars (plus its blip cell) touches
-PROC edlastrow(n) IS ancy + ((ancx + n) / cols)
+PROC edlastrow(n) IS curcon.ancy + ((curcon.ancx + n) / curcon.cols)
 
 -> scroll until that fits on screen (the dotab menu loop's pattern)
 PROC edroom(n)
-  WHILE (edlastrow(n) > (rows - 1)) AND (ancy > 0)
+  WHILE (edlastrow(n) > (curcon.rows - 1)) AND (curcon.ancy > 0)
     screenscroll()
-    IF cy > 0 THEN cy--
+    IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1
   ENDWHILE
 ENDPROC
 
 PROC eraseedit()
   DEF y, r, r1, x0
-  IF win = NIL THEN RETURN
-  IF ancx >= cols THEN RETURN -> inverted RectFill = wild writes
-  r1 := edlastrow(edlast)
-  IF r1 > (rows - 1) THEN r1 := rows - 1
-  x0 := ancx
-  SetAPen(rp, 0)
-  FOR r := ancy TO r1
-    y := topy + Mul(r, ch)
-    RectFill(rp, left + Mul(x0, cw), y,
-             left + Mul(cols, cw) - 1, y + ch - 1)
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.ancx >= curcon.cols THEN RETURN -> inverted RectFill = wild writes
+  r1 := edlastrow(curcon.edlast)
+  IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
+  x0 := curcon.ancx
+  SetAPen(curcon.rp, 0)
+  FOR r := curcon.ancy TO r1
+    y := curcon.topy + Mul(r, curcon.ch)
+    RectFill(curcon.rp, curcon.left + Mul(x0, curcon.cw), y,
+             curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
     x0 := 0                   -> continuation rows clear full width
   ENDFOR
-  SetAPen(rp, deffg)
+  SetAPen(curcon.rp, curcon.deffg)
 ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
@@ -1965,50 +2005,50 @@ ENDPROC
 -> grown row-wrapping)
 PROC drawedit()
   DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc
-  IF win = NIL THEN RETURN
-  l := StrLen(ebuf)
+  IF curcon.win = NIL THEN RETURN
+  l := StrLen(curcon.ebuf)
   edroom(l)
   eraseedit()
-  s := ebuf
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
+  s := curcon.ebuf
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
   i := 0
-  r := ancy
-  xc := ancx
+  r := curcon.ancy
+  xc := curcon.ancx
   WHILE i < l
-    n := Min(cols - xc, l - i)
-    Move(rp, left + Mul(xc, cw), topy + Mul(r, ch) + baseline)
-    Text(rp, s + i, n)
+    n := Min(curcon.cols - xc, l - i)
+    Move(curcon.rp, curcon.left + Mul(xc, curcon.cw), curcon.topy + Mul(r, curcon.ch) + curcon.baseline)
+    Text(curcon.rp, s + i, n)
     i := i + n
     xc := 0
     r := r + 1
   ENDWHILE
   cch[0] := 32
-  IF cpos < l THEN cch[0] := s[cpos]
-  bc := ancx + cpos
-  r := bc / cols
-  SetAPen(rp, 0)
-  SetBPen(rp, deffg)
-  Move(rp, left + Mul(bc - Mul(r, cols), cw),
-       topy + Mul(ancy + r, ch) + baseline)
-  Text(rp, cch, 1)
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
-  edlast := l
+  IF curcon.cpos < l THEN cch[0] := s[curcon.cpos]
+  bc := curcon.ancx + curcon.cpos
+  r := bc / curcon.cols
+  SetAPen(curcon.rp, 0)
+  SetBPen(curcon.rp, curcon.deffg)
+  Move(curcon.rp, curcon.left + Mul(bc - Mul(r, curcon.cols), curcon.cw),
+       curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
+  Text(curcon.rp, cch, 1)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+  curcon.edlast := l
 ENDPROC
 
 -> put history entry idx (0 = newest) into ebuf, cut to fit
 PROC histload(idx)
-  StrCopy(ebuf, hist[Mod(htotal - 1 - idx, HISTMAX)])
-  WHILE StrLen(ebuf) > edcap()
-    SetStr(ebuf, StrLen(ebuf) - 1)
+  StrCopy(curcon.ebuf, curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)])
+  WHILE StrLen(curcon.ebuf) > edcap()
+    SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
   ENDWHILE
 ENDPROC
 
 PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, dup
   snaplive()                    -> typing returns the view to live
-  IF rawmode
+  IF curcon.rawmode
     -> raw: every key is just a byte for the client - Return is CR 13,
     -> Ctrl+C is byte 3 (no break signal), Ctrl+\ is byte 28 (no EOF)
     enqueue(code)
@@ -2020,7 +2060,7 @@ PROC dovanilla(code, qual)
     dotab(qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT))
     RETURN
   ENDIF
-  IF tcactive
+  IF curcon.tcactive
     IF code = 13
       tcclose()   -> Enter ACCEPTS the selection and closes the menu;
       RETURN      -> the line stays put for a second Enter (zsh style)
@@ -2030,12 +2070,12 @@ PROC dovanilla(code, qual)
     ENDIF
     tcclose()     -> any other key closes it, then acts normally
   ENDIF
-  s := ebuf
-  l := StrLen(ebuf)
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
   IF code = 13
     -> commit: echo the line into the transcript, feed the readers
     eraseedit()
-    render(ebuf, l)
+    render(curcon.ebuf, l)
     outnl()
     FOR j := 0 TO l - 1
       enqueue(s[j])
@@ -2046,61 +2086,61 @@ PROC dovanilla(code, qual)
     -> hist[Mod(-1,32)] on an empty history - survivable in an app,
     -> a guru in a handler - hence the nested IF.)
     dup := FALSE
-    IF htotal > 0
-      IF StrCmp(hist[Mod(htotal - 1, HISTMAX)], ebuf) THEN dup := TRUE
+    IF curcon.htotal > 0
+      IF StrCmp(curcon.hist[Mod(curcon.htotal - 1, HISTMAX)], curcon.ebuf) THEN dup := TRUE
     ENDIF
     IF (l > 0) AND (dup = FALSE)
-      StrCopy(hist[Mod(htotal, HISTMAX)], ebuf)
-      htotal := htotal + 1
+      StrCopy(curcon.hist[Mod(curcon.htotal, HISTMAX)], curcon.ebuf)
+      curcon.htotal := curcon.htotal + 1
     ENDIF
-    StrCopy(ebuf, '')
-    cpos := 0
-    hpos := -1
+    StrCopy(curcon.ebuf, '')
+    curcon.cpos := 0
+    curcon.hpos := -1
     reanchor()
     drawedit()
     inputarrived()
   ELSEIF code = 28
     -> Ctrl+\ : EOF for the next (or a waiting) read
-    eofpend := TRUE
+    curcon.eofpend := TRUE
     satisfyreads()
   ELSEIF (code >= 3) AND (code <= 6)
     -> Ctrl+C..F: forward the break to the current break owner
-    IF breaktask
-      Signal(breaktask, Shl(SIGBREAKF_CTRL_C, code - 3))
+    IF curcon.breaktask
+      Signal(curcon.breaktask, Shl(SIGBREAKF_CTRL_C, code - 3))
     ENDIF
   ELSEIF code = 27
-    StrCopy(ebuf, '')
-    cpos := 0
+    StrCopy(curcon.ebuf, '')
+    curcon.cpos := 0
     drawedit()
   ELSEIF code = 8
     -> Backspace: delete before the cursor, close the gap
-    IF cpos > 0
-      FOR j := cpos TO l - 1
+    IF curcon.cpos > 0
+      FOR j := curcon.cpos TO l - 1
         s[j - 1] := s[j]
       ENDFOR
-      SetStr(ebuf, l - 1)
-      cpos := cpos - 1
+      SetStr(curcon.ebuf, l - 1)
+      curcon.cpos := curcon.cpos - 1
       drawedit()
     ENDIF
   ELSEIF code = 127
     -> Del: delete under the cursor
-    IF cpos < l
-      FOR j := cpos + 1 TO l - 1
+    IF curcon.cpos < l
+      FOR j := curcon.cpos + 1 TO l - 1
         s[j - 1] := s[j]
       ENDFOR
-      SetStr(ebuf, l - 1)
+      SetStr(curcon.ebuf, l - 1)
       drawedit()
     ENDIF
   ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
     -> Latin-1 high half too: Swedish keymaps type beyond ASCII;
     -> typed characters insert at the cursor, not just append
     IF l < edcap()
-      FOR j := l - 1 TO cpos STEP -1
+      FOR j := l - 1 TO curcon.cpos STEP -1
         s[j + 1] := s[j]
       ENDFOR
-      s[cpos] := code
-      SetStr(ebuf, l + 1)
-      cpos := cpos + 1
+      s[curcon.cpos] := code
+      SetStr(curcon.ebuf, l + 1)
+      curcon.cpos := curcon.cpos + 1
       drawedit()
     ENDIF
   ENDIF
@@ -2151,14 +2191,14 @@ PROC dorawkey(code, qual)
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   -> Tab can arrive as a RAW key when the keymap has no vanilla
   -> mapping for its shifted form: dispatch it to completion too
-  IF (code = $42) AND (rawmode = FALSE)
+  IF (code = $42) AND (curcon.rawmode = FALSE)
     dotab(sh)
     RETURN TRUE
   ENDIF
   -> raw keys close an open completion menu - EXCEPT the qualifier
   -> keys themselves ($60-$67: Shift, Ctrl, Alt, Amiga - Shift+Tab
   -> starts with a bare Shift down-stroke) and key releases (bit 7)
-  IF tcactive
+  IF curcon.tcactive
     IF ((code AND $80) = 0) AND ((code < $60) OR (code > $67))
       tcclose()
     ENDIF
@@ -2171,67 +2211,67 @@ PROC dorawkey(code, qual)
     IF qual AND IEQUALIFIER_CONTROL
       scrollview(IF code = RK_UP THEN 1 ELSE -1)
       RETURN TRUE
-    ELSEIF (sh <> 0) AND (rawmode = FALSE)
-      scrollview(IF code = RK_UP THEN rows - 1 ELSE -(rows - 1))
+    ELSEIF (sh <> 0) AND (curcon.rawmode = FALSE)
+      scrollview(IF code = RK_UP THEN curcon.rows - 1 ELSE -(curcon.rows - 1))
       RETURN TRUE
     ENDIF
   ENDIF
   snaplive()                    -> any other key returns the view to live
-  IF rawmode
+  IF curcon.rawmode
     RETURN rawcsikey(code, qual)
   ENDIF
-  s := ebuf
-  l := StrLen(ebuf)
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
   IF code = RK_UP
     -> plain Up/Down walk the prompt history (output scrollback lives
     -> on Shift/Ctrl, above)
-    avail := htotal
+    avail := curcon.htotal
     IF avail > HISTMAX THEN avail := HISTMAX
-    IF hpos < (avail - 1)
-      IF hpos = -1 THEN StrCopy(stash, ebuf)  -> the half-typed line
-      hpos := hpos + 1
-      histload(hpos)
-      cpos := StrLen(ebuf)
+    IF curcon.hpos < (avail - 1)
+      IF curcon.hpos = -1 THEN StrCopy(curcon.stash, curcon.ebuf)  -> the half-typed line
+      curcon.hpos := curcon.hpos + 1
+      histload(curcon.hpos)
+      curcon.cpos := StrLen(curcon.ebuf)
       drawedit()
     ENDIF
   ELSEIF code = RK_DOWN
-    IF hpos >= 0
-      hpos := hpos - 1
-      IF hpos = -1
-        StrCopy(ebuf, stash)    -> back to the half-typed line
+    IF curcon.hpos >= 0
+      curcon.hpos := curcon.hpos - 1
+      IF curcon.hpos = -1
+        StrCopy(curcon.ebuf, curcon.stash)    -> back to the half-typed line
       ELSE
-        histload(hpos)
+        histload(curcon.hpos)
       ENDIF
-      cpos := StrLen(ebuf)
+      curcon.cpos := StrLen(curcon.ebuf)
       drawedit()
     ENDIF
   ELSEIF code = RK_LEFT
     -> Shift = all the way (the house rule), Ctrl = word jump
     IF qual AND IEQUALIFIER_CONTROL
-      WHILE (cpos > 0) AND (s[cpos - 1] = 32)
-        cpos := cpos - 1
+      WHILE (curcon.cpos > 0) AND (s[curcon.cpos - 1] = 32)
+        curcon.cpos := curcon.cpos - 1
       ENDWHILE
-      WHILE (cpos > 0) AND (s[cpos - 1] <> 32)
-        cpos := cpos - 1
+      WHILE (curcon.cpos > 0) AND (s[curcon.cpos - 1] <> 32)
+        curcon.cpos := curcon.cpos - 1
       ENDWHILE
     ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-      cpos := 0
-    ELSEIF cpos > 0
-      cpos := cpos - 1
+      curcon.cpos := 0
+    ELSEIF curcon.cpos > 0
+      curcon.cpos := curcon.cpos - 1
     ENDIF
     drawedit()
   ELSEIF code = RK_RIGHT
     IF qual AND IEQUALIFIER_CONTROL
-      WHILE (cpos < l) AND (s[cpos] <> 32)
-        cpos := cpos + 1
+      WHILE (curcon.cpos < l) AND (s[curcon.cpos] <> 32)
+        curcon.cpos := curcon.cpos + 1
       ENDWHILE
-      WHILE (cpos < l) AND (s[cpos] = 32)
-        cpos := cpos + 1
+      WHILE (curcon.cpos < l) AND (s[curcon.cpos] = 32)
+        curcon.cpos := curcon.cpos + 1
       ENDWHILE
     ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
-      cpos := StrLen(ebuf)
-    ELSEIF cpos < l
-      cpos := cpos + 1
+      curcon.cpos := StrLen(curcon.ebuf)
+    ELSEIF curcon.cpos < l
+      curcon.cpos := curcon.cpos + 1
     ENDIF
     drawedit()
   ENDIF
@@ -2295,7 +2335,7 @@ PROC ihchain(list:PTR TO inputevent)
         IF c = IECLASS_RAWKEY
           take := TRUE
         ELSEIF (c > IECLASS_RAWKEY) AND (c <= IECLASS_MAX)
-          IF evmask AND Shl(1, c) THEN take := TRUE
+          IF curcon.evmask AND Shl(1, c) THEN take := TRUE
         ENDIF
         IF take
           IF (ihhead - ihtail) < IHMAX
@@ -2328,9 +2368,9 @@ PROC ihdrain()
   DEF e:PTR TO ihev
   WHILE ihtail <> ihhead
     e := ihring + Shl(ihtail AND (IHMAX - 1), 5)
-    IF win                      -> late events after closewin: dropped
+    IF curcon.win                      -> late events after closewin: dropped
       IF e.cls = IECLASS_RAWKEY
-        IF evmask AND Shl(1, IECLASS_RAWKEY)
+        IF curcon.evmask AND Shl(1, IECLASS_RAWKEY)
           ihreport(e)           -> class 1 requested as reports: the
         ELSE                    -> client owns the keys raw
           ihkey(e)
@@ -2355,7 +2395,7 @@ PROC ihkey(e:PTR TO ihev)
   IF (cd >= $68) AND (cd <= $7F) THEN RETURN  -> buttons, comm codes
   IF cd < $60 THEN clearsel()   -> any real key drops the highlight
                                 -> (bare qualifiers keep it)
-  IF (selon = FALSE) AND (wqn > 0) THEN flushwq()
+  IF (curcon.selon = FALSE) AND (curcon.wqn > 0) THEN flushwq()
                                 -> belt: a lost button-up (ring
                                 -> overflow) must not park writers
                                 -> forever
@@ -2371,14 +2411,14 @@ PROC ihkey(e:PTR TO ihev)
       IF (ihmap[0] = "c") OR (ihmap[0] = "C")
         -> RAMIGA-C re-copies the standing highlight - release
         -> already copied, but the stock muscle memory is free
-        IF sello >= 0 THEN selcopy()
+        IF curcon.sello >= 0 THEN selcopy()
         RETURN
       ENDIF
     ENDIF
   ENDIF
   IF dorawkey(cd, q) THEN RETURN
   n := ihmaprawkey(e)
-  IF rawmode
+  IF curcon.rawmode
     -> raw: the mapped bytes go to the client as they are - this is
     -> where letters, Return=CR, Ctrl+C=3 and multi-byte F-key
     -> strings come from now
@@ -2532,12 +2572,12 @@ ENDPROC 0
 PROC tcclient()
   DEF t:PTR TO tc, pkt:PTR TO dospacket, sender:PTR TO mp
   t := NIL
-  IF rdn > 0
-    pkt := rdq[0]
+  IF curcon.rdn > 0
+    pkt := curcon.rdq[0]
     sender := pkt.port
     t := sender.sigtask
-  ELSEIF breaktask
-    t := breaktask
+  ELSEIF curcon.breaktask
+    t := curcon.breaktask
   ENDIF
   IF t = NIL THEN RETURN NIL
   IF t.ln.type <> NT_PROCESS THEN RETURN NIL
@@ -2550,9 +2590,9 @@ PROC tcresolve(dirpart:PTR TO CHAR)
   DEF proc:PTR TO process, fl:PTR TO filelock, i, colon, len, res,
       dl:PTR TO doslist, dcopy[300]:ARRAY OF CHAR,
       devname[40]:ARRAY OF CHAR
-  fsdirport := NIL
-  fsdirlock := 0
-  fsdirfree := FALSE
+  curcon.fsdirport := NIL
+  curcon.fsdirlock := 0
+  curcon.fsdirfree := FALSE
   len := StrLen(dirpart)
   IF len > 280 THEN RETURN FALSE
   FOR i := 0 TO len
@@ -2579,16 +2619,16 @@ PROC tcresolve(dirpart:PTR TO CHAR)
     IF proc = NIL THEN RETURN FALSE
     IF proc.currentdir = 0 THEN RETURN FALSE
     fl := Shl(proc.currentdir, 2)
-    fsdirport := fl.task
+    curcon.fsdirport := fl.task
     IF len = 0
-      fsdirlock := proc.currentdir     -> scan the CWD itself; not ours
+      curcon.fsdirlock := proc.currentdir     -> scan the CWD itself; not ours
       RETURN TRUE                      -> to free
     ENDIF
-    res := fscall(fsdirport, ACTION_LOCATE_OBJECT, proc.currentdir,
+    res := fscall(curcon.fsdirport, ACTION_LOCATE_OBJECT, proc.currentdir,
                   tcbstr(dcopy), SHARED_LOCK)
     IF res = 0 THEN RETURN FALSE
-    fsdirlock := res
-    fsdirfree := TRUE
+    curcon.fsdirlock := res
+    curcon.fsdirfree := TRUE
     RETURN TRUE
   ENDIF
   -> a device, volume or assign name before the ':'
@@ -2605,68 +2645,68 @@ PROC tcresolve(dirpart:PTR TO CHAR)
   ENDIF
   IF dl.type = DLT_DIRECTORY
     -> an assign: its lock is the base, the rest is relative to it
-    fsdirlock := dl.lock
+    curcon.fsdirlock := dl.lock
     UnLockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
-    IF fsdirlock = 0 THEN RETURN FALSE  -> late/nonbinding, unresolved
-    fl := Shl(fsdirlock, 2)
-    fsdirport := fl.task
+    IF curcon.fsdirlock = 0 THEN RETURN FALSE  -> late/nonbinding, unresolved
+    fl := Shl(curcon.fsdirlock, 2)
+    curcon.fsdirport := fl.task
     IF (colon + 1) < len
-      res := fscall(fsdirport, ACTION_LOCATE_OBJECT, fsdirlock,
+      res := fscall(curcon.fsdirport, ACTION_LOCATE_OBJECT, curcon.fsdirlock,
                     tcbstr(dcopy + colon + 1), SHARED_LOCK)
       IF res = 0 THEN RETURN FALSE
-      fsdirlock := res
-      fsdirfree := TRUE
+      curcon.fsdirlock := res
+      curcon.fsdirfree := TRUE
     ENDIF
     RETURN TRUE
   ENDIF
   -> a volume or device: its handler port takes the whole "NAME:path"
   -> name against a zero lock (what dos.library itself does)
-  fsdirport := dl.task
+  curcon.fsdirport := dl.task
   UnLockDosList(LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS)
-  IF fsdirport = NIL THEN RETURN FALSE  -> not mounted/started; starting
-  res := fscall(fsdirport, ACTION_LOCATE_OBJECT, 0,  -> it needs DOS
+  IF curcon.fsdirport = NIL THEN RETURN FALSE  -> not mounted/started; starting
+  res := fscall(curcon.fsdirport, ACTION_LOCATE_OBJECT, 0,  -> it needs DOS
                 tcbstr(dcopy), SHARED_LOCK)
   IF res = 0 THEN RETURN FALSE
-  fsdirlock := res
-  fsdirfree := TRUE
+  curcon.fsdirlock := res
+  curcon.fsdirfree := TRUE
 ENDPROC TRUE
 
 PROC tcfreelock()
-  IF fsdirfree AND (fsdirlock <> 0)
-    fscall(fsdirport, ACTION_FREE_LOCK, fsdirlock, 0, 0)
+  IF curcon.fsdirfree AND (curcon.fsdirlock <> 0)
+    fscall(curcon.fsdirport, ACTION_FREE_LOCK, curcon.fsdirlock, 0, 0)
   ENDIF
-  fsdirlock := 0
-  fsdirfree := FALSE
+  curcon.fsdirlock := 0
+  curcon.fsdirfree := FALSE
 ENDPROC
 
 -> scan the resolved directory for names starting with the prefix
 PROC tcscan(pfx:PTR TO CHAR, plen)
   DEF res, nbuf[112]:ARRAY OF CHAR, l, p:PTR TO CHAR
-  tcn := 0
-  tcpu := 0
-  tcmore := FALSE
-  res := fscall(fsdirport, ACTION_EXAMINE_OBJECT, fsdirlock,
+  curcon.tcn := 0
+  curcon.tcpu := 0
+  curcon.tcmore := FALSE
+  res := fscall(curcon.fsdirport, ACTION_EXAMINE_OBJECT, curcon.fsdirlock,
                 Shr(fsfib, 2), 0)
   IF res = 0 THEN RETURN
   IF fsfib.direntrytype <= 0 THEN RETURN   -> a file, not a directory
-  WHILE fscall(fsdirport, ACTION_EXAMINE_NEXT, fsdirlock,
+  WHILE fscall(curcon.fsdirport, ACTION_EXAMINE_NEXT, curcon.fsdirlock,
                Shr(fsfib, 2), 0)
     tcfibname(nbuf)
     l := StrLen(nbuf)
     IF l > 0
       IF (plen = 0) OR tcpref(nbuf, pfx, plen)
-        IF (tcn < TCMAX) AND ((tcpu + l + 3) < TCPOOLSZ)
-          p := tcpool + tcpu
+        IF (curcon.tcn < TCMAX) AND ((curcon.tcpu + l + 3) < TCPOOLSZ)
+          p := curcon.tcpool + curcon.tcpu
           p[0] := IF fsfib.direntrytype > 0 THEN 1 ELSE 0
           IF tchidname(nbuf, l, fsfib.protection)
             p[0] := p[0] OR 2
           ENDIF
           CopyMem(nbuf, p + 1, l + 1)
-          tcc[tcn] := p
-          tcn++
-          tcpu := tcpu + l + 2
+          curcon.tcc[curcon.tcn] := p
+          curcon.tcn := curcon.tcn + 1
+          curcon.tcpu := curcon.tcpu + l + 2
         ELSE
-          tcmore := TRUE
+          curcon.tcmore := TRUE
         ENDIF
       ENDIF
     ENDIF
@@ -2675,31 +2715,31 @@ ENDPROC
 
 PROC tcsort()
   DEF i, j, key, go
-  FOR i := 1 TO tcn - 1
-    key := tcc[i]
+  FOR i := 1 TO curcon.tcn - 1
+    key := curcon.tcc[i]
     j := i - 1
     go := TRUE
     WHILE go
       IF j < 0
         go := FALSE
-      ELSEIF tccmp(tcc[j] + 1, key + 1) > 0
-        tcc[j + 1] := tcc[j]
+      ELSEIF tccmp(curcon.tcc[j] + 1, key + 1) > 0
+        curcon.tcc[j + 1] := curcon.tcc[j]
         j--
       ELSE
         go := FALSE
       ENDIF
     ENDWHILE
-    tcc[j + 1] := key
+    curcon.tcc[j + 1] := key
   ENDFOR
 ENDPROC
 
 -> length of the folded common prefix of all candidates
 PROC tccommon()
   DEF l, i, k, a:PTR TO CHAR, b:PTR TO CHAR
-  a := tcc[0] + 1
+  a := curcon.tcc[0] + 1
   l := StrLen(a)
-  FOR k := 1 TO tcn - 1
-    b := tcc[k] + 1
+  FOR k := 1 TO curcon.tcn - 1
+    b := curcon.tcc[k] + 1
     i := 0
     WHILE (i < l) AND (b[i] <> 0) AND (tcfold(a[i]) = tcfold(b[i]))
       i++
@@ -2711,27 +2751,27 @@ ENDPROC l
 -> replace ebuf[tcws..tcwend) with nl bytes at nt; FALSE = no fit
 PROC tcreplace(nt:PTR TO CHAR, nl)
   DEF s:PTR TO CHAR, t:PTR TO CHAR, l, newlen, i
-  s := ebuf
-  l := StrLen(ebuf)
-  newlen := tcws + nl + (l - tcwend)
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
+  newlen := curcon.tcws + nl + (l - curcon.tcwend)
   IF newlen > edcap() THEN RETURN FALSE
-  IF tcactive
+  IF curcon.tcactive
     -> the menu's rows are frozen (tcmrow0): while it is open a
     -> candidate may not grow the line down into it
-    IF (ancx + newlen + 1) > Mul(tcmrow0 - ancy, cols) THEN RETURN FALSE
+    IF (curcon.ancx + newlen + 1) > Mul(curcon.tcmrow0 - curcon.ancy, curcon.cols) THEN RETURN FALSE
   ENDIF
-  StrCopy(tctail, s + tcwend)
-  t := tctail
+  StrCopy(curcon.tctail, s + curcon.tcwend)
+  t := curcon.tctail
   FOR i := 0 TO nl - 1
-    s[tcws + i] := nt[i]
+    s[curcon.tcws + i] := nt[i]
   ENDFOR
-  FOR i := 0 TO StrLen(tctail) - 1
-    s[tcws + nl + i] := t[i]
+  FOR i := 0 TO StrLen(curcon.tctail) - 1
+    s[curcon.tcws + nl + i] := t[i]
   ENDFOR
-  SetStr(ebuf, newlen)
+  SetStr(curcon.ebuf, newlen)
   s[newlen] := 0
-  tcwend := tcws + nl
-  cpos := tcwend
+  curcon.tcwend := curcon.tcws + nl
+  curcon.cpos := curcon.tcwend
 ENDPROC TRUE
 
 -> ---------- the menu below the prompt ----------
@@ -2739,12 +2779,12 @@ ENDPROC TRUE
 -> repaint one screen row from the live model (menu cleanup)
 PROC drawmodelrow(r)
   DEF idx
-  IF sb = NIL THEN RETURN
-  idx := sbtop + r
+  IF curcon.sb = NIL THEN RETURN
+  idx := curcon.sbtop + r
   IF idx >= SBMAX THEN idx := idx - SBMAX
-  drawmrow(idx, topy + Mul(r, ch))
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
+  drawmrow(idx, curcon.topy + Mul(r, curcon.ch))
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
 ENDPROC
 
 -> hidden-class: the h protection bit, or a case-blind ".info"
@@ -2766,78 +2806,78 @@ ENDPROC TRUE
 -> pen 3 otherwise), everything else in the default pen
 PROC menupen(flag)
   IF flag AND 2                 -> hidden-class grey
-    IF wbpens THEN RETURN 8
-    IF anstab[0] >= 0 THEN RETURN anstab[0]
-    RETURN deffg
+    IF curcon.wbpens THEN RETURN 8
+    IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
+    RETURN curcon.deffg
   ENDIF
   IF flag AND 1                 -> directory blue
-    IF wbpens THEN RETURN 12
-    IF anstab[4] >= 0 THEN RETURN anstab[4]
+    IF curcon.wbpens THEN RETURN 12
+    IF curcon.anstab[4] >= 0 THEN RETURN curcon.anstab[4]
     RETURN 3                    -> the classic WB blue pen
   ENDIF
-ENDPROC deffg
+ENDPROC curcon.deffg
 
 PROC tcmenucalc()
   DEF i, l, maxl, p:PTR TO CHAR
   maxl := 1
-  FOR i := 0 TO tcn - 1
-    p := tcc[i]
+  FOR i := 0 TO curcon.tcn - 1
+    p := curcon.tcc[i]
     l := StrLen(p + 1) + (p[0] AND 1)  -> dirs show a trailing '/'
     IF l > maxl THEN maxl := l
   ENDFOR
-  tcmcolw := maxl + 2
-  IF tcmcolw > cols THEN tcmcolw := cols
-  tcmcols := Div(cols, tcmcolw)
-  IF tcmcols < 1 THEN tcmcols := 1
-  tcmrows := Div(tcn + tcmcols - 1, tcmcols)
-  IF tcmrows > (rows - 1)       -> more than fits: show the first
-    tcmrows := rows - 1         -> page, cycle within it
-    tcmore := TRUE
+  curcon.tcmcolw := maxl + 2
+  IF curcon.tcmcolw > curcon.cols THEN curcon.tcmcolw := curcon.cols
+  curcon.tcmcols := Div(curcon.cols, curcon.tcmcolw)
+  IF curcon.tcmcols < 1 THEN curcon.tcmcols := 1
+  curcon.tcmrows := Div(curcon.tcn + curcon.tcmcols - 1, curcon.tcmcols)
+  IF curcon.tcmrows > (curcon.rows - 1)       -> more than fits: show the first
+    curcon.tcmrows := curcon.rows - 1         -> page, cycle within it
+    curcon.tcmore := TRUE
   ENDIF
-  tcshown := Mul(tcmrows, tcmcols)
-  IF tcshown > tcn THEN tcshown := tcn
+  curcon.tcshown := Mul(curcon.tcmrows, curcon.tcmcols)
+  IF curcon.tcshown > curcon.tcn THEN curcon.tcshown := curcon.tcn
 ENDPROC
 
 PROC tcmenudraw()
   DEF idx, r, c, p:PTR TO CHAR, l, nb[260]:ARRAY OF CHAR
-  FOR idx := 0 TO tcshown - 1
-    r := Div(idx, tcmcols)
-    c := idx - Mul(r, tcmcols)
-    p := tcc[idx]
+  FOR idx := 0 TO curcon.tcshown - 1
+    r := Div(idx, curcon.tcmcols)
+    c := idx - Mul(r, curcon.tcmcols)
+    p := curcon.tcc[idx]
     l := StrLen(p + 1)
     CopyMem(p + 1, nb, l)
     IF p[0] AND 1
       nb[l] := "/"
       l++
     ENDIF
-    WHILE l < tcmcolw
+    WHILE l < curcon.tcmcolw
       nb[l] := 32
       l++
     ENDWHILE
-    IF idx = tcsel
-      SetAPen(rp, 0)
-      SetBPen(rp, deffg)
+    IF idx = curcon.tcsel
+      SetAPen(curcon.rp, 0)
+      SetBPen(curcon.rp, curcon.deffg)
     ELSE
-      SetAPen(rp, menupen(p[0]))
-      SetBPen(rp, 0)
+      SetAPen(curcon.rp, menupen(p[0]))
+      SetBPen(curcon.rp, 0)
     ENDIF
-    Move(rp, left + Mul(Mul(c, tcmcolw), cw),
-         topy + Mul(tcmrow0 + r, ch) + baseline)
-    Text(rp, nb, l)
+    Move(curcon.rp, curcon.left + Mul(Mul(c, curcon.tcmcolw), curcon.cw),
+         curcon.topy + Mul(curcon.tcmrow0 + r, curcon.ch) + curcon.baseline)
+    Text(curcon.rp, nb, l)
   ENDFOR
-  SetAPen(rp, deffg)
-  SetBPen(rp, 0)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
 ENDPROC
 
 -> close the menu: the rows under it come back from the model
 PROC tcclose()
   DEF r
-  IF tcactive = FALSE THEN RETURN
-  FOR r := 0 TO tcmrows - 1
-    drawmodelrow(tcmrow0 + r)
+  IF curcon.tcactive = FALSE THEN RETURN
+  FOR r := 0 TO curcon.tcmrows - 1
+    drawmodelrow(curcon.tcmrow0 + r)
   ENDFOR
-  tcactive := FALSE
-  tcsel := -1
+  curcon.tcactive := FALSE
+  curcon.tcsel := -1
 ENDPROC
 
 -> Tab in the cooked editor. First Tab completes (whole match, or the
@@ -2847,61 +2887,61 @@ ENDPROC
 PROC dotab(back)
   DEF s:PTR TO CHAR, l, i, sep, plen, cpl, p:PTR TO CHAR,
       dirp[300]:ARRAY OF CHAR
-  IF tcactive
-    IF tcshown = 0 THEN RETURN
+  IF curcon.tcactive
+    IF curcon.tcshown = 0 THEN RETURN
     IF back
-      tcsel := tcsel - 1
-      IF tcsel < 0 THEN tcsel := tcshown - 1
+      curcon.tcsel := curcon.tcsel - 1
+      IF curcon.tcsel < 0 THEN curcon.tcsel := curcon.tcshown - 1
     ELSE
-      tcsel := tcsel + 1
-      IF tcsel >= tcshown THEN tcsel := 0
+      curcon.tcsel := curcon.tcsel + 1
+      IF curcon.tcsel >= curcon.tcshown THEN curcon.tcsel := 0
     ENDIF
-    p := tcc[tcsel]
-    StrCopy(tctmp, p + 1)
-    IF p[0] AND 1 THEN StrAdd(tctmp, '/')
-    IF tcreplace(tctmp, StrLen(tctmp)) THEN drawedit()
+    p := curcon.tcc[curcon.tcsel]
+    StrCopy(curcon.tctmp, p + 1)
+    IF p[0] AND 1 THEN StrAdd(curcon.tctmp, '/')
+    IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp)) THEN drawedit()
     tcmenudraw()
     RETURN
   ENDIF
   IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
-     (fsname = NIL) OR (tcpool = NIL) THEN RETURN
-  s := ebuf
-  l := StrLen(ebuf)
+     (fsname = NIL) OR (curcon.tcpool = NIL) THEN RETURN
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
   -> the word: back from the cursor to the last space (v1: no quotes)
-  i := cpos
+  i := curcon.cpos
   WHILE (i > 0) AND (s[i - 1] <> 32)
     i := i - 1
   ENDWHILE
-  tcws := i
-  tcwend := cpos
+  curcon.tcws := i
+  curcon.tcwend := curcon.cpos
   -> split the word at its last '/' or ':': dirpart + prefix
-  sep := tcws
-  FOR i := tcws TO cpos - 1
+  sep := curcon.tcws
+  FOR i := curcon.tcws TO curcon.cpos - 1
     IF (s[i] = "/") OR (s[i] = ":") THEN sep := i + 1
   ENDFOR
-  IF (sep - tcws) > 280 THEN RETURN
-  FOR i := 0 TO sep - tcws - 1
-    dirp[i] := s[tcws + i]
+  IF (sep - curcon.tcws) > 280 THEN RETURN
+  FOR i := 0 TO sep - curcon.tcws - 1
+    dirp[i] := s[curcon.tcws + i]
   ENDFOR
-  dirp[sep - tcws] := 0
-  plen := cpos - sep
+  dirp[sep - curcon.tcws] := 0
+  plen := curcon.cpos - sep
   IF tcresolve(dirp) = FALSE
     DisplayBeep(NIL)
     RETURN
   ENDIF
   tcscan(s + sep, plen)
   tcfreelock()
-  IF tcn = 0
+  IF curcon.tcn = 0
     DisplayBeep(NIL)
     RETURN
   ENDIF
   tcsort()
-  IF tcn = 1
+  IF curcon.tcn = 1
     -> the one match: complete it, '/' opens a dir, ' ' ends a file
-    p := tcc[0]
-    StrCopy(tctmp, p + 1)
-    StrAdd(tctmp, IF (p[0] AND 1) THEN '/' ELSE ' ')
-    IF tcreplace(tctmp, StrLen(tctmp))
+    p := curcon.tcc[0]
+    StrCopy(curcon.tctmp, p + 1)
+    StrAdd(curcon.tctmp, IF (p[0] AND 1) THEN '/' ELSE ' ')
+    IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp))
       drawedit()
     ELSE
       DisplayBeep(NIL)
@@ -2912,53 +2952,53 @@ PROC dotab(back)
   -> first candidate), then the menu
   cpl := tccommon()
   IF cpl > 0
-    p := tcc[0]
+    p := curcon.tcc[0]
     FOR i := 0 TO cpl - 1
-      tctmp[i] := p[1 + i]
+      curcon.tctmp[i] := p[1 + i]
     ENDFOR
-    tctmp[cpl] := 0
-    SetStr(tctmp, cpl)
-    IF tcreplace(tctmp, cpl) THEN drawedit()
+    curcon.tctmp[cpl] := 0
+    SetStr(curcon.tctmp, cpl)
+    IF tcreplace(curcon.tctmp, cpl) THEN drawedit()
   ENDIF
-  IF sb = NIL THEN RETURN   -> no model = no way to restore the rows
+  IF curcon.sb = NIL THEN RETURN   -> no model = no way to restore the rows
   tcmenucalc()              -> under a menu; prefix-only completion
-  WHILE ((edlastrow(StrLen(ebuf)) + tcmrows) > (rows - 1)) AND (ancy > 0)
+  WHILE ((edlastrow(StrLen(curcon.ebuf)) + curcon.tcmrows) > (curcon.rows - 1)) AND (curcon.ancy > 0)
     screenscroll()          -> make room below the (wrapped) edit
-    IF cy > 0 THEN cy--     -> line; its pixels scroll along, anchor
+    IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1     -> line; its pixels scroll along, anchor
   ENDWHILE                  -> and output cursor track it
-  tcmrow0 := edlastrow(StrLen(ebuf)) + 1
-  tcsel := -1
-  tcactive := TRUE
+  curcon.tcmrow0 := edlastrow(StrLen(curcon.ebuf)) + 1
+  curcon.tcsel := -1
+  curcon.tcactive := TRUE
   tcmenudraw()
-  IF tcmore THEN DisplayBeep(NIL)  -> more than the menu shows
+  IF curcon.tcmore THEN DisplayBeep(NIL)  -> more than the menu shows
 ENDPROC
 
 -> ---------- cooked input plumbing ----------
 
 PROC enqueue(c)
   DEF nt
-  nt := Mod(inqt + 1, INQMAX)
-  IF nt <> inqh               -> full queue drops (should never happen)
-    inq[inqt] := c
-    inqt := nt
+  nt := Mod(curcon.inqt + 1, INQMAX)
+  IF nt <> curcon.inqh               -> full queue drops (should never happen)
+    curcon.inq[curcon.inqt] := c
+    curcon.inqt := nt
   ENDIF
 ENDPROC
 
-PROC inavail() IS Mod(inqt - inqh + INQMAX, INQMAX)
+PROC inavail() IS Mod(curcon.inqt - curcon.inqh + INQMAX, INQMAX)
 
 -> reply queued reads while finished-line bytes (or an EOF) are there;
 -> a read gets at most one line - cooked semantics - and a short buffer
 -> gets the rest of the line on its next read
 PROC satisfyreads()
   DEF pkt:PTR TO dospacket, dst:PTR TO CHAR, max, n, c, i, stop
-  WHILE (rdn > 0) AND ((inavail() > 0) OR eofpend)
-    pkt := rdq[0]
-    FOR i := 1 TO rdn - 1
-      rdq[i - 1] := rdq[i]
+  WHILE (curcon.rdn > 0) AND ((inavail() > 0) OR curcon.eofpend)
+    pkt := curcon.rdq[0]
+    FOR i := 1 TO curcon.rdn - 1
+      curcon.rdq[i - 1] := curcon.rdq[i]
     ENDFOR
-    rdn--
+    curcon.rdn := curcon.rdn - 1
     IF inavail() = 0
-      eofpend := FALSE          -> EOF is one-shot
+      curcon.eofpend := FALSE          -> EOF is one-shot
       ReplyPkt(pkt, 0, 0)
     ELSE
       dst := pkt.arg2
@@ -2966,15 +3006,15 @@ PROC satisfyreads()
       n := 0
       stop := FALSE
       WHILE (n < max) AND (stop = FALSE) AND (inavail() > 0)
-        c := inq[inqh]
-        inqh := Mod(inqh + 1, INQMAX)
+        c := curcon.inq[curcon.inqh]
+        curcon.inqh := Mod(curcon.inqh + 1, INQMAX)
         dst[n] := c
         n++
-        IF (c = 10) AND (rawmode = FALSE) THEN stop := TRUE
+        IF (c = 10) AND (curcon.rawmode = FALSE) THEN stop := TRUE
       ENDWHILE
       ReplyPkt(pkt, n, 0)
     ENDIF
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.20 (18.7.26) CCON: LTX console handler M9', 0
+vers: CHAR '$VER: ccon-handler 0.21 (18.7.26) CCON: LTX console handler M10a', 0

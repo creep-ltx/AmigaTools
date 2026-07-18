@@ -566,8 +566,52 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       explicitly; (6) regression: CTerm WINDOW0x unaffected,
       resize/colours/copy-paste as before.
 
-- [ ] **M10: a window per open — DESIGNED 18.7.26, migration is
-      the next session's work (it touches every global).**
+- [ ] **M10: a window per open — DESIGNED 18.7.26; STEP A
+      BOOT-PASSED 18.7.26 ($VER 0.21): the full regression sweep
+      green on one shell. A bonus specimen from the boot: two
+      shells on the shared console showed `ls`'s bounds-report
+      being stolen by the other shell's queued read ("nknown
+      command" - the report's CSI bytes eaten by the renderer in
+      the echoed error) - the exact input-routing disease steps
+      B-E cure, photographed live.**
+      **Step A (the struct-ification): every per-window global —
+      ~100 of them — moved into ONE `console` OBJECT reached only
+      through `curcon`; shared state (ports, timer/clipboard/input
+      devices, keymap, fs plumbing, the one chain) stays global.
+      The rename was scripted (word-boundary, string/comment-safe)
+      and the compiler was the net: the old globals ceased to
+      exist, so any missed site failed the build. E adaptations:
+      the six `:STRING` globals became E-strings allocated once in
+      coninit() (OBJECT fields cannot be STRING), and field ++/--
+      became `:=` forms (member inc/dec not relied on). The object
+      is New()ed at mount time — allocation failure now REFUSES the
+      mount (ReplyPkt DOSFALSE) instead of running half-built.
+      Byte arrays sit last in the object so LONG fields stay
+      aligned. tcpool moved per-console (4K each — per-window menus
+      must not share candidate storage in step B).
+      **THE BUILD GREW PAST THE 16-BIT SMALL MODEL: compile with
+      `LARGE` now** (`ecompile ccon-handler.e ccon-handler LARGE`) —
+      member indirection pushed string-pool references out of 32k
+      range. Verified against the 0.20 binary before deploy, not
+      assumed: startup stage 2 is byte-identical except the two
+      expected constants (startup allocation $40f0→$2eb8 — the
+      static arrays moved to the heap object — and the LINK A4
+      frame), wbmessage still captured into (-$24,A4) by the same
+      code, and gluestub's 22 bytes are identical, so the handler
+      trick and the chain hookup survive the model change. Smoke-
+      tested under vamos (the no-mount usage path runs, exit 5).
+      Deployed as L:ccon-handler (0.20 kept as L:ccon-handler-0.20).
+      **Boot test (step A = behaviour IDENTICAL to 0.20):**
+      `Version L:ccon-handler` says 0.21, then the standing
+      regression sweep — `NewShell CCON:` typing/å-ä-ö/history/
+      Ctrl+word-jumps/Tab completion menu incl. Shift+Tab/
+      scrollback keys/Ctrl+C break/dir/More paging/Ed (menus,
+      block cursor, resize mid-edit)/copy&paste both ways/window
+      resize/EndShell closes; `echo >CCON:0/0/300/80/auto/AUTO/WAIT
+      hi`; CRAW: raw window; CTerm WINDOW0x handoff. Anything that
+      behaves differently from 0.20 is a step-A bug.
+      **Remaining steps (B–E ladder below): the console LIST,
+      per-open routing, curcon set at dispatch boundaries.**
       **Decision: ONE process, many windows** (the AROS
       con-handler shape), NOT the KingCON per-window fork:
       CreateNewProc from inside a handler risks internal DOS
