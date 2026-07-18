@@ -35,6 +35,8 @@
 -> packet port with the window port via Wait(), so WaitPkt is gone.
 
 MODULE 'intuition/intuition','intuition/intuitionbase',
+       'intuition/screens',
+       'graphics/view',
        'utility/tagitem',
        'exec/nodes','exec/ports','exec/io','exec/tasks',
        'exec/interrupts',
@@ -143,6 +145,11 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     deffg=1, curfg=1, curbg=0, bold=FALSE, can16=FALSE,
     wbpens=FALSE,               -> WBPENS option: plain SGR 30-33
                                 -> are WB pens, retarget at theme
+    cursgr=FALSE,               -> an explicit 3x is in effect (bare
+                                -> bold must not recolour anything)
+    anstab[8]:ARRAY OF LONG,    -> foreign screens: the ANSI bright
+                                -> colours as ObtainBestPen results
+    anscm=NIL,                  -> the colormap they came from
     wtitle[112]:STRING,         -> title-bar scroll indicator (persists:
                                 -> Intuition keeps the pointer)
     -> tab completion (M5b): filesystem packets are HAND-ROLLED at exec
@@ -327,6 +334,7 @@ PROC main()
             IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
             IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code)
             IF class = IDCMP_MOUSEMOVE THEN selmouse($FF)
+            IF class = IDCMP_NEWSIZE THEN doresize()
             IF class = IDCMP_CLOSEWINDOW THEN doclosew()
           ENDIF
         UNTIL im = NIL
@@ -675,8 +683,25 @@ PROC dofind(pkt:PTR TO dospacket)
   ENDIF
 ENDPROC
 
+-> the text grid from the window's current dimensions. A borrowed
+-> window is sized to an exact grid by its owner: no margin inset
+-> there, or the columns drift off the owner's art.
+PROC gridcalc()
+  DEF i
+  i := MARGIN
+  IF fwin THEN i := 0
+  left := win.borderleft + i
+  topy := win.bordertop + i
+  cols := Div(win.width - win.borderleft - win.borderright - i - i, cw)
+  rows := Div(win.height - win.bordertop - win.borderbottom - i - i, ch)
+  IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
+  IF cols < 2 THEN cols := 2
+  IF rows < 1 THEN rows := 1
+ENDPROC
+
 PROC openwin()
-  DEF ta:PTR TO textattr, i, idc
+  DEF ta:PTR TO textattr, i, idc, scrn:PTR TO screen, v,
+      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR
   fwin := FALSE
   -> M6: with the input.device handler on, keys never touch IDCMP -
   -> the UserPort carries only the close gadget, stock console.device
@@ -712,6 +737,9 @@ PROC openwin()
        WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
        WA_ACTIVATE, TRUE,
        WA_CLOSEGADGET, closegad,
+       WA_SIZEGADGET, TRUE,          -> M8: consoles resize
+       WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
+       WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
        WA_IDCMP, idc,
        TAG_DONE, NIL])
   ENDIF
@@ -732,15 +760,7 @@ PROC openwin()
   cw := rp.txwidth
   ch := rp.txheight
   baseline := rp.txbaseline
-  -> a borrowed window is sized to an exact grid by its owner: no
-  -> margin inset there, or the columns drift off the owner's art
-  i := MARGIN
-  IF fwin THEN i := 0
-  left := win.borderleft + i
-  topy := win.bordertop + i
-  cols := Div(win.width - win.borderleft - win.borderright - i - i, cw)
-  rows := Div(win.height - win.bordertop - win.borderbottom - i - i, ch)
-  IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
+  gridcalc()
   -> the scrollback ring + its attr plane: sized to the real grid
   -> width. New() zeroes (E heap is cleared), so the model starts as
   -> blank rows with attr 0; a failed allocation just disables
@@ -762,9 +782,48 @@ PROC openwin()
   IF rp.bitmap
     IF rp.bitmap.depth >= 4 THEN can16 := TRUE
   ENDIF
+  -> the ANSI/WB separation (the two colour worlds must not share
+  -> pen numbers): WBPENS in the open name declares the screen's
+  -> palette truly ANSI (CTerm sends it) and the pen conventions
+  -> apply as-is. On any OTHER screen the pens mean whatever the
+  -> user's palette says, so ANSI colour INTENT - the bold+3x
+  -> forms ls uses - is translated by COLOUR instead:
+  -> ObtainBestPen picks the screen's closest real match for each
+  -> bright ANSI colour. Plain 3x stays raw pens there (stock
+  -> console semantics - what Ed and every WB-pen program wants).
+  -> Pens above 15 will not fit the attr plane's nibble and are
+  -> released on the spot; -1 falls back to the default pen.
+  anscm := NIL
+  FOR i := 0 TO 7
+    anstab[i] := -1             -> E global arrays start as garbage
+  ENDFOR
+  IF wbpens = FALSE
+    -> the bright half of the CTerm palette, one nibble per gun
+    pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
+    pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
+    pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
+    scrn := win.wscreen
+    IF scrn
+      anscm := scrn.viewport.colormap
+      IF anscm
+        FOR i := 0 TO 7
+          v := ObtainBestPenA(anscm,
+                 Mul(pr[i], $11111111),
+                 Mul(pg[i], $11111111),
+                 Mul(pb[i], $11111111), NIL)
+          IF v > 15
+            ReleasePen(anscm, v)
+            v := -1
+          ENDIF
+          anstab[i] := v
+        ENDFOR
+      ENDIF
+    ENDIF
+  ENDIF
   curfg := deffg
   curbg := 0
   bold := FALSE
+  cursgr := FALSE
   SetAPen(rp, deffg)
   SetBPen(rp, 0)
   IF histdone = FALSE           -> the history survives window
@@ -802,6 +861,7 @@ ENDPROC
 -> WAIT_CHARs answer FALSE, the model is returned to the heap, and a
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
+  DEF i
   IF win = NIL THEN RETURN
   ihwin := NIL                  -> disarm the chain handler FIRST; then
   ihtail := ihhead              -> discard whatever it already captured
@@ -821,6 +881,14 @@ PROC closewin()
   ENDWHILE
   tcactive := FALSE
   tcsel := -1
+  -> obtained ANSI pens go back to the screen with the window
+  IF anscm
+    FOR i := 0 TO 7
+      IF anstab[i] >= 0 THEN ReleasePen(anscm, anstab[i])
+      anstab[i] := -1
+    ENDFOR
+    anscm := NIL
+  ENDIF
   IF fwin
     ReportMouse(FALSE, win)     -> hand the flag back the way the
     ModifyIDCMP(win, oldidcmp)  -> owner had it
@@ -845,6 +913,86 @@ PROC closewin()
   eofpend := FALSE
   rawmode := FALSE
   evmask := 0
+ENDPROC
+
+-> M8: the window has a new size (the gadget, or a borrowed
+-> window's owner resized). The grid is recomputed and the
+-> scrollback model follows: the ring is cols-stride, so a width
+-> change reallocates it and row-copies the old content - rows
+-> stay rows, no reflow, same as the rest of the console family.
+-> A height loss scrolls the tail into history; everything
+-> repaints from the model, and a raw-events client that asked
+-> for class 12 (Ed does, CSI 12{) gets the report and
+-> re-measures itself.
+PROC doresize()
+  DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, r, n,
+      evb[8]:ARRAY OF LONG, e:PTR TO ihev
+  IF win = NIL THEN RETURN
+  tcclose()                     -> restores rows at the OLD geometry
+  clearsel()
+  selon := FALSE                -> a drag dies with the old grid
+  cursx := -1                   -> a full repaint follows anyway
+  viewoff := 0
+  oc := cols
+  gridcalc()
+  IF sb
+    IF cols <> oc
+      nsb := New(Mul(SBMAX, cols))
+      nsa := New(Mul(SBMAX, cols))
+      IF (nsb = NIL) OR (nsa = NIL)
+        IF nsb THEN Dispose(nsb)
+        IF nsa THEN Dispose(nsa)
+        Dispose(sb)             -> degraded: the console runs on
+        Dispose(sa)             -> without scrollback rather than
+        sb := NIL               -> rendering through a wrong-stride
+        sa := NIL               -> model
+      ELSE
+        n := Min(oc, cols)
+        FOR r := 0 TO SBMAX - 1
+          CopyMem(sb + Mul(r, oc), nsb + Mul(r, cols), n)
+          CopyMem(sa + Mul(r, oc), nsa + Mul(r, cols), n)
+        ENDFOR
+        Dispose(sb)
+        Dispose(sa)
+        sb := nsb
+        sa := nsa
+      ENDIF
+    ENDIF
+  ENDIF
+  IF cx > cols THEN cx := cols  -> cols itself = pending wrap, legal
+  WHILE cy > (rows - 1)         -> height shrank: the rows above the
+    sbtop++                     -> cursor scroll into history
+    IF sbtop >= SBMAX THEN sbtop := 0
+    IF sbcnt < (SBMAX - rows) THEN sbcnt++
+    cy--
+    IF ancy > 0 THEN ancy--
+  ENDWHILE
+  IF ancx > (cols - 1) THEN ancx := cols - 1
+  IF ancy > (rows - 1) THEN ancy := rows - 1
+  SetAPen(rp, 0)                -> clear the inner window (margins
+  RectFill(rp, win.borderleft, win.bordertop,  -> included), then
+           win.width - win.borderright - 1,    -> repaint from the
+           win.height - win.borderbottom - 1)  -> model
+  SetAPen(rp, deffg)
+  redraw()
+  settitle()
+  IF rawmode
+    cursdraw()
+  ELSE
+    drawedit()
+  ENDIF
+  IF evmask AND Shl(1, IECLASS_SIZEWINDOW)
+    e := evb
+    e.cls := IECLASS_SIZEWINDOW
+    e.sub := 0
+    e.code := 0
+    e.qual := 0
+    e.addr := win
+    e.secs := 0
+    e.mics := 0
+    ihreport(e)
+  ENDIF
+  flushwq()                     -> any writers parked by a dying drag
 ENDPROC
 
 -> the close gadget: EOF to the reader (stock CON: CLOSE semantics);
@@ -876,10 +1024,19 @@ PROC sarow(r)
   IF i >= SBMAX THEN i := i - SBMAX
 ENDPROC sa + Mul(i, cols)
 
--> the pen SGR state draws with right now: bold lifts the 8 base
--> colours to the bright half when the screen has 16 pens
+-> the pen SGR state draws with right now. On an ANSI screen
+-> (WBPENS) bold lifts the 8 base colours to the bright pens; on
+-> any other screen bold+explicit-3x goes through the
+-> ObtainBestPen table instead (real colours on the user's
+-> palette), and bare bold recolours nothing.
 PROC fgpen()
-  IF can16 AND bold AND (curfg < 8) THEN RETURN curfg + 8
+  IF bold AND (curfg < 8)
+    IF wbpens
+      IF can16 THEN RETURN curfg + 8
+    ELSEIF cursgr
+      IF anstab[curfg] >= 0 THEN RETURN anstab[curfg]
+    ENDIF
+  ENDIF
 ENDPROC curfg
 
 PROC curattr() IS fgpen() OR Shl(curbg, 4)
@@ -1078,7 +1235,7 @@ ENDPROC
 PROC setidcmp()
   DEF idc
   IF win = NIL THEN RETURN
-  idc := IDCMP_CLOSEWINDOW
+  idc := IDCMP_CLOSEWINDOW OR IDCMP_NEWSIZE
   IF ihon = FALSE
     idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
   ENDIF
@@ -1414,12 +1571,14 @@ PROC csidispatch(c)
         curfg := deffg
         curbg := 0
         bold := FALSE
+        cursgr := FALSE
       ELSEIF v = 1
         bold := TRUE
       ELSEIF v = 22
         bold := FALSE
       ELSEIF (v >= 30) AND (v <= 37)
         curfg := v - 30
+        cursgr := TRUE
         -> WBPENS (see parsecon): plain 30-33 are WB pen numbers
         -> from programs like Ed, not ANSI colours - retarget them
         -> at the theme. Bold forms keep ANSI positions (fgpen()
@@ -1437,6 +1596,7 @@ PROC csidispatch(c)
         ENDIF
       ELSEIF v = 39
         curfg := deffg
+        cursgr := FALSE
       ELSEIF (v >= 40) AND (v <= 47)
         curbg := v - 40
       ELSEIF v = 49
@@ -2509,8 +2669,16 @@ ENDPROC TRUE
 -> directories blue (bright blue on 16 pens, the classic WB blue
 -> pen 3 otherwise), everything else in the default pen
 PROC menupen(flag)
-  IF flag AND 2 THEN RETURN IF can16 THEN 8 ELSE deffg
-  IF flag AND 1 THEN RETURN IF can16 THEN 12 ELSE 3
+  IF flag AND 2                 -> hidden-class grey
+    IF wbpens THEN RETURN 8
+    IF anstab[0] >= 0 THEN RETURN anstab[0]
+    RETURN deffg
+  ENDIF
+  IF flag AND 1                 -> directory blue
+    IF wbpens THEN RETURN 12
+    IF anstab[4] >= 0 THEN RETURN anstab[4]
+    RETURN 3                    -> the classic WB blue pen
+  ENDIF
 ENDPROC deffg
 
 PROC tcmenucalc()
@@ -2713,4 +2881,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.17 (18.7.26) CCON: LTX console handler M7', 0
+vers: CHAR '$VER: ccon-handler 0.19 (18.7.26) CCON: LTX console handler M8', 0

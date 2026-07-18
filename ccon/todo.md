@@ -487,6 +487,52 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       (7) regression: menus in Ed still pick, block cursor
       clean, completion menu closes on click.
 
+- [x] **M8: window resize — BUILT 18.7.26 ($VER 0.18),
+      BOOT-CONFIRMED same day.** WA_SIZEGADGET + WA_MIN/MAX limits on own windows,
+      IDCMP_NEWSIZE in the base set (borrowed windows react too
+      if their owner ever resizes). doresize(): grid recomputed
+      (gridcalc, shared with openwin), and the scrollback model
+      follows - the ring is cols-stride, so a width change
+      reallocates both planes and row-copies the old content
+      (rows stay rows, no reflow - family behaviour); allocation
+      failure degrades to no-scrollback rather than rendering
+      through a wrong-stride model. Height loss scrolls the tail
+      into history (cursor/anchor clamped), everything repaints
+      from the model, the wrapped edit line re-wraps at the new
+      width for free, and a raw client holding CSI 12{ gets the
+      class-12 report - Ed re-measures itself, exactly why it
+      asks. Open menus/selections/drags die cleanly first.
+      **Boot test:** drag the size gadget on a `NewShell CCON:`
+      window - (1) shrink/grow width: text re-clips per row (no
+      reflow), prompt+wrapped edit line re-wrap, typing works at
+      the new width, dir columns adapt (client asks per command);
+      (2) shrink height: bottom-anchored tail scrolls into
+      history (Shift+Up shows it); (3) scrollback + selection +
+      copy still work after several resizes (model realloc); (4)
+      Ed: resize mid-edit - Ed re-draws itself to the new size
+      (class-12 report path); (5) More: page width adapts on the
+      next file.
+
+- [x] **ANSI/WB colour separation — 0.19 (18.7.26),
+      BOOT-CONFIRMED same day.** His WB-screen report: ls colours washed out — the
+      mirror image of the Ed bug (ls assumes ANSI pen positions,
+      Ed assumes WB ones; C:List emits no SGR at all, binary
+      checked). The separation, CTerm as declarer: WBPENS in the
+      open name = "this palette is truly ANSI" → conventions
+      as-is (bright pens, WB-pen translation). NO declaration =
+      foreign screen → plain 3x stays RAW pens (stock
+      console.device semantics, Ed natively right), and ANSI
+      colour INTENT — the bold+3x forms — translates by COLOUR:
+      ObtainBestPenA per bright ANSI colour against the screen's
+      colormap at open (released at close; pens >15 rejected,
+      the attr plane's nibble). Bare SGR 1 without a 3x
+      recolours nothing (cursgr flag). Completion menu follows
+      (anstab greys/blues, classic pen-3 blue fallback).
+      **Boot test (WB `NewShell CCON:`):** ls — dirs real blue,
+      hidden real grey, plain black; Ed — black text, blue
+      status; then inside CTerm ANSI — everything as before
+      (wbpens path untouched).
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

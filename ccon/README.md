@@ -83,7 +83,20 @@ MOUSEMOVE in only mid-drag) lives in one place. The cooked edit
 line also wraps across rows now, stock-shell style: growing past
 the bottom scrolls the screen, the prompt walks up, and the
 completion menu freezes its rows so cycling candidates cannot
-overwrite it. See `todo.md`.
+overwrite it.
+Windows resize (M8): the scrollback model is reallocated and
+row-copied on a width change (rows stay rows — no reflow, family
+behaviour), a height loss scrolls the tail into history, the
+wrapped edit line re-wraps at the new width, and a raw client
+that asked for class-12 reports (Ed does) is told and re-measures
+itself. And the two colour worlds are kept apart: `WBPENS` in the
+open name declares the screen's palette truly ANSI (CTerm sends
+it) and the pen conventions apply as-is — on any other screen,
+plain SGR 3x stays raw pens (stock semantics, what WB-pen
+programs like Ed mean) while the bold+3x forms — ANSI colour
+intent, the `ls` scheme — are translated by colour through
+ObtainBestPen against the screen's own palette, so directories
+are genuinely blue on a stock Workbench too. See `todo.md`.
 
 ## Try it
 
