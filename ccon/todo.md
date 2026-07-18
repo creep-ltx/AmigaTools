@@ -566,6 +566,51 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       explicitly; (6) regression: CTerm WINDOW0x unaffected,
       resize/colours/copy-paste as before.
 
+- [ ] **M10: a window per open — DESIGNED 18.7.26, migration is
+      the next session's work (it touches every global).**
+      **Decision: ONE process, many windows** (the AROS
+      con-handler shape), NOT the KingCON per-window fork:
+      CreateNewProc from inside a handler risks internal DOS
+      packet traffic on pr_MsgPort (unverifiable without a ROM
+      dig), and forked instances would each need their own
+      timer/clipboard/input-chain hookups - N chain handlers is
+      the wrong shape. CRAW: already proves per-process works,
+      but only per-DEVICE.
+      **State:** a `console` OBJECT absorbs every per-window
+      global (window/grid/cursor, SGR state, model sb/sa/sbtop/
+      sbcnt/viewoff, editor + history, inq/rdq/wcq, breaktask,
+      rawmode/evmask, selection, completion state, parse
+      results, edlast/tcmrow0/anstab...). Shared stays global:
+      the ports, timer.device, clipboard.device,
+      keymap.library, the ONE input chain, fsport.
+      **THE MIGRATION TRICK - "current console":** procs keep
+      their bodies; the per-window globals become curcon.fields
+      and `curcon` is set at the dispatch boundaries only:
+      packets by arg1 (fh_Arg1 = fh.args = the console pointer,
+      validated against the list - the routing the packet
+      protocol always wanted), window events by UserPort ->
+      console, chain drains by a console tag added to the ihev
+      ring slot, timer expiry by scan. Almost no proc
+      signatures change.
+      **Routing details:** FIND* parse per open now (the M9
+      options finally apply to every window); `*`/CONSOLE:-
+      style opens map to the SENDER's console by walking the
+      opener's CLI streams (pr_CLI -> cli_StandardInput ->
+      fh.args = console) with active-window fallback - same for
+      DISK_INFO/More/Ed. The main loop Wait mask ORs every
+      console's UserPort sigbit (rebuilt on open/close); the
+      park rule and evmask go per-console. ihchain matches
+      IntuitionBase.ActiveWindow against the console list
+      instead of one ihwin.
+      **Open knob:** the model is SBMAX*cols*2 bytes per
+      window - either all windows get 4000 lines (memory-fat)
+      or secondaries get a smaller ring; decide at migration.
+      **Testing ladder:** (A) struct-ified single console,
+      behaviour identical - boot; (B) two shells, two windows -
+      boot; (C) the M9 option list re-run, per open this time;
+      (D) Ed/More/CTerm/copy-paste regression per window; (E)
+      CCON: and CRAW: simultaneously.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
