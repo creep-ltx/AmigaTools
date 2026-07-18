@@ -1,17 +1,21 @@
--> ccon-handler.e - CCON: LTX console handler. Milestone 5: scrollback,
--> the point of it all. The 0.1 CTerm scrollback model (commit 71e29b1)
--> transplanted and grown up for a full-screen console: a 4000-line byte
--> ring where the last `rows` lines ARE the visible grid, so cursor
--> positioning addresses into it and the top visible row slides into
--> history on every bottom scroll. Every draw is mirrored into the model;
--> viewing is a whole-grid redraw at an offset. Ctrl+Up/Down scrolls by
--> line (works in raw mode too - More, Ed), Shift+Up/Down by page
--> (cooked only; raw clients own shifted arrows as CSI T/S). Any output
--> or any other key snaps back to live.
+-> ccon-handler.e - CCON: LTX console handler. Milestone 6: input the
+-> way console.device does it. Keys no longer arrive through the
+-> window's IDCMP: an input.device handler (IND_ADDHANDLER, priority
+-> below Intuition) captures events for our window while it is active,
+-> copies them into a ring and signals the handler task, which runs
+-> them through keymap.library. The UserPort sits idle - free for Ed
+-> to commandeer with its ModifyIDCMP/GetMsg surgery, which is what
+-> froze the machine four times under the IDCMP design - and the raw
+-> event reports (CSI n{) are live again, carrying Intuition's real
+-> ie_EventAddress. M5 scrollback, M5b completion, M5c open
+-> semantics, M5d colours all ride on top unchanged; if the chain
+-> hookup fails, ihon stays FALSE and the boot-proven IDCMP path is
+-> the fallback, end to end.
 ->
 -> Test:  Mount CCON: FROM DEVS:CCON-mountlist
 ->        NewShell CCON:
 ->        list SYS: then Shift+Up/Down, Ctrl+Up/Down; type = snap live
+->        then Ed on a file - the menus should WORK now
 ->
 -> How an E binary survives being started as a handler (verified by
 -> disassembling E-VO's generated startup code): a handler process has no
@@ -30,12 +34,14 @@
 -> safe (PutMsg/WaitPort underneath), but the M2 loop multiplexes the
 -> packet port with the window port via Wait(), so WaitPkt is gone.
 
-MODULE 'intuition/intuition',
+MODULE 'intuition/intuition','intuition/intuitionbase',
        'utility/tagitem',
        'exec/nodes','exec/ports','exec/io','exec/tasks',
-       'graphics/text','graphics/rastport',
-       'devices/inputevent','devices/timer',
-       'dos/dos','dos/dosextens','dos/filehandler'
+       'exec/interrupts',
+       'graphics/text','graphics/rastport','graphics/gfx',
+       'devices/inputevent','devices/timer','devices/input',
+       'dos/dos','dos/dosextens','dos/filehandler',
+       'keymap'
 
 CONST MARGIN=4,
       LINEMAX=400,      -> longest editable input line
@@ -45,7 +51,25 @@ CONST MARGIN=4,
       SBMAX=4000,       -> scrollback model, lines (like CTerm 0.1)
       TCMAX=80,         -> tab completion: max candidates collected
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
+      IHMAX=64,         -> input-event ring, slots (power of two)
+      IHPRI=20,         -> chain position: below Intuition's 50, above
+                        -> console.device's 0 - menu operations arrive
+                        -> already digested into IECLASS_MENULIST
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F
+
+-> one captured input event (M6). The ring stride is 32 (Shl, no Mul
+-> in the input.device context); addr carries ie_EventAddress, which
+-> for RAWKEY is the dead-key prev-down bytes MapRawKey composes from
+OBJECT ihev
+  cls:CHAR
+  sub:CHAR
+  code:INT
+  qual:INT
+  pad:INT
+  addr:LONG
+  secs:LONG
+  mics:LONG
+ENDOBJECT
 
 DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     win=NIL:PTR TO window,
@@ -54,6 +78,8 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     cw, ch, baseline,           -> cell metrics (topaz: fixed)
     left, topy, cols, rows,     -> the text grid inside the window
     cx=0, cy=0,                 -> output cursor, in cells
+    cursx=-1, cursy=0,          -> where the raw-mode block cursor is
+                                -> painted right now; -1 = not painted
     opens=0,
     -> the line editor (transplanted from CTerm 0.1, commit 71e29b1)
     ebuf[404]:STRING,           -> the line being typed
@@ -84,9 +110,19 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> and the old top row becomes history with no copying. All index
     -> math is add/subtract wraps - no Mod, no DIVU anywhere near it.
     sb=NIL,                     -> the ring; NIL = scrollback disabled
+    sa=NIL,                     -> its attr plane: one byte per cell -
+                                -> fg pen in the low nibble, bg in the
+                                -> high - so colours survive redraws
     sbtop=0,                    -> ring index of the top visible row
     sbcnt=0,                    -> history lines above the screen (valid)
     viewoff=0,                  -> lines scrolled back; 0 = live
+    -> SGR state (M5d): CSI ...m renders now. deffg comes from the
+    -> open name's PEN option (CTerm passes PEN7 on its ANSI screen);
+    -> bold maps to the bright pens 8-15 when the screen is deep
+    -> enough (can16), the 1996 ANSI-art convention
+    deffg=1, curfg=1, curbg=0, bold=FALSE, can16=FALSE,
+    wbpens=FALSE,               -> WBPENS option: plain SGR 30-33
+                                -> are WB pens, retarget at theme
     wtitle[112]:STRING,         -> title-bar scroll indicator (persists:
                                 -> Intuition keeps the pointer)
     -> tab completion (M5b): filesystem packets are HAND-ROLLED at exec
@@ -116,7 +152,27 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     tcws=0, tcwend=0,           -> the word being completed, in ebuf
     tcmrows=0, tcmcols=0, tcmcolw=0, tcshown=0,
     tctmp[416]:STRING,          -> completion scratch
-    tctail[404]:STRING          -> line tail during word replacement
+    tctail[404]:STRING,         -> line tail during word replacement
+    -> M6: keys come from the input.device chain, not the window's
+    -> IDCMP - console.device's architecture. The interrupt's code is
+    -> gluestub; ihchain runs in input.device's task and fills ihring;
+    -> the main loop drains it on ihsig. ihon=FALSE falls back to the
+    -> boot-proven IDCMP path (0.8 behaviour) end to end.
+    ihgd[2]:ARRAY OF LONG,      -> glue data: [E's A4][{ihchain}]
+    ihcapa4=0,                  -> A4, captured by inline asm at start
+    ihis=NIL:PTR TO is,         -> the interrupt in input.device's chain
+    ihport=NIL:PTR TO mp,
+    ihreq=NIL:PTR TO iostd,
+    ihon=FALSE,
+    ihwin=NIL,                  -> take events for THIS window when it
+                                -> is the active one; NIL = take nothing
+    ihtask=NIL, ihsigbit=-1, ihsig=0,
+    ihring=NIL:PTR TO CHAR,     -> IHMAX slots, stride 32
+    ihhead=0, ihtail=0,         -> free-running; slot = n AND (IHMAX-1)
+    ihdrop=0,                   -> events lost to a full ring
+    ihie=NIL:PTR TO inputevent, -> rebuilt event for MapRawKey
+    ihiebuf[8]:ARRAY OF LONG,   -> its longword-aligned storage
+    ihmap[36]:ARRAY OF CHAR     -> MapRawKey result bytes
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
@@ -167,37 +223,92 @@ PROC main()
   IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
   tcpool := New(TCPOOLSZ)
 
+  -> M6: hook into the input.device chain (console.device's own
+  -> architecture: keys are taken upstream, the window's UserPort
+  -> stays idle for clients like Ed to commandeer). Every step is
+  -> exec-only. If anything fails, ihon stays FALSE and the window
+  -> falls back to IDCMP keys - the boot-proven 0.8 path.
+  ihtask := FindTask(NIL)
+  ihsigbit := AllocSignal(-1)
+  ihring := New(Shl(IHMAX, 5))
+  ihie := ihiebuf
+  -> keymap.library is NOT one of E's auto-opened four - the module
+  -> only declares the base. It lives in ROM, so OpenLibrary is pure
+  -> exec, no packets. (Found by disassembly: the compiled MapRawKey
+  -> stub jumps through keymapbase, and nothing had ever set it.)
+  keymapbase := OpenLibrary('keymap.library', 36)
+  IF (ihsigbit >= 0) AND (ihring <> NIL) AND (keymapbase <> NIL)
+    ihsig := Shl(1, ihsigbit)
+    MOVE.L A4,ihcapa4
+    ihgd[0] := ihcapa4
+    ihgd[1] := {ihchain}
+    ihport := CreateMsgPort()
+    IF ihport
+      ihreq := CreateIORequest(ihport, SIZEOF iostd)
+      IF ihreq
+        IF OpenDevice('input.device', 0, ihreq, 0) = 0
+          ihis := New(SIZEOF is)
+          IF ihis
+            ihis.ln.type := NT_INTERRUPT
+            ihis.ln.pri := IHPRI
+            ihis.ln.name := 'CCON'
+            ihis.data := ihgd
+            ihis.code := {gluestub}
+            ihreq.command := IND_ADDHANDLER
+            ihreq.data := ihis
+            DoIO(ihreq)
+            IF ihreq.error = 0 THEN ihon := TRUE
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDIF
+
   psig := Shl(1, port.sigbit)
   WHILE TRUE
     wsig := 0
     IF win THEN wsig := Shl(1, win.userport.sigbit)
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
+    IF ihon THEN wsig := wsig OR ihsig
     Wait(psig OR wsig)
     -> drain the packet port
     REPEAT
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
     UNTIL msg = NIL
-    -> drain the window port
+    -> drain the captured input events (M6)
+    IF ihon THEN ihdrain()
+    -> drain the window port - UNLESS a client asked for raw event
+    -> reports (Ed). Disassembling C:Ed (18.7.26) showed it never
+    -> touches this port at all (no ModifyIDCMP/GetMsg on our window;
+    -> the LVO hits that suggested it were rexxsyslib collisions -
+    -> Ed's ARexx machinery). The park stays anyway: with the chain
+    -> on, the only IDCMP class left is CLOSEWINDOW, and deferring a
+    -> close-gadget click while a raw-events client (Ed fullscreen)
+    -> owns the session beats tearing the window down under it.
+    -> Leftovers drain when the mask clears (CSI }, cooked
+    -> reversion, close).
     IF win
-      REPEAT
-        im := GetMsg(win.userport)
-        IF im
-          class := im.class
-          code := im.code
-          qual := im.qualifier
-          mx := im.mousex
-          my := im.mousey
-          ia := im.iaddress
-          secs := im.seconds
-          mics := im.micros
-          ReplyMsg(im)
-          IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
-          IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
-          IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
-          IF class = IDCMP_CLOSEWINDOW THEN doclosew()
-        ENDIF
-      UNTIL im = NIL
+      IF (ihon = FALSE) OR (evmask = 0)
+        REPEAT
+          im := GetMsg(win.userport)
+          IF im
+            class := im.class
+            code := im.code
+            qual := im.qualifier
+            mx := im.mousex
+            my := im.mousey
+            ia := im.iaddress
+            secs := im.seconds
+            mics := im.micros
+            ReplyMsg(im)
+            IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
+            IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
+            IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
+            IF class = IDCMP_CLOSEWINDOW THEN doclosew()
+          ENDIF
+        UNTIL im = NIL
+      ENDIF
       IF closereq                 -> deferred: never CloseWindow while
         closereq := FALSE         -> draining the port it owns
         closewin()
@@ -296,7 +407,9 @@ PROC dopkt(pkt:PTR TO dospacket)
     snaplive()                  -> new output pulls the view back to live
     tcclose()                   -> and closes an open completion menu
     IF rawmode
-      render(pkt.arg2, len)     -> raw: the app owns the screen, no blip
+      curserase()               -> raw: the app owns the screen, no blip
+      render(pkt.arg2, len)     -> - but the console owns the block
+      cursdraw()                -> cursor (Ed's only position marker)
     ELSE
       eraseedit()
       render(pkt.arg2, len)
@@ -335,13 +448,19 @@ PROC dopkt(pkt:PTR TO dospacket)
         rawmode := TRUE
         tcclose()
         eraseedit()
+        cursdraw()              -> the block cursor appears at once
       ENDIF
     ELSE
       IF rawmode
         rawmode := FALSE
+        curserase()             -> the blip owns cooked mode
         reanchor()
         drawedit()
       ENDIF
+      -> a client reverting to cooked is done with its raw event
+      -> reports too (Ed does not send CSI } on exit); clearing the
+      -> mask also resumes the parked UserPort drain (M6)
+      evmask := 0
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
@@ -409,6 +528,8 @@ PROC parsecon(bname)
   waitmode := FALSE
   closegad := FALSE
   fwptr := NIL
+  deffg := 1
+  wbpens := FALSE
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -456,6 +577,21 @@ PROC parsecon(bname)
         closegad := TRUE        -> WAIT needs the gadget to end
       ELSEIF StrCmp(tok, 'CLOSE')
         closegad := TRUE
+      ELSEIF StrCmp(tok, 'WBPENS')
+        -> translate the classic Workbench pens when a program
+        -> hardcodes them: C:Ed prints its body text as SGR 31
+        -> ("pen 1" = BLACK on the WB palette) and highlights as
+        -> 33 (WB blue). On an ANSI palette pen 1 is red, so a
+        -> client that owns such a screen (CTerm's dark theme)
+        -> sends WBPENS and plain 30-33 become theme pens
+        -> instead: 30->0, 31->deffg, 32->15, 33->12. Bold forms
+        -> (1;3x - the ls scheme) and backgrounds are untouched.
+        wbpens := TRUE
+      ELSEIF StrCmp(tok, 'PEN', 3)
+        -> PENn: the default text pen (CTerm sends PEN7 with its
+        -> ANSI palette, where pen 1 is ANSI red)
+        v := tcnum(tok + 3)
+        IF (v >= 1) AND (v <= 15) THEN deffg := v
       ELSEIF StrCmp(tok, 'WINDOW0X', 8)
         v := 0
         c := 8
@@ -494,8 +630,20 @@ PROC dofind(pkt:PTR TO dospacket)
 ENDPROC
 
 PROC openwin()
-  DEF ta:PTR TO textattr, i
+  DEF ta:PTR TO textattr, i, idc
   fwin := FALSE
+  -> M6: with the input.device handler on, keys never touch IDCMP -
+  -> the UserPort carries only the close gadget, stock console.device
+  -> shape. IDCMP_MENUPICK must NOT be set: with it, Intuition delivers
+  -> a menu pick as an IntuiMessage to the UserPort and it never enters
+  -> the input stream - without it, the pick travels downstream as an
+  -> IECLASS_MENULIST input event, which is what ihchain catches and
+  -> ihreport turns into the CSI report Ed's parser reads (this is
+  -> exactly how Ed works on a stock CON: window, which carries no
+  -> MENUPICK either - console.device picks the event up at pri 0).
+  -> Without the chain, the boot-proven IDCMP key path stays as it was.
+  idc := IDCMP_CLOSEWINDOW
+  IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
   IF fwptr
     -> WINDOW0x: render into a window someone else owns. We take its
     -> IDCMP over (the owner must stop reading it - the Ed lesson:
@@ -504,19 +652,21 @@ PROC openwin()
     win := fwptr
     fwin := TRUE
     oldidcmp := win.idcmpflags
-    ModifyIDCMP(win, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR
-                     IDCMP_MENUPICK OR IDCMP_CLOSEWINDOW)
+    ModifyIDCMP(win, idc)
   ELSE
     IF pww < 160 THEN pww := 160
     IF pwh < 60 THEN pwh := 60
+    -> the fallback is a failure state now - say so where a
+    -> screenshot shows it (chain-on and fallback windows behave
+    -> identically until Ed's menus are tried)
+    IF ihon = FALSE THEN StrAdd(wtitlebase, ' [no chain]')
     win := OpenWindowTagList(NIL,
       [WA_TITLE, wtitlebase, WA_LEFT, pwx, WA_TOP, pwy,
        WA_WIDTH, pww, WA_HEIGHT, pwh,
        WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
        WA_ACTIVATE, TRUE,
        WA_CLOSEGADGET, closegad,
-       WA_IDCMP, IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR
-                 IDCMP_MENUPICK OR IDCMP_CLOSEWINDOW,
+       WA_IDCMP, idc,
        TAG_DONE, NIL])
   ENDIF
   IF win = NIL THEN RETURN
@@ -545,14 +695,31 @@ PROC openwin()
   cols := Div(win.width - win.borderleft - win.borderright - i - i, cw)
   rows := Div(win.height - win.bordertop - win.borderbottom - i - i, ch)
   IF cols > 255 THEN cols := 255      -> redraw's row buffer is 256
-  -> the scrollback ring: sized to the real grid width. New() zeroes
-  -> (E heap is cleared), so the whole model starts as blank rows; a
-  -> failed allocation just disables scrollback, the console still runs
+  -> the scrollback ring + its attr plane: sized to the real grid
+  -> width. New() zeroes (E heap is cleared), so the model starts as
+  -> blank rows with attr 0; a failed allocation just disables
+  -> scrollback, the console still runs
   sb := New(Mul(SBMAX, cols))
+  sa := New(Mul(SBMAX, cols))
+  IF (sb = NIL) OR (sa = NIL)
+    IF sb THEN Dispose(sb)
+    IF sa THEN Dispose(sa)
+    sb := NIL
+    sa := NIL
+  ENDIF
   sbtop := 0
   sbcnt := 0
   viewoff := 0
-  SetAPen(rp, 1)
+  -> SGR ground state; bright pens exist when the screen is deep
+  -> enough (rp.bitmap is the screen's for a normal window)
+  can16 := FALSE
+  IF rp.bitmap
+    IF rp.bitmap.depth >= 4 THEN can16 := TRUE
+  ENDIF
+  curfg := deffg
+  curbg := 0
+  bold := FALSE
+  SetAPen(rp, deffg)
   SetBPen(rp, 0)
   IF histdone = FALSE           -> the history survives window
     FOR i := 0 TO HISTMAX - 1   -> close/reopen; allocate once
@@ -577,6 +744,9 @@ PROC openwin()
   hpos := -1
   StrCopy(ebuf, '')
   drawedit()                    -> the blip stands from the start
+  -> armed last: the chain handler takes nothing until the per-window
+  -> state above is fully rebuilt
+  ihwin := win
 ENDPROC
 
 -> real close semantics (M5c): pending reads answer EOF, pending
@@ -584,6 +754,9 @@ ENDPROC
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
   IF win = NIL THEN RETURN
+  ihwin := NIL                  -> disarm the chain handler FIRST; then
+  ihtail := ihhead              -> discard whatever it already captured
+  cursx := -1                   -> the window takes the cursor with it
   canceltimer()
   WHILE wcn > 0
     wcn--
@@ -610,6 +783,10 @@ PROC closewin()
   IF sb
     Dispose(sb)
     sb := NIL
+  ENDIF
+  IF sa
+    Dispose(sa)
+    sa := NIL
   ENDIF
   eofpend := FALSE
   rawmode := FALSE
@@ -638,32 +815,117 @@ PROC visrow(r)
   IF i >= SBMAX THEN i := i - SBMAX
 ENDPROC sb + Mul(i, cols)
 
-PROC clearrow(m:PTR TO CHAR)
+-> the attr-plane twin of visrow
+PROC sarow(r)
   DEF i
+  i := sbtop + r
+  IF i >= SBMAX THEN i := i - SBMAX
+ENDPROC sa + Mul(i, cols)
+
+-> the pen SGR state draws with right now: bold lifts the 8 base
+-> colours to the bright half when the screen has 16 pens
+PROC fgpen()
+  IF can16 AND bold AND (curfg < 8) THEN RETURN curfg + 8
+ENDPROC curfg
+
+PROC curattr() IS fgpen() OR Shl(curbg, 4)
+
+PROC clearrow(r)
+  DEF i, m:PTR TO CHAR, a:PTR TO CHAR
+  m := visrow(r)
+  a := sarow(r)
   FOR i := 0 TO cols - 1
     m[i] := 0
+    a[i] := 0
   ENDFOR
+ENDPROC
+
+-> paint one MODEL ring row (by ring index) at pixel row y, in
+-> attr-batched runs - the piece redraw, drawmodelrow and the menu
+-> restore share, and where the colours come back from
+PROC drawmrow(idx, y)
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c,
+      rowbuf[256]:ARRAY OF CHAR
+  m := sb + Mul(idx, cols)
+  a := sa + Mul(idx, cols)
+  FOR i := 0 TO cols - 1
+    c := m[i]
+    rowbuf[i] := IF c < 32 THEN 32 ELSE c
+  ENDFOR
+  i := 0
+  WHILE i < cols
+    at := a[i]
+    j := i
+    WHILE (j < cols) AND (a[j] = at)
+      j++
+    ENDWHILE
+    SetAPen(rp, at AND 15)
+    SetBPen(rp, Shr(at, 4) AND 7)
+    Move(rp, left + Mul(i, cw), y + baseline)
+    Text(rp, rowbuf + i, j - i)
+    i := j
+  ENDWHILE
+ENDPROC
+
+-> the raw-mode block cursor: stock console.device always shows a
+-> filled cell at the cursor, and Ed draws no marker of its own -
+-> it relies on the console's. Cooked mode has the blip instead.
+-> The block is the cell from the model in inverse video; an empty
+-> cell (attr 0, fg=bg) gets deffg so the block is never invisible.
+-> Discipline: curserase() before anything repaints or scrolls the
+-> grid, cursdraw() after - the write path wraps render() with the
+-> pair, so interior ScrollRasters never smear a painted cursor.
+PROC cursdraw()
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, x, c, at, fg, bg,
+      b[2]:ARRAY OF CHAR
+  IF (win = NIL) OR (sb = NIL) OR (viewoff > 0) THEN RETURN
+  x := IF cx >= cols THEN cols - 1 ELSE cx
+  m := visrow(cy)
+  a := sarow(cy)
+  c := m[x]
+  b[0] := IF c < 32 THEN 32 ELSE c
+  at := a[x]
+  fg := at AND 15
+  bg := Shr(at, 4) AND 7
+  IF fg = bg THEN fg := deffg
+  SetAPen(rp, bg)               -> inverse video: glyph in the cell's
+  SetBPen(rp, fg)               -> background, block in its foreground
+  Move(rp, left + Mul(x, cw), topy + Mul(cy, ch) + baseline)
+  Text(rp, b, 1)
+  cursx := x
+  cursy := cy
+ENDPROC
+
+PROC curserase()
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, c, at, b[2]:ARRAY OF CHAR
+  IF cursx < 0 THEN RETURN
+  IF win AND sb
+    m := visrow(cursy)
+    a := sarow(cursy)
+    c := m[cursx]
+    b[0] := IF c < 32 THEN 32 ELSE c
+    at := a[cursx]
+    SetAPen(rp, at AND 15)      -> the cell exactly as drawmrow paints
+    SetBPen(rp, Shr(at, 4) AND 7)
+    Move(rp, left + Mul(cursx, cw), topy + Mul(cursy, ch) + baseline)
+    Text(rp, b, 1)
+  ENDIF
+  cursx := -1
 ENDPROC
 
 -> redraw the whole grid from the model at the current view offset;
 -> model zeroes render as spaces. viewoff = lines back, 0 = live.
 PROC redraw()
-  DEF r, idx, m:PTR TO CHAR, i, c, rowbuf[256]:ARRAY OF CHAR
+  DEF r, idx
   IF sb = NIL THEN RETURN
-  SetAPen(rp, 1)
-  SetBPen(rp, 0)
   FOR r := 0 TO rows - 1
     idx := sbtop - viewoff + r
     IF idx < 0 THEN idx := idx + SBMAX
     IF idx >= SBMAX THEN idx := idx - SBMAX
-    m := sb + Mul(idx, cols)
-    FOR i := 0 TO cols - 1
-      c := m[i]
-      rowbuf[i] := IF c < 32 THEN 32 ELSE c
-    ENDFOR
-    Move(rp, left, topy + Mul(r, ch) + baseline)
-    Text(rp, rowbuf, cols)
+    drawmrow(idx, topy + Mul(r, ch))
   ENDFOR
+  SetAPen(rp, deffg)
+  SetBPen(rp, 0)
 ENDPROC
 
 -> the title bar doubles as the scroll-position indicator. The buffer
@@ -687,9 +949,12 @@ PROC scrollview(delta)
   viewoff := viewoff + delta
   IF viewoff > sbcnt THEN viewoff := sbcnt
   IF viewoff < 0 THEN viewoff := 0
-  redraw()
+  redraw()                      -> the grid repaint wiped any block
+  cursx := -1                   -> cursor pixels with it
   settitle()
-  IF (viewoff = 0) AND (rawmode = FALSE) THEN drawedit()
+  IF viewoff = 0
+    IF rawmode THEN cursdraw() ELSE drawedit()
+  ENDIF
 ENDPROC
 
 -> any output or any non-scroll key returns the view to live
@@ -697,8 +962,9 @@ PROC snaplive()
   IF viewoff = 0 THEN RETURN
   viewoff := 0
   redraw()
+  cursx := -1
   settitle()
-  IF rawmode = FALSE THEN drawedit()
+  IF rawmode THEN cursdraw() ELSE drawedit()
 ENDPROC
 
 -> ---------- output: a cell-grid renderer (CSI parsing comes with the
@@ -716,7 +982,7 @@ PROC screenscroll()
     sbtop++
     IF sbtop >= SBMAX THEN sbtop := 0
     IF sbcnt < (SBMAX - rows) THEN sbcnt++
-    clearrow(visrow(rows - 1))
+    clearrow(rows - 1)
   ENDIF
 ENDPROC
 
@@ -733,11 +999,15 @@ PROC outchr(c)
   DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
   IF cx >= cols THEN outnl()
   b[0] := c
+  SetAPen(rp, fgpen())
+  SetBPen(rp, curbg)
   Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
   Text(rp, b, 1)
   IF sb
     m := visrow(cy)
     m[cx] := c
+    m := sarow(cy)
+    m[cx] := curattr()
   ENDIF
   cx++
 ENDPROC
@@ -758,7 +1028,7 @@ ENDPROC
 -> CSI 1;1;rows;cols SPACE r (how dir learns it can do columns).
 -> Everything else is consumed silently.
 PROC csidispatch(c)
-  DEF n, i
+  DEF n, i, v
   n := cpar[0]
   IF c = "A"
     IF n < 1 THEN n := 1
@@ -791,6 +1061,44 @@ PROC csidispatch(c)
     inslines(n)
   ELSEIF c = "M"
     dellines(n)
+  ELSEIF c = "m"
+    -> SGR (M5d): reset, bold (bright pens on a 16-pen screen),
+    -> 30-37 fg, 39 default fg, 40-47 bg, 49 default bg
+    FOR i := 0 TO cnp
+      v := cpar[i]
+      IF v = 0
+        curfg := deffg
+        curbg := 0
+        bold := FALSE
+      ELSEIF v = 1
+        bold := TRUE
+      ELSEIF v = 22
+        bold := FALSE
+      ELSEIF (v >= 30) AND (v <= 37)
+        curfg := v - 30
+        -> WBPENS (see parsecon): plain 30-33 are WB pen numbers
+        -> from programs like Ed, not ANSI colours - retarget them
+        -> at the theme. Bold forms keep ANSI positions (fgpen()
+        -> lifts to the bright half before this map could matter).
+        IF wbpens AND can16 AND (bold = FALSE) AND (v <= 33)
+          IF v = 30
+            curfg := 0
+          ELSEIF v = 31
+            curfg := deffg
+          ELSEIF v = 32
+            curfg := 15
+          ELSE
+            curfg := 12
+          ENDIF
+        ENDIF
+      ELSEIF v = 39
+        curfg := deffg
+      ELSEIF (v >= 40) AND (v <= 47)
+        curbg := v - 40
+      ELSEIF v = 49
+        curbg := 0
+      ENDIF
+    ENDFOR
   ELSEIF c = "q"
     IF n = 0 THEN sendreport()
   ELSEIF c = "{"
@@ -811,30 +1119,25 @@ PROC csidispatch(c)
   ENDIF
 ENDPROC
 
--> a menu pick becomes a raw input event report on the input stream:
--> CSI class;subclass;keycode;qualifiers;x;y;seconds;micros| - Ed
--> put the menu strip on our window (found via DISK_INFO's window
--> pointer) and reads the picks back this way. THE TRAP (paid for
--> with two full system freezes): for menu events x;y are NOT
--> coordinates - the RKM says "Intuition address (x<<16+y)". The
--> reader rebuilds a POINTER from them (to walk the NextSelect
--> chain), so they must carry the IntuiMessage's IAddress - mouse
--> coordinates in those fields become a wild dereference inside
--> Intuition's menu handling, and the whole input chain dies.
--> MENU PICKS ARE DELIBERATELY SWALLOWED. The experiment log
--> (17.7.26, four system freezes): Ed attaches menus to our window
--> and requests raw event reports (CSI 2;10;11;12{). The true V47
--> report format was recovered from console.device 46.1's own
--> builder (ROM offset $13de): CSI class;subclass;ie_Code;
--> ie_Qualifier;addrhigh;addrlow;secs;micros| - and reports in
--> exactly that format froze the whole input chain (mouse dead)
--> no matter what the address halves carried: mouse coordinates,
--> ItemAddress(strip,code), or 0;0. Whatever Ed's report parser
--> expects, it is not decoded yet - the next step is disassembling
--> Ed's own parser, not another guess. Until then: menus render
--> but picks vanish, Ed exits with Esc-x - and every OTHER M4
--> feature (raw mode, WAIT_CHAR, bounds report, More, editing)
--> is boot-verified working.
+-> Menu picks, resolved (18.7.26) by doing what the old freeze log
+-> demanded: disassembling Ed's own parser instead of guessing a
+-> fifth time. C:Ed (3.2, 24396 bytes): at startup it sends four
+-> single-param SREs - CSI 12{ 2{ 10{ 11{ - and its report
+-> dispatcher (code $1708) switches on param 0 of a parsed
+-> CSI class;subclass;code;qualifier;ah;al;secs;mics| report.
+-> For class 10 it reads ONLY the code field: ItemAddress(strip,
+-> code), runs the Ed command hung off the MenuItem's +$22
+-> extension, then follows item.NextSelect ($20) until MENUNULL.
+-> The address halves that cost four freezes of guessing are never
+-> read for menus (class 2 uses them not at all either - it divides
+-> MouseX/Y by the rastport font cell to get Ed's mouse cell).
+-> So the route is the stock-CON: one: no IDCMP_MENUPICK on the
+-> window (openwin), Intuition sends the pick downstream as
+-> IECLASS_MENULIST, ihchain captures it under Ed's CSI 10{ mask,
+-> ihreport emits the V47 report, Ed walks the strip. This proc is
+-> only reachable in the ihon=FALSE fallback, where MENUPICK is
+-> still in the IDCMP set and picks stay deliberately swallowed -
+-> the boot-proven 0.8 shape.
 PROC domenupick(code, qual, ia, secs, mics)
 ENDPROC
 
@@ -845,10 +1148,10 @@ PROC erasebelow()
     SetAPen(rp, 0)
     RectFill(rp, left, topy + Mul(cy + 1, ch),
              left + Mul(cols, cw) - 1, topy + Mul(rows, ch) - 1)
-    SetAPen(rp, 1)
+    SetAPen(rp, deffg)
     IF sb
       FOR r := cy + 1 TO rows - 1
-        clearrow(visrow(r))
+        clearrow(r)
       ENDFOR
     ENDIF
   ENDIF
@@ -866,9 +1169,10 @@ PROC inslines(n)
   IF sb
     FOR r := rows - 1 TO cy + n STEP -1
       CopyMem(visrow(r - n), visrow(r), cols)
+      CopyMem(sarow(r - n), sarow(r), cols)
     ENDFOR
     FOR r := cy TO cy + n - 1
-      clearrow(visrow(r))
+      clearrow(r)
     ENDFOR
   ENDIF
 ENDPROC
@@ -883,9 +1187,10 @@ PROC dellines(n)
   IF sb
     FOR r := cy TO rows - 1 - n
       CopyMem(visrow(r + n), visrow(r), cols)
+      CopyMem(sarow(r + n), sarow(r), cols)
     ENDFOR
     FOR r := rows - n TO rows - 1
-      clearrow(visrow(r))
+      clearrow(r)
     ENDFOR
   ENDIF
 ENDPROC
@@ -906,16 +1211,18 @@ ENDPROC
 
 -> erase from the output cursor to the end of its row (CSI K)
 PROC eraseeol()
-  DEF y, m:PTR TO CHAR, j
+  DEF y, m:PTR TO CHAR, a:PTR TO CHAR, j
   IF cx >= cols THEN RETURN   -> inverted RectFill = wild writes
   y := topy + Mul(cy, ch)
   SetAPen(rp, 0)
   RectFill(rp, left + Mul(cx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
-  SetAPen(rp, 1)
+  SetAPen(rp, deffg)
   IF sb
     m := visrow(cy)
+    a := sarow(cy)
     FOR j := cx TO cols - 1
       m[j] := 0
+      a[j] := 0
     ENDFOR
   ENDIF
 ENDPROC
@@ -925,7 +1232,7 @@ ENDPROC
 -> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
 -> the rest silently.
 PROC render(buf, len)
-  DEF s:PTR TO CHAR, i=0, j, c, run, fit
+  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2
   IF win = NIL THEN RETURN
   s := buf
   WHILE i < len
@@ -982,9 +1289,17 @@ PROC render(buf, len)
         IF cx >= cols THEN outnl()
         fit := cols - cx
         IF fit > run THEN fit := run
+        SetAPen(rp, fgpen())
+        SetBPen(rp, curbg)
         Move(rp, left + Mul(cx, cw), topy + Mul(cy, ch) + baseline)
         Text(rp, s + i, fit)
-        IF sb THEN CopyMem(s + i, visrow(cy) + cx, fit)
+        IF sb
+          CopyMem(s + i, visrow(cy) + cx, fit)
+          m := sarow(cy) + cx
+          FOR j2 := 0 TO fit - 1
+            m[j2] := curattr()
+          ENDFOR
+        ENDIF
         cx := cx + fit
         i := i + fit
         run := run - fit
@@ -1011,7 +1326,7 @@ PROC eraseedit()
   y := topy + Mul(ancy, ch)
   SetAPen(rp, 0)
   RectFill(rp, left + Mul(ancx, cw), y, left + Mul(cols, cw) - 1, y + ch - 1)
-  SetAPen(rp, 1)
+  SetAPen(rp, deffg)
 ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
@@ -1021,6 +1336,7 @@ PROC drawedit()
   IF win = NIL THEN RETURN
   eraseedit()
   y := topy + Mul(ancy, ch)
+  SetAPen(rp, deffg)
   SetBPen(rp, 0)
   Move(rp, left + Mul(ancx, cw), y + baseline)
   Text(rp, ebuf, StrLen(ebuf))
@@ -1029,10 +1345,10 @@ PROC drawedit()
   cch[0] := 32
   IF cpos < l THEN cch[0] := s[cpos]
   SetAPen(rp, 0)
-  SetBPen(rp, 1)
+  SetBPen(rp, deffg)
   Move(rp, left + Mul(ancx + cpos, cw), y + baseline)
   Text(rp, cch, 1)
-  SetAPen(rp, 1)
+  SetAPen(rp, deffg)
   SetBPen(rp, 0)
 ENDPROC
 
@@ -1177,11 +1493,14 @@ PROC rawcsikey(code, qual)
     enqueue("?")
     enqueue("~")
   ELSE
-    RETURN
+    RETURN FALSE      -> not a special: the caller maps it to bytes
   ENDIF
   inputarrived()
-ENDPROC
+ENDPROC TRUE
 
+-> returns TRUE when the key is fully handled here (M6 uses that to
+-> know when to run the keymap instead); the legacy IDCMP path
+-> ignores the result - vanilla bytes arrive as their own events there
 PROC dorawkey(code, qual)
   DEF s:PTR TO CHAR, l, avail, sh
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
@@ -1189,7 +1508,7 @@ PROC dorawkey(code, qual)
   -> mapping for its shifted form: dispatch it to completion too
   IF (code = $42) AND (rawmode = FALSE)
     dotab(sh)
-    RETURN
+    RETURN TRUE
   ENDIF
   -> raw keys close an open completion menu - EXCEPT the qualifier
   -> keys themselves ($60-$67: Shift, Ctrl, Alt, Amiga - Shift+Tab
@@ -1206,16 +1525,15 @@ PROC dorawkey(code, qual)
   IF (code = RK_UP) OR (code = RK_DOWN)
     IF qual AND IEQUALIFIER_CONTROL
       scrollview(IF code = RK_UP THEN 1 ELSE -1)
-      RETURN
+      RETURN TRUE
     ELSEIF (sh <> 0) AND (rawmode = FALSE)
       scrollview(IF code = RK_UP THEN rows - 1 ELSE -(rows - 1))
-      RETURN
+      RETURN TRUE
     ENDIF
   ENDIF
   snaplive()                    -> any other key returns the view to live
   IF rawmode
-    rawcsikey(code, qual)
-    RETURN
+    RETURN rawcsikey(code, qual)
   ENDIF
   s := ebuf
   l := StrLen(ebuf)
@@ -1272,6 +1590,177 @@ PROC dorawkey(code, qual)
     ENDIF
     drawedit()
   ENDIF
+  -> arrows are consumed here even as no-ops: their keymap image is a
+  -> CSI string, never cooked input
+ENDPROC (code = RK_UP) OR (code = RK_DOWN) OR (code = RK_LEFT) OR (code = RK_RIGHT)
+
+-> ---------- input.device-handler input (M6) ----------
+-> Keys are taken from the input.device chain, where console.device
+-> takes its own: an Interrupt added with IND_ADDHANDLER at priority
+-> IHPRI - below Intuition (50), so menu operations arrive already
+-> digested into IECLASS_MENULIST events, above console.device (0).
+-> The window's UserPort is left idle for clients like Ed to
+-> commandeer with ModifyIDCMP/GetMsg - the stock-CON: architecture
+-> that ended the Ed-menus freezes.
+
+-> gluestub is the interrupt's is_Code. input.device JSRs it with
+-> A0 = the event chain and A1 = is_Data (ihgd). An E proc reaches
+-> its globals through A4 (E-VO frames them with LINK A4 in the
+-> startup), so the stub restores the A4 captured at startup, saves
+-> the registers E procs clobber freely, and calls ihchain with the
+-> chain as its one stack argument (E-VO convention: caller pushes,
+-> caller cleans, result in D0). All of that - including "a proc
+-> with no arguments and no locals gets NO prologue, the MOVEM
+-> really is the first instruction" - was read out of the generated
+-> code with the machine68k disassembler, not assumed.
+PROC gluestub()
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L  A1,A3
+  MOVE.L  (A3),A4
+  MOVE.L  A0,-(A7)
+  MOVE.L  4(A3),A0
+  JSR     (A0)
+  ADDQ.L  #4,A7
+  MOVEM.L (A7)+,D2-D7/A2-A6
+  RTS
+ENDPROC
+
+-> Runs inside input.device's task on input.device's stack. Rules of
+-> this context: no waiting, no allocating, no library calls except
+-> the one Signal - copy, neutralize, get out. Events for our window
+-> while it is the active one are copied into the ring and turned
+-> into IECLASS_NULL; everything else passes through untouched.
+-> ihwin is the arming switch: the main task sets it only while a
+-> fully initialized window exists.
+PROC ihchain(list:PTR TO inputevent)
+  DEF ev:PTR TO inputevent, ib:PTR TO intuitionbase, e:PTR TO ihev,
+      take, got, c
+  got := FALSE
+  IF ihwin
+    ib := intuitionbase
+    IF ib.activewindow = ihwin
+      ev := list
+      WHILE ev
+        c := ev.class
+        take := FALSE
+        IF c = IECLASS_RAWKEY
+          take := TRUE
+        ELSEIF (c > IECLASS_RAWKEY) AND (c <= IECLASS_MAX)
+          IF evmask AND Shl(1, c) THEN take := TRUE
+        ENDIF
+        IF take
+          IF (ihhead - ihtail) < IHMAX
+            e := ihring + Shl(ihhead AND (IHMAX - 1), 5)
+            e.cls := c
+            e.sub := ev.subclass
+            e.code := ev.code
+            e.qual := ev.qualifier
+            e.addr := ev.eventaddress
+            e.secs := ev.timestamp.secs
+            e.mics := ev.timestamp.micro
+            ihhead := ihhead + 1
+            got := TRUE
+          ELSE
+            ihdrop := ihdrop + 1
+          ENDIF
+          ev.class := IECLASS_NULL
+        ENDIF
+        ev := ev.nextevent
+      ENDWHILE
+    ENDIF
+  ENDIF
+  IF got THEN Signal(ihtask, ihsig)
+ENDPROC list
+
+-> main-task side: drain the ring. RAWKEY becomes editor/queue input
+-> through the same procs the IDCMP path used; every other captured
+-> class was requested via CSI n{ and becomes a raw event report.
+PROC ihdrain()
+  DEF e:PTR TO ihev
+  WHILE ihtail <> ihhead
+    e := ihring + Shl(ihtail AND (IHMAX - 1), 5)
+    IF win                      -> late events after closewin: dropped
+      IF e.cls = IECLASS_RAWKEY
+        IF evmask AND Shl(1, IECLASS_RAWKEY)
+          ihreport(e)           -> class 1 requested as reports: the
+        ELSE                    -> client owns the keys raw
+          ihkey(e)
+        ENDIF
+      ELSE
+        ihreport(e)
+      ENDIF
+    ENDIF
+    ihtail := ihtail + 1
+  ENDWHILE
+ENDPROC
+
+-> one key event: the raw specials first (same dispatch the IDCMP
+-> path used), then the keymap for everything it declined. Releases
+-> are dropped whole - nothing here ever used them, and letting them
+-> through would snap the scrollback view on every key-up.
+PROC ihkey(e:PTR TO ihev)
+  DEF cd, q, n, i
+  cd := e.code AND $FFFF
+  q := e.qual AND $FFFF
+  IF cd AND IECODE_UP_PREFIX THEN RETURN
+  IF (cd >= $68) AND (cd <= $7F) THEN RETURN  -> buttons, comm codes
+  IF dorawkey(cd, q) THEN RETURN
+  n := ihmaprawkey(e)
+  IF rawmode
+    -> raw: the mapped bytes go to the client as they are - this is
+    -> where letters, Return=CR, Ctrl+C=3 and multi-byte F-key
+    -> strings come from now
+    IF n > 0
+      FOR i := 0 TO n - 1
+        enqueue(ihmap[i])
+      ENDFOR
+      inputarrived()
+    ENDIF
+  ELSE
+    -> cooked: only single-byte images reach the line editor -
+    -> Intuition's VANILLAKEY delivered exactly those; multi-byte
+    -> images are F-key CSI strings and were never cooked input
+    IF n = 1 THEN dovanilla(ihmap[0], q)
+  ENDIF
+ENDPROC
+
+-> rebuild a real InputEvent for keymap.library (ROM - no packets).
+-> addr carries the dead-key prev-down bytes, so Swedish dead-key
+-> composition works exactly as it did under Intuition's mapping
+PROC ihmaprawkey(e:PTR TO ihev)
+  DEF ie:PTR TO inputevent, n
+  ie := ihie
+  ie.nextevent := NIL
+  ie.class := IECLASS_RAWKEY
+  ie.subclass := e.sub
+  ie.code := e.code
+  ie.qualifier := e.qual
+  ie.eventaddress := e.addr
+  ie.timestamp.secs := e.secs
+  ie.timestamp.micro := e.mics
+  n := MapRawKey(ie, ihmap, 32, NIL)
+  IF n < 0 THEN n := 0          -> overflow: drop, never overrun
+ENDPROC n
+
+-> a captured event becomes a raw input event report on the input
+-> stream, in the true V47 shape recovered from console.device
+-> 46.1's own builder (ROM $13de): CSI class;subclass;code;
+-> qualifier;addrhigh;addrlow;secs;micros| - and the address halves
+-> now carry Intuition's own ie_EventAddress passed through, not a
+-> reconstruction (the old freeze experiments had to guess here;
+-> the freezes themselves were the UserPort fight, solved above)
+PROC ihreport(e:PTR TO ihev)
+  DEF b[64]:STRING, i
+  enqueue($9B)
+  StringF(b, '\d;\d;\d;\d;\d;\d;\d;\d',
+          e.cls, e.sub, e.code AND $FFFF, e.qual AND $FFFF,
+          Shr(e.addr, 16) AND $FFFF, e.addr AND $FFFF,
+          e.secs AND $7FFFFFFF, e.mics)
+  FOR i := 0 TO StrLen(b) - 1
+    enqueue(b[i])
+  ENDFOR
+  enqueue("|")
+  inputarrived()
 ENDPROC
 
 -> ---------- tab completion (M5b): the zsh menu, Amiga plumbing -----
@@ -1497,6 +1986,9 @@ PROC tcscan(pfx:PTR TO CHAR, plen)
         IF (tcn < TCMAX) AND ((tcpu + l + 3) < TCPOOLSZ)
           p := tcpool + tcpu
           p[0] := IF fsfib.direntrytype > 0 THEN 1 ELSE 0
+          IF tchidname(nbuf, l, fsfib.protection)
+            p[0] := p[0] OR 2
+          ENDIF
           CopyMem(nbuf, p + 1, l + 1)
           tcc[tcn] := p
           tcn++
@@ -1570,27 +2062,43 @@ ENDPROC TRUE
 
 -> repaint one screen row from the live model (menu cleanup)
 PROC drawmodelrow(r)
-  DEF idx, m:PTR TO CHAR, i, c, rowbuf[256]:ARRAY OF CHAR
+  DEF idx
   IF sb = NIL THEN RETURN
   idx := sbtop + r
   IF idx >= SBMAX THEN idx := idx - SBMAX
-  m := sb + Mul(idx, cols)
-  FOR i := 0 TO cols - 1
-    c := m[i]
-    rowbuf[i] := IF c < 32 THEN 32 ELSE c
-  ENDFOR
-  SetAPen(rp, 1)
+  drawmrow(idx, topy + Mul(r, ch))
+  SetAPen(rp, deffg)
   SetBPen(rp, 0)
-  Move(rp, left, topy + Mul(r, ch) + baseline)
-  Text(rp, rowbuf, cols)
 ENDPROC
+
+-> hidden-class: the h protection bit, or a case-blind ".info"
+-> suffix with a stem (ls's rule, mirrored)
+PROC tchidname(n:PTR TO CHAR, l, prot)
+  DEF i
+  IF prot AND $80 THEN RETURN TRUE
+  IF l < 6 THEN RETURN FALSE
+  i := l - 5
+  IF n[i] <> "." THEN RETURN FALSE
+  IF tcfold(n[i + 1]) <> "I" THEN RETURN FALSE
+  IF tcfold(n[i + 2]) <> "N" THEN RETURN FALSE
+  IF tcfold(n[i + 3]) <> "F" THEN RETURN FALSE
+  IF tcfold(n[i + 4]) <> "O" THEN RETURN FALSE
+ENDPROC TRUE
+
+-> menu colours mirror ls: hidden-class grey (grey needs 16 pens),
+-> directories blue (bright blue on 16 pens, the classic WB blue
+-> pen 3 otherwise), everything else in the default pen
+PROC menupen(flag)
+  IF flag AND 2 THEN RETURN IF can16 THEN 8 ELSE deffg
+  IF flag AND 1 THEN RETURN IF can16 THEN 12 ELSE 3
+ENDPROC deffg
 
 PROC tcmenucalc()
   DEF i, l, maxl, p:PTR TO CHAR
   maxl := 1
   FOR i := 0 TO tcn - 1
     p := tcc[i]
-    l := StrLen(p + 1) + p[0]   -> dirs show with a trailing '/'
+    l := StrLen(p + 1) + (p[0] AND 1)  -> dirs show a trailing '/'
     IF l > maxl THEN maxl := l
   ENDFOR
   tcmcolw := maxl + 2
@@ -1614,7 +2122,7 @@ PROC tcmenudraw()
     p := tcc[idx]
     l := StrLen(p + 1)
     CopyMem(p + 1, nb, l)
-    IF p[0]
+    IF p[0] AND 1
       nb[l] := "/"
       l++
     ENDIF
@@ -1624,16 +2132,16 @@ PROC tcmenudraw()
     ENDWHILE
     IF idx = tcsel
       SetAPen(rp, 0)
-      SetBPen(rp, 1)
+      SetBPen(rp, deffg)
     ELSE
-      SetAPen(rp, 1)
+      SetAPen(rp, menupen(p[0]))
       SetBPen(rp, 0)
     ENDIF
     Move(rp, left + Mul(Mul(c, tcmcolw), cw),
          topy + Mul(ancy + 1 + r, ch) + baseline)
     Text(rp, nb, l)
   ENDFOR
-  SetAPen(rp, 1)
+  SetAPen(rp, deffg)
   SetBPen(rp, 0)
 ENDPROC
 
@@ -1666,7 +2174,7 @@ PROC dotab(back)
     ENDIF
     p := tcc[tcsel]
     StrCopy(tctmp, p + 1)
-    IF p[0] THEN StrAdd(tctmp, '/')
+    IF p[0] AND 1 THEN StrAdd(tctmp, '/')
     IF tcreplace(tctmp, StrLen(tctmp)) THEN drawedit()
     tcmenudraw()
     RETURN
@@ -1708,7 +2216,7 @@ PROC dotab(back)
     -> the one match: complete it, '/' opens a dir, ' ' ends a file
     p := tcc[0]
     StrCopy(tctmp, p + 1)
-    StrAdd(tctmp, IF p[0] THEN '/' ELSE ' ')
+    StrAdd(tctmp, IF (p[0] AND 1) THEN '/' ELSE ' ')
     IF tcreplace(tctmp, StrLen(tctmp))
       drawedit()
     ELSE
@@ -1784,4 +2292,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.7 (17.7.26) CCON: LTX console handler M5c', 0
+vers: CHAR '$VER: ccon-handler 0.12 (18.7.26) CCON: LTX console handler M6', 0

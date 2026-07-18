@@ -26,14 +26,45 @@ tab completion (menu below the prompt, Tab cycles, Shift+Tab
 backwards, Enter accepts), built on hand-rolled filesystem
 packets — a handler cannot call packet-sending dos.library
 functions, so LOCATE/EXAMINE ride a private reply port straight
-to the filesystem. Opens parse stock-CON: style —
+to the filesystem. The renderer speaks SGR: colour codes in
+output (reset, bold, 30–37 foreground, 40–47 background) render
+with real pens, bold mapping to the bright pens on a 16-pen
+screen, and the scrollback model carries an attribute plane so
+colours survive scroll-back redraws. A `PEN` option in the open
+name sets the default text pen (CTerm sends `PEN7` on its ANSI
+screen, where pen 1 is red), and a `WBPENS` option retargets
+plain SGR 30–33: those are Workbench pen numbers to OS programs
+— C:Ed hardcodes `ESC[31m` for its body text because pen 1 is
+black on a Workbench screen — so under WBPENS 31 renders as the
+default text pen, 33 as the theme blue, 32 bright white, 30
+background, while bold forms (`1;3x`, the `ls` scheme) and
+backgrounds keep their ANSI positions. Opens parse stock-CON: style —
 `CCON:x/y/w/h/title/options` with CLOSE (gadget = EOF), WAIT
 (window lingers for its gadget) and WINDOW0xADDR (borrow an
 existing window; not yet exercised by a client) — and the window
 closes with its last handle, so `EndShell` takes it away and
 `echo >CCON:0/0/400/100/hi/WAIT hello` leaves one to read.
-Next: M6, input.device-handler key input (Ed's menus). See
-`todo.md`.
+M6 moves key acquisition where
+console.device keeps its own: an input.device handler below
+Intuition's chain position captures events for the active CCON
+window and the handler task runs them through keymap.library,
+and the raw input event reports (`CSI n{`) are live. The window
+also stops asking for menu picks over IDCMP — the stock
+con-handler opens its window with no IDCMP classes at all (read
+from the 47.19 ROM tag list), because a pick delivered to the
+UserPort never enters the input stream: without IDCMP_MENUPICK
+it arrives as an IECLASS_MENULIST event the chain handler can
+report. That report is exactly what Ed's menu code consumes —
+its parser (disassembled, C:Ed code $1708) looks up the report's
+code field with ItemAddress and walks NextSelect, so menus over
+CCON: work the same way they do over CON: — boot-verified: Ed's
+menus drop and pick. Raw mode also renders the console block
+cursor now (an inverse-video cell from the scrollback model at
+the cursor position): full-screen programs like Ed draw no
+marker of their own and rely on the console's, exactly as on
+stock CON:. If the chain hookup fails, keys fall back to the
+window path and the window title gains a ` [no chain]` marker.
+See `todo.md`.
 
 ## Try it
 

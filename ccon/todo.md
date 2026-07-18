@@ -88,31 +88,44 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       via our bounds report, More raw paging + its DISK_INFO
       window-retitle trick, Ed fullscreen editing with å/ä/ö,
       Esc-x exit; ONE parked gap: see the menu item below).
-- [ ] **Ed's menus (parked after four system freezes).** Ed
-      attaches menus to our window (DISK_INFO window ptr) and
-      requests raw event reports (`CSI 2;10;11;12{`). The TRUE
-      V47 report format was recovered from console.device 46.1's
-      ROM builder ($13de): `CSI class;subclass;ie_Code;
-      ie_Qualifier;addrhigh;addrlow;secs;micros|`. Reports in
-      exactly that shape froze the entire input chain (mouse
-      dead) with the address halves as mouse coords, as
-      ItemAddress(strip,code), AND as 0;0 — three value
-      experiments, identical freeze fingerprint (title-bar
-      black box: mp=2, rdn=0, ring all READs). **SOLVED by
-      disassembling C:Ed itself: Ed does IDCMP surgery on the
-      console window — 3× ModifyIDCMP, 6× GetMsg, WaitPort,
-      3× ReplyMsg on OUR UserPort. The report is just the wake-up
-      call; Ed then reads the window's IDCMP directly. Two tasks
-      consuming one message port (with the sigbit allocated in
-      ours) = stolen messages, blocked WaitPort, dead input
-      chain. Stock CON: survives because console.device never
-      touches the window's IDCMP — it taps keys upstream via an
-      input.device handler, so the UserPort is free for Ed to
-      commandeer.** The real fix is architectural and has its
-      own milestone below (input-handler input). Until then CCON
-      swallows picks: menus render, Esc-x exits, nothing
-      freezes, and no reports means Ed's IDCMP code stays
-      asleep.
+- [x] **Ed's menus (four system freezes; resolved 18.7.26 by
+      disassembling Ed's parser — BOOT-CONFIRMED same day, menus
+      drop and pick).** Ed attaches
+      menus to our window (DISK_INFO window ptr) and requests raw
+      event reports at startup: four single-param SREs, `CSI 12{`
+      `2{` `10{` `11{` (bytes at file 0x2083; reset `12} 2} 10}`
+      on exit). The TRUE V47 report format was recovered from
+      console.device 46.1's ROM builder ($13de): `CSI class;
+      subclass;ie_Code;ie_Qualifier;addrhigh;addrlow;secs;
+      micros|`. **C:Ed's report dispatcher (code $1708) switches
+      on param 0: class 10 reads ONLY the code field —
+      ItemAddress(strip, code), runs the Ed command hung off the
+      MenuItem's +$22 extension (gadtools USERDATA), follows
+      item.NextSelect ($20) until MENUNULL. The address halves
+      that cost four freezes of guessing are never read for
+      menus; class 2 divides MouseX/Y by the rastport font cell
+      (utility SDivMod32) for Ed's mouse cell, class 11 feeds a
+      2-char quit command, class 12 re-measures the window. And
+      Ed NEVER touches the window's UserPort: an earlier LVO scan
+      pinned "3× ModifyIDCMP, 6× GetMsg, WaitPort on OUR port" on
+      it, but base-tracking every site (the JSR (d16,A6)
+      ambiguity trap struck again) resolves them all to
+      rexxsyslib — CreateRexxMsg/CreateArgstring/DeleteRexxMsg,
+      Ed's ARexx port "ed" — and its own pr_MsgPort/reply ports.
+      The two-consumers-on-one-port theory is disproven; what
+      actually froze the old builds is unpinned (the reports were
+      synthesized from IDCMP MENUPICK then — that whole surface
+      is gone now).** The route Ed is really built against is the
+      stock one, verified in ROM: con-handler 47.19 opens its
+      window with WA_IDCMP=0 (tag at module $1bda), so menu picks
+      reach console.device downstream as IECLASS_MENULIST — with
+      IDCMP_MENUPICK set, Intuition delivers to the UserPort
+      instead and the chain never sees the pick. Fix in 0.10:
+      openwin sets NO IDCMP_MENUPICK while the M6 chain is on;
+      ihchain catches class 10 under Ed's mask and ihreport
+      already speaks the exact format the $1708 dispatcher
+      parses. Fallback (ihon=FALSE) keeps MENUPICK + swallowed
+      picks — the boot-proven 0.8 shape.
       **THE V47 SHELL HANDSHAKE (found by disassembling ROM
       shell_47.47 after typing went dead):** at startup the shell
       calls SetMode(fh,2), sends ACTION_DISK_INFO and compares
@@ -272,17 +285,133 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       NOTHING until the next boot/remount. Every handler fix
       needs a reboot to actually test. Shift+Tab cycling
       boot-confirmed after the reboot (17.7.26).**
-- [ ] **M6: input.device-handler input (the Ed-menus fix, and
-      full console.device parity).** Move key acquisition out of
-      IDCMP: add an input.device handler (IND_ADDHANDLER) below
-      Intuition's priority, take the keys Intuition forwards when
-      our window is active, keymap-convert, feed the same queues.
-      The window's UserPort then stays untouched — free for Ed's
-      ModifyIDCMP/GetMsg takeover, exactly like stock. Then the
-      raw event reports (format recovered from console.device
-      46.1, ROM $13de) can come back and Ed's menus work. Input
-      handlers run in interrupt-ish context: queue events, signal
-      the handler task, do the work there.
+- [ ] **M5d: SGR colours — BUILT 17.7.26, awaiting its boot
+      test.** The renderer speaks CSI ...m: 0 reset, 1 bold
+      (bright pens 8-15 when the screen has 16 — the ANSI-art
+      convention; depth probed via rp.bitmap), 22, 30-37 fg,
+      39, 40-47 bg, 49. The scrollback model grew an attribute
+      plane (second SBMAX×cols ring, fg nibble + bg nibble per
+      cell) so colours survive scroll-back redraws — drawmrow
+      paints attr-batched runs and is shared by redraw, live
+      row repaint and menu restore. The default text pen is the
+      PEN open-name option (CTerm sends PEN7 on its 16-pen ANSI
+      screen where pen 1 is red); every hardcoded pen-1 became
+      deffg (edit line, blip, completion menu). Erases stay
+      background-0 (v1: CSI K with a coloured bg erases black).
+      Paired: CTerm 0.4 ANSI mode now opens depth 4 with the
+      16-colour palette (8 = the grey his scheme wants) and
+      band ANSI art maps bold to bright pens; ls colours
+      directories blue (1;34) and hidden-class entries grey
+      (1;30) in BOTH builds (16-combo differential still
+      byte-identical; the colour path itself is interactive-only
+      — boot verifies it). FIRST BOOT ROUND PASSED (his
+      screenshot: blue dirs, grey .infos, light-grey text, red
+      art) except the completion menu drew plain — SECOND ROUND:
+      menu candidates now colour like ls (flag byte grew a
+      hidden bit; hidden grey, dirs bright blue, WB-blue pen 3
+      on screens without 16 pens), and CTerm opens 16 pens in
+      BOTH themes (non-ANSI = CMenu-LIGHT grown to 16) so the
+      scheme works on the classic light look too.
+- [ ] **M6: input.device-handler input — BUILT 17.7.26 ($VER 0.9),
+      deployed as a SEPARATE TEST DEVICE, awaiting its boot test.**
+      Key acquisition moved out of IDCMP: an Interrupt added with
+      IND_ADDHANDLER at priority 20 (below Intuition's 50 — menu
+      operations arrive already digested into IECLASS_MENULIST —
+      above console.device's 0). The interrupt's is_Code is an E
+      proc: a glue stub whose MOVEM really is the first instruction
+      (a 0-arg/0-local E-VO proc gets NO prologue — read out of the
+      generated code), restores the A4 captured at startup from
+      is_Data, saves D2-D7/A2-A6 (E procs clobber freely), calls
+      ihchain with the chain as its one stack arg (caller pushes,
+      caller cleans, result in D0 — all disasm-verified, including
+      the compiled install block, field offsets, the pure asl.l Shl
+      helper it borrows, and Signal = LVO -324). ihchain runs in
+      input.device's task: events for our window while it is ACTIVE
+      (IntuitionBase.ActiveWindow, offset $34 verified) are copied
+      into a 64-slot ring (stride 32, free-running indices, no
+      Mod/Mul) and neutralized to IECLASS_NULL; the main loop
+      drains on a private signal. RAWKEY downs run through the
+      existing dispatch (dorawkey/rawcsikey grew a consumed flag),
+      then keymap.library MapRawKey — NOT auto-opened by E, only
+      the big four are; the disasm caught the NIL base — with the
+      dead-key bytes riding in ie_EventAddress, so Swedish
+      composition survives. Cooked feeds only 1-byte images to
+      dovanilla (Intuition-VANILLAKEY parity; multi-byte = F-key
+      CSI strings); raw enqueues all mapped bytes. Releases are
+      dropped whole (nothing used them; letting them through would
+      snap the scrollback view on key-up). Raw event reports are
+      LIVE again for evmask classes, carrying Intuition's REAL
+      ie_EventAddress (the freeze experiments had to guess here —
+      the freezes were the UserPort fight, not the report format).
+      With the chain on, keys never touch IDCMP, and 0.10
+      (18.7.26) finished the shape: the window carries ONLY
+      IDCMP_CLOSEWINDOW (stock con-handler 47.19 opens with
+      WA_IDCMP=0, read from the ROM tag list) — IDCMP_MENUPICK
+      would make Intuition deliver menu picks to the UserPort
+      instead of downstream as IECLASS_MENULIST, which is the
+      route Ed's disassembled parser actually consumes (see the
+      Ed's-menus item above; the first 0.9 boot showed menus
+      dropping but picks dead — consistent with the pick dying in
+      the parked port, though a silent fall back to ihon=FALSE
+      would look identical, so 0.10 also appends " [no chain]" to
+      the window title whenever the fallback is in effect: one
+      glance now separates the two). While evmask is set the
+      UserPort drain is PARKED —
+      not for the disproven two-consumers theory, but to defer a
+      close-gadget click while a raw-events client owns the
+      session; leftovers drain when the mask clears (CSI },
+      cooked reversion — SetMode 0 clears evmask, Ed sends no
+      CSI } — or close). Every failure path (no signal, no ring,
+      no keymap.library, no port/req/device/interrupt) leaves
+      ihon=FALSE = the boot-proven IDCMP path end to end.
+      **Deployed as L:ccon-handler ($VER 0.10 18.7.26; the 0.8
+      build is kept beside it as L:ccon-handler-m5), so the M5d
+      round-2 colour check and this experiment share the same
+      test window.**
+      **BOOT RESULT 18.7.26: menus WORK — drop and pick confirmed
+      by Tobias on the 0.10 boot.** Follow-up in 0.11 (same day):
+      raw mode never rendered a cursor, and Ed draws no marker of
+      its own — on stock CON: the console.device block cursor is
+      Ed's position marker. 0.11 adds it: an inverse-video cell
+      from the model at (cx,cy), deffg block on empty cells so it
+      is never invisible; curserase()/cursdraw() wrap the raw
+      write path (so interior ScrollRasters never smear it), the
+      SetMode transitions (appears on raw, yields to the blip on
+      cooked), and the scrollback view (hidden while viewing,
+      back on snap). Cooked keeps the blip — no double cursor.
+      Second follow-up, 0.12 (18.7.26): Ed's text rendered RED
+      under CTerm's dark theme — not a CCON bug: C:Ed hardcodes
+      Workbench pen numbers (four `ESC[33m`/`ESC[31m` pairs in
+      the binary: status messages in 33 = WB blue, body text
+      restored with 31 = WB BLACK), and the ANSI palette puts red
+      at pen 1. Ed has no colour option (ReadArgs template
+      checked). Fix: new `WBPENS` open option — plain SGR 30-33
+      retarget as WB pens at the theme (30→0, 31→deffg, 32→15,
+      33→12; 16-pen screens only, bold forms and backgrounds
+      untouched so the ls scheme and ANSI positions survive);
+      CTerm sends `/PEN7/WBPENS` on its ANSI screen (cterm
+      rebuilt + deployed). Light theme needs nothing (its pen 1
+      is already black = WB semantics).
+      **Boot test (reboot first — handler seglists only reload
+      then):** `Version L:ccon-handler` should say 0.12, then
+      `NewShell CCON:` — (1) regression: typing, å/ä/ö, history,
+      Ctrl+word-jumps, Tab completion menu incl. Shift+Tab,
+      scrollback keys, Ctrl+C break, `dir`, More paging, window
+      drag/close gadget, EndShell; (2) menus in Ed: CONFIRMED
+      WORKING on the 0.10 boot (pick → IECLASS_MENULIST → ihchain
+      → V47 report → Ed's ItemAddress walk); still to check: Ed's
+      mouse cell-click positioning (class 2 reports), Esc-x clean
+      exit, cooked after; (3) NEW in 0.11: the block cursor — Ed
+      shows a filled cell at the edit position, it moves with
+      typing/cursor keys, More shows one at its prompt, no ghost
+      blocks left behind by scrolling, scrollback view hides it
+      and snap-back restores it, and back at the shell prompt the
+      cooked blip is the only cursor; (4) NEW in 0.12: Ed's text
+      is grey (not red) under CTerm's dark theme, Ed's status
+      messages show in blue, and `ls` colours are unchanged
+      (blue dirs, grey hidden); (5) two-window check: a stock
+      CON: shell alongside — keys go to whichever window is
+      active.
 
 ## Design notes
 
