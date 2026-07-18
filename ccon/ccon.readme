@@ -88,6 +88,18 @@ THE KEYS
     and comes back). Return commits. Ctrl+\ is EOF, Ctrl+C..F
     signal the running command.
 
+  Autosuggestions (fish style):
+    as you type, the newest history entry your line begins shows
+    its continuation as grey ghost text at the cursor. Right (or
+    Shift+Right) accepts all of it; Ctrl+Right or Tab accept one
+    word at a time (leading space included, so `ls` takes ` -la`
+    in one stroke); keep typing and it adapts or disappears. The
+    ghost is never part of the committed line - Return runs only
+    what you typed. While a ghost is showing, Shift+Tab forces the
+    completion menu instead (for when history shadows a filename
+    you want completed). Shown only on screens with a readable
+    grey pen.
+
   Tab completion (zsh menu style):
     Tab completes the word at the cursor - one match completes
     whole ('/' after a directory, ' ' after a file), several

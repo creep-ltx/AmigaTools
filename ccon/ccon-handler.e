@@ -126,6 +126,10 @@ OBJECT console
   cpos                          -> cursor inside ebuf
   ancx, ancy                    -> cell where the edit line is drawn
   edlast                        -> chars the last drawedit painted
+  sghost:PTR TO CHAR            -> fish-style autosuggestion: the
+                                -> history entry the typed line
+                                -> prefixes (NIL = none); ghost text
+                                -> is its tail, drawn grey
   tcmrow0                       -> completion menu's first row, frozen
   hist[32]:ARRAY OF LONG        -> prompt history: E-string ptrs
   htotal, hpos
@@ -2325,7 +2329,7 @@ ENDPROC
 -> commit erases it and renders the real line over the same cells.
 PROC drawedit()
   DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc,
-      m:PTR TO CHAR, a:PTR TO CHAR, j
+      m:PTR TO CHAR, a:PTR TO CHAR, j, gp, g:PTR TO CHAR, gn, gcol
   IF curcon.win = NIL THEN RETURN
   l := StrLen(curcon.ebuf)
   edroom(l)
@@ -2351,8 +2355,22 @@ PROC drawedit()
     xc := 0
     r := r + 1
   ENDWHILE
+  -> the autosuggestion: only with the cursor at the end, only on a
+  -> screen with a readable grey. The blip cell carries the ghost's
+  -> FIRST character (inverse, fish fashion - accepted text lands
+  -> exactly where it was shown); the rest draws grey, clipped to
+  -> the blip's row. Pixels only: eraseedit clears every touched
+  -> row to its right edge, so the ghost needs no bookkeeping.
+  curcon.sghost := NIL
+  gp := ghostpen()
+  IF (curcon.cpos = l) AND (gp >= 0) THEN sgfind()
   cch[0] := 32
-  IF curcon.cpos < l THEN cch[0] := s[curcon.cpos]
+  IF curcon.cpos < l
+    cch[0] := s[curcon.cpos]
+  ELSEIF curcon.sghost
+    g := curcon.sghost
+    cch[0] := g[l]
+  ENDIF
   bc := curcon.ancx + curcon.cpos
   r := bc / curcon.cols
   SetAPen(curcon.rp, 0)
@@ -2360,9 +2378,95 @@ PROC drawedit()
   Move(curcon.rp, curcon.left + Mul(bc - Mul(r, curcon.cols), curcon.cw),
        curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
   Text(curcon.rp, cch, 1)
+  IF curcon.sghost
+    g := curcon.sghost
+    gcol := bc - Mul(r, curcon.cols) + 1
+    gn := Min(StrLen(g) - l - 1, curcon.cols - gcol)
+    IF gn > 0
+      SetAPen(curcon.rp, gp)
+      SetBPen(curcon.rp, 0)
+      Move(curcon.rp, curcon.left + Mul(gcol, curcon.cw),
+           curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
+      Text(curcon.rp, g + l + 1, gn)
+    ENDIF
+  ENDIF
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
   curcon.edlast := l
+ENDPROC
+
+-> ---------- fish-style autosuggestions ----------
+-> While you type, the newest history entry the line prefixes shows
+-> its continuation as grey ghost text after the blip; Right (or
+-> Shift+Right/End) accepts all of it, Ctrl+Right one word. The
+-> ghost is pixels only - never in the model, never in the commit,
+-> gone the moment the line stops matching. Case-folded matching
+-> (tcfold), verbatim acceptance from the history string.
+
+-> the pen the ghost draws with; -1 = no readable grey exists on
+-> this screen, so no suggestions are shown at all (a ghost in the
+-> default pen would read as typed text - worse than nothing)
+PROC ghostpen()
+  IF curcon.wbpens AND curcon.can16 THEN RETURN 8
+  IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
+ENDPROC -1
+
+-> newest history entry strictly longer than ebuf that ebuf
+-> prefixes, case-folded; result in curcon.sghost
+PROC sgfind()
+  DEF l, avail, idx, h:PTR TO CHAR, i, ok, s:PTR TO CHAR
+  curcon.sghost := NIL
+  IF curcon.histdone = FALSE THEN RETURN
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
+  IF l = 0 THEN RETURN
+  avail := Min(curcon.htotal, HISTMAX)
+  FOR idx := 0 TO avail - 1
+    IF curcon.sghost = NIL
+      h := curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)]
+      IF StrLen(h) > l
+        ok := TRUE
+        FOR i := 0 TO l - 1
+          IF tcfold(h[i]) <> tcfold(s[i]) THEN ok := FALSE
+        ENDFOR
+        IF ok THEN curcon.sghost := h
+      ENDIF
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> accept the whole suggestion (Right/Shift+Right at line end)
+PROC sgall()
+  StrCopy(curcon.ebuf, curcon.sghost)
+  WHILE StrLen(curcon.ebuf) > edcap()
+    SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
+  ENDWHILE
+  curcon.cpos := StrLen(curcon.ebuf)
+ENDPROC
+
+-> accept one word of it (Ctrl+Right or Tab): leading spaces ride
+-> along with the token they precede, fish fashion - from `ls` a
+-> ghost of ` -la` comes across in ONE stroke, not a space first
+PROC sgword()
+  DEF s:PTR TO CHAR, g:PTR TO CHAR, l, i, cap
+  s := curcon.ebuf
+  g := curcon.sghost
+  l := StrLen(curcon.ebuf)
+  cap := edcap()
+  i := l
+  WHILE (g[i] = 32) AND (l < cap)
+    s[l] := g[i]
+    l++
+    i++
+  ENDWHILE
+  WHILE (g[i] <> 0) AND (g[i] <> 32) AND (l < cap)
+    s[l] := g[i]
+    l++
+    i++
+  ENDWHILE
+  s[l] := 0
+  SetStr(curcon.ebuf, l)
+  curcon.cpos := l
 ENDPROC
 
 -> put history entry idx (0 = newest) into ebuf, cut to fit
@@ -2603,7 +2707,15 @@ PROC dorawkey(code, qual)
     ENDIF
     drawedit()
   ELSEIF code = RK_RIGHT
-    IF qual AND IEQUALIFIER_CONTROL
+    IF (curcon.cpos = l) AND (curcon.sghost <> NIL)
+      -> the ghost accepts (fish): Right and Shift+Right take all
+      -> of it, Ctrl+Right the next word and its trailing space
+      IF qual AND IEQUALIFIER_CONTROL
+        sgword()
+      ELSE
+        sgall()
+      ENDIF
+    ELSEIF qual AND IEQUALIFIER_CONTROL
       WHILE (curcon.cpos < l) AND (s[curcon.cpos] <> 32)
         curcon.cpos := curcon.cpos + 1
       ENDWHILE
@@ -3249,6 +3361,16 @@ PROC dotab(back)
     IF p[0] AND 1 THEN StrAdd(curcon.tctmp, '/')
     IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp)) THEN drawedit()
     tcmenudraw()
+    RETURN
+  ENDIF
+  -> plain Tab prefers a visible autosuggestion: accept its next
+  -> word. Shift+Tab still FORCES the completion menu - the escape
+  -> hatch for when history shadows a filename you want completed
+  -> (bare Shift+Tab meant nothing outside an open menu anyway)
+  IF (back = FALSE) AND (curcon.sghost <> NIL) AND
+     (curcon.cpos = StrLen(curcon.ebuf))
+    sgword()
+    drawedit()
     RETURN
   ENDIF
   IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR

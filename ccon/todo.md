@@ -573,6 +573,38 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       CRAW: process alongside CCON:'s (item E's screenshot shows
       Startup-sequence in a CRaw window with a paste landed in it).
       Edit-line selection works since 0.25 (the drawedit mirror).
+      1.0 also ships fish-style AUTOSUGGESTIONS (his call: "we
+      absolutely NEED it") — drawedit finds the newest history
+      entry the typed line prefixes (case-folded) and draws its
+      continuation as grey ghost text: the blip cell carries the
+      ghost's first char (accepted text lands exactly where shown),
+      the rest clips to the blip's row, ghostpen() is WBPENS grey 8
+      or the ObtainBestPen grey, and NO readable grey = no ghosts
+      (a deffg ghost would read as typed text). Right/Shift+Right
+      accept all (sgall, edcap-capped), Ctrl+Right one word + its
+      space (sgword). Pixels only: never mirrored to the model, so
+      never selected/copied/committed; eraseedit's clear-to-row-
+      edge already erases it; vanishes under a selection repaint
+      until the next keypress (the blip's known cosmetic, shared).
+      Boot test: run two commands, type the first's prefix — grey
+      ghost appears; Right completes it; Ctrl+Right takes one word
+      at a time; typing a diverging char kills it; Return with a
+      ghost showing runs ONLY the typed text; Up/Down history
+      still work; ghost behaves on the wrapped edit line and never
+      shows mid-line (cursor not at end).
+      FIRST GHOST BOOT (18.7.26, inside CTerm's frame no less):
+      works — two refinements from his fingers, same build night:
+      (1) sgword copied token-then-spaces, so `ls` + Ctrl+Right
+      took the bare space first and needed a second stroke for
+      `-la`; fish order is spaces-ride-with-the-token — one stroke
+      now. (2) Tab accepts the next ghost word too (his ask);
+      plain Tab prefers a visible ghost, Shift+Tab FORCES the
+      completion menu — the escape hatch when history shadows a
+      filename (bare Shift+Tab meant nothing outside a menu).
+      Re-test: `ls` → Ctrl+Right = `ls -la` in one stroke; Tab
+      steps through ghost words; Shift+Tab with a ghost showing
+      opens the completion menu; Tab with NO ghost still
+      completes filenames.
       Final 1.0 fix: a bare qualifier down-stroke no longer snaps
       a scrolled view to live — pressing Shift mid-Ctrl+Up-scroll
       to switch to paging used to throw the view to the prompt
