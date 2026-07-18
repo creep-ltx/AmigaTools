@@ -533,6 +533,39 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       status; then inside CTerm ANSI — everything as before
       (wbpens path untouched).
 
+- [x] **M9: the stock option set + CRAW: — BUILT 18.7.26 ($VER
+      0.20), boot 18.7.26: 0.20 live, CRAW: CONFIRMED (own
+      window - it is its own handler process, the architecture
+      demonstrating itself), close-gadget default + regression
+      all green. The window OPTIONS could not be exercised: they
+      parse on the FIRST open only, and a shell held the window,
+      so every test open attached to it - the M5c single-window
+      rule, now the visible wall. Hence M10.** The V47 option table (read from ROM
+      con-handler 47.19 at $1c34) minus the premium tier: AUTO
+      (open succeeds windowless, ensurewin() materializes the
+      window on the first WRITE/READ/WAIT_CHAR/SCREEN_MODE/
+      DISK_INFO; an AUTO that never opened resets with its last
+      close), SCREENname (LockPubScreen for the OpenWindow, name
+      case-preserved from the raw token, NIL/failed = default
+      public screen), NOBORDER, NODRAG, NODEPTH, NOSIZE,
+      BACKDROP, INACTIVE, NOCLOSE — and the close gadget is now
+      ON by default like a stock 3.2 shell window (CLOSE kept
+      for compatibility). CRAW: = second mountlist, same binary,
+      Startup = "RAW" (dn_Startup BSTR, >1024 = BPTR heuristic):
+      that instance opens streams raw from byte one; the block
+      cursor stands at home on open. Skipped for later: SMART/
+      SIMPLE (we are effectively smart-refresh), ALT, ICONIFY.
+      **Boot test:** (1) `NewShell CCON:` — close gadget present
+      by default now, click = EOF/EndShell; (2)
+      `echo >CCON:0/0/300/80/auto/AUTO/WAIT hi` — window appears
+      only when echo writes; also `dir >CCON:.../AUTO/CLOSE`;
+      (3) `Mount CRAW: FROM DEVS:CRAW-mountlist` +
+      `type file >CRAW:0/0/400/120/t/WAIT` — raw window, block
+      cursor; (4) NOBORDER/NODRAG/BACKDROP/INACTIVE windows look
+      and act the part; (5) SCREENWorkbench opens there
+      explicitly; (6) regression: CTerm WINDOW0x unaffected,
+      resize/colours/copy-paste as before.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

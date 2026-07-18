@@ -39,11 +39,19 @@ black on a Workbench screen — so under WBPENS 31 renders as the
 default text pen, 33 as the theme blue, 32 bright white, 30
 background, while bold forms (`1;3x`, the `ls` scheme) and
 backgrounds keep their ANSI positions. Opens parse stock-CON: style —
-`CCON:x/y/w/h/title/options` with CLOSE (gadget = EOF), WAIT
-(window lingers for its gadget) and WINDOW0xADDR (borrow an
-existing window; not yet exercised by a client) — and the window
-closes with its last handle, so `EndShell` takes it away and
-`echo >CCON:0/0/400/100/hi/WAIT hello` leaves one to read.
+`CCON:x/y/w/h/title/options` with the stock option set: CLOSE
+and NOCLOSE (the gadget — present by default like a 3.2 shell
+window, click = EOF), WAIT (window lingers for its gadget), AUTO
+(the open succeeds windowless and the window appears on first
+real I/O — the classic debug-console idiom), SCREENname (open on
+a named public screen), NOBORDER, NODRAG, NODEPTH, NOSIZE,
+BACKDROP, INACTIVE, WINDOW0xADDR (borrow an existing window),
+plus CCON's own PEN and WBPENS — and the window closes with its
+last handle, so `EndShell` takes it away and
+`echo >CCON:0/0/400/100/hi/WAIT hello` leaves one to read. A
+second mountlist mounts the same binary as `CRAW:` (Startup =
+"RAW"): its streams open in raw mode from the first byte, the
+RAW: counterpart.
 M6 moves key acquisition where
 console.device keeps its own: an input.device handler below
 Intuition's chain position captures events for the active CCON
@@ -115,6 +123,7 @@ and prints the line.
 - `ccon-handler.e` — the source, Amiga E.
 - `ccon-handler` — prebuilt AmigaOS binary.
 - `CCON-mountlist` — mountlist for `DEVS:`.
+- `CRAW-mountlist` — the raw-by-default second device.
 - `todo.md` — milestones and the verified protocol facts.
 
 ## Building

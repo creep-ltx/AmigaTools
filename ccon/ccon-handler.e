@@ -145,6 +145,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     deffg=1, curfg=1, curbg=0, bold=FALSE, can16=FALSE,
     wbpens=FALSE,               -> WBPENS option: plain SGR 30-33
                                 -> are WB pens, retarget at theme
+    -> M9: the stock CON: option set + the CRAW: device
+    rawdef=FALSE,               -> Startup="RAW": streams open raw
+    pauto=FALSE,                -> AUTO: window on first I/O
+    autopend=FALSE,             -> an AUTO open waits, windowless
+    pnoborder=FALSE, pnodrag=FALSE, pnodepth=FALSE,
+    pnosize=FALSE, pbackdrop=FALSE, pinactive=FALSE,
+    pscrname[64]:ARRAY OF CHAR, -> SCREENname: a public screen
     cursgr=FALSE,               -> an explicit 3x is in effect (bare
                                 -> bold must not recolour anything)
     anstab[8]:ARRAY OF LONG,    -> foreign screens: the ANSI bright
@@ -204,7 +211,8 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
-      class, code, qual, mx, my, ia, secs, mics, tmp
+      class, code, qual, mx, my, ia, secs, mics, tmp,
+      stps:PTR TO CHAR
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -221,6 +229,18 @@ PROC main()
 
   dnode := Shl(pkt.arg3, 2)       -> BPTR to our DeviceNode
   dnode.task := port              -> future opens come straight to us
+  -> M9: one binary, two devices - a mountlist with Startup = "RAW"
+  -> (CRAW-mountlist) makes this instance open its streams raw by
+  -> default, the RAW: counterpart. dn_Startup holds a BPTR to a
+  -> BSTR when it is not a small integer.
+  tmp := dnode.startup
+  IF tmp > 1024
+    stps := Shl(tmp, 2)
+    IF stps[0] = 3
+      IF (tcfold(stps[1]) = "R") AND (tcfold(stps[2]) = "A") AND
+         (tcfold(stps[3]) = "W") THEN rawdef := TRUE
+    ENDIF
+  ENDIF
   ReplyPkt(pkt, DOSTRUE, 0)       -> mount handshake done
 
   -> timer.device for real WAIT_CHAR timeouts (all exec, no packets);
@@ -420,6 +440,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     IF opens <= 0
       opens := 0
       breaktask := NIL
+      autopend := FALSE         -> an AUTO that never opened resets
       IF win
         IF waitmode = FALSE     -> stock CON: semantics: the window
           closewin()            -> closes with its last handle; WAIT
@@ -435,6 +456,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       dowrite(pkt)              -> behaviour - output freezes while
     ENDIF                       -> you select)
   CASE ACTION_READ
+    ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     breaktask := sender.sigtask -> (the AROS con-handler does the same)
     IF rdn < RDMAX
@@ -445,6 +467,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
     ENDIF
   CASE ACTION_WAIT_CHAR
+    ensurewin()
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
     -> let timer.device answer (input arrival wakes all waiters)
@@ -458,6 +481,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       IF wcn = 1 THEN armtimer(pkt.arg1)
     ENDIF
   CASE ACTION_SCREEN_MODE
+    ensurewin()                 -> mode changes imply a console soon
     -> arg1: DOSTRUE = raw, 0 = cooked. Raw parks the line editor -
     -> keys become bytes, the client owns echo and screen
     IF pkt.arg1
@@ -489,6 +513,7 @@ PROC dopkt(pkt:PTR TO dospacket)
   CASE ACTION_DISK_INFO
     -> the console curiosity: id_VolumeNode carries the WINDOW pointer,
     -> which is how programs find the console's window
+    ensurewin()                 -> the asker wants a window pointer
     id := Shl(pkt.arg1, 2)      -> BPTR to InfoData
     zp := id
     FOR i := 0 TO 8
@@ -522,6 +547,11 @@ ENDPROC
 -> flush after a selection drag ends
 PROC dowrite(pkt:PTR TO dospacket)
   DEF sender:PTR TO mp, len
+  ensurewin()                   -> an AUTO window appears on first
+  IF win = NIL                  -> output; no window at all = the
+    ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)  -> write cannot land
+    RETURN
+  ENDIF
   sender := pkt.port            -> the writer owns the break signal too:
   breaktask := sender.sigtask   -> `list >CCON:` is opened by the SHELL,
                                 -> but the WRITEs come from list itself -
@@ -573,17 +603,26 @@ ENDPROC v
 -> exact string CTerm's frame handoff sends). Unknown options are
 -> ignored. Field order is stock CON:'s.
 PROC parsecon(bname)
-  DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR
+  DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR,
+      tok2[84]:ARRAY OF CHAR
   pwx := 40
   pwy := 40
   pww := 520
   pwh := 160
   StrCopy(wtitlebase, 'CCON:')
   waitmode := FALSE
-  closegad := FALSE
-  fwptr := NIL
+  closegad := TRUE              -> stock 3.2 shape: close gadget on
+  fwptr := NIL                  -> (NOCLOSE removes it)
   deffg := 1
   wbpens := FALSE
+  pauto := FALSE
+  pnoborder := FALSE
+  pnodrag := FALSE
+  pnodepth := FALSE
+  pnosize := FALSE
+  pbackdrop := FALSE
+  pinactive := FALSE
+  pscrname[0] := 0              -> global array: garbage until set
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -620,17 +659,47 @@ PROC parsecon(bname)
     ELSEIF f = 4
       IF tl > 0 THEN StrCopy(wtitlebase, tok)
     ELSE
-      -> an option: fold to upper case in place, then compare
+      -> an option: fold to upper case in place, then compare -
+      -> keeping the raw token (tok2) for case-preserving values
       v := 0
       WHILE tok[v]
+        tok2[v] := tok[v]
         tok[v] := tcfold(tok[v])
         v++
       ENDWHILE
+      tok2[v] := 0
       IF StrCmp(tok, 'WAIT')
         waitmode := TRUE
         closegad := TRUE        -> WAIT needs the gadget to end
       ELSEIF StrCmp(tok, 'CLOSE')
         closegad := TRUE
+      ELSEIF StrCmp(tok, 'NOCLOSE')
+        closegad := FALSE
+      ELSEIF StrCmp(tok, 'AUTO')
+        pauto := TRUE           -> the window waits for first I/O
+      ELSEIF StrCmp(tok, 'NOBORDER')
+        pnoborder := TRUE
+      ELSEIF StrCmp(tok, 'NODRAG')
+        pnodrag := TRUE
+      ELSEIF StrCmp(tok, 'NODEPTH')
+        pnodepth := TRUE
+      ELSEIF StrCmp(tok, 'NOSIZE')
+        pnosize := TRUE
+      ELSEIF StrCmp(tok, 'BACKDROP')
+        pbackdrop := TRUE
+      ELSEIF StrCmp(tok, 'INACTIVE')
+        pinactive := TRUE
+      ELSEIF StrCmp(tok, 'SCREEN', 6)
+        -> SCREENname, stock syntax: open on that public screen
+        -> (name taken case-preserved from the raw token)
+        v := 6
+        c := 0
+        WHILE tok2[v] AND (c < 63)
+          pscrname[c] := tok2[v]
+          c++
+          v++
+        ENDWHILE
+        pscrname[c] := 0
       ELSEIF StrCmp(tok, 'WBPENS')
         -> translate the classic Workbench pens when a program
         -> hardcodes them: C:Ed prints its body text as SGR 31
@@ -666,11 +735,15 @@ ENDPROC
 
 PROC dofind(pkt:PTR TO dospacket)
   DEF fh:PTR TO filehandle, sender:PTR TO mp
-  IF win = NIL
+  IF (win = NIL) AND (autopend = FALSE)
     parsecon(pkt.arg3)          -> the FIRST open decides the window;
-    openwin()                   -> later opens attach to it as-is
+    IF pauto                    -> later opens attach to it as-is.
+      autopend := TRUE          -> AUTO (M9): the open succeeds
+    ELSE                        -> windowless; first real I/O makes
+      openwin()                 -> the window (ensurewin)
+    ENDIF
   ENDIF
-  IF win
+  IF win OR autopend
     fh := Shl(pkt.arg1, 2)      -> BPTR to the FileHandle DOS made
     fh.args := 1                -> our stream id (single stream for now)
     fh.interactive := DOSTRUE   -> we are a console
@@ -681,6 +754,11 @@ PROC dofind(pkt:PTR TO dospacket)
   ELSE
     ReplyPkt(pkt, DOSFALSE, ERROR_NO_FREE_STORE)
   ENDIF
+ENDPROC
+
+-> an AUTO window materializes on the first packet that needs one
+PROC ensurewin()
+  IF (win = NIL) AND autopend THEN openwin()
 ENDPROC
 
 -> the text grid from the window's current dimensions. A borrowed
@@ -701,7 +779,8 @@ ENDPROC
 
 PROC openwin()
   DEF ta:PTR TO textattr, i, idc, scrn:PTR TO screen, v,
-      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR
+      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
+      pubscr:PTR TO screen
   fwin := FALSE
   -> M6: with the input.device handler on, keys never touch IDCMP -
   -> the UserPort carries only the close gadget, stock console.device
@@ -731,17 +810,28 @@ PROC openwin()
     -> screenshot shows it (chain-on and fallback windows behave
     -> identically until Ed's menus are tried)
     IF ihon = FALSE THEN StrAdd(wtitlebase, ' [no chain]')
+    -> M9: SCREENname opens on that public screen (locked for the
+    -> OpenWindow only - the window itself then holds the screen);
+    -> the no-name/failed case is NIL = the default public screen,
+    -> which is exactly where windows went before
+    pubscr := NIL
+    IF pscrname[0] THEN pubscr := LockPubScreen(pscrname)
     win := OpenWindowTagList(NIL,
       [WA_TITLE, wtitlebase, WA_LEFT, pwx, WA_TOP, pwy,
        WA_WIDTH, pww, WA_HEIGHT, pwh,
-       WA_DRAGBAR, TRUE, WA_DEPTHGADGET, TRUE,
-       WA_ACTIVATE, TRUE,
+       WA_DRAGBAR, IF pnodrag THEN FALSE ELSE TRUE,
+       WA_DEPTHGADGET, IF pnodepth THEN FALSE ELSE TRUE,
+       WA_ACTIVATE, IF pinactive THEN FALSE ELSE TRUE,
        WA_CLOSEGADGET, closegad,
-       WA_SIZEGADGET, TRUE,          -> M8: consoles resize
+       WA_SIZEGADGET, IF pnosize THEN FALSE ELSE TRUE,
+       WA_BORDERLESS, pnoborder,
+       WA_BACKDROP, pbackdrop,
+       WA_PUBSCREEN, pubscr,
        WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
        WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
        WA_IDCMP, idc,
        TAG_DONE, NIL])
+    IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   ENDIF
   IF win = NIL THEN RETURN
   rp := win.rport
@@ -848,7 +938,13 @@ PROC openwin()
   cpos := 0
   hpos := -1
   StrCopy(ebuf, '')
-  drawedit()                    -> the blip stands from the start
+  rawmode := rawdef             -> the CRAW: device opens raw
+  autopend := FALSE             -> an AUTO wait ends here
+  IF rawmode
+    cursdraw()                  -> raw: the block cursor at home
+  ELSE
+    drawedit()                  -> the blip stands from the start
+  ENDIF
   setidcmp()                    -> selection's MOUSEBUTTONS joins the
   ReportMouse(TRUE, win)        -> set (evmask is 0 here) and motion
                                 -> events exist when a drag asks
@@ -2881,4 +2977,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 0.19 (18.7.26) CCON: LTX console handler M8', 0
+vers: CHAR '$VER: ccon-handler 0.20 (18.7.26) CCON: LTX console handler M9', 0
