@@ -23,10 +23,11 @@ Shell is to a CON: window, plus the frame.
 `EndShell` (or `EndCLI`) ends the shell and CTerm closes behind
 it.
 
-## Arguments (0.3)
+## Arguments
 
 ```
-CTerm [CONSOLE <device:>] [FROM <script>]
+CTerm [CONSOLE <device:>] [HEADER <file>] [FOOTER <file>]
+      [FULL] [ANSI] [FROM <script>]
 ```
 
 `CONSOLE` picks the console handler the frame window is handed
@@ -41,6 +42,58 @@ NewShell `FROM` mechanism):
 ```
 CTerm CCON: FROM S:Shell-Startup
 ```
+
+`HEADER` and `FOOTER` name band art files of your own — the whole
+file is the band; a header claims up to 6 lines, a footer up to 3. Naming one band shows only
+that band; naming neither shows the built-in mockup; `FULL` shows
+none, giving the console the whole screen (`FULL` with a named
+band is refused as a contradiction). A band file containing ANSI
+escapes is detected and rendered in colour — SGR foreground and
+background, bold, underline, and the cursor-forward gaps ANSI art
+positions itself with — and automatically engages the palette:
+
+```
+CTerm CCON: HEADER S:CMenu/Headers/top3.ANS
+CTerm FULL
+```
+
+The screen always opens with 16 pens and the ANSI colours in
+place — so blue directories and grey hidden files work in both
+themes, with the same SGR codes. `ANSI` picks the dark terminal
+theme (black background, light-grey text); without it the
+classic light theme stands (grey background, black text — with
+black where ANSI red would sit, the CMenu LIGHT trade). Bright
+colours (bold-as-bright, where ANSI art lives) and pen-8 grey
+exist in both. Plain (non-ANSI) band art follows the theme's
+text colour: light grey on dark, black on light. The palette is *true* ANSI,
+so pen 1 (the pen consoles draw text with by default) is red;
+CCON accepts a `PEN` option in its open name for exactly this,
+and CTerm passes `PEN7/WBPENS` automatically when the console
+device is CCON-family: `PEN7` gives light-grey terminal text,
+and `WBPENS` retargets plain SGR 30–33 — Workbench pen numbers
+to OS programs (C:Ed hardcodes `ESC[31m`, "WB black", for its
+body text) — so Ed reads grey-on-dark instead of red while bold
+ANSI colours stay put. (Stock CON: rejects opens carrying
+options it does not know, so the options are only sent to
+CCON-family names — CON: under `ANSI` keeps red text.)
+
+## Configuration
+
+`PROGDIR:cterm.cfg` (plain text, `;` comments, `KEY VALUE`
+lines, keys case-insensitive) provides defaults for everything;
+the command line overrides it:
+
+```
+; CTerm configuration
+CONSOLE CCON:
+HEADER S:CMenu/Headers/top1.ANS
+FOOTER DH0:Art/ltx-footer.txt
+ANSI ON
+FROM S:Shell-Startup
+```
+
+`FULL ON` is also accepted; a `HEADER`/`FOOTER` given on the
+command line overrides a config `FULL`.
 
 KingCON as a hardwired handler was tried and dropped during 0.2:
 on the AmigaOS 3.2 test install, KingCON 1.3 crashes
@@ -81,6 +134,8 @@ on exit — so it works as a bootless emergency shell.
 - `cterm-mockup-microknight7` — the 91-column version.
 - `contest.e` / `contest` — the architecture proof: bands +
   borderless window + `WINDOW` option + `Execute`.
+- `cterm.cfg` — a commented example config; uncomment what you
+  want and drop it next to the binary.
 - `todo.md` — what's next.
 
 ## Building
@@ -104,4 +159,6 @@ launched from a boot script as
 `cterm ccon: >nil: <nil:` after `mount ccon: from
 devs:ccon-mountlist`. The `FROM` argument parses (bad-argument
 usage verified under vamos) but has not been exercised at boot
-yet.
+yet. 0.4 (user bands, FULL, ANSI palette, the config file) is
+built — the config parser is verified under vamos (extracted and
+run verbatim), the rest awaits its boot test.
