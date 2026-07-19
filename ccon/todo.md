@@ -1887,6 +1887,110 @@ fix only removes the SLASH-COUNTING trap.
       400-char cap (truncates cleanly, no overflow) — all landed
       exactly as designed.
 
+      **PARKED follow-up: real multi-row paste display.** He asked,
+      after seeing b28 boot: could the pasted lines show as actual
+      separate visual rows instead of one wrapped line with pilcrow
+      joins? Investigated properly before deciding, not waved off —
+      read the FULL body of `drawedit()` this time, not just the
+      functions it calls. The scope is real, not vague caution:
+      EVERY position calculation in the edit-line renderer assumes
+      pure width-driven wrapping, a straight-line map from "logical
+      offset from the anchor" to "screen row/column" via `n / cols`
+      and `Mul(row, cols)`. Counted at least six separate places
+      that do this inside `drawedit()` alone — the main text paint
+      loop, the old-text mirror-zeroing tail, the cursor blip
+      position, the ghost position, the Ctrl+R search banner
+      overlay, and the stale-pixel cleanup tail — plus `edlastrow()`,
+      `edcap()`, `edroom()`, and `eraseedit()` as their own separate
+      functions. An embedded newline forcing an early row break
+      breaks the straight-line assumption EVERYWHERE at once; all of
+      them would need to agree, consistently, or it's the b8→b9→b10
+      saga again (erase extent and paint extent computed by two
+      pieces of logic that quietly drifted apart) — except spread
+      across a dozen call sites instead of two.
+
+      Given that's the single most bug-prone code in the project
+      (three confirmed incidents already, on ordinary single-line
+      editing, with none of this extra complexity) and this was
+      already a very long session, his call: park it for a session
+      with a clearer head, keep the working, committed b28 pilcrow
+      version as the safe baseline.
+
+      **A sketch worth starting from, not a spec:** rather than
+      re-deriving newline-aware row/column math ad hoc at each of
+      those dozen call sites (repeating the exact mistake that
+      caused b8→b10), centralize it — one `edrow(n)`/`edcol(n)`
+      pair (or a single packed-return helper) that scans from the
+      anchor counting `PASTENL` as a forced break, used EVERYWHERE
+      `n / cols` currently appears. Harness-verify that pair alone
+      first, exhaustively, against both the no-newline case (must
+      match the OLD pure-division math byte-for-byte — regressing
+      ordinary typing would be far worse than an imperfect paste
+      feature) and various embedded-newline placements, before
+      touching a single call site in the real function. Cursor
+      movement keys (Left/Right/Home/End/word-jump) likely need NO
+      changes at all — they already operate on `cpos` as a content
+      index, not a screen position; only the RENDERING math is
+      actually offset-dependent. Confirm that assumption with the
+      harness too, don't assume it holds.
+
+      **b29, superseding b28 — his honest reconsideration:** "I
+      don't think we need multi-row copy/paste if it can't be done
+      right. The weird little linebreak symbol does not really
+      compare to a real multi row copy/paste." Fair, and it
+      reframed the actual question: not "how do we fake multi-row"
+      but "what's the RIGHT behaviour if we don't." Talked through
+      three honest options — keep the pilcrow, revert to a FIXED
+      drip-feed, or drop multi-line paste entirely (first line
+      only, rest discarded with a beep). His call: the drip-feed,
+      properly fixed.
+
+      Back to b27's shape (`pasteq`/`pasteappend`/`pastepull`,
+      re-added — `PASTENL`/`pasteinsert`'s substitution/`pasteundo`
+      all removed again, no longer needed) — only the FIRST line
+      lands live, looking exactly like typed text, zero new
+      rendering concepts. What was ACTUALLY wrong with b27 wasn't
+      the drip-feed concept, it was that the pending queue was
+      invisible — his next ask, once he saw the choice laid out:
+      "it needs a way to abort," and separately, a visible
+      indicator so advancing the queue is never a silent surprise.
+
+      First cut of the indicator went in the window title
+      (`[paste: N more, Esc cancels]`) — simplest, zero new
+      drawing. He preferred something more visible: "a greyed
+      (hidden) line under or above the prompt." Built on the
+      Tab-completion menu's OWN established pattern for exactly
+      this problem (`tcmenucalc`/`tcmenudraw`/`tcclose`) rather
+      than inventing a new one — `pastehintroom()` mirrors the
+      menu's scroll-until-it-fits room-making, `pastehintshow()`
+      mirrors its pixels-only draw/restore-from-model discipline,
+      drawn in the same ghost pen (and gated on the same
+      `ghostpen() >= 0` readable-grey check) the autosuggestions
+      already use. Recomputed on every `drawedit()` call, same as
+      the ghost and the Ctrl+R banner, so it tracks the current
+      line's row as it grows/shrinks and needs no separate
+      "hide the hint" call anywhere — Esc and the final `pastepull`
+      both just leave `pasteq` empty, and the next `drawedit()`
+      notices and erases it. One care point the menu's pattern
+      didn't need: if the edit line's OWN paint has grown to reach
+      the hint's old row (line got longer), erasing that row from
+      the model would stomp the just-painted text — guarded with
+      `IF pastehintrow > edlastrow(l)` before erasing.
+
+      Esc's job (already correct in b27, just re-added here):
+      clears the CURRENT line AND the whole queue in one shot —
+      the hint literally says "Esc cancels all," so it has to.
+
+      **Verified what harness verification can reach:** the queue
+      walk itself (a four-line paste, three `pastepull()` calls,
+      the line-count helper `pastelines()` reporting 3→2→1→0 in
+      step, a 4th call past exhaustion staying a safe no-op) and
+      the Esc-equivalent queue-clear — all pure in-memory, fully
+      provable on Linux. The actual grey-row PAINT (`Move`/`Text`/
+      `drawmodelrow`, the room-making scroll) is real Intuition
+      drawing vamos cannot display or check — FS-UAE boot-test
+      territory, like the rest of tonight's screen-facing work.
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every

@@ -362,15 +362,15 @@
 
     RAMIGA-V   paste the clipboard as typed input. In raw mode the
                program receives the bytes as they are (pasting into
-               Ed works). In COOKED mode, the WHOLE clip lands live
-               in the edit line as one long, fully editable line -
-               move the cursor, Backspace, kill words, edit any of
-               it, exactly like typed text. An embedded line break
-               shows as a pilcrow (P) rather than a real newline
-               while you edit; nothing in the paste RUNS until you
-               press Enter, at which point everything commits and
-               runs at once, in order, same as pasting into any
-               terminal. Esc clears it all, nothing runs.
+               Ed works). In COOKED mode, only the FIRST line lands
+               live - looking exactly like anything you typed, no
+               markers, no symbols. If the clip has more lines, a
+               grey hint appears below the prompt: "N more lines
+               queued - Enter runs this one, Esc cancels all." Each
+               Enter runs the line on screen and loads the next;
+               nothing later in the paste ever runs on its own, and
+               Esc at any point drops the whole rest of the queue,
+               not just the visible line.
     RAMIGA+SHIFT+V
                paste the OLD way for just this once: every line in
                the clip runs immediately as it lands, LF for Return.

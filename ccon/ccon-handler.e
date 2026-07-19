@@ -86,10 +86,13 @@ CONST MARGIN=4,
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       WQMAX=16,         -> writes parked during a selection drag
       CLIPMAX=16384,    -> clipboard transfer buffer, bytes
-      PASTENL=182,      -> Latin-1 pilcrow (P): the visible stand-in
-                        -> for an embedded newline while a multi-line
-                        -> paste is still being edited - real command
-                        -> text essentially never contains one
+      PASTEQMAX=4096,   -> queued paste tail, bytes - allocated lazily
+                        -> (NIL until a paste actually has a tail),
+                        -> kept smaller than CLIPMAX on purpose after
+                        -> the footprint pass: an unusually huge
+                        -> multi-line paste truncates rather than
+                        -> costing every window a full 16K it will
+                        -> almost never use
       IHMAX=64,         -> input-event ring, slots (power of two)
       IHPRI=20,         -> chain position: below Intuition's 50, above
                         -> console.device's 0 - menu operations arrive
@@ -230,6 +233,12 @@ OBJECT console
   pasteexec                     -> Theme B: PASTEEXEC open option -
                                 -> the OLD RAMIGA-V behaviour (every
                                 -> LF runs its line) for this window
+  pasteq:PTR TO CHAR            -> queued paste tail past the FIRST
+                                -> embedded LF - fed in one line per
+                                -> real Enter, never auto-run (E-str,
+                                -> lazily allocated - see PASTEQMAX)
+  pastehintrow                  -> row the "N more queued" hint is
+                                -> currently drawn on, -1 = none
   plines                        -> v1.1 LINES=n parsed (0 = default)
   pfontsize, pfontexp           -> v1.1 FONTname/size parse state (the
                                 -> size rides the NEXT '/'-token)
@@ -566,6 +575,7 @@ PROC coninit(c:PTR TO console)
   c.srbuf := String(64)
   c.srstash := String(404)
   c.sridx := -1
+  c.pastehintrow := -1
   IF (c.ebuf = NIL) OR (c.stash = NIL) OR (c.wtitle = NIL) OR
      (c.wtitlebase = NIL) OR (c.tctmp = NIL) OR (c.tctail = NIL) OR
      (c.srbuf = NIL) OR (c.srstash = NIL)
@@ -680,6 +690,7 @@ PROC condispose(c:PTR TO console)
   IF c.tcpool THEN Dispose(c.tcpool)
   IF c.srbuf THEN Dispose(c.srbuf)
   IF c.srstash THEN Dispose(c.srstash)
+  IF c.pasteq THEN Dispose(c.pasteq)
   Dispose(c)
 ENDPROC
 
@@ -2358,13 +2369,17 @@ ENDPROC
 -> Cooked is the safety question: forceexec (RAMIGA+SHIFT+V) or the
 -> PASTEEXEC open option replay every LF as a Return, 1.0-style,
 -> each pasted line running the instant it lands - the DEFAULT now
--> is safer (his call, Theme B): the WHOLE clip lands live as one
--> long, fully editable line (embedded newlines shown as a PASTENL
--> pilcrow, real Return/Backspace/kill keys all just work - see
--> pasteinsert), and NONE of it runs until a real Enter commits it,
--> at which point it all runs at once, in order, like any terminal
--> paste - so a pasted `rm important-file` sits there to be seen
--> and edited out, not executed before you can react.
+-> is safer (his call, Theme B, redesigned twice - see todo.md):
+-> only the first line lands live, looking exactly like any typed
+-> line (no markers, no new rendering concepts - see pasteinsert);
+-> anything past the first embedded LF queues in curcon.pasteq and
+-> is fed back ONE LINE PER REAL ENTER by pastepull(), with a grey
+-> hint row below the prompt (pastehintshow, in drawedit) always
+-> showing how many are left and that Esc cancels all of them. A
+-> pasted `rm important-file` sits there to be seen and killed, not
+-> executed before you can react - and nothing from later in the
+-> paste can EVER surprise-run itself on some unrelated later Enter,
+-> because the hint makes the pending state impossible to miss.
 PROC dopaste(forceexec)
   DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
       lw:PTR TO LONG, b:PTR TO CHAR, exec
@@ -2422,30 +2437,103 @@ PROC injectbyte(c)
   ENDIF
 ENDPROC
 
--> safe-paste insert: the WHOLE clip becomes literal text at the
--> cursor in one go - NOT via dovanilla, deliberately: a pasted
--> Tab/Ctrl-R/Esc byte must never trigger completion or search or a
--> line-clear, it should just be an odd-looking literal character,
--> the same way a stray control byte typed by hand would be if this
--> codepath ever saw it. An embedded LF becomes PASTENL (a pilcrow,
--> chosen as a byte vanishingly unlikely to appear in real command
--> text) rather than a raw newline - reusing the ALREADY-CORRECT
--> width-wrap editing model unchanged (edcap/edlastrow have never
--> heard of a newline, and teaching them one meant reopening the
--> exact eraseedit/drawedit machinery that took three fixes to get
--> right earlier tonight). The whole pasted block is fully visible
--> and fully editable - cursor movement, Backspace, kill keys, all
--> of it - as one long line that wraps by width like any other.
--> pasteundo() reverses the substitution at commit time, so what
--> actually RUNS still has real newlines in it.
+-> safe-paste insert (b29 - the SECOND redesign, see todo.md for
+-> why b28's pilcrow-marker version was abandoned): the first
+-> line's worth of b[] (up to the first LF, or all of it if there
+-> is none) becomes literal text at the cursor - NOT via dovanilla,
+-> deliberately: a pasted Tab/Ctrl-R/Esc byte must never trigger
+-> completion or search or a line-clear, it should just be an odd-
+-> looking literal character, the same way a stray control byte
+-> typed by hand would be if this codepath ever saw it. Anything
+-> past that first LF queues, never runs here - the line the user
+-> SEES is always完全 ordinary, single-row, ACTUAL edit-line
+-> content, ZERO new rendering concepts, because it always really
+-> is just one line.
 PROC pasteinsert(b:PTR TO CHAR, take)
+  DEF s:PTR TO CHAR, l, cap, k, c, j, i
+  i := 0
+  WHILE (i < take) AND (b[i] <> 10)
+    i++
+  ENDWHILE
+  s := curcon.ebuf
+  l := StrLen(s)
+  cap := edcap()
+  FOR k := 0 TO i - 1
+    c := b[k]
+    IF ((c >= 32) AND (c <= 126)) OR (c >= 160)
+      IF l < cap
+        FOR j := l - 1 TO curcon.cpos STEP -1
+          s[j + 1] := s[j]
+        ENDFOR
+        s[curcon.cpos] := c
+        l := l + 1
+        curcon.cpos := curcon.cpos + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  SetStr(curcon.ebuf, l)
+  IF i < take THEN pasteappend(b + i + 1, take - i - 1)
+ENDPROC
+
+-> append len bytes (a raw span, NOT null-terminated - a slice of
+-> the shared clipboard buffer) to the queued paste tail. Allocated
+-> lazily so a window that never pastes multi-line text never pays
+-> for it. A second paste arriving while one is still queued
+-> appends rather than clobbering it - nothing pasted is silently
+-> lost, only ever truncated if it would overflow PASTEQMAX.
+PROC pasteappend(text:PTR TO CHAR, len)
+  DEF cur, room
+  IF len <= 0 THEN RETURN
+  IF curcon.pasteq = NIL THEN curcon.pasteq := String(PASTEQMAX)
+  IF curcon.pasteq = NIL THEN RETURN
+  cur := StrLen(curcon.pasteq)
+  room := (PASTEQMAX - 1) - cur
+  IF room <= 0 THEN RETURN
+  IF len > room THEN len := room
+  CopyMem(text, curcon.pasteq + cur, len)
+  SetStr(curcon.pasteq, cur + len)
+ENDPROC
+
+-> pull the next queued line into the (already-empty) edit line,
+-> literal insert same as the first line got - called from
+-> dovanilla's Return commit, right after the CURRENT line is
+-> cleared, so each real Enter runs one line and loads the next.
+-> The pending-paste HINT ROW (below the prompt) is not touched
+-> here - it is recomputed on every drawedit() call, same as the
+-> ghost and search banner, and dovanilla calls drawedit() right
+-> after this anyway.
+PROC pastepull()
+  DEF q:PTR TO CHAR, ql, i, j
+  q := curcon.pasteq
+  IF q = NIL THEN RETURN
+  ql := StrLen(q)
+  IF ql = 0 THEN RETURN
+  i := 0
+  WHILE (i < ql) AND (q[i] <> 10)
+    i++
+  ENDWHILE
+  pasteinsline1(q, i)
+  IF i < ql
+    FOR j := 0 TO ql - i - 2
+      q[j] := q[i + 1 + j]
+    ENDFOR
+    SetStr(q, ql - i - 1)
+  ELSE
+    SetStr(q, 0)
+  ENDIF
+ENDPROC
+
+-> the shared insert-at-cursor body pasteinsert's first line and
+-> pastepull's later ones both need - split out once there were
+-> two callers, same shift-right/drop-in/SetStr shape dovanilla's
+-> own printable-character branch uses
+PROC pasteinsline1(b:PTR TO CHAR, n)
   DEF s:PTR TO CHAR, l, cap, k, c, j
   s := curcon.ebuf
   l := StrLen(s)
   cap := edcap()
-  FOR k := 0 TO take - 1
+  FOR k := 0 TO n - 1
     c := b[k]
-    IF c = 10 THEN c := PASTENL
     IF ((c >= 32) AND (c <= 126)) OR (c >= 160)
       IF l < cap
         FOR j := l - 1 TO curcon.cpos STEP -1
@@ -2460,15 +2548,78 @@ PROC pasteinsert(b:PTR TO CHAR, take)
   SetStr(curcon.ebuf, l)
 ENDPROC
 
--> reverse pasteinsert's substitution on a committed line: PASTENL
--> back to a real LF, in place. Called right before a commit is
--> echoed/enqueued, never before - the edit line itself keeps
--> showing the pilcrow right up to the moment it actually runs.
-PROC pasteundo(s:PTR TO CHAR, l)
-  DEF i
+-> how many MORE lines (beyond the one on screen right now) are
+-> still queued - LF count, plus one more if a non-empty tail
+-> follows the last LF (a paste need not end with a trailing break)
+PROC pastelines(q:PTR TO CHAR)
+  DEF l, i, n, tail
+  IF q = NIL THEN RETURN 0
+  l := StrLen(q)
+  IF l = 0 THEN RETURN 0
+  n := 0
+  tail := FALSE
   FOR i := 0 TO l - 1
-    IF s[i] = PASTENL THEN s[i] := 10
+    IF q[i] = 10
+      n++
+      tail := FALSE
+    ELSE
+      tail := TRUE
+    ENDIF
   ENDFOR
+  IF tail THEN n := n + 1
+ENDPROC n
+
+-> make room for the pending-paste hint row (one extra row below
+-> the edit line's own last row) - same scroll-until-it-fits shape
+-> dotab's completion menu already uses for the same problem
+PROC pastehintroom(l)
+  WHILE ((edlastrow(l) + 1) > (curcon.rows - 1)) AND (curcon.ancy > 0)
+    screenscroll()
+    IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1
+  ENDWHILE
+ENDPROC
+
+-> the pending-paste hint: a grey advisory row just below the edit
+-> line while a multi-line paste is still queued - his ask, more
+-> visible than a title-bar string. Modeled on the completion
+-> menu's OWN pattern (tcmenucalc/tcmenudraw/tcclose): pixels only,
+-> never touches the model, so "closing" it is always just
+-> repainting that one row from the model - and because it's
+-> recomputed on every drawedit() call (like the ghost and the
+-> Ctrl+R banner), there is no separate "hide the hint" call
+-> anywhere - Esc and the last pastepull() both just leave
+-> curcon.pasteq empty, and the next drawedit() notices.
+PROC pastehintshow(l)
+  DEF row, n, txt[80]:ARRAY OF CHAR, tl
+  -> always erase the OLD position first - the simplest way to
+  -> never leave a stale hint when the line's wrapped height
+  -> changes between keystrokes. Skip if the edit line's OWN paint
+  -> already covers that row now (grew to reach it) - that paint
+  -> already ran, above, and must not be stomped by a stale-model
+  -> repaint here.
+  IF curcon.pastehintrow >= 0
+    IF (curcon.pastehintrow > edlastrow(l)) AND
+       (curcon.pastehintrow <= (curcon.rows - 1))
+      drawmodelrow(curcon.pastehintrow)
+    ENDIF
+    curcon.pastehintrow := -1
+  ENDIF
+  IF curcon.sb = NIL THEN RETURN    -> no model = no way to restore later
+  n := pastelines(curcon.pasteq)
+  IF n = 0 THEN RETURN
+  IF ghostpen() < 0 THEN RETURN     -> same readable-grey rule the ghost uses
+  row := edlastrow(l) + 1
+  IF row > (curcon.rows - 1) THEN RETURN  -> no room even after scrolling
+  StringF(txt, '\d more line\s queued - Enter runs this one, Esc cancels all',
+          n, IF n = 1 THEN '' ELSE 's')
+  tl := Min(StrLen(txt), curcon.cols)
+  SetAPen(curcon.rp, ghostpen())
+  SetBPen(curcon.rp, 0)
+  Move(curcon.rp, curcon.left, curcon.topy + Mul(row, curcon.ch) + curcon.baseline)
+  Text(curcon.rp, txt, tl)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+  curcon.pastehintrow := row
 ENDPROC
 
 -> redraw the whole grid from the model at the current view offset;
@@ -3281,6 +3432,9 @@ PROC drawedit()
   oldext := curcon.edext
   l := StrLen(curcon.ebuf)
   edroom(l)
+  IF curcon.pasteq THEN pastehintroom(l)  -> one more row for the hint,
+                                          -> before anything below
+                                          -> depends on final row counts
   s := curcon.ebuf
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
@@ -3433,6 +3587,10 @@ PROC drawedit()
   ENDIF
   curcon.edlast := l
   curcon.edext := newext        -> text + the blip cell + any ghost
+  -> unconditional: this is what notices a hint needs to disappear
+  -> (the last pastepull() or an Esc left curcon.pasteq empty) just
+  -> as much as it notices one needs to appear or move
+  pastehintshow(l)
 ENDPROC
 
 -> ---------- Ctrl+R incremental history search (readline) ----------
@@ -3702,15 +3860,14 @@ PROC dovanilla(code, qual)
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF code = 13
-    -> commit: echo the line into the transcript, feed the readers.
-    -> Theme B: history remembers a pasted line with its PASTENL
-    -> pilcrows still in it (so Up/Down recall re-shows them
-    -> correctly, still editable, exactly like a fresh paste would)
-    -> - only AFTER that does pasteundo turn them back into the
-    -> real newlines render()/enqueue() need, so a multi-line paste
-    -> echoes as proper multi-row output and the shell reads it as
-    -> the several separate commands it always was.
+    -> commit: echo the line into the transcript, feed the readers
     eraseedit()
+    render(curcon.ebuf, l)
+    outnl()
+    FOR j := 0 TO l - 1
+      enqueue(s[j])
+    ENDFOR
+    enqueue(10)
     IF l > 0
       histremember(curcon.ebuf)  -> shared ring (Theme B)
       -> flush to disk on every command, not just last-window-close -
@@ -3719,16 +3876,14 @@ PROC dovanilla(code, qual)
       -> so an unclean reboot lost everything since the last close)
       savehistfile()
     ENDIF
-    pasteundo(curcon.ebuf, l)
-    render(curcon.ebuf, l)
-    outnl()
-    FOR j := 0 TO l - 1
-      enqueue(s[j])
-    ENDFOR
-    enqueue(10)
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
     curcon.hpos := -1
+    -> Theme B (b29): a queued paste tail feeds its next line in
+    -> right here, one per real Enter - never auto-run. The hint
+    -> row updates itself on the drawedit() call right below,
+    -> nothing extra needed here.
+    pastepull()
     reanchor()
     drawedit()
     inputarrived()
@@ -3742,12 +3897,13 @@ PROC dovanilla(code, qual)
       Signal(curcon.breaktask, Shl(SIGBREAKF_CTRL_C, code - 3))
     ENDIF
   ELSEIF code = 27
-    -> a pending multi-line paste (its embedded newlines still
-    -> showing as PASTENL pilcrows) is just ordinary ebuf content
-    -> now - clearing the line clears all of it, nothing separate
-    -> left over to surprise a later Enter
+    -> Esc abandons the WHOLE pending paste, not just the visible
+    -> line - the hint row says "Esc cancels all" and means it;
+    -> otherwise a later, unrelated Enter would silently pull in
+    -> whatever was left queued
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
+    IF curcon.pasteq THEN SetStr(curcon.pasteq, 0)
     drawedit()
   ELSEIF code = 8
     -> Backspace: delete before the cursor, close the gap
@@ -5002,4 +5158,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b28 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b29 CCON: LTX console handler', 0
