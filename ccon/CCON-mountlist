@@ -1,8 +1,9 @@
 /* CCON-mountlist - the CCON: console handler, its CRAW: (raw-by-
-** default) counterpart, and CON:/RAW: stanzas for testing the
-** system-wide takeover (v1.2 territory - EXPERIMENTAL, see
-** ccon/todo.md "Mount it AS CON:"). One file, four devices - same
-** shape KingCON's own mountlist uses.
+** default) counterpart, and CON:/RAW: stanzas for replacing the
+** system console entirely, KingCON style (EXPERIMENTAL, but boot-
+** confirmed working - see ccon.doc section 14 for the full story,
+** what still only shows "CCON:" cosmetically, and how to undo it).
+** One file, four devices - same shape KingCON's own mountlist uses.
 **
 ** Install:  copy ccon-handler to L:
 **           copy CCON-mountlist to DEVS:

@@ -1,5 +1,14 @@
+Short:        CCon v1.1 - Ultimate CON Replacement
+Author:       tobias.karlsson at piratkopia.se (Tobias Karlsson)
+Uploader:     tobias.karlsson@piratkopia.se (Tobias Karlsson)
+Type:         util/shell
+Version:      1.1
+Architecture: m68k-amigaos
+
+
   CCON: - a console handler with output scrollback for AmigaOS.
 =================================================================
+
 
 WHAT IT IS
 
@@ -90,7 +99,7 @@ LIMITATIONS
 INSTALL
 
   copy L/ccon-handler L:
-  copy DEVS/ccon-mountlist DEVS:
+  copy DEVS/#? DEVS:
   Mount CCON: FROM DEVS:CCON-mountlist
   Mount CRAW: FROM DEVS:CCON-mountlist
   NewShell CCON:

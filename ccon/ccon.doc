@@ -19,10 +19,11 @@
    11. Copy and paste
    12. Raw mode and CRAW:
    13. Running fullscreen programs (Ed, More)
-   14. How it works, briefly
-   15. Known limitations
-   16. Building from source
-   17. Files
+   14. Replacing the system console (experimental)
+   15. How it works, briefly
+   16. Known limitations
+   17. Building from source
+   18. Files
 
 
 1. WHAT CCON: IS
@@ -58,7 +59,15 @@
     - fullscreen programs work: Ed with working menus, More -
       and More leaves your scrollback transcript as it found it,
       xterm-alternate-screen style
+    - history is shared and persistent across every window, not
+      lost when one closes
+    - Ctrl+R searches scrollback CONTENT once you're scrolled
+      back, not just commands - the same key, retargeted
+    - RAMIGA-V pastes safely, one line at a time, never blindly
+      running a whole clipboard's worth of commands
     - a raw twin device, CRAW:, for RAW:-style uses
+    - can even replace CON:/RAW: system-wide, KingCON style
+      (experimental - section 14)
 
 
 2. REQUIREMENTS
@@ -113,6 +122,9 @@
     NewShell CCON:60/30/500/120/My-Shell
     dir >CCON:0/0/400/200/dir/WAIT
     echo >CCON:0/0/300/80/log/AUTO/WAIT starting...
+
+  A bare CCON: with no geometry opens at 0/18/640/130 - the same
+  position and size a stock NewShell window opens at.
 
   width or height of -1 fills the REST of the screen it opens
   on, measured from X/Y - not the screen's raw size regardless of
@@ -177,7 +189,7 @@
              30-33 from programs are then treated as WORKBENCH pen
              numbers and retargeted at the theme (C:Ed hardcodes
              WB pens; without this it would render in ANSI red).
-             See section 14 for the full colour story.
+             See section 15 for the full colour story.
 
   FONTname/size
              Open the window in this font, loading it from disk if
@@ -190,7 +202,7 @@
   LINESn     How many lines of scrollback THIS window keeps
              (default 512, floor 100, ceiling 5000). Raise it for
              a deep transcript, lower it on a tight machine - see
-             section 15 for the cost per line.
+             section 16 for the cost per line.
 
   Not implemented: SMART, SIMPLE, ALT, ICONIFY.
 
@@ -486,7 +498,50 @@
   screen (More mid-page), where scrolling is refused, xterm manners.
 
 
-14. HOW IT WORKS, BRIEFLY
+14. REPLACING THE SYSTEM CONSOLE (EXPERIMENTAL)
+--------------------------------------------------------------------------
+
+  CCON:'s own mountlist also carries CON: and RAW: stanzas,
+  pointing at the exact same handler - the trick KingCON uses to
+  become the system console. Dismount the stock devices, then
+  mount CCON: under their names instead:
+
+    Assign CON: DISMOUNT
+    Assign RAW: DISMOUNT
+    Mount CON: FROM DEVS:CCON-mountlist
+    Mount RAW: FROM DEVS:CCON-mountlist
+
+  From that point on, EVERY console the system opens - Startup-
+  Sequence output, requesters, EndCLI, a plain NewShell CON: -
+  opens through CCON: instead. A window already open when you run
+  the Assign/Mount pair keeps whatever handler it already had;
+  only NEW opens are affected.
+
+  This needs no code changes to work: the shell's console probe
+  (section 2) never checks which device name it was opened under,
+  only what CCON: answers - so it hands editing to itself under
+  CON: exactly as it does under its own name. Boot-tested working,
+  including being made permanent via S:User-Startup (below).
+
+  Two cosmetic-only quirks, not bugs: a window opened this way
+  still shows "CCON:" as its default title, and it still answers
+  "CCON" (not "CON ") to low-level tools that ask a handler's name
+  - neither affects how it behaves.
+
+  Put the Assign/Mount lines in S:User-Startup, NOT in Startup-
+  Sequence itself, so anything Startup-Sequence needs CON: for
+  before that point still gets the stock console - only your own
+  session onward runs on CCON:.
+
+  Marked experimental because the blast radius is different from
+  everything else in this handbook: instead of "windows you asked
+  for," it becomes "every console the OS opens." To undo it for
+  the rest of a session, Assign CON:/RAW: DISMOUNT again and
+  re-Mount the stock devices from DEVS:mountlist; a reboot undoes
+  it for good if you have not made it permanent yet.
+
+
+15. HOW IT WORKS, BRIEFLY
 --------------------------------------------------------------------------
 
   CCON: is a DOS packet handler written in Amiga E. A few of its
@@ -534,7 +589,7 @@
   apply per window.
 
 
-15. KNOWN LIMITATIONS
+16. KNOWN LIMITATIONS
 --------------------------------------------------------------------------
 
   - The scrollback model costs about 120K per window at 80 columns
@@ -544,11 +599,11 @@
   - Completion: no quoted words, one menu page, no volume-name
     completion for a bare word.
   - SMART/SIMPLE, ALT and ICONIFY are not implemented.
-  - A borrowed window (WINDOW0x) keeps its owner's font; FONT only
-    applies to windows CCON: opens itself.
+  - A borrowed window (WINDOW0xADDR) keeps its owner's font; FONT
+    only applies to windows CCON: opens itself.
 
 
-16. BUILDING FROM SOURCE
+17. BUILDING FROM SOURCE
 --------------------------------------------------------------------------
 
   The prebuilt binary is included; nothing needs compiling. To
@@ -562,12 +617,14 @@
   verified by disassembling the compiler's generated startup code.
 
 
-17. FILES
+18. FILES
 --------------------------------------------------------------------------
 
   L/ccon-handler         the handler
-  DEVS/CCON-mountlist    Mount CCON: or CRAW: FROM this - one file,
-                         two device stanzas, same shape KingCON uses
+  DEVS/CCON-mountlist    Mount CCON:, CRAW:, CON: or RAW: FROM
+                         this - one file, four device stanzas
+                         (the last two experimental, section 14),
+                         same shape KingCON's own mountlist uses
   ccon.readme            short-form readme
   ccon.doc               this manual
 
