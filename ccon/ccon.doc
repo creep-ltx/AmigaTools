@@ -36,7 +36,8 @@
   The reason it exists is OUTPUT SCROLLBACK. The stock 3.2 console
   has none, and cannot be given any from the outside: commands talk
   to the handler, so a terminal program cannot bolt scrollback on.
-  CCON: keeps 4000 lines of history behind every window.
+  CCON: keeps 1000 lines of history behind every window by
+  default (LINES=n asks for more, up to 4000).
 
   Around that core it grew into a full console with a modern shell
   feel:
@@ -71,8 +72,9 @@
   where the history, completion, ghosts and search live.
 
   Memory: each window allocates its scrollback model at open time,
-  roughly 600K at 80 columns. Plenty on an expanded machine; mind
-  it on a 2MB one.
+  roughly 235K at 80 columns and the default 1000 lines (LINES=n
+  scales it directly, up to 4000). Plenty on an expanded machine;
+  mind it on a 2MB one.
 
 
 3. INSTALLATION
@@ -112,6 +114,11 @@
     NewShell CCON:60/30/500/120/My-Shell
     dir >CCON:0/0/400/200/dir/WAIT
     echo >CCON:0/0/300/80/log/AUTO/WAIT starting...
+
+  width or height of -1 fills the screen it opens on:
+
+    NewShell CCON:0/0/-1/-1
+    NewShell CCON:0/0/-1/300
 
   EVERY open gets its own console and window, exactly as with stock
   CON:. A redirect like `list >CCON:` opens (and, without WAIT,
@@ -175,9 +182,9 @@
              fit the cell model). Example: FONTmicroknight/8.
 
   LINESn     How many lines of scrollback THIS window keeps
-             (default 4000, floor 100). Lower it on a tight machine
-             to shrink the model - see section 15 for the cost per
-             line.
+             (default 1000, floor 100, ceiling 4000). Raise it for
+             a deep transcript, lower it on a tight machine - see
+             section 15 for the cost per line.
 
   Not implemented: SMART, SIMPLE, ALT, ICONIFY.
 
@@ -314,7 +321,8 @@
 10. SCROLLBACK
 --------------------------------------------------------------------------
 
-  Every window remembers 4000 lines. Viewing:
+  Every window remembers 1000 lines by default (LINESn asks for
+  more, up to 4000 - section 5). Viewing:
 
     Shift+Up / Shift+Down   page back / forward  (cooked mode)
     Ctrl+Up / Ctrl+Down     one line at a time   (ALL modes)
@@ -432,8 +440,9 @@
   are translated BY COLOUR to the screen's nearest real pens. So
   directories are genuinely blue everywhere, and Ed is never red.
 
-  Each window's display is backed by a scrollback model (4000
-  lines by default, or LINES=n) with one attribute byte per cell
+  Each window's display is backed by a scrollback model (1000
+  lines by default, LINES=n for more up to 4000) with one
+  attribute byte per cell
   plus a style byte for SGR 3/4/7 (italic, underline, inverse -
   inverse is a pen swap at paint time, never a stored colour).
   Redraws, scrollback, selection repaints, menu restores and the
@@ -457,9 +466,9 @@
 15. KNOWN LIMITATIONS
 --------------------------------------------------------------------------
 
-  - History is per window and ends with it.
-  - The scrollback model costs about 600K per window at 80 columns
-    (LINES=n scales this up or down).
+  - The scrollback model costs about 235K per window at 80 columns
+    and the default 1000 lines (LINES=n scales this up to 4000,
+    or down to a floor of 100).
   - CSI K under a coloured background erases to black.
   - Completion: no quoted words, one menu page, no volume-name
     completion for a bare word.

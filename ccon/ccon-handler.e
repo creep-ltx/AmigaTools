@@ -76,7 +76,12 @@ CONST MARGIN=4,
                         -> LINEMAX is ~80K once, not 32 * N windows)
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
-      SBMAX=4000,       -> scrollback model, lines (like CTerm 0.1)
+      SBMAX=1000,       -> scrollback model, lines - the DEFAULT
+                        -> depth (his footprint pass, 19.7.26: 4000
+                        -> was the 1.0 hardcode; LINES=n opts UP,
+                        -> capped at SBMAXCAP below)
+      SBMAXCAP=4000,    -> LINES=n ceiling - no accidental multi-MB
+                        -> windows from a typo or a big number
       TCMAX=80,         -> tab completion: max candidates collected
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       WQMAX=16,         -> writes parked during a selection drag
@@ -100,6 +105,15 @@ OBJECT ihev
   secs:LONG
   mics:LONG
   con:LONG          -> M10b: the console the event was captured for
+ENDOBJECT
+
+-> a CLI's command path (cli_CommandDir): a plain BPTR-linked list
+-> of these, one per Path entry, unchanged since 1.x - not in any
+-> stock E module, cross-checked against amitools' PathStruct
+-> (path_Next/path_Lock, two BPTRs, nothing else).
+OBJECT pathnode
+  next:LONG
+  lock:LONG
 ENDOBJECT
 
 -> M10 step A: everything per-window lives in ONE console object; the
@@ -1048,7 +1062,11 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.pinactive := TRUE
   ELSEIF StrCmp(tok, 'SCREEN', 6)
     -> SCREENname, stock syntax: open on that public screen
-    -> (name taken case-preserved from the raw token)
+    -> (name taken case-preserved from the raw token). A bare
+    -> "SCREEN" with nothing after is NOT a match - matters now
+    -> that field 4 (the title) tries this too: a title that
+    -> merely STARTS with a keyword must fall through to being
+    -> a title, not a silently-broken option.
     v := 6
     c := 0
     WHILE tok2[v] AND (c < 63)
@@ -1057,6 +1075,7 @@ PROC parseopt(tok:PTR TO CHAR)
       v++
     ENDWHILE
     curcon.pscrname[c] := 0
+    IF c = 0 THEN matched := FALSE
   ELSEIF StrCmp(tok, 'WBPENS')
     -> translate the classic Workbench pens when a program
     -> hardcodes them: C:Ed prints its body text as SGR 31
@@ -1071,7 +1090,7 @@ PROC parseopt(tok:PTR TO CHAR)
     -> PENn: the default text pen (CTerm sends PEN7 with its
     -> ANSI palette, where pen 1 is ANSI red)
     v := tcnum(tok + 3)
-    IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v
+    IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v ELSE matched := FALSE
   ELSEIF StrCmp(tok, 'WINDOW0X', 8)
     v := 0
     c := 8
@@ -1080,17 +1099,20 @@ PROC parseopt(tok:PTR TO CHAR)
         v := Shl(v, 4) + (tok[c] - 48)
       ELSEIF (tok[c] >= "A") AND (tok[c] <= "F")
         v := Shl(v, 4) + (tok[c] - 55)
+      ELSE
+        matched := FALSE
       ENDIF
       c++
     ENDWHILE
-    curcon.fwptr := v
+    IF matched THEN curcon.fwptr := v
   ELSEIF StrCmp(tok, 'LINES', 5)
     -> v1.1: the memory knob - model depth per console. tcnum
-    -> already caps at 20000; openwin floors at 100.
+    -> already caps at 20000; openwin floors at 100, ceilings at
+    -> SBMAXCAP (4000, the OLD 1.0-era default).
     v := 5
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
-    IF v >= 0 THEN curcon.plines := v
+    IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
   ELSEIF StrCmp(tok, 'FONT', 4)
     -> v1.1: FONTname/size - name case-preserved from the raw
     -> token; ".font" is appended in openwin when missing
@@ -1103,7 +1125,7 @@ PROC parseopt(tok:PTR TO CHAR)
       v++
     ENDWHILE
     curcon.pfontname[c] := 0
-    IF c > 0 THEN curcon.pfontexp := TRUE
+    IF c > 0 THEN curcon.pfontexp := TRUE ELSE matched := FALSE
   ELSE
     matched := FALSE
   ENDIF
@@ -1111,7 +1133,7 @@ ENDPROC matched
 
 PROC parsecon(bname)
   DEF s:PTR TO CHAR, l, i, f, tl, v, c, optmode=FALSE,
-      tok[84]:ARRAY OF CHAR
+      tok[84]:ARRAY OF CHAR, torig[84]:ARRAY OF CHAR
   curcon.pwx := 40
   curcon.pwy := 40
   curcon.pww := 520
@@ -1178,13 +1200,52 @@ PROC parsecon(bname)
       v := tcnum(tok)
       IF v >= 0 THEN curcon.pwy := v
     ELSEIF f = 2
-      v := tcnum(tok)
-      IF v >= 0 THEN curcon.pww := v
+      -> his ask, 19.7.26: width/height=-1 fills the screen (openwin
+      -> resolves the sentinel once it has a screen to measure).
+      -> tcnum() itself has no minus-sign support and would just
+      -> read "-1" as invalid (silently ignored, the OLD behaviour)
+      -> - the literal string is checked first so it means FILL,
+      -> not "leave the default".
+      IF StrCmp(tok, '-1')
+        curcon.pww := -1
+      ELSE
+        v := tcnum(tok)
+        IF v >= 0 THEN curcon.pww := v
+      ENDIF
     ELSEIF f = 3
-      v := tcnum(tok)
-      IF v >= 0 THEN curcon.pwh := v
+      IF StrCmp(tok, '-1')
+        curcon.pwh := -1
+      ELSE
+        v := tcnum(tok)
+        IF v >= 0 THEN curcon.pwh := v
+      ENDIF
     ELSEIF f = 4
-      IF tl > 0 THEN StrCopy(curcon.wtitlebase, tok)
+      -> the title-slot footgun (his catch, 19.7.26): with explicit
+      -> geometry given, field 4 is ALWAYS the title - so
+      -> "0/0/640/100/LINES384" silently made "LINES384" the
+      -> TITLE and never touched plines at all, no error, no
+      -> warning. Now field 4 tries parseopt FIRST; every prefix
+      -> branch in it fails closed (matched=FALSE) unless its
+      -> suffix genuinely parses, so an ordinary title merely
+      -> STARTING with a keyword ("Screensaver-log", "Penguin")
+      -> still falls through and becomes the title exactly as
+      -> before - only a token that actually parses as a real
+      -> option (LINES384, FONTtopaz/8, WAIT, PEN7, ...) gets
+      -> diverted.
+      IF tl > 0
+        -> parseopt folds tok to uppercase IN PLACE even when it
+        -> ends up not matching - a title must keep its real case,
+        -> so save it before the call, not after. A manual copy,
+        -> not StrCopy: tok/torig are plain fixed arrays, not
+        -> String()-allocated E strings, and StrCopy needs the
+        -> latter's hidden header (the same trap dirp's own
+        -> byte-loop below already routes around).
+        FOR v := 0 TO tl - 1
+          torig[v] := tok[v]
+        ENDFOR
+        torig[tl] := 0
+        IF parseopt(tok) = FALSE THEN StrCopy(curcon.wtitlebase, torig)
+      ENDIF
     ELSE
       parseopt(tok)
     ENDIF
@@ -1372,8 +1433,6 @@ PROC openwin()
     curcon.oldidcmp := curcon.win.idcmpflags
     ModifyIDCMP(curcon.win, idc)
   ELSE
-    IF curcon.pww < 160 THEN curcon.pww := 160
-    IF curcon.pwh < 60 THEN curcon.pwh := 60
     -> the fallback is a failure state now - say so where a
     -> screenshot shows it (chain-on and fallback windows behave
     -> identically until Ed's menus are tried)
@@ -1381,9 +1440,31 @@ PROC openwin()
     -> M9: SCREENname opens on that public screen (locked for the
     -> OpenWindow only - the window itself then holds the screen);
     -> the no-name/failed case is NIL = the default public screen,
-    -> which is exactly where windows went before
+    -> which is exactly where windows went before. Locked here
+    -> (not just when SCREENname is given) whenever -1/-1 needs a
+    -> screen to measure, so the SAME lock that answers "how big"
+    -> is the one the window actually opens on - no re-resolving
+    -> "the default screen" a second time and risking a different
+    -> answer between the two calls.
     pubscr := NIL
-    IF curcon.pscrname[0] THEN pubscr := LockPubScreen(curcon.pscrname)
+    IF curcon.pscrname[0]
+      pubscr := LockPubScreen(curcon.pscrname)
+    ELSEIF (curcon.pww = -1) OR (curcon.pwh = -1)
+      pubscr := LockPubScreen(NIL)
+    ENDIF
+    -> his ask, 19.7.26: WIDTH/HEIGHT=-1 fills the screen he's
+    -> opening on. A failed lock (named screen gone, or the
+    -> default somehow unavailable) falls back to a sane fixed
+    -> size rather than leaving the -1 sentinel to hit the floor
+    -> clamps below and open as a tiny 160x60 window instead.
+    IF pubscr
+      IF curcon.pww = -1 THEN curcon.pww := pubscr.width
+      IF curcon.pwh = -1 THEN curcon.pwh := pubscr.height
+    ENDIF
+    IF curcon.pww = -1 THEN curcon.pww := 640
+    IF curcon.pwh = -1 THEN curcon.pwh := 200
+    IF curcon.pww < 160 THEN curcon.pww := 160
+    IF curcon.pwh < 60 THEN curcon.pwh := 60
     curcon.win := OpenWindowTagList(NIL,
       [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
        WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
@@ -1488,6 +1569,7 @@ PROC openwin()
   v := curcon.plines
   IF v = 0 THEN v := SBMAX
   IF v < 100 THEN v := 100
+  IF v > SBMAXCAP THEN v := SBMAXCAP
   curcon.sbmax := v
   curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
   curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
@@ -4376,37 +4458,127 @@ PROC savehistfile()
   Dispose(fh)
 ENDPROC
 
--> scan the resolved directory for names starting with the prefix
-PROC tcscan(pfx:PTR TO CHAR, plen)
-  DEF res, nbuf[112]:ARRAY OF CHAR, l, p:PTR TO CHAR
-  curcon.tcn := 0
-  curcon.tcpu := 0
-  curcon.tcmore := FALSE
-  res := fscall(curcon.fsdirport, ACTION_EXAMINE_OBJECT, curcon.fsdirlock,
-                Shr(fsfib, 2), 0)
+-> is name already a candidate? (case-folded) - only matters once a
+-> word can gather candidates from more than one source (Theme B
+-> command completion: resident list + several Path directories can
+-> legitimately name the same command)
+PROC tchas(name:PTR TO CHAR)
+  DEF i
+  FOR i := 0 TO curcon.tcn - 1
+    IF tccmp(curcon.tcc[i] + 1, name) = 0 THEN RETURN TRUE
+  ENDFOR
+ENDPROC FALSE
+
+-> append one candidate to the pool - the packing tcscanone and
+-> tcscancmd both need, factored out once there were two sources
+PROC tcadd(name:PTR TO CHAR, isdir, hidden)
+  DEF l, p:PTR TO CHAR
+  IF tchas(name) THEN RETURN
+  l := StrLen(name)
+  IF (curcon.tcn >= TCMAX) OR ((curcon.tcpu + l + 3) >= TCPOOLSZ)
+    curcon.tcmore := TRUE
+    RETURN
+  ENDIF
+  p := curcon.tcpool + curcon.tcpu
+  p[0] := IF isdir THEN 1 ELSE 0
+  IF hidden THEN p[0] := p[0] OR 2
+  CopyMem(name, p + 1, l + 1)
+  curcon.tcc[curcon.tcn] := p
+  curcon.tcn := curcon.tcn + 1
+  curcon.tcpu := curcon.tcpu + l + 2
+ENDPROC
+
+-> scan ONE directory (port/lock) for names starting with the
+-> prefix, appending into whatever the pool already holds - the
+-> single-directory case (tcscan) resets first; the multi-source
+-> case (tcscancmd) resets once and calls this per Path entry
+PROC tcscanone(port:PTR TO mp, lock, pfx:PTR TO CHAR, plen)
+  DEF res, nbuf[112]:ARRAY OF CHAR, l
+  res := fscall(port, ACTION_EXAMINE_OBJECT, lock, Shr(fsfib, 2), 0)
   IF res = 0 THEN RETURN
   IF fsfib.direntrytype <= 0 THEN RETURN   -> a file, not a directory
-  WHILE fscall(curcon.fsdirport, ACTION_EXAMINE_NEXT, curcon.fsdirlock,
-               Shr(fsfib, 2), 0)
+  WHILE fscall(port, ACTION_EXAMINE_NEXT, lock, Shr(fsfib, 2), 0)
     tcfibname(nbuf)
     l := StrLen(nbuf)
     IF l > 0
       IF (plen = 0) OR tcpref(nbuf, pfx, plen)
-        IF (curcon.tcn < TCMAX) AND ((curcon.tcpu + l + 3) < TCPOOLSZ)
-          p := curcon.tcpool + curcon.tcpu
-          p[0] := IF fsfib.direntrytype > 0 THEN 1 ELSE 0
-          IF tchidname(nbuf, l, fsfib.protection)
-            p[0] := p[0] OR 2
-          ENDIF
-          CopyMem(nbuf, p + 1, l + 1)
-          curcon.tcc[curcon.tcn] := p
-          curcon.tcn := curcon.tcn + 1
-          curcon.tcpu := curcon.tcpu + l + 2
-        ELSE
-          curcon.tcmore := TRUE
-        ENDIF
+        tcadd(nbuf, fsfib.direntrytype > 0, tchidname(nbuf, l, fsfib.protection))
       ENDIF
     ENDIF
+  ENDWHILE
+ENDPROC
+
+-> scan the resolved directory for names starting with the prefix
+PROC tcscan(pfx:PTR TO CHAR, plen)
+  curcon.tcn := 0
+  curcon.tcpu := 0
+  curcon.tcmore := FALSE
+  tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
+ENDPROC
+
+-> PARKED (19.7.26 night) - dotab() no longer calls this. Tried as
+-> word-one command completion (resident + C: + Path, later merged
+-> with the current directory too), but he found it cluttered the
+-> menu with entries he didn't want mixed into plain filename
+-> completion and asked to revert. Left compiled-in and unused so
+-> the plumbing (FindSegment/resident list, the pathnode/Path-chain
+-> walk, all struct-offset-verified) doesn't have to be re-derived
+-> if this gets picked back up later - see todo.md Theme B #2.
+->
+-> What it did: resident commands (memory-resident, Forbid()-
+-> walkable via FindSegment, no packets - RKM: "must Forbid() lock
+-> the list to use this call"), the current directory, C: always,
+-> and every directory in the CLI's command path (cli_CommandDir).
+PROC tcscancmd(pfx:PTR TO CHAR, plen)
+  DEF seg:PTR TO segment, proc:PTR TO process,
+      cli:PTR TO commandlineinterface, pnb, pn:PTR TO pathnode,
+      fl:PTR TO filelock, port:PTR TO mp
+  curcon.tcn := 0
+  curcon.tcpu := 0
+  curcon.tcmore := FALSE
+  Forbid()
+  seg := FindSegment(NIL, NIL, TRUE)
+  WHILE seg
+    IF seg.uc = CMD_INTERNAL
+      IF (plen = 0) OR tcpref(seg.name, pfx, plen) THEN tcadd(seg.name, FALSE, FALSE)
+    ENDIF
+    seg := FindSegment(NIL, seg, TRUE)
+  ENDWHILE
+  Permit()
+  -> the current directory too - his catch: word-one completion
+  -> was searching ONLY where the shell would find something to
+  -> RUN, which meant sitting in RAM: and hitting Tab showed C:'s
+  -> commands while ignoring RAM: entirely. Merge, don't exclude -
+  -> `d<Tab>` in RAM: should offer `demo/` from RAM: AND `delete`
+  -> from C: in the same menu, not pick one source and hide the
+  -> other. tcresolve('') is the exact same CWD lookup plain word
+  -> completion already used (tcclient's blocked-reader current
+  -> dir) - just called explicitly instead of from a typed dirpart.
+  IF tcresolve('')
+    tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
+    tcfreelock()
+  ENDIF
+  -> C: always, regardless of the Path chain below - the shell
+  -> finds C: commands whether or not Path was ever touched,
+  -> completion should too. tchas already dedupes against anything
+  -> the chain also turns up (C: is normally in it by default).
+  IF tcresolve('C:')
+    tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
+    tcfreelock()
+  ENDIF
+  proc := tcclient()
+  IF proc = NIL THEN RETURN
+  IF proc.cli = 0 THEN RETURN
+  cli := Shl(proc.cli, 2)
+  pnb := cli.commanddir
+  WHILE pnb
+    pn := Shl(pnb, 2)
+    IF pn.lock
+      fl := Shl(pn.lock, 2)
+      port := fl.task
+      IF port THEN tcscanone(port, pn.lock, pfx, plen)
+    ENDIF
+    pnb := pn.next
   ENDWHILE
 ENDPROC
 
@@ -4631,6 +4803,13 @@ PROC dotab(back)
   -> dirpart, or `version l:c<Tab>` eats its "l:" (latent since
   -> M5b - plain words never showed it, path words always did)
   curcon.tcws := sep
+  -> Theme B #2 (word-one command completion) tried and reverted,
+  -> parked for later (19.7.26 night) - cluttered the menu with
+  -> C:/resident/Path entries he didn't want mixed into plain
+  -> filename completion. tcscancmd() and its plumbing stay in the
+  -> source, unused, for whenever it's picked back up (see todo.md).
+  -> Every word, including the first, is plain filename completion
+  -> again - the pre-Theme-B-#2 behaviour, unchanged.
   IF tcresolve(dirp) = FALSE
     DisplayBeep(NIL)
     RETURN
@@ -4723,4 +4902,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b18 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b26 CCON: LTX console handler', 0

@@ -1525,12 +1525,279 @@ fix only removes the SLASH-COUNTING trap.
       the recalled line mid-walk doesn't change it. A bare Up/Down
       on an empty prompt is `histmatches` with an empty filter, so
       it's the exact same code path as before, not a fork.
-- [ ] **First-word command completion.** Tab on word one completes
-      from the resident list (semaphore-walkable, no packets) and
-      the path: C: plus the CLI's path chain (cli_CommandDir lock
-      list — walk the sender's CLI like conbysender does, scan
-      each lock with the M5b machinery). Ghost synergy: people
-      run what they can complete.
+- [ ] **First-word command completion — tried, reverted, PARKED
+      for later (19.7.26 night, "the more I try it the less I
+      like it").** `dotab` captures whether
+      the completed word is word one (`firstword`, before the
+      dirpart-split loop reuses the `i` it was computed from) and,
+      when it's word one AND no explicit path was typed (`dirp[0]
+      = 0`), calls `tcscancmd()` instead of the usual tcresolve+
+      tcscan — command completion, not filename completion. Word
+      two+ and any explicit-path word one (`c:li<Tab>`) are
+      completely untouched.
+
+      `tcscancmd` gathers from two sources, exactly as the design
+      called for: resident commands via `FindSegment(NIL, seg,
+      TRUE)` under Forbid() (not a semaphore as first guessed —
+      the real dos.library autodoc says Forbid(), "no packets"
+      either way; filtered to `seg.uc = CMD_INTERNAL`, the
+      documented "-2 = resident shell command" marker — CMD_SYSTEM
+      -1 and ordinary loaded segments are NOT commands, excluded),
+      then every lock in the CLI's own `cli_CommandDir` chain (the
+      Path list — C: by default, more if he's `Path ADD`ed) via
+      the same M5b directory-scan packets already used for normal
+      completion. NOT the current directory — that's not where the
+      shell looks either, by design.
+
+      `tcscan`'s single-directory body split into `tcscanone(port,
+      lock, pfx, plen)` (the scan) and `tcadd(name, isdir, hidden)`
+      (the pool-pack), so `tcscancmd` can call the same machinery
+      per Path entry without resetting between calls. `tcadd` also
+      gained a dedupe check (`tchas`) — a command can legitimately
+      be both resident AND a file in C:, and two sources merging
+      into one list made that a real (if cosmetic) possibility for
+      the first time; `tcscan`'s original single-directory call
+      never needed it and still doesn't pay for it (an empty list
+      makes `tchas` a fast no-op).
+
+      `pathnode` (next/lock, two BPTRs) isn't in any stock E
+      module — added by hand, cross-checked field-for-field
+      against amitools' `PathStruct` (`path_Next`/`path_Lock`,
+      nothing else) before use, the same discipline as the
+      `FileHandleStruct` check for history. `FindSegment`'s
+      contract (Forbid()-only, no locking, the -1/-2/-999 seg_UC
+      meanings) came from the real dos.library autodoc found on
+      disk, not memory — this one genuinely wasn't remembered
+      correctly at first (thought semaphore, thought di_Handlers/
+      DosInfo was the way in) and the autodoc caught it before any
+      code was written, exactly the point of reading it first.
+
+      **Verification split cleanly in two, same as history:** the
+      dedupe/pool-packing logic (`tchas`/`tcadd`) is pure in-memory
+      — fully proven with a throwaway harness (two colliding names
+      from "different sources" collapse correctly case-fold, a
+      forced pool overflow sets `tcmore` without corrupting
+      anything). The resident-list walk and Path-chain walk are
+      real OS integration — FindSegment found nothing under vamos
+      (no Shell ever populated a resident list there, expected,
+      not a failure) and the Path chain needs a live CLI process
+      vamos doesn't model either. Both are FS-UAE boot-test
+      territory, like the history packet code before it.
+
+      **b20, his catch:** completion should find C: commands
+      ALWAYS, whether or not C: happens to be sitting in the Path
+      chain. The original design leaned on "C: is normally the
+      first Path entry by default" — true in the ordinary case,
+      but a real design smell (silently depending on a default
+      nobody guarantees, and the whole function bailed out with
+      NOTHING if `tcclient()`/`proc.cli` failed to resolve at all,
+      taking C: down with it). Fixed: `tcresolve('C:')` +
+      `tcscanone` run unconditionally, before the Path chain is
+      even reached — C: is found whether or not the CLI resolves,
+      whether or not Path was ever touched. `tchas` already
+      deduped the common case (C: also in the chain); now it earns
+      its keep in the uncommon one too.
+
+      **b21, his catch — a real design problem, not a bug:**
+      "hitting Tab in RAM: should obviously not show everything in
+      C:." b20's model was EXCLUSION — word one searched ONLY the
+      command sources, deliberately leaving the current directory
+      out ("that's not where the shell looks"), technically true
+      for command RESOLUTION but wrong for what Tab should ever
+      DO: a bare Tab in RAM: dumped C:'s command list and showed
+      nothing of RAM: at all. His fix, and the right one: MERGE,
+      don't exclude. `tcscancmd` gained one more unconditional
+      source — `tcresolve('')` (the exact CWD lookup plain word
+      completion already used, just invoked directly) scanned via
+      the same `tcscanone`/`tchas` machinery as C: and the Path
+      chain. `d<Tab>` in RAM: now offers `demo/` from RAM: and
+      `delete` from C: in one sorted, deduped menu — nothing
+      hidden, nothing shadowed. A bare Tab goes back to reading as
+      "your directory, plus commands," not "the whole command
+      universe, minus your directory." Word two+ and explicit-path
+      word one are still completely untouched — the merge only
+      ever ADDS sources for the bare-word-one case, never removes.
+
+      **PARKED (b22):** even merged, he didn't like it — C:/
+      resident/Path entries mixed into the menu felt like clutter
+      rather than help, and repeated use didn't change his mind
+      ("the more I try it the less I like it"). Reverted: `dotab`
+      no longer branches on word position at all, `firstword` is
+      gone, every word (including the first) is plain filename
+      completion again, unchanged from before Theme B #2 started.
+      `tcscancmd`/`tcadd`/`tchas`/`tcscanone`/`pathnode` all stay
+      in the source, compiled in but UNREFERENCED (the compiler
+      says so, harmlessly) — the struct-offset verification and
+      the resident-list/Path-chain plumbing don't have to be
+      re-derived if this idea gets a different shape later (a
+      SEPARATE key from Tab, maybe, rather than folded into it -
+      undecided, not scheduled). `tcscan` keeps calling through
+      `tcscanone`/`tcadd` internally — that refactor was a pure
+      no-op split, nothing to revert there.
+
+- [x] **Memory footprint pass (b23) — done, deployed, his boot
+      test pending.** Started from two of his screenshots: a
+      before/after `avail` around a bare `newshell ccon:` (delta
+      ~1.03MB) and a WB titlebar mem-free before/after (delta
+      ~1.06MB, same ballpark). Rather than guess the window's
+      column count, he sent a THIRD screenshot — a ruler line
+      (`123456789012...`) typed into that exact bare window and
+      wrapped across several rows. Counted it two independent ways
+      (the no-prompt wrapped rows, and the prompt-row's 13-char
+      prefix + digit count) — both agreed: **70 columns**, not
+      guessed. Model math from that: `3 planes x SBMAX(4000) x
+      cols(70)` = 840,000 bytes, plus ~6.4K of fixed per-window
+      strings, plus (if that was the session's first window) the
+      one-time 80.8K shared history ring — ~927K predicted vs
+      ~1.03-1.06MB measured, a ~128K gap left honestly unexplained
+      rather than papered over with a guess.
+
+      His question along the way: CCON opened in MicroKnight 7/7,
+      not topaz 8, from a bare `newshell ccon:` — is that right?
+      Checked against the real intuition.library autodoc (not
+      memory): `GfxBase.DefaultFont` is documented as "sysfont 0 -
+      old DefaultFont, fixed-width, the default," distinct from
+      the Workbench screen's own (possibly proportional) font.
+      Confirmed CCON reads the correct slot — if his Font Prefs'
+      FIXED default is MicroKnight, stock CON: and every other
+      console-type window would open in it too. Not a CCON bug;
+      a Prefs fact, worth him checking `SYS:Prefs/Font` if topaz 8
+      was actually expected there.
+
+      The fix, his call from three options: **default SBMAX 4000
+      -> 1000** (a straight 4x cut in the common case — LINES=n
+      still opts up for anyone who wants more), plus a new
+      **SBMAXCAP (4000)** ceiling on LINES=n itself, which had NO
+      upper bound before (a typo could have asked for an enormous
+      window — this was a real latent gap, not just a footprint
+      tweak). `ccon.doc`/`ccon.readme`'s memory figures updated to
+      the real math (~235K at 80 cols/1000 lines) — the old "~600K"
+      number was ALREADY stale before today, predating the Theme A
+      style plane; caught and fixed in the same pass. Also
+      quietly dropped a doc line that had gone stale since Theme B
+      #1 shipped ("History is per window and dies with it" — it
+      hasn't, since b16).
+
+      **Declined for now, his call still open:** bit-packing the
+      style plane (`ss` uses 1 full byte per cell for 3 bits of
+      real data — italic/underline/inverse — so ~5/8 of it is
+      spare). Real savings on top of the SBMAX cut, but it touches
+      every painter that reads/writes `ss` (drawmrow, clearrow,
+      cursdraw, drawselrow, redraw, screenscroll, drawmodelrow,
+      drawedit, csidispatch's SGR handling, altsave/altrestore) —
+      explained the tradeoff, did not implement, waiting on
+      whether he wants that scope taken on.
+
+- [x] **The LINES384 mystery, solved — and a real bug fixed
+      (b24).** His ViNCEd-vs-CCON comparison sequence
+      (`newshell ccon:0/0/640/100/LINES384`) came back with numbers
+      that made no sense — two supposedly-identical windows costing
+      different amounts. Zoomed into his own screenshots character
+      by character rather than re-guessing: the command he actually
+      typed had explicit geometry, and with explicit geometry the
+      open-string's field order is fixed — x/y/w/h/TITLE/options.
+      Field 4 is unconditionally the title, no exceptions, so
+      "LINES384" landed there as plain text and the depth option
+      was NEVER applied — that window silently ran at the DEFAULT
+      depth. No error, no warning. His own workaround (inserting a
+      dummy "LINES" title first, pushing LINES384 into field 5)
+      is exactly why one of his two "LINES384" windows worked and
+      the other didn't.
+
+      Real fix, not just a doc warning: field 4 now tries
+      `parseopt()` FIRST. Every prefix-based option branch inside
+      it (`SCREEN`/`PEN`/`WINDOW0X`/`LINES`/`FONT`) was tightened to
+      fail closed — `matched := FALSE` unless the suffix actually
+      parses — so a token only diverts from becoming the title when
+      it's a GENUINE option, not just something that starts with
+      the same letters. `torig[]` (a manual byte-copy, not
+      `StrCopy` — `tok`/`torig` are plain fixed arrays, not
+      `String()`-allocated E strings, the same trap `dirp[]` already
+      routes around in `dotab()`) preserves the original casing,
+      since `parseopt` folds its argument to uppercase in place
+      even on a non-match.
+
+      Verified with a harness (parsecon+parseopt extracted
+      verbatim, post-fix) before touching the real build: the
+      literal failing string now keeps the default title and
+      correctly sets `plines=384`; ordinary titles including ones
+      that merely START with a keyword ("My-Window", "Penguin")
+      survive untouched; a real option in the title slot
+      ("FONTtopaz/8", "WAIT") still works; every string
+      boot-verified earlier tonight matches byte-for-byte, zero
+      regressions. One accepted, disclosed gap: `FONT`/`SCREEN`
+      immediately followed by more non-space text (e.g.
+      "Fontwork") still gets swallowed — both accept any non-empty
+      suffix as a valid name with no further validation, so a
+      coincidental collision there can't be distinguished from a
+      real one.
+
+      Also deployed in the same build: temporary window-title
+      telemetry (`[sbmax=N cols=N bytes=N]` prefix) so the
+      original footprint questions can be answered directly from
+      the title bar instead of more screenshot arithmetic — to be
+      stripped once he's satisfied with the numbers.
+
+      **The mystery, actually resolved (his own screenshot chain,
+      re-read character by character):** window 4's telemetry
+      title read `[sbmax=384 cols=87 bytes=33408]` — 384×87 =
+      33,408 exactly, proving both the fix and the model math are
+      correct. The residual "gap" between that confirmed number
+      and the raw `avail` deltas turned out to be unrelated to
+      CCON at all: every test opened its window via `newshell`,
+      which creates a whole new Process (stack, CLI struct,
+      environment) on top of whatever CCON itself allocates — the
+      SAME category of cost a fresh ViNCEd shell also pays. Final
+      head-to-head at matching depth (384 lines): ViNCEd ~246KB
+      total, CCON ~439KB total, but CCON's actual scrollback model
+      is a precise, telemetry-confirmed ~98KB of that — the rest is
+      generic per-window process overhead, not a CCON inefficiency.
+
+- [x] **Width/height=-1 fills the screen — done, deployed as
+      "1.1b25", his boot test pending.** His ask, arriving mid
+      footprint-hunt: `newshell ccon:0/0/-1/-1` should open a
+      window covering the whole screen. `-1` is a genuinely new
+      sentinel meaning "fill" — it couldn't reuse `tcnum()`'s
+      existing failure return (`tcnum` has no minus-sign support
+      at all, so `"-1"` was ALREADY read as "not a number" and
+      silently ignored, defaults kept — the exact behavior the
+      "0/0/-1/-1" curiosity earlier tonight quietly relied on
+      without anyone asking for it). Field 2/3 (width/height) now
+      check for the literal string `"-1"` before falling through
+      to `tcnum`, so a real `-1` means fill while garbage still
+      means "ignored, keep the default" as before.
+
+      Resolution happens in `openwin()`, before the existing
+      160×60 floor clamps (which would otherwise misread a
+      still-unresolved `-1` as "way too small" and clamp it there
+      instead of filling anything): the SAME `LockPubScreen` call
+      that used to only fire for an explicit `SCREENname` now also
+      fires whenever either field is `-1` and no name was given
+      (`LockPubScreen(NIL)` — the default public screen), and that
+      ONE lock both answers "how big" (`pubscr.width`/`.height`)
+      and is the lock the window actually opens on — deliberately
+      not two separate calls, so there's no window for the default
+      screen to change between "measure" and "open on". A failed
+      lock falls back to 640×200 rather than falling through to
+      the tiny 160×60 minimum. Width and height resolve
+      independently (`.../-1/300` fills width only).
+
+      Verified via the same parsecon-harness discipline: the
+      sentinel is captured correctly and independently per field,
+      unaffected by the b24 title-slot fix (`0/0/-1/-1/Title` still
+      gets `title="Title"`), and every previously-verified string
+      still matches. The screen-side resolution itself (`pubscr.
+      width`/`.height`, `LockPubScreen`) is real OS integration
+      vamos doesn't model — FS-UAE boot-test territory, same as
+      the history packet code and the resident-command walk before
+      it. Boot-confirmed ("works great" + screenshot, a full-
+      screen-edge-to-edge "Test" window, 19.7.26).
+
+      **b26:** the b24 window-title telemetry (`[sbmax=N cols=N
+      bytes=N]`) stripped now that both the LINES384 bug and the
+      footprint numbers are settled — titles are plain again,
+      nothing temporary left in the tree from tonight's footprint
+      hunt.
 - [ ] **Scrollback search.** The last KingCON/ViNCEd feature CCON
       lacks: a search key in the scrollback view (Ctrl+R while
       scrolled? `/` cooked-style prompt? decide), matches

@@ -5,9 +5,9 @@ WHAT IT IS
 
   A mounted console handler - what CON:, KingCON and ViNCEd are -
   built around the one feature the stock 3.2 console cannot be
-  given from outside: output scrollback. 4000 lines of history
-  behind every window, and a line editor that brings the modern
-  shell feel to the Amiga prompt.
+  given from outside: output scrollback. 1000 lines of history
+  behind every window by default (up to 4000), and a line editor
+  that brings the modern shell feel to the Amiga prompt.
 
 FEATURES
 
@@ -44,8 +44,8 @@ FEATURES
 
 LIMITATIONS
 
-  - History is per window and dies with it
-  - ~600K of model per window at 80 columns (LINES=n scales it)
+  - ~235K of model per window at 80 columns and the default 1000
+    lines (LINES=n scales it, up to 4000)
   - Borrowed windows (WINDOW0x) keep their owner's font
   - CSI K erases to black under colour
   - Completion: no quoted words, one menu page of 80
