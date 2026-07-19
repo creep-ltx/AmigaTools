@@ -1798,13 +1798,6 @@ fix only removes the SLASH-COUNTING trap.
       footprint numbers are settled — titles are plain again,
       nothing temporary left in the tree from tonight's footprint
       hunt.
-- [ ] **Scrollback search.** The last KingCON/ViNCEd feature CCON
-      lacks: a search key in the scrollback view (Ctrl+R while
-      scrolled? `/` cooked-style prompt? decide), matches
-      highlighted via the attr plane (style plane helps), n/N
-      jumps, any output snaps live as ever. The Ctrl+R search
-      machinery (srfind's fold-substring scan) generalizes from
-      the history ring to the model rows.
 - [x] **Bracketed-paste safety — two designs, the second one
       shipped (b27→b28) — deployed as "1.1b28", his boot test
       pending.** RAMIGA-V used to replay every LF in a pasted clip
@@ -1990,6 +1983,142 @@ fix only removes the SLASH-COUNTING trap.
       `drawmodelrow`, the room-making scroll) is real Intuition
       drawing vamos cannot display or check — FS-UAE boot-test
       territory, like the rest of tonight's screen-facing work.
+
+- [x] **Scrollback search (b30) — Theme B's last item, done,
+      deployed as "1.1b30", his boot test pending.** The last
+      KingCON/ViNCEd feature CCON lacked: a way to search the
+      scrollback content itself, not just the command history.
+      His choice on the trigger-key design question: "Ctrl+R,
+      reused contextually" — no new key, no dedicated `/` prompt.
+      Ctrl+R now branches on `viewoff`: at the live prompt it's
+      still exactly the old history search, untouched; once
+      scrolled back (`viewoff > 0`), the SAME key searches the
+      scrollback rows instead. The two modes can never be active
+      together, so reuse was safe rather than a hazard.
+
+      Built as a near-total mirror of the existing Ctrl+R history-
+      search state machine — new fields `sbsrch`/`sbidx`/`sbstash`
+      alongside the old `srch`/`sridx`/`srbuf`, and new procs
+      `sbenter`/`sbadd`/`sbback`/`sbnext`/`sbprev`/`sbexit`/
+      `sbcancel` shaped exactly like `srenter`/`sradd`/`srback`/…
+      — plus two new pieces the history version didn't need:
+      `sbrowidx(v)` converts a scroll-offset `v` into the ring
+      buffer's physical row index (the same `sbtop`-relative math
+      `redraw()` already does, factored out), and `sbfind(fromv,
+      dir)` does the actual fold-case substring scan across
+      scrollback rows, INCLUSIVE of the starting row, walking in
+      the given direction until a match or the history's edge.
+
+      The one non-obvious step: proving `viewoff` itself is
+      directly usable as `sbfind`'s "v" position, with no separate
+      conversion layer — worked out on paper first (viewoff is
+      already defined as "how many rows back from live," which is
+      exactly what `sbrowidx` needs), then confirmed against a
+      hand-built harness (`sbsearchtest.e`, a fake 10-row ring at
+      cols=8, sbtop=2, sbcnt=5) rather than trusted on the
+      derivation alone.
+
+      Hooked into `dovanilla()` at the very TOP of the function,
+      before `snaplive()` and before the raw-mode short-circuit —
+      required so the feature works while scrolled back inside a
+      raw client's output too (More, Ed), which was an explicit
+      design requirement, not an afterthought. Three states
+      handled there: actively typing a fragment (`sbsrch`, routes
+      printable keys to `sbadd`, Ctrl+R to `sbnext`, Backspace to
+      `sbback`, Esc to `sbcancel`, anything else exits typing via
+      `sbexit` but keeps the match); not typing but still scrolled
+      back and a fragment exists (`viewoff > 0`, routes Ctrl+R to
+      re-enter typing, n/N to `sbnext`/`sbprev`); everything else
+      falls through to the ordinary path unchanged.
+
+      One design trap caught during the paper-design pass, before
+      any code was written — not a bug found later: 'n'/'N' were
+      first drafted as unconditional jump commands inside the
+      active-typing branch too, which would have made searching
+      for a fragment containing either letter (e.g. "run",
+      "found") impossible. Fixed by scoping the n/N jump-shortcut
+      to ONLY the not-typing state — while `sbsrch` is TRUE, 'n'
+      and 'N' fall through to `sbadd()` like any other printable
+      character.
+
+      Esc restores the exact `viewoff` the search started from
+      (stashed in `sbstash` at `sbenter()`), same abort discipline
+      as the paste hint row right above this. Match highlighting
+      (`sbhighlight`) paints the matched span of the bottom-most
+      visible row in inverted colours directly via `Move`/`Text`/
+      `SetAPen`/`SetBPen` — pixels only, no model change, same
+      discipline as the ghost text and the paste hint.
+
+      **Verified with a harness** (`sbsearchtest.e`) before
+      touching the real build: `sbrowidx`'s v-to-ring-index
+      mapping against a hand-derived table (including wraparound,
+      e.g. v=5 → idx=9 on a 10-slot ring), forward search, case-
+      fold search, an inclusive re-search from the found spot
+      landing on itself, a deliberately-absent fragment returning
+      not-found without crashing, backward search, and an out-of-
+      range starting `v` (99) staying a safe no-op — all six exact
+      matches against hand-derived expected values. The actual
+      inverse-highlight PAINT and the `(search: frag)` title
+      banner are real Intuition drawing vamos cannot check —
+      FS-UAE boot-test territory, same as every other screen-
+      facing item tonight.
+
+      **b31, real bug found on first boot test, fixed same
+      session.** His report: Ctrl+R always gave command-history
+      search, scrolled back or not — b30's whole content-search
+      entry point was dead on arrival. Root cause was NOT in any
+      of the new sbsrch code, which traced out correct on paper —
+      it was a pre-existing two-pass ordering fact that b30's
+      design happened to collide with for the first time: every
+      key crosses this handler TWICE, a RAWKEY event first (
+      `dorawkey()`), then a VANILLAKEY event second (`dovanilla()`,
+      where the whole sbsrch/Ctrl+R/n-N gate lives, guarded on
+      `curcon.viewoff`). `dorawkey()` had one unconditional line —
+      `snaplive()` for "any other key returns the view to live" —
+      that fired on the RAW pass for literally every ordinary key,
+      including Ctrl+R itself. `snaplive()` zeroes `viewoff`
+      directly. So by the time the SAME keystroke's VANILLAKEY
+      event reached `dovanilla()` a moment later, `viewoff` had
+      already been reset to 0 by its own earlier pass — the gate
+      never saw "scrolled back" as true, no matter how far back
+      the user actually was. n/N-after-typing was silently broken
+      the identical way (they're ungated ordinary letters on the
+      raw pass too); only entering via Ctrl+R got caught by his
+      testing.
+
+      Fix, in `dorawkey()`: that snaplive() call is now conditional
+      — it still fires unconditionally for the handful of raw keys
+      that have NO vanilla counterpart at all and so would never
+      reach `dovanilla()`'s own snaplive() otherwise (arrows in
+      both modes, plus F1-F10/Help in raw mode, `rawcsikey()`'s
+      complete special-key list) — everything else defers to
+      `dovanilla()`'s existing, already-correct gate. Verified by
+      tracing every call site by hand rather than guessing: Ctrl-
+      arrows/Shift-arrows/wheel already RETURN before this line
+      (untouched); plain arrows are explicitly kept in the eager
+      list (unchanged behaviour, still needed since arrows never
+      generate a VANILLAKEY event); every ordinary printable key,
+      Ctrl+letter, Return, Backspace, Esc and Tab all DO generate a
+      VANILLAKEY event, so `dovanilla()`'s own `snaplive()` call
+      (already present, already firing for every case not consumed
+      by the search guard) covers them with identical end-user
+      behaviour to before — the only actual removal is the
+      redundant EARLIER of two snaplive() calls that used to fire
+      for those keys, not a behaviour change. One knowingly accepted,
+      narrow edge case: an F-key or Help pressed while scrolled back
+      in COOKED mode (not raw) has never been handled by `dorawkey()`
+      at all beyond that side-effect un-scroll, and now does
+      nothing whatsoever while scrolled — not a documented feature,
+      nobody could have been relying on it.
+
+      This is pure control-flow, not model math, so nothing new to
+      harness — verified by hand-tracing every code path through
+      the two-pass sequence for the specific keys this session's
+      retest checklist covers (Ctrl+R, n, N, all four arrows in
+      both modes, Ctrl/Shift+arrows, ordinary typing, Return/
+      Backspace/Esc/Tab) before compiling. Deployed as "1.1b31",
+      his boot test pending — this is the retest that actually
+      exercises the b30 feature for the first time.
 
 ### Parked for v1.2 — the big swing
 

@@ -12,7 +12,10 @@ WHAT IT IS
 FEATURES
 
   - Output scrollback: Shift/Ctrl+arrows and the mouse wheel,
-    working in raw mode too (wheel back through More mid-page)
+    working in raw mode too (wheel back through More mid-page);
+    Ctrl+R searches it once you're scrolled back (same key as
+    history search, retargeted), matches shown inverted, n/N
+    step through older/newer - works in raw mode too
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0x, NOBORDER, ...) per window
   - Hosts real AmigaShells: NewShell CCON:

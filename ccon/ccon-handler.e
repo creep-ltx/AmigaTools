@@ -169,6 +169,13 @@ OBJECT console
   sridx                         -> history index of the match; -1 none
   srbuf:PTR TO CHAR             -> the search fragment (E-string)
   srstash:PTR TO CHAR           -> the line as it was at Ctrl+R
+  -> Theme B: Ctrl+R while scrolled back searches CONTENT instead -
+  -> same key, same incremental shape, reuses srbuf (the two search
+  -> modes are never active at once). n/N jump matches afterward,
+  -> vim/less style, as long as viewoff stays > 0.
+  sbsrch                         -> actively typing the fragment
+  sbidx                          -> current match, in viewoff units
+  sbstash                        -> viewoff to restore on Esc
   -> double/triple click (word/line select)
   dcsec, dcmic                  -> time of the last SELECTDOWN
   dccnt                         -> click run length: 1 drag, 2 word,
@@ -3712,6 +3719,140 @@ PROC srcancel()
   drawedit()
 ENDPROC
 
+-> ---------- Theme B: scrollback content search ----------
+-> Ctrl+R at the live prompt is history search (above, unchanged).
+-> Ctrl+R while scrolled back (viewoff > 0) searches the SCROLLBACK
+-> MODEL instead - same incremental shape, same srbuf, retargeted:
+-> a "match" moves curcon.viewoff and highlights a row instead of
+-> filling in curcon.ebuf. Matches always land on the BOTTOM row of
+-> the window (viewoff IS the "lines back" unit already, so setting
+-> viewoff := v puts ring row v exactly there - no extra
+-> conversion needed, confirmed against redraw()'s own indexing).
+
+-> the ring index for "v lines back from the newest line" - the
+-> same mapping redraw() uses, solved for a fixed r = rows-1
+PROC sbrowidx(v)
+  DEF idx
+  idx := curcon.sbtop + curcon.rows - 1 - v
+  WHILE idx < 0
+    idx := idx + curcon.sbmax
+  ENDWHILE
+  WHILE idx >= curcon.sbmax
+    idx := idx - curcon.sbmax
+  ENDWHILE
+ENDPROC idx
+
+-> inverse-highlight the matched span on the bottom row, pixels
+-> only - the next redraw() (a new match, or leaving search) wipes
+-> it for free, so there is nothing to separately erase
+PROC sbhighlight(v, col, len)
+  DEF idx, m:PTR TO CHAR, rowbuf[256]:ARRAY OF CHAR, i, c
+  IF curcon.win = NIL THEN RETURN
+  idx := sbrowidx(v)
+  m := curcon.sb + Mul(idx, curcon.cols)
+  FOR i := 0 TO len - 1
+    c := m[col + i]
+    rowbuf[i] := IF c < 32 THEN 32 ELSE c
+  ENDFOR
+  SetAPen(curcon.rp, 0)
+  SetBPen(curcon.rp, curcon.deffg)
+  Move(curcon.rp, curcon.left + Mul(col, curcon.cw),
+       curcon.topy + Mul(curcon.rows - 1, curcon.ch) + curcon.baseline)
+  Text(curcon.rp, rowbuf, len)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+ENDPROC
+
+-> next match starting AT fromv (inclusive) going in dir (+1 =
+-> older, -1 = newer); TRUE = found (viewoff/sbidx updated,
+-> redrawn and highlighted), FALSE = kept as it was. Model cells
+-> read 0 for "never written" - folded to a space, matching how
+-> they already RENDER, so a fragment with a space in it can match
+-> blank cells the same way it would match visible ones.
+PROC sbfind(fromv, dir)
+  DEF fl, maxv, v, idx, m:PTR TO CHAR, i, j, ok, f:PTR TO CHAR, c
+  f := curcon.srbuf
+  fl := StrLen(f)
+  IF fl = 0 THEN RETURN FALSE
+  maxv := curcon.sbcnt + curcon.rows - 1
+  v := fromv
+  WHILE (v >= 0) AND (v <= maxv)
+    idx := sbrowidx(v)
+    m := curcon.sb + Mul(idx, curcon.cols)
+    i := 0
+    WHILE i <= (curcon.cols - fl)
+      ok := TRUE
+      FOR j := 0 TO fl - 1
+        c := m[i + j]
+        IF c = 0 THEN c := 32
+        IF tcfold(c) <> tcfold(f[j]) THEN ok := FALSE
+      ENDFOR
+      IF ok
+        curcon.sbidx := v
+        curcon.viewoff := v
+        redraw()
+        sbhighlight(v, i, fl)
+        srtitle()
+        RETURN TRUE
+      ENDIF
+      i++
+    ENDWHILE
+    v := v + dir
+  ENDWHILE
+ENDPROC FALSE
+
+PROC sbenter()
+  IF curcon.srbuf = NIL THEN RETURN
+  IF curcon.sb = NIL THEN RETURN
+  curcon.sbsrch := TRUE
+  curcon.sbstash := curcon.viewoff
+  StrCopy(curcon.srbuf, '')
+  curcon.sbidx := curcon.viewoff
+  srtitle()                     -> the [search: ] chip appears NOW
+ENDPROC
+
+PROC sbadd(code)
+  IF StrLen(curcon.srbuf) >= 60 THEN RETURN
+  StrAdd(curcon.srbuf, [code, 0]:CHAR, 1)
+  IF sbfind(curcon.sbidx, 1) = FALSE THEN DisplayBeep(NIL)
+  srtitle()
+ENDPROC
+
+PROC sbback()
+  DEF l
+  l := StrLen(curcon.srbuf)
+  IF l > 0
+    SetStr(curcon.srbuf, l - 1)
+    sbfind(curcon.sbstash, 1)
+  ENDIF
+  srtitle()
+ENDPROC
+
+PROC sbnext()
+  IF sbfind(curcon.sbidx + 1, 1) = FALSE THEN DisplayBeep(NIL)
+  srtitle()
+ENDPROC
+
+PROC sbprev()
+  IF sbfind(curcon.sbidx - 1, -1) = FALSE THEN DisplayBeep(NIL)
+  srtitle()
+ENDPROC
+
+-> leave search TYPING mode, keeping the current match on screen -
+-> n/N still jump it afterward, as long as viewoff stays > 0
+PROC sbexit()
+  curcon.sbsrch := FALSE
+  settitle()
+ENDPROC
+
+-> Esc: the search never happened, view snaps back to where it was
+PROC sbcancel()
+  curcon.sbsrch := FALSE
+  curcon.viewoff := curcon.sbstash
+  redraw()
+  settitle()
+ENDPROC
+
 -> ---------- fish-style autosuggestions ----------
 -> While you type, the newest history entry the line prefixes shows
 -> its continuation as grey ghost text after the blip; Right (or
@@ -3810,6 +3951,39 @@ ENDPROC
 
 PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, k
+  -> Theme B: scrollback content search - deliberately BEFORE
+  -> snaplive() and the raw-mode bypass below, since it has to work
+  -> while viewing a raw client's (Ed, More) scrolled-away output
+  -> too, and snapping live first would defeat entering it at all.
+  IF curcon.sbsrch
+    IF code = 18
+      sbnext()
+      RETURN
+    ELSEIF code = 27
+      sbcancel()
+      RETURN
+    ELSEIF code = 8
+      sbback()
+      RETURN
+    ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
+      sbadd(code)                -> a literal 'n'/'N' narrows the
+      RETURN                     -> fragment here - jump meaning
+    ELSE                         -> only applies AFTER typing ends
+      sbexit()
+    ENDIF
+  ELSEIF curcon.viewoff > 0
+    IF code = 18
+      IF curcon.altvalid = FALSE THEN sbenter()
+      RETURN
+    ELSEIF (StrLen(curcon.srbuf) > 0) AND ((code = "n") OR (code = "N"))
+      -> vim/less muscle memory: step through the LAST search's
+      -> matches while still looking at scrolled-back content. No
+      -> new exception for raw clients - scroll keys already never
+      -> reach them while scrolled, this is the same rule.
+      IF code = "n" THEN sbnext() ELSE sbprev()
+      RETURN
+    ENDIF
+  ENDIF
   snaplive()                    -> typing returns the view to live
   IF curcon.rawmode
     -> raw: every key is just a byte for the client - Return is CR 13,
@@ -4080,7 +4254,20 @@ PROC dorawkey(code, qual)
   -> last). Bit 7 covers releases for the IDCMP fallback - the
   -> chain path already drops those in ihkey.
   IF ((code AND $80) <> 0) OR ((code >= $60) AND (code <= $67)) THEN RETURN TRUE
-  snaplive()                    -> any other key returns the view to live
+  -> Theme B bug (b30, caught 19.7.26c): this RAW pass ran BEFORE the
+  -> VANILLAKEY pass that carries Ctrl+R/n/N to dovanilla()'s
+  -> scrollback-search gate - snapping live here first meant that
+  -> gate always saw viewoff already reset to 0, so content search
+  -> could never trigger, no matter how far back you'd scrolled.
+  -> While scrolled, defer to dovanilla's own snaplive() call, which
+  -> already knows about the search keys; only the keys with NO
+  -> vanilla counterpart at all still need it done HERE - the arrows
+  -> (cooked and raw), plus F1-F10/Help (raw mode's rawcsikey list).
+  IF (curcon.viewoff = 0) OR (code = RK_UP) OR (code = RK_DOWN) OR
+     (code = RK_LEFT) OR (code = RK_RIGHT) OR
+     ((code >= $50) AND (code <= $59)) OR (code = $5F)
+    snaplive()                  -> any other key returns the view to live
+  ENDIF
   IF curcon.rawmode
     RETURN rawcsikey(code, qual)
   ENDIF
@@ -5158,4 +5345,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b29 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b31 CCON: LTX console handler', 0

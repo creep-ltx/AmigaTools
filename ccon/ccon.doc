@@ -320,6 +320,9 @@
   When the search ends, the real prompt returns - CCON: restores
   it from the scrollback model, pixel for pixel.
 
+  Ctrl+R means something else once you are SCROLLED BACK - see
+  "Searching scrollback" in section 10.
+
 
 10. SCROLLBACK
 --------------------------------------------------------------------------
@@ -338,6 +341,29 @@
   While you are back, the title bar shows [scrollback -n]. Any new
   output, or any other key, snaps the view to live. Colours are
   remembered per cell and survive the trip.
+
+  Searching scrollback:
+
+  Once you are scrolled back, Ctrl+R searches the CONTENT on
+  screen instead of your command history - same key, same
+  incremental feel, a different target:
+
+    (search: fra_)   as you type, the newest matching line jumps
+                      into view and is shown INVERTED so you can
+                      find it at a glance
+
+    Ctrl+R (again)   step to the next OLDER match
+    n / N            the same, once typing has stopped - n for
+                      older, N for newer (vim/less habit); works
+                      as long as you stay scrolled back
+    Backspace        shorten the fragment (search widens back)
+    Return / anything else
+                      stop typing, keep the match on screen
+    Esc              cancel - back to where you were before Ctrl+R
+
+  This works in raw mode too - search through More's or Ed's
+  scrolled-away output the same way. Whatever you find stays put
+  until you scroll, search again, or return to live.
 
 
 11. COPY AND PASTE
