@@ -1,5 +1,5 @@
 ==========================================================================
-                                CCON: 1.0
+                                CCON: 1.1
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -50,8 +50,13 @@
     - scrollback by keys and mouse wheel, in raw mode too
     - copy and paste with the stock console, both directions,
       with double-click word and triple-click line selection
-    - SGR colour with a careful ANSI/Workbench pen separation
-    - fullscreen programs work: Ed with working menus, More
+    - SGR colour with a careful ANSI/Workbench pen separation,
+      plus real italic/underline/inverse soft styles
+    - FONT and LINES per window: your own font and scrollback
+      depth, or Font Prefs' default font if you don't ask
+    - fullscreen programs work: Ed with working menus, More -
+      and More leaves your scrollback transcript as it found it,
+      xterm-alternate-screen style
     - a raw twin device, CRAW:, for RAW:-style uses
 
 
@@ -161,7 +166,39 @@
              WB pens; without this it would render in ANSI red).
              See section 14 for the full colour story.
 
+  FONTname/size
+             Open the window in this font, loading it from disk if
+             it is not already resident. Left unset, the window
+             opens in whatever font Font Prefs has set as "System
+             Default Text" (topaz 8 only if that font can't be
+             opened, or is proportional - proportional fonts don't
+             fit the cell model). Example: FONTmicroknight/8.
+
+  LINESn     How many lines of scrollback THIS window keeps
+             (default 4000, floor 100). Lower it on a tight machine
+             to shrink the model - see section 15 for the cost per
+             line.
+
   Not implemented: SMART, SIMPLE, ALT, ICONIFY.
+
+  A WARNING WORTH BOLD: the AmigaDOS shell eats an unquoted '='
+  from ANY command line before CCON: ever sees it - so a FONT or
+  LINES option MUST be written without one (FONTtopaz/8, LINES200),
+  or the whole open string quoted. `FONT=topaz/8` silently truncates
+  to `FONT` and does nothing; this is a shell fact, not a CCON: bug.
+
+  A keyword as the very FIRST field switches the whole open string
+  to options-only, with default position and size - so a plain
+  option needs no throwaway slashes:
+
+    NewShell CCON:FONTtopaz/8
+    NewShell CCON:WAIT
+    NewShell CCON:LINES200
+
+  Mixing geometry WITH options still needs the full positional form
+  (x/y/w/h/title come first, as in section 4):
+
+    NewShell CCON:0/0/640/200/My-Window/FONTtopaz/8
 
 
 6. THE LINE EDITOR
@@ -205,7 +242,7 @@
                                            grey: a suggestion
 
     Right / Shift+Right   accept the whole suggestion
-    Ctrl+Right / Tab      accept ONE word of it (leading space
+    Ctrl+Right            accept ONE word of it (leading space
                           included: from `ls`, one stroke takes
                           ` -la`)
     anything else         just keep typing; the ghost adapts or
@@ -216,9 +253,8 @@
   on screens that have a readable grey pen - a ghost that looked
   like typed text would be worse than none.
 
-  While a ghost is showing, Shift+Tab forces the tab completion
-  menu instead (see below) - for when your history shadows a
-  filename you actually want completed.
+  Tab never accepts the ghost - it always opens tab completion
+  (below), ghost or no ghost. Ghosts are a Right-family thing only.
 
 
 8. TAB COMPLETION
@@ -358,9 +394,17 @@
     - More's single-key paging uses real timed WAIT_CHARs.
     - The block cursor is drawn by the console, as Ed expects.
     - Swedish (and other) dead-key composition works in raw mode.
+    - More restores your scrollback transcript exactly as it found
+      it on exit: it brackets its session in CSI ?47h / ?47l, the
+      same alternate-screen sequence xterm honours, and CCON:
+      answers it the same way xterm does - pages you viewed in More
+      do not enter your history, and quitting snaps back to your
+      prompt instantly, pixel for pixel. Any client that sends the
+      same sequence gets the same treatment.
 
   And unlike stock CON:, Ctrl+Up/Down and the wheel still scroll
-  the view while these programs run.
+  the view while these programs run - except on the alternate
+  screen (More mid-page), where scrolling is refused, xterm manners.
 
 
 14. HOW IT WORKS, BRIEFLY
@@ -388,9 +432,22 @@
   are translated BY COLOUR to the screen's nearest real pens. So
   directories are genuinely blue everywhere, and Ed is never red.
 
-  Each window's display is backed by a 4000-line model with one
-  attribute byte per cell. Redraws, scrollback, selection repaints,
-  menu restores and the Ctrl+R prompt restore all read from it.
+  Each window's display is backed by a scrollback model (4000
+  lines by default, or LINES=n) with one attribute byte per cell
+  plus a style byte for SGR 3/4/7 (italic, underline, inverse -
+  inverse is a pen swap at paint time, never a stored colour).
+  Redraws, scrollback, selection repaints, menu restores and the
+  Ctrl+R prompt restore all read from it.
+
+  A window with no FONT option opens in whatever font Font Prefs
+  has set as "System Default Text" - the same font stock CON:
+  honours - falling back to topaz 8 only if that font is missing
+  or proportional.
+
+  A program that sets its own window title (the xterm-style OSC
+  sequence, ESC ] 0 ; title BEL) is remembered as the window's
+  title from then on; leaving scrollback restores THAT title, not
+  CCON:'s own.
 
   The window closes with its last handle; WAIT windows linger for
   their gadget. Every open parses its own name, so all options
@@ -401,16 +458,14 @@
 --------------------------------------------------------------------------
 
   - History is per window and ends with it.
-  - The scrollback model costs about 600K per window at 80 columns.
-  - Leaving scrollback restores CCON:'s own title, overwriting a
-    title a program set (More's, for instance). Cosmetic.
+  - The scrollback model costs about 600K per window at 80 columns
+    (LINES=n scales this up or down).
   - CSI K under a coloured background erases to black.
   - Completion: no quoted words, one menu page, no volume-name
     completion for a bare word.
   - SMART/SIMPLE, ALT and ICONIFY are not implemented.
-  - The font is topaz 8 (a borrowed window keeps its owner's font);
-    there is no FONT option yet.
-  - SGR italic/underline (3/4) are not rendered.
+  - A borrowed window (WINDOW0x) keeps its owner's font; FONT only
+    applies to windows CCON: opens itself.
 
 
 16. BUILDING FROM SOURCE

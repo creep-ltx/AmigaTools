@@ -26,6 +26,14 @@
 -> slot, timer expiry by timercon. WAIT windows linger but nothing
 -> re-attaches: a new open is a new window, the stock CON: way.
 ->
+-> v1.1 Theme A (1.1b1): FONTname/size in the open string (already-
+-> LOADED fonts only - OpenFont, never OpenDiskFont, the no-DOS
+-> rule), SGR 3/4/7 as real soft styles in a third model plane,
+-> LINES=n as the per-console memory knob that pays for it, CSI @/P
+-> insert/delete character, and xterm OSC title sequences
+-> (ESC]0;title BEL) - which also end the More-retitle stomp:
+-> settitle adopts a foreign title as the new base.
+->
 -> Test:  Mount CCON: FROM DEVS:CCON-mountlist
 ->        NewShell CCON:
 ->        list SYS: then Shift+Up/Down, Ctrl+Up/Down; type = snap live
@@ -50,15 +58,15 @@
 
 MODULE 'intuition/intuition','intuition/intuitionbase',
        'intuition/screens',
-       'graphics/view',
+       'graphics/view','graphics/gfxbase',
        'utility/tagitem',
        'exec/nodes','exec/ports','exec/io','exec/tasks',
        'exec/interrupts',
        'graphics/text','graphics/rastport','graphics/gfx',
        'devices/inputevent','devices/timer','devices/input',
        'devices/clipboard',
-       'dos/dos','dos/dosextens','dos/filehandler',
-       'keymap'
+       'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
+       'keymap','diskfont'
 
 CONST MARGIN=4,
       LINEMAX=400,      -> longest editable input line
@@ -126,6 +134,8 @@ OBJECT console
   cpos                          -> cursor inside ebuf
   ancx, ancy                    -> cell where the edit line is drawn
   edlast                        -> chars the last drawedit painted
+  edext                         -> cells of the last paint INCLUDING
+                                -> blip and ghost (erase extent)
   sghost:PTR TO CHAR            -> fish-style autosuggestion: the
                                 -> history entry the typed line
                                 -> prefixes (NIL = none); ghost text
@@ -148,6 +158,8 @@ OBJECT console
   cesc                          -> CSI parser state (survives split
   cpar[4]:ARRAY OF LONG         -> writes; up to 4 parameters)
   cnp
+  cpriv                         -> a '?'/'>' rode the params (v1.1b11:
+                                -> CSI ?47h/l is More's altscreen)
   rdq[16]:ARRAY OF LONG         -> pending ACTION_READ packets
   rdn
   eofpend
@@ -159,11 +171,28 @@ OBJECT console
   -> the scrollback model (M5)
   sb                            -> the ring; NIL = scrollback disabled
   sa                            -> its attr plane: fg/bg nibble per cell
+  ss                            -> v1.1: the style plane - bit0 italic,
+                                -> bit1 underline, bit2 inverse; third
+                                -> byte per cell, what LINES pays for
   sbtop                         -> ring index of the top visible row
   sbcnt                         -> history lines above the screen
+  sbmax                         -> v1.1: model lines THIS console keeps
+                                -> (LINES=n; default SBMAX)
   viewoff                       -> lines scrolled back; 0 = live
+  -> raw-session alternate screen (v1.1b10): More/Ed restore the
+  -> transcript on exit instead of leaving their UI in it
+  altm, alta, alts              -> saved visible rows, three planes
+  altvalid
+  altcx, altcy, altancx, altancy
+  altsbtop, altsbcnt
+  altrows, altcols              -> geometry at snapshot; a resize
+                                -> during raw discards the snapshot
+  rawscr                        -> rows scrolled away during raw
   -> SGR state (M5d)
   deffg, curfg, curbg, bold, can16
+  cursty                        -> v1.1: current soft style bits (see ss)
+  softmask                      -> AskSoftStyle: what the font can fake
+  cursoft                       -> soft style now set on the rastport
   wbpens                        -> WBPENS: plain 30-33 are WB pens
   cursgr                        -> an explicit 3x is in effect
   anstab[8]:ARRAY OF LONG       -> foreign screens: ObtainBestPen picks
@@ -177,6 +206,10 @@ OBJECT console
   pauto                         -> AUTO: window on first I/O
   autopend                      -> an AUTO open waits, windowless
   pnoborder, pnodrag, pnodepth, pnosize, pbackdrop, pinactive
+  plines                        -> v1.1 LINES=n parsed (0 = default)
+  pfontsize, pfontexp           -> v1.1 FONTname/size parse state (the
+                                -> size rides the NEXT '/'-token)
+  oscn, oscsk                   -> v1.1 xterm OSC title parser state
   wtitle:PTR TO CHAR            -> title + scroll indicator (E-string;
                                 -> persists: Intuition keeps the ptr)
   wtitlebase:PTR TO CHAR        -> the parsed window title (E-string)
@@ -195,6 +228,8 @@ OBJECT console
   -> byte arrays last (alignment)
   inq[2048]:ARRAY OF CHAR       -> input byte queue (finished lines)
   pscrname[64]:ARRAY OF CHAR    -> SCREENname: a public screen
+  pfontname[40]:ARRAY OF CHAR   -> v1.1 FONT: the requested face
+  osct[84]:ARRAY OF CHAR        -> v1.1: OSC title being collected
 ENDOBJECT
 
 DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
@@ -231,13 +266,25 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     ihdrop=0,                   -> events lost to a full ring
     ihie=NIL:PTR TO inputevent, -> rebuilt event for MapRawKey
     ihiebuf[8]:ARRAY OF LONG,   -> its longword-aligned storage
+    -> v1.1b2: the disk-font loader - a throwaway helper process
+    -> runs OpenDiskFont on our behalf (it has its own pr_MsgPort,
+    -> so the no-DOS rule stays whole); the handler sleeps on fhsig
+    fhok=FALSE,                 -> the plumbing came up at init
+    fhstub=NIL:PTR TO CHAR,     -> poked machine code: the NP_Entry
+    fhgd[2]:ARRAY OF LONG,      -> stub and its [A4][{fonthelper}]
+    fhcapa4=0,                  -> glue vector (the gluestub pattern)
+    fhsigbit=-1, fhsig=0,
+    fhtask=NIL,
+    fhta=NIL:PTR TO textattr,   -> the request: in
+    fhfont=NIL,                 -> the result: out
     ihmap[36]:ARRAY OF CHAR     -> MapRawKey result bytes
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
-      stps:PTR TO CHAR, c:PTR TO console, cnext
+      stps:PTR TO CHAR, c:PTR TO console, cnext,
+      wp:PTR TO INT, lp:PTR TO LONG
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -296,6 +343,38 @@ PROC main()
   IF tmp THEN fsfib := Shl(Shr(tmp + 3, 2), 2)  -> aligned; round up
   tmp := New(260)
   IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
+
+  -> v1.1b2: the disk-font loader plumbing. The helper's entry is
+  -> 24 bytes of hand-poked machine code: an NP_Entry process
+  -> starts WITHOUT E's A4 data base, so the stub loads it from
+  -> fhgd exactly the way gluestub loads it from is_Data - only
+  -> the vector address rides as an immediate poked in here, since
+  -> a process entry carries no is_Data pointer. Exec-only; if any
+  -> step fails, fhok stays FALSE and FONT falls back to OpenFont.
+  fhtask := FindTask(NIL)
+  fhsigbit := AllocSignal(-1)
+  fhstub := New(32)
+  IF (fhsigbit >= 0) AND (fhstub <> NIL)
+    fhsig := Shl(1, fhsigbit)
+    MOVE.L A4,fhcapa4
+    fhgd[0] := fhcapa4
+    fhgd[1] := {fonthelper}
+    wp := fhstub
+    wp[0] := $48E7              -> MOVEM.L D2-D7/A2-A6,-(A7)
+    wp[1] := $3F3E
+    wp[2] := $267C              -> MOVEA.L #fhgd,A3
+    lp := fhstub + 6            -> the immediate (even, 68000-legal)
+    lp[0] := fhgd
+    wp[5] := $2853              -> MOVEA.L (A3),A4
+    wp[6] := $206B              -> MOVEA.L 4(A3),A0
+    wp[7] := $0004
+    wp[8] := $4E90              -> JSR (A0)
+    wp[9] := $4CDF              -> MOVEM.L (A7)+,D2-D7/A2-A6
+    wp[10] := $7CFC
+    wp[11] := $4E75             -> RTS
+    CacheClearU()               -> poked code vs instruction cache
+    fhok := TRUE
+  ENDIF
 
   -> M6: hook into the input.device chain (console.device's own
   -> architecture: keys are taken upstream, the window's UserPort
@@ -689,6 +768,14 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     curcon := c
     c.opens := c.opens - 1
+    -> b11 safety net: a client that DIED on the alternate screen
+    -> (Ctrl+C'd More) never sends ?47l - its closing handle
+    -> restores the transcript instead of leaving it lost forever
+    IF c.altvalid AND c.win
+      IF altrestore()
+        IF c.rawmode = FALSE THEN drawedit()
+      ENDIF
+    ENDIF
     IF c.opens <= 0
       c.opens := 0
       c.breaktask := NIL
@@ -772,9 +859,9 @@ PROC dopkt(pkt:PTR TO dospacket)
       IF curcon.rawmode
         curcon.rawmode := FALSE
         curserase()             -> the blip owns cooked mode
-        reanchor()
-        drawedit()
-      ENDIF
+        reanchor()              -> (b11: the altscreen no longer rides
+        drawedit()              -> SetMode - More's ?47l comes AFTER
+      ENDIF                     -> this packet and restores then)
       -> a client reverting to cooked is done with its raw event
       -> reports too (Ed does not send CSI } on exit); clearing the
       -> mask also resumes the parked UserPort drain (M6)
@@ -891,9 +978,117 @@ ENDPROC v
 -> WINDOW0xADDR (borrow an existing window - CON:-compatible, the
 -> exact string CTerm's frame handoff sends). Unknown options are
 -> ignored. Field order is stock CON:'s.
+-> one open-string option, folded + dispatched. Split out of
+-> parsecon (v1.1b12) so the f=0 special case below - a keyword AS
+-> THE VERY FIRST FIELD, no geometry slashes at all - can share it
+-> with the normal post-title route. Returns TRUE when tok named a
+-> real option; unrecognized tokens are dropped either way (house
+-> rule), the return only matters to the f=0 caller.
+PROC parseopt(tok:PTR TO CHAR)
+  DEF tok2[84]:ARRAY OF CHAR, v, c, matched=TRUE
+  -> fold to upper case in place, then compare - keeping the raw
+  -> token (tok2) for case-preserving values
+  v := 0
+  WHILE tok[v]
+    tok2[v] := tok[v]
+    tok[v] := tcfold(tok[v])
+    v++
+  ENDWHILE
+  tok2[v] := 0
+  -> v1.1 FONT: fields split on '/', so "FONTname/size" arrives
+  -> as TWO tokens - a bare number right after a FONT is its size
+  c := -1
+  IF curcon.pfontexp THEN c := tcnum(tok)
+  curcon.pfontexp := FALSE
+  IF c >= 1
+    curcon.pfontsize := c
+  ELSEIF StrCmp(tok, 'WAIT')
+    curcon.waitmode := TRUE
+    curcon.closegad := TRUE        -> WAIT needs the gadget to end
+  ELSEIF StrCmp(tok, 'CLOSE')
+    curcon.closegad := TRUE
+  ELSEIF StrCmp(tok, 'NOCLOSE')
+    curcon.closegad := FALSE
+  ELSEIF StrCmp(tok, 'AUTO')
+    curcon.pauto := TRUE           -> the window waits for first I/O
+  ELSEIF StrCmp(tok, 'NOBORDER')
+    curcon.pnoborder := TRUE
+  ELSEIF StrCmp(tok, 'NODRAG')
+    curcon.pnodrag := TRUE
+  ELSEIF StrCmp(tok, 'NODEPTH')
+    curcon.pnodepth := TRUE
+  ELSEIF StrCmp(tok, 'NOSIZE')
+    curcon.pnosize := TRUE
+  ELSEIF StrCmp(tok, 'BACKDROP')
+    curcon.pbackdrop := TRUE
+  ELSEIF StrCmp(tok, 'INACTIVE')
+    curcon.pinactive := TRUE
+  ELSEIF StrCmp(tok, 'SCREEN', 6)
+    -> SCREENname, stock syntax: open on that public screen
+    -> (name taken case-preserved from the raw token)
+    v := 6
+    c := 0
+    WHILE tok2[v] AND (c < 63)
+      curcon.pscrname[c] := tok2[v]
+      c++
+      v++
+    ENDWHILE
+    curcon.pscrname[c] := 0
+  ELSEIF StrCmp(tok, 'WBPENS')
+    -> translate the classic Workbench pens when a program
+    -> hardcodes them: C:Ed prints its body text as SGR 31
+    -> ("pen 1" = BLACK on the WB palette) and highlights as
+    -> 33 (WB blue). On an ANSI palette pen 1 is red, so a
+    -> client that owns such a screen (CTerm's dark theme)
+    -> sends WBPENS and plain 30-33 become theme pens
+    -> instead: 30->0, 31->deffg, 32->15, 33->12. Bold forms
+    -> (1;3x - the ls scheme) and backgrounds are untouched.
+    curcon.wbpens := TRUE
+  ELSEIF StrCmp(tok, 'PEN', 3)
+    -> PENn: the default text pen (CTerm sends PEN7 with its
+    -> ANSI palette, where pen 1 is ANSI red)
+    v := tcnum(tok + 3)
+    IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v
+  ELSEIF StrCmp(tok, 'WINDOW0X', 8)
+    v := 0
+    c := 8
+    WHILE tok[c]
+      IF (tok[c] >= "0") AND (tok[c] <= "9")
+        v := Shl(v, 4) + (tok[c] - 48)
+      ELSEIF (tok[c] >= "A") AND (tok[c] <= "F")
+        v := Shl(v, 4) + (tok[c] - 55)
+      ENDIF
+      c++
+    ENDWHILE
+    curcon.fwptr := v
+  ELSEIF StrCmp(tok, 'LINES', 5)
+    -> v1.1: the memory knob - model depth per console. tcnum
+    -> already caps at 20000; openwin floors at 100.
+    v := 5
+    IF tok[v] = "=" THEN v := 6
+    v := tcnum(tok + v)
+    IF v >= 0 THEN curcon.plines := v
+  ELSEIF StrCmp(tok, 'FONT', 4)
+    -> v1.1: FONTname/size - name case-preserved from the raw
+    -> token; ".font" is appended in openwin when missing
+    v := 4
+    IF tok2[v] = "=" THEN v := 5
+    c := 0
+    WHILE tok2[v] AND (c < 35)
+      curcon.pfontname[c] := tok2[v]
+      c++
+      v++
+    ENDWHILE
+    curcon.pfontname[c] := 0
+    IF c > 0 THEN curcon.pfontexp := TRUE
+  ELSE
+    matched := FALSE
+  ENDIF
+ENDPROC matched
+
 PROC parsecon(bname)
-  DEF s:PTR TO CHAR, l, i, f, tl, v, c, tok[84]:ARRAY OF CHAR,
-      tok2[84]:ARRAY OF CHAR
+  DEF s:PTR TO CHAR, l, i, f, tl, v, c, optmode=FALSE,
+      tok[84]:ARRAY OF CHAR
   curcon.pwx := 40
   curcon.pwy := 40
   curcon.pww := 520
@@ -912,6 +1107,10 @@ PROC parsecon(bname)
   curcon.pbackdrop := FALSE
   curcon.pinactive := FALSE
   curcon.pscrname[0] := 0              -> global array: garbage until set
+  curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
+  curcon.pfontname[0] := 0             -> open like everything else
+  curcon.pfontsize := 0
+  curcon.pfontexp := FALSE
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -933,9 +1132,25 @@ PROC parsecon(bname)
     ENDWHILE
     i++                         -> past the '/'
     tok[tl] := 0
-    IF f = 0
+    IF optmode
+      parseopt(tok)              -> once the shortcut fires, every
+                                 -> further token is an option too
+    ELSEIF f = 0
       v := tcnum(tok)
-      IF v >= 0 THEN curcon.pwx := v
+      IF v >= 0
+        curcon.pwx := v
+      ELSEIF parseopt(tok)
+        -> v1.1b12: the FIRST field wasn't a number and NAMED a
+        -> real option - "ccon:FONTtopaz/8" with no geometry at
+        -> all, the shape he actually reached for. The whole spec
+        -> becomes options-only (x/y/w/h/title stay default); to
+        -> mix geometry WITH options, spell the positional fields
+        -> as before (ccon:0/0/640/80/title/FONTtopaz/8) - unquoted
+        -> '=' is still the shell's, not ours (see dofind/parsecon
+        -> notes) - this shortcut sidesteps the OTHER trap instead:
+        -> counting slashes just to reach the options field.
+        optmode := TRUE
+      ENDIF
     ELSEIF f = 1
       v := tcnum(tok)
       IF v >= 0 THEN curcon.pwy := v
@@ -948,75 +1163,7 @@ PROC parsecon(bname)
     ELSEIF f = 4
       IF tl > 0 THEN StrCopy(curcon.wtitlebase, tok)
     ELSE
-      -> an option: fold to upper case in place, then compare -
-      -> keeping the raw token (tok2) for case-preserving values
-      v := 0
-      WHILE tok[v]
-        tok2[v] := tok[v]
-        tok[v] := tcfold(tok[v])
-        v++
-      ENDWHILE
-      tok2[v] := 0
-      IF StrCmp(tok, 'WAIT')
-        curcon.waitmode := TRUE
-        curcon.closegad := TRUE        -> WAIT needs the gadget to end
-      ELSEIF StrCmp(tok, 'CLOSE')
-        curcon.closegad := TRUE
-      ELSEIF StrCmp(tok, 'NOCLOSE')
-        curcon.closegad := FALSE
-      ELSEIF StrCmp(tok, 'AUTO')
-        curcon.pauto := TRUE           -> the window waits for first I/O
-      ELSEIF StrCmp(tok, 'NOBORDER')
-        curcon.pnoborder := TRUE
-      ELSEIF StrCmp(tok, 'NODRAG')
-        curcon.pnodrag := TRUE
-      ELSEIF StrCmp(tok, 'NODEPTH')
-        curcon.pnodepth := TRUE
-      ELSEIF StrCmp(tok, 'NOSIZE')
-        curcon.pnosize := TRUE
-      ELSEIF StrCmp(tok, 'BACKDROP')
-        curcon.pbackdrop := TRUE
-      ELSEIF StrCmp(tok, 'INACTIVE')
-        curcon.pinactive := TRUE
-      ELSEIF StrCmp(tok, 'SCREEN', 6)
-        -> SCREENname, stock syntax: open on that public screen
-        -> (name taken case-preserved from the raw token)
-        v := 6
-        c := 0
-        WHILE tok2[v] AND (c < 63)
-          curcon.pscrname[c] := tok2[v]
-          c++
-          v++
-        ENDWHILE
-        curcon.pscrname[c] := 0
-      ELSEIF StrCmp(tok, 'WBPENS')
-        -> translate the classic Workbench pens when a program
-        -> hardcodes them: C:Ed prints its body text as SGR 31
-        -> ("pen 1" = BLACK on the WB palette) and highlights as
-        -> 33 (WB blue). On an ANSI palette pen 1 is red, so a
-        -> client that owns such a screen (CTerm's dark theme)
-        -> sends WBPENS and plain 30-33 become theme pens
-        -> instead: 30->0, 31->deffg, 32->15, 33->12. Bold forms
-        -> (1;3x - the ls scheme) and backgrounds are untouched.
-        curcon.wbpens := TRUE
-      ELSEIF StrCmp(tok, 'PEN', 3)
-        -> PENn: the default text pen (CTerm sends PEN7 with its
-        -> ANSI palette, where pen 1 is ANSI red)
-        v := tcnum(tok + 3)
-        IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v
-      ELSEIF StrCmp(tok, 'WINDOW0X', 8)
-        v := 0
-        c := 8
-        WHILE tok[c]
-          IF (tok[c] >= "0") AND (tok[c] <= "9")
-            v := Shl(v, 4) + (tok[c] - 48)
-          ELSEIF (tok[c] >= "A") AND (tok[c] <= "F")
-            v := Shl(v, 4) + (tok[c] - 55)
-          ENDIF
-          c++
-        ENDWHILE
-        curcon.fwptr := v
-      ENDIF
+      parseopt(tok)
     ENDIF
     f++
   ENDWHILE
@@ -1121,10 +1268,56 @@ PROC gridcalc()
   IF curcon.rows < 1 THEN curcon.rows := 1
 ENDPROC
 
+-> ---------- disk fonts (v1.1b2) ----------
+-> OpenDiskFont from the handler is the no-DOS rule violated: DoPkt
+-> waits on pr_MsgPort, the same port our clients send to. But the
+-> rule binds THIS process only - a throwaway helper process has
+-> its own pr_MsgPort and talks DOS freely. fontload spawns one per
+-> request (only when a FONT option is present), sleeps on a
+-> private signal while it works - client packets just queue on the
+-> port meanwhile - and gets the loaded font back through fhfont.
+-> Fonts are system-global once in memory, so closewin's CloseFont
+-> works on them the same as on a ROM font.
+
+-> runs ON THE HELPER process (A4 restored by the poked stub)
+PROC fonthelper()
+  DEF p:PTR TO process
+  p := FindTask(NIL)
+  p.windowptr := -1             -> no "please insert volume" boxes
+  IF diskfontbase = NIL THEN diskfontbase := OpenLibrary('diskfont.library', 36)
+  IF diskfontbase THEN fhfont := OpenDiskFont(fhta)
+  Signal(fhtask, fhsig)         -> ALWAYS - the handler is waiting
+ENDPROC
+
+PROC fontload(ta:PTR TO textattr)
+  DEF f=NIL
+  IF fhok
+    fhta := ta
+    fhfont := NIL
+    SetSignal(0, fhsig)         -> no stale wakeups
+    IF CreateNewProc([NP_ENTRY, fhstub,
+                      NP_NAME, 'ccon-fontload',
+                      NP_STACKSIZE, 16384,
+                      NP_COPYVARS, FALSE,
+                      NP_CURRENTDIR, 0,
+                      NP_INPUT, 0,
+                      NP_OUTPUT, 0,
+                      NP_CLOSEINPUT, FALSE,
+                      NP_CLOSEOUTPUT, FALSE,
+                      TAG_DONE, NIL])
+      Wait(fhsig)
+      f := fhfont
+    ENDIF
+  ENDIF
+  -> no helper (or no diskfont.library): loaded fonts still resolve
+  IF f = NIL THEN f := OpenFont(ta)
+ENDPROC f
+
 PROC openwin()
   DEF ta:PTR TO textattr, i, idc, scrn:PTR TO screen, v,
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
-      pubscr:PTR TO screen
+      pubscr:PTR TO screen, fname[48]:ARRAY OF CHAR, fl, ok,
+      gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn
   curcon.fwin := FALSE
   -> M6: with the input.device handler on, keys never touch IDCMP -
   -> the UserPort carries only the close gadget, stock console.device
@@ -1183,29 +1376,98 @@ PROC openwin()
     -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont
     -> would not be safe. A BORROWED window keeps the font its owner
     -> set on the rastport (CTerm's frame carries MicroKnight).
+    -> v1.1 FONT: fontload goes to DISK through the helper process
+    -> (v1.1b2 - loaded-only proved useless the first minute: 3.2
+    -> keeps even topaz 9 on disk now). A name nowhere to be found,
+    -> or a proportional face (the grid needs fixed cells), falls
+    -> back to topaz 8 silently.
     NEW ta
     ta.name := 'topaz.font'
     ta.ysize := 8
     ta.style := 0
     ta.flags := 0
-    curcon.tf := OpenFont(ta)
+    IF curcon.pfontname[0]
+      fl := StrLen(curcon.pfontname)
+      CopyMem(curcon.pfontname, fname, fl + 1)
+      ok := FALSE                -> ".font" appended unless present
+      IF fl >= 5
+        IF (fname[fl - 5] = ".") AND (tcfold(fname[fl - 4]) = "F") AND
+           (tcfold(fname[fl - 3]) = "O") AND (tcfold(fname[fl - 2]) = "N") AND
+           (tcfold(fname[fl - 1]) = "T") THEN ok := TRUE
+      ENDIF
+      IF ok = FALSE THEN CopyMem('.font', fname + fl, 6)
+      ta.name := fname
+      ta.ysize := IF curcon.pfontsize > 0 THEN curcon.pfontsize ELSE 8
+      curcon.tf := fontload(ta)
+      IF curcon.tf
+        IF curcon.tf.flags AND $20     -> FPF_PROPORTIONAL: the grid
+          CloseFont(curcon.tf)         -> needs fixed cells
+          curcon.tf := NIL
+        ENDIF
+      ENDIF
+      IF curcon.tf = NIL
+        ta.name := 'topaz.font'
+        ta.ysize := 8
+      ENDIF
+    ELSE
+      -> no FONT option (v1.1): the user's Font Prefs "System
+      -> Default Text" font - GfxBase DefaultFont, exactly what
+      -> stock CON: honors and 1.1b hardcoded past. The system
+      -> holds it open and IN MEMORY, so plain OpenFont reopens it
+      -> by name/size - no helper needed. Unusable (proportional,
+      -> or the reopen fails) drops to topaz 8, his spec.
+      gfx := gfxbase
+      dfont := gfx.defaultfont
+      IF dfont
+        mnode := dfont              -> tf_Message.mn_Node.ln_Name
+        ta.name := mnode.ln.name
+        ta.ysize := dfont.ysize
+        curcon.tf := OpenFont(ta)
+        IF curcon.tf
+          IF curcon.tf.flags AND $20     -> FPF_PROPORTIONAL
+            CloseFont(curcon.tf)
+            curcon.tf := NIL
+          ENDIF
+        ENDIF
+      ENDIF
+      IF curcon.tf = NIL
+        ta.name := 'topaz.font'
+        ta.ysize := 8
+      ENDIF
+    ENDIF
+    IF curcon.tf = NIL THEN curcon.tf := OpenFont(ta)
     IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
   ENDIF
   curcon.cw := curcon.rp.txwidth
   curcon.ch := curcon.rp.txheight
   curcon.baseline := curcon.rp.txbaseline
+  -> v1.1 styles: what italic/underline the rastport can fake on
+  -> this font (borrowed windows measured too)
+  curcon.softmask := AskSoftStyle(curcon.rp)
+  curcon.cursoft := 0
   gridcalc()
-  -> the scrollback ring + its attr plane: sized to the real grid
-  -> width. New() zeroes (E heap is cleared), so the model starts as
-  -> blank rows with attr 0; a failed allocation just disables
-  -> scrollback, the console still runs
-  curcon.sb := New(Mul(SBMAX, curcon.cols))
-  curcon.sa := New(Mul(SBMAX, curcon.cols))
-  IF (curcon.sb = NIL) OR (curcon.sa = NIL)
+  -> the scrollback ring + its attr and style planes: sized to the
+  -> real grid width. New() zeroes (E heap is cleared), so the model
+  -> starts as blank rows with attr 0; a failed allocation just
+  -> disables scrollback, the console still runs. v1.1: LINES=n is
+  -> the depth knob (a 2MB machine can ask for a shallow ring where
+  -> 1.0 hardcoded 4000 lines - and the style plane is the third
+  -> byte per cell that knob pays for). Floor 100: the visible grid
+  -> must always fit inside the ring.
+  v := curcon.plines
+  IF v = 0 THEN v := SBMAX
+  IF v < 100 THEN v := 100
+  curcon.sbmax := v
+  curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
+  curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
+  curcon.ss := New(Mul(curcon.sbmax, curcon.cols))
+  IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL)
     IF curcon.sb THEN Dispose(curcon.sb)
     IF curcon.sa THEN Dispose(curcon.sa)
+    IF curcon.ss THEN Dispose(curcon.ss)
     curcon.sb := NIL
     curcon.sa := NIL
+    curcon.ss := NIL
   ENDIF
   curcon.sbtop := 0
   curcon.sbcnt := 0
@@ -1258,6 +1520,8 @@ PROC openwin()
   curcon.curbg := 0
   curcon.bold := FALSE
   curcon.cursgr := FALSE
+  curcon.cursty := 0
+  curcon.oscn := 0
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
   IF curcon.histdone = FALSE           -> the history survives window
@@ -1372,6 +1636,11 @@ PROC closewin()
     Dispose(curcon.sa)
     curcon.sa := NIL
   ENDIF
+  IF curcon.ss
+    Dispose(curcon.ss)
+    curcon.ss := NIL
+  ENDIF
+  altdrop()                     -> the snapshot dies with the window
   curcon.eofpend := FALSE
   curcon.rawmode := FALSE
   curcon.evmask := 0
@@ -1387,9 +1656,10 @@ ENDPROC
 -> for class 12 (Ed does, CSI 12{) gets the report and
 -> re-measures itself.
 PROC doresize()
-  DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, r, n,
+  DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, nss:PTR TO CHAR, r, n,
       evb[8]:ARRAY OF LONG, e:PTR TO ihev
   IF curcon.win = NIL THEN RETURN
+  altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
   curcon.selon := FALSE                -> a drag dies with the old grid
@@ -1399,33 +1669,40 @@ PROC doresize()
   gridcalc()
   IF curcon.sb
     IF curcon.cols <> oc
-      nsb := New(Mul(SBMAX, curcon.cols))
-      nsa := New(Mul(SBMAX, curcon.cols))
-      IF (nsb = NIL) OR (nsa = NIL)
+      nsb := New(Mul(curcon.sbmax, curcon.cols))
+      nsa := New(Mul(curcon.sbmax, curcon.cols))
+      nss := New(Mul(curcon.sbmax, curcon.cols))
+      IF (nsb = NIL) OR (nsa = NIL) OR (nss = NIL)
         IF nsb THEN Dispose(nsb)
         IF nsa THEN Dispose(nsa)
+        IF nss THEN Dispose(nss)
         Dispose(curcon.sb)             -> degraded: the console runs on
         Dispose(curcon.sa)             -> without scrollback rather than
-        curcon.sb := NIL               -> rendering through a wrong-stride
-        curcon.sa := NIL               -> model
+        Dispose(curcon.ss)             -> rendering through a wrong-
+        curcon.sb := NIL               -> stride model
+        curcon.sa := NIL
+        curcon.ss := NIL
       ELSE
         n := Min(oc, curcon.cols)
-        FOR r := 0 TO SBMAX - 1
+        FOR r := 0 TO curcon.sbmax - 1
           CopyMem(curcon.sb + Mul(r, oc), nsb + Mul(r, curcon.cols), n)
           CopyMem(curcon.sa + Mul(r, oc), nsa + Mul(r, curcon.cols), n)
+          CopyMem(curcon.ss + Mul(r, oc), nss + Mul(r, curcon.cols), n)
         ENDFOR
         Dispose(curcon.sb)
         Dispose(curcon.sa)
+        Dispose(curcon.ss)
         curcon.sb := nsb
         curcon.sa := nsa
+        curcon.ss := nss
       ENDIF
     ENDIF
   ENDIF
   IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols  -> cols itself = pending wrap, legal
   WHILE curcon.cy > (curcon.rows - 1)         -> height shrank: the rows above the
     curcon.sbtop := curcon.sbtop + 1                     -> cursor scroll into history
-    IF curcon.sbtop >= SBMAX THEN curcon.sbtop := 0
-    IF curcon.sbcnt < (SBMAX - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
+    IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
+    IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
     curcon.cy := curcon.cy - 1
     IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1
   ENDWHILE
@@ -1476,15 +1753,23 @@ ENDPROC
 PROC visrow(r)
   DEF i
   i := curcon.sbtop + r
-  IF i >= SBMAX THEN i := i - SBMAX
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
 ENDPROC curcon.sb + Mul(i, curcon.cols)
 
 -> the attr-plane twin of visrow
 PROC sarow(r)
   DEF i
   i := curcon.sbtop + r
-  IF i >= SBMAX THEN i := i - SBMAX
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
 ENDPROC curcon.sa + Mul(i, curcon.cols)
+
+-> the style-plane twin (v1.1): bit0 italic, bit1 underline,
+-> bit2 inverse - allocated with sb/sa, all three or none
+PROC ssrow(r)
+  DEF i
+  i := curcon.sbtop + r
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
+ENDPROC curcon.ss + Mul(i, curcon.cols)
 
 -> the pen SGR state draws with right now. On an ANSI screen
 -> (WBPENS) bold lifts the 8 base colours to the bright pens; on
@@ -1503,13 +1788,42 @@ ENDPROC curcon.curfg
 
 PROC curattr() IS fgpen() OR Shl(curcon.curbg, 4)
 
+-> v1.1 soft styles: point the rastport at a cell's style bits only
+-> when they change (SetSoftStyle is a call per run otherwise).
+-> bit0 italic -> FSF_ITALIC ($4), bit1 underline -> FSF_UNDERLINED
+-> ($1); bit2 inverse is a pen swap at paint time, not a font style.
+PROC setsoft(sty)
+  DEF w
+  w := 0
+  IF sty AND 1 THEN w := w OR $4
+  IF sty AND 2 THEN w := w OR $1
+  w := w AND curcon.softmask
+  IF w <> curcon.cursoft
+    SetSoftStyle(curcon.rp, w, curcon.softmask)
+    curcon.cursoft := w
+  ENDIF
+ENDPROC
+
+-> live-output pens from the SGR state: inverse (SGR 7) swaps
+PROC setpens()
+  IF curcon.cursty AND 4
+    SetAPen(curcon.rp, curcon.curbg)
+    SetBPen(curcon.rp, fgpen())
+  ELSE
+    SetAPen(curcon.rp, fgpen())
+    SetBPen(curcon.rp, curcon.curbg)
+  ENDIF
+ENDPROC
+
 PROC clearrow(r)
-  DEF i, m:PTR TO CHAR, a:PTR TO CHAR
+  DEF i, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR
   m := visrow(r)
   a := sarow(r)
+  stp := ssrow(r)
   FOR i := 0 TO curcon.cols - 1
     m[i] := 0
     a[i] := 0
+    stp[i] := 0
   ENDFOR
 ENDPROC
 
@@ -1517,10 +1831,11 @@ ENDPROC
 -> attr-batched runs - the piece redraw, drawmodelrow and the menu
 -> restore share, and where the colours come back from
 PROC drawmrow(idx, y)
-  DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c,
-      rowbuf[256]:ARRAY OF CHAR
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at, c, sy,
+      fg, bg, rowbuf[256]:ARRAY OF CHAR
   m := curcon.sb + Mul(idx, curcon.cols)
   a := curcon.sa + Mul(idx, curcon.cols)
+  stp := curcon.ss + Mul(idx, curcon.cols)
   FOR i := 0 TO curcon.cols - 1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
@@ -1528,16 +1843,27 @@ PROC drawmrow(idx, y)
   i := 0
   WHILE i < curcon.cols
     at := a[i]
+    sy := stp[i]
     j := i
-    WHILE (j < curcon.cols) AND (a[j] = at)
+    WHILE (j < curcon.cols) AND (a[j] = at) AND (stp[j] = sy)
       j++
     ENDWHILE
-    SetAPen(curcon.rp, at AND 15)
-    SetBPen(curcon.rp, Shr(at, 4) AND 7)
+    fg := at AND 15
+    bg := Shr(at, 4) AND 7
+    IF sy AND 4                 -> inverse cell: the drawselrow swap
+      IF fg = bg THEN fg := curcon.deffg
+      SetAPen(curcon.rp, bg)
+      SetBPen(curcon.rp, fg)
+    ELSE
+      SetAPen(curcon.rp, fg)
+      SetBPen(curcon.rp, bg)
+    ENDIF
+    setsoft(sy)
     Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
     Text(curcon.rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
+  setsoft(0)
 ENDPROC
 
 -> the raw-mode block cursor: stock console.device always shows a
@@ -1549,39 +1875,61 @@ ENDPROC
 -> grid, cursdraw() after - the write path wraps render() with the
 -> pair, so interior ScrollRasters never smear a painted cursor.
 PROC cursdraw()
-  DEF m:PTR TO CHAR, a:PTR TO CHAR, x, c, at, fg, bg,
-      b[2]:ARRAY OF CHAR
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, x, c, at, sy,
+      fg, bg, t, b[2]:ARRAY OF CHAR
   IF (curcon.win = NIL) OR (curcon.sb = NIL) OR (curcon.viewoff > 0) THEN RETURN
   x := IF curcon.cx >= curcon.cols THEN curcon.cols - 1 ELSE curcon.cx
   m := visrow(curcon.cy)
   a := sarow(curcon.cy)
+  stp := ssrow(curcon.cy)
   c := m[x]
   b[0] := IF c < 32 THEN 32 ELSE c
   at := a[x]
+  sy := stp[x]
   fg := at AND 15
   bg := Shr(at, 4) AND 7
+  IF sy AND 4                   -> an inverse cell shows its EFFECTIVE
+    t := fg                     -> video first; the cursor inverts that
+    fg := bg
+    bg := t
+  ENDIF
   IF fg = bg THEN fg := curcon.deffg
   SetAPen(curcon.rp, bg)               -> inverse video: glyph in the cell's
   SetBPen(curcon.rp, fg)               -> background, block in its foreground
+  setsoft(sy)
   Move(curcon.rp, curcon.left + Mul(x, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
   Text(curcon.rp, b, 1)
+  setsoft(0)
   curcon.cursx := x
   curcon.cursy := curcon.cy
 ENDPROC
 
 PROC curserase()
-  DEF m:PTR TO CHAR, a:PTR TO CHAR, c, at, b[2]:ARRAY OF CHAR
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, c, at, sy,
+      fg, bg, t, b[2]:ARRAY OF CHAR
   IF curcon.cursx < 0 THEN RETURN
   IF curcon.win AND curcon.sb
     m := visrow(curcon.cursy)
     a := sarow(curcon.cursy)
+    stp := ssrow(curcon.cursy)
     c := m[curcon.cursx]
     b[0] := IF c < 32 THEN 32 ELSE c
     at := a[curcon.cursx]
-    SetAPen(curcon.rp, at AND 15)      -> the cell exactly as drawmrow paints
-    SetBPen(curcon.rp, Shr(at, 4) AND 7)
+    sy := stp[curcon.cursx]
+    fg := at AND 15
+    bg := Shr(at, 4) AND 7
+    IF sy AND 4                 -> the cell exactly as drawmrow paints
+      t := fg
+      fg := bg
+      bg := t
+      IF fg = bg THEN fg := curcon.deffg
+    ENDIF
+    SetAPen(curcon.rp, fg)
+    SetBPen(curcon.rp, bg)
+    setsoft(sy)
     Move(curcon.rp, curcon.left + Mul(curcon.cursx, curcon.cw), curcon.topy + Mul(curcon.cursy, curcon.ch) + curcon.baseline)
     Text(curcon.rp, b, 1)
+    setsoft(0)
   ENDIF
   curcon.cursx := -1
 ENDPROC
@@ -1607,8 +1955,8 @@ ENDPROC
 PROC selvidx(r)
   DEF i
   i := curcon.sbtop - curcon.selvo + r
-  IF i < 0 THEN i := i + SBMAX
-  IF i >= SBMAX THEN i := i - SBMAX
+  IF i < 0 THEN i := i + curcon.sbmax
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
 ENDPROC i
 
 -> the mouse position as a linear cell (row*cols+x); -1 = off-grid
@@ -1626,10 +1974,11 @@ ENDPROC Mul(r, curcon.cols) + x
 -> paint one view row like drawmrow, but cells inside [lo,hi) draw
 -> inverse video (fg=bg empties get deffg, the block-cursor rule)
 PROC drawselrow(r, lo, hi)
-  DEF m:PTR TO CHAR, a:PTR TO CHAR, i, j, at, c, s, fg, bg, base, y,
-      rowbuf[256]:ARRAY OF CHAR
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at, c, s,
+      sy, sw, fg, bg, base, y, rowbuf[256]:ARRAY OF CHAR
   m := curcon.sb + Mul(selvidx(r), curcon.cols)
   a := curcon.sa + Mul(selvidx(r), curcon.cols)
+  stp := curcon.ss + Mul(selvidx(r), curcon.cols)
   y := curcon.topy + Mul(r, curcon.ch)
   base := Mul(r, curcon.cols)
   FOR i := 0 TO curcon.cols - 1
@@ -1639,15 +1988,19 @@ PROC drawselrow(r, lo, hi)
   i := 0
   WHILE i < curcon.cols
     at := a[i]
+    sy := stp[i]
     s := ((base + i) >= lo) AND ((base + i) < hi)
     j := i
-    WHILE (j < curcon.cols) AND (a[j] = at) AND
+    WHILE (j < curcon.cols) AND (a[j] = at) AND (stp[j] = sy) AND
           ((((base + j) >= lo) AND ((base + j) < hi)) = s)
       j++
     ENDWHILE
     fg := at AND 15
     bg := Shr(at, 4) AND 7
-    IF s
+    sw := s
+    IF sy AND 4 THEN sw := (sw = FALSE)  -> selection over an inverse
+                                         -> cell re-inverts (xterm)
+    IF sw
       IF fg = bg THEN fg := curcon.deffg
       SetAPen(curcon.rp, bg)
       SetBPen(curcon.rp, fg)
@@ -1655,10 +2008,12 @@ PROC drawselrow(r, lo, hi)
       SetAPen(curcon.rp, fg)
       SetBPen(curcon.rp, bg)
     ENDIF
+    setsoft(sy)
     Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
     Text(curcon.rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
+  setsoft(0)
 ENDPROC
 
 -> repaint view rows rmin..rmax against selection [lo,hi)
@@ -1931,8 +2286,8 @@ PROC redraw()
   IF curcon.sb = NIL THEN RETURN
   FOR r := 0 TO curcon.rows - 1
     idx := curcon.sbtop - curcon.viewoff + r
-    IF idx < 0 THEN idx := idx + SBMAX
-    IF idx >= SBMAX THEN idx := idx - SBMAX
+    IF idx < 0 THEN idx := idx + curcon.sbmax
+    IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
     drawmrow(idx, curcon.topy + Mul(r, curcon.ch))
   ENDFOR
   SetAPen(curcon.rp, curcon.deffg)
@@ -1941,10 +2296,21 @@ ENDPROC
 
 -> the title bar doubles as the scroll-position indicator. The buffer
 -> is a global: Intuition keeps the POINTER (the M4 telemetry lesson).
--> Known cosmetic gap: leaving scrollback restores our own title, so a
--> client retitle (More does one via DISK_INFO) is overwritten.
+-> v1.1 closes the 1.0 cosmetic gap: a title that is not ours on the
+-> window (More finds the window via DISK_INFO and SetWindowTitles
+-> it DIRECTLY) is adopted as the new base first, so the scrollback
+-> and search suffixes append to a client retitle instead of
+-> stomping it on the next view flip.
 PROC settitle()
+  DEF t:PTR TO CHAR
   IF curcon.fwin THEN RETURN   -> a borrowed window keeps its owner's title
+  IF curcon.win
+    t := curcon.win.title
+    IF (t <> curcon.wtitle) AND (t <> curcon.wtitlebase) AND
+       (t <> NIL) AND (t <> -1)
+      StrCopy(curcon.wtitlebase, t)
+    ENDIF
+  ENDIF
   IF curcon.viewoff > 0
     StringF(curcon.wtitle, '\s  [scrollback -\d]', curcon.wtitlebase, curcon.viewoff)
     SetWindowTitles(curcon.win, curcon.wtitle, -1)
@@ -1953,10 +2319,32 @@ PROC settitle()
   ENDIF
 ENDPROC
 
+-> ---------- xterm window titles (v1.1) ----------
+-> ESC ] 0 ; title BEL (BEL, $9C or ESC \ all terminate): the client
+-> retitles the window - the proper path More never had. The text
+-> becomes wtitlebase, so the [scrollback -n] and [search:] suffixes
+-> ride on top of it like on any other title.
+PROC oscstart()
+  curcon.cesc := 3
+  curcon.oscn := 0
+  curcon.oscsk := TRUE
+ENDPROC
+
+PROC oscdone()
+  curcon.osct[curcon.oscn] := 0
+  IF curcon.oscn > 0
+    StrCopy(curcon.wtitlebase, curcon.osct)
+    settitle()
+  ENDIF
+ENDPROC
+
 -> scroll the view by delta lines (positive = back in time), clamped
 -> to the history actually stored; landing on live restores the blip
 PROC scrollview(delta)
   IF curcon.sb = NIL THEN RETURN
+  IF curcon.altvalid THEN RETURN  -> no scrollback ON the alternate
+                                  -> screen (xterm manners; the raw
+                                  -> rows there are More's business)
   curcon.viewoff := curcon.viewoff + delta
   IF curcon.viewoff > curcon.sbcnt THEN curcon.viewoff := curcon.sbcnt
   IF curcon.viewoff < 0 THEN curcon.viewoff := 0
@@ -1967,6 +2355,87 @@ PROC scrollview(delta)
     IF curcon.rawmode THEN cursdraw() ELSE drawedit()
   ENDIF
 ENDPROC
+
+-> ---------- the raw-session alternate screen (v1.1b10) ----------
+-> The More finding from the b8 sweep: a fullscreen client paints
+-> its UI over the visible rows - which ARE the model's live window
+-> - so its pager bars ended up archived in scrollback where the
+-> transcript should be. Stock CON: corrupts identically, it just
+-> has no scrollback to show it. The cure no Amiga console had: on
+-> cooked->raw the visible rows are SNAPSHOT; on raw->cooked they
+-> come back, cursor and anchor too - More and Ed leave the
+-> transcript exactly as they found it (less-on-xterm manners).
+-> Rows that scroll away DURING raw reclaim ring rows; if that
+-> wrapped far enough to eat the oldest history, sbcnt shrinks by
+-> the overflow (rawscr counts, screenscroll feeds it).
+
+PROC altdrop()
+  IF curcon.altm THEN Dispose(curcon.altm)
+  IF curcon.alta THEN Dispose(curcon.alta)
+  IF curcon.alts THEN Dispose(curcon.alts)
+  curcon.altm := NIL
+  curcon.alta := NIL
+  curcon.alts := NIL
+  curcon.altvalid := FALSE
+ENDPROC
+
+PROC altsave()
+  DEF r, n
+  altdrop()
+  IF curcon.sb = NIL THEN RETURN
+  n := Mul(curcon.rows, curcon.cols)
+  curcon.altm := New(n)
+  curcon.alta := New(n)
+  curcon.alts := New(n)
+  IF (curcon.altm = NIL) OR (curcon.alta = NIL) OR (curcon.alts = NIL)
+    altdrop()                   -> no memory: raw runs unsnapshotted
+    RETURN
+  ENDIF
+  FOR r := 0 TO curcon.rows - 1
+    CopyMem(visrow(r), curcon.altm + Mul(r, curcon.cols), curcon.cols)
+    CopyMem(sarow(r), curcon.alta + Mul(r, curcon.cols), curcon.cols)
+    CopyMem(ssrow(r), curcon.alts + Mul(r, curcon.cols), curcon.cols)
+  ENDFOR
+  curcon.altcx := curcon.cx
+  curcon.altcy := curcon.cy
+  curcon.altancx := curcon.ancx
+  curcon.altancy := curcon.ancy
+  curcon.altsbtop := curcon.sbtop
+  curcon.altsbcnt := curcon.sbcnt
+  curcon.altrows := curcon.rows
+  curcon.altcols := curcon.cols
+  curcon.rawscr := 0
+  curcon.altvalid := TRUE
+ENDPROC
+
+-> TRUE = the pre-raw screen is back on model and glass; the caller
+-> skips reanchor (the saved anchor is part of the restoration)
+PROC altrestore()
+  DEF r, over
+  IF curcon.altvalid = FALSE THEN RETURN FALSE
+  IF (curcon.altrows <> curcon.rows) OR (curcon.altcols <> curcon.cols)
+    altdrop()
+    RETURN FALSE
+  ENDIF
+  curcon.sbtop := curcon.altsbtop
+  over := curcon.rawscr - (curcon.sbmax - curcon.rows - curcon.altsbcnt)
+  curcon.sbcnt := curcon.altsbcnt
+  IF over > 0 THEN curcon.sbcnt := curcon.sbcnt - over
+  IF curcon.sbcnt < 0 THEN curcon.sbcnt := 0
+  FOR r := 0 TO curcon.rows - 1
+    CopyMem(curcon.altm + Mul(r, curcon.cols), visrow(r), curcon.cols)
+    CopyMem(curcon.alta + Mul(r, curcon.cols), sarow(r), curcon.cols)
+    CopyMem(curcon.alts + Mul(r, curcon.cols), ssrow(r), curcon.cols)
+  ENDFOR
+  curcon.cx := curcon.altcx
+  curcon.cy := curcon.altcy
+  curcon.ancx := curcon.altancx
+  curcon.ancy := curcon.altancy
+  altdrop()
+  curcon.viewoff := 0
+  redraw()
+  settitle()
+ENDPROC TRUE
 
 -> any output or any non-scroll key returns the view to live
 PROC snaplive()
@@ -1991,10 +2460,11 @@ PROC screenscroll()
   IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1       -> the edit anchor scrolled with the rest
   IF curcon.sb
     curcon.sbtop := curcon.sbtop + 1
-    IF curcon.sbtop >= SBMAX THEN curcon.sbtop := 0
-    IF curcon.sbcnt < (SBMAX - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
-    clearrow(curcon.rows - 1)
-  ENDIF
+    IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
+    IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
+    IF curcon.rawmode THEN curcon.rawscr := curcon.rawscr + 1
+    clearrow(curcon.rows - 1)   -> (rawscr: altrestore's overflow
+  ENDIF                         -> accounting, see the alt procs)
 ENDPROC
 
 PROC outnl()
@@ -2010,8 +2480,8 @@ PROC outchr(c)
   DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
   IF curcon.cx >= curcon.cols THEN outnl()
   b[0] := c
-  SetAPen(curcon.rp, fgpen())
-  SetBPen(curcon.rp, curcon.curbg)
+  setpens()
+  setsoft(curcon.cursty)
   Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
   Text(curcon.rp, b, 1)
   IF curcon.sb
@@ -2019,6 +2489,8 @@ PROC outchr(c)
     m[curcon.cx] := c
     m := sarow(curcon.cy)
     m[curcon.cx] := curattr()
+    m := ssrow(curcon.cy)
+    m[curcon.cx] := curcon.cursty
   ENDIF
   curcon.cx := curcon.cx + 1
 ENDPROC
@@ -2026,6 +2498,7 @@ ENDPROC
 PROC csistart()
   curcon.cesc := 2
   curcon.cnp := 0
+  curcon.cpriv := FALSE
   curcon.cpar[0] := 0
   curcon.cpar[1] := 0
   curcon.cpar[2] := 0
@@ -2072,6 +2545,18 @@ PROC csidispatch(c)
     inslines(n)
   ELSEIF c = "M"
     dellines(n)
+  ELSEIF c = "@"
+    inschars(n)                 -> v1.1: ICH, the L/M pattern sideways
+  ELSEIF c = "P"
+    delchars(n)                 -> v1.1: DCH
+  ELSEIF c = "h"
+    -> CSI ?47h - ENTER the alternate screen (b11: the client
+    -> drives it, xterm-exact - V47's More brackets its whole
+    -> pager session with ?47h/?47l, VERIFIED in its binary; the
+    -> b10 SetMode coupling raced More's own exit tidy-up)
+    IF curcon.cpriv AND (n = 47) THEN altsave()
+  ELSEIF c = "l"
+    IF curcon.cpriv AND (n = 47) THEN altrestore()
   ELSEIF c = "m"
     -> SGR (M5d): reset, bold (bright pens on a 16-pen screen),
     -> 30-37 fg, 39 default fg, 40-47 bg, 49 default bg
@@ -2082,10 +2567,26 @@ PROC csidispatch(c)
         curcon.curbg := 0
         curcon.bold := FALSE
         curcon.cursgr := FALSE
+        curcon.cursty := 0
       ELSEIF v = 1
         curcon.bold := TRUE
       ELSEIF v = 22
         curcon.bold := FALSE
+      ELSEIF v = 3
+        -> v1.1 soft styles: italic (3/23), underline (4/24),
+        -> inverse (7/27) - the styles stock CON: renders and 1.0
+        -> dropped; they live in the model's third plane
+        curcon.cursty := curcon.cursty OR 1
+      ELSEIF v = 23
+        curcon.cursty := curcon.cursty AND 6
+      ELSEIF v = 4
+        curcon.cursty := curcon.cursty OR 2
+      ELSEIF v = 24
+        curcon.cursty := curcon.cursty AND 5
+      ELSEIF v = 7
+        curcon.cursty := curcon.cursty OR 4
+      ELSEIF v = 27
+        curcon.cursty := curcon.cursty AND 3
       ELSEIF (v >= 30) AND (v <= 37)
         curcon.curfg := v - 30
         curcon.cursgr := TRUE
@@ -2189,6 +2690,7 @@ PROC inslines(n)
     FOR r := curcon.rows - 1 TO curcon.cy + n STEP -1
       CopyMem(visrow(r - n), visrow(r), curcon.cols)
       CopyMem(sarow(r - n), sarow(r), curcon.cols)
+      CopyMem(ssrow(r - n), ssrow(r), curcon.cols)
     ENDFOR
     FOR r := curcon.cy TO curcon.cy + n - 1
       clearrow(r)
@@ -2207,10 +2709,77 @@ PROC dellines(n)
     FOR r := curcon.cy TO curcon.rows - 1 - n
       CopyMem(visrow(r + n), visrow(r), curcon.cols)
       CopyMem(sarow(r + n), sarow(r), curcon.cols)
+      CopyMem(ssrow(r + n), ssrow(r), curcon.cols)
     ENDFOR
     FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
     ENDFOR
+  ENDIF
+ENDPROC
+
+-> CSI @ / CSI P (v1.1): insert/delete blank cells inside the row.
+-> b7: the model row is shifted, then the ROW IS REPAINTED FROM THE
+-> MODEL (one drawmrow) - the b6 horizontal ScrollRaster wiped the
+-> row on boot while the model shift was provably right (harness-
+-> verified); a repaint from the model cannot disagree with it.
+-> The blitter path survives only for the no-model degenerate case.
+PROC inschars(n)
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j, y, idx
+  IF curcon.cx >= curcon.cols THEN RETURN
+  IF n < 1 THEN n := 1
+  IF n > (curcon.cols - curcon.cx) THEN n := curcon.cols - curcon.cx
+  y := curcon.topy + Mul(curcon.cy, curcon.ch)
+  IF curcon.sb
+    m := visrow(curcon.cy)
+    a := sarow(curcon.cy)
+    stp := ssrow(curcon.cy)
+    FOR j := curcon.cols - 1 TO curcon.cx + n STEP -1
+      m[j] := m[j - n]
+      a[j] := a[j - n]
+      stp[j] := stp[j - n]
+    ENDFOR
+    FOR j := curcon.cx TO curcon.cx + n - 1
+      m[j] := 0
+      a[j] := 0
+      stp[j] := 0
+    ENDFOR
+    idx := curcon.sbtop + curcon.cy
+    IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
+    drawmrow(idx, y)
+  ELSE
+    ScrollRaster(curcon.rp, -Mul(n, curcon.cw), 0,
+                 curcon.left + Mul(curcon.cx, curcon.cw), y,
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
+  ENDIF
+ENDPROC
+
+PROC delchars(n)
+  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j, y, idx
+  IF curcon.cx >= curcon.cols THEN RETURN
+  IF n < 1 THEN n := 1
+  IF n > (curcon.cols - curcon.cx) THEN n := curcon.cols - curcon.cx
+  y := curcon.topy + Mul(curcon.cy, curcon.ch)
+  IF curcon.sb
+    m := visrow(curcon.cy)
+    a := sarow(curcon.cy)
+    stp := ssrow(curcon.cy)
+    FOR j := curcon.cx TO curcon.cols - 1 - n
+      m[j] := m[j + n]
+      a[j] := a[j + n]
+      stp[j] := stp[j + n]
+    ENDFOR
+    FOR j := curcon.cols - n TO curcon.cols - 1
+      m[j] := 0
+      a[j] := 0
+      stp[j] := 0
+    ENDFOR
+    idx := curcon.sbtop + curcon.cy
+    IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
+    drawmrow(idx, y)
+  ELSE
+    ScrollRaster(curcon.rp, Mul(n, curcon.cw), 0,
+                 curcon.left + Mul(curcon.cx, curcon.cw), y,
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
   ENDIF
 ENDPROC
 
@@ -2230,7 +2799,7 @@ ENDPROC
 
 -> erase from the output cursor to the end of its row (CSI K)
 PROC eraseeol()
-  DEF y, m:PTR TO CHAR, a:PTR TO CHAR, j
+  DEF y, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j
   IF curcon.cx >= curcon.cols THEN RETURN   -> inverted RectFill = wild writes
   y := curcon.topy + Mul(curcon.cy, curcon.ch)
   SetAPen(curcon.rp, 0)
@@ -2239,9 +2808,11 @@ PROC eraseeol()
   IF curcon.sb
     m := visrow(curcon.cy)
     a := sarow(curcon.cy)
+    stp := ssrow(curcon.cy)
     FOR j := curcon.cx TO curcon.cols - 1
       m[j] := 0
       a[j] := 0
+      stp[j] := 0
     ENDFOR
   ENDIF
 ENDPROC
@@ -2256,12 +2827,36 @@ PROC render(buf, len)
   s := buf
   WHILE i < len
     c := s[i]
-    IF curcon.cesc = 1    -> after ESC: '[' opens a CSI, else two-byte seq
+    IF curcon.cesc = 1    -> after ESC: '[' opens a CSI, ']' an OSC
       IF c = "["
         csistart()
+      ELSEIF c = "]"
+        oscstart()        -> v1.1: xterm title sequence
       ELSE
         curcon.cesc := 0
       ENDIF
+      i := i + 1
+    ELSEIF curcon.cesc = 3    -> OSC body: ESC]0;title BEL (or ST)
+      IF (c = 7) OR (c = $9C)
+        oscdone()
+        curcon.cesc := 0
+      ELSEIF c = 27
+        curcon.cesc := 4      -> ESC inside the OSC: ST coming?
+      ELSEIF curcon.oscsk AND (c >= "0") AND (c <= "9")
+        -> the Ps number skipped: 0, 1 and 2 all retitle here
+      ELSEIF curcon.oscsk AND (c = ";")
+        curcon.oscsk := FALSE
+      ELSE
+        curcon.oscsk := FALSE
+        IF (curcon.oscn < 80) AND (c >= 32)
+          curcon.osct[curcon.oscn] := c
+          curcon.oscn := curcon.oscn + 1
+        ENDIF
+      ENDIF
+      i := i + 1
+    ELSEIF curcon.cesc = 4    -> ESC \ is ST; anything else aborts
+      IF c = 92 THEN oscdone()
+      curcon.cesc := 0
       i := i + 1
     ELSEIF curcon.cesc = 2    -> CSI parameters end at the final byte >= $40
       IF (c >= "0") AND (c <= "9")
@@ -2271,6 +2866,8 @@ PROC render(buf, len)
         curcon.cnp := curcon.cnp + 1
         IF curcon.cnp > 3 THEN curcon.cnp := 3
         curcon.cpar[curcon.cnp] := 0
+      ELSEIF (c = "?") OR (c = ">")
+        curcon.cpriv := TRUE    -> DEC private marker (More: ?47h/l)
       ELSEIF c >= $40
         csidispatch(c)
         curcon.cesc := 0
@@ -2281,6 +2878,9 @@ PROC render(buf, len)
       i := i + 1
     ELSEIF c = $9B
       csistart()
+      i := i + 1
+    ELSEIF c = $9D
+      oscstart()          -> the 8-bit OSC introducer
       i := i + 1
     ELSEIF c = 10
       outnl()
@@ -2308,8 +2908,8 @@ PROC render(buf, len)
         IF curcon.cx >= curcon.cols THEN outnl()
         fit := curcon.cols - curcon.cx
         IF fit > run THEN fit := run
-        SetAPen(curcon.rp, fgpen())
-        SetBPen(curcon.rp, curcon.curbg)
+        setpens()
+        setsoft(curcon.cursty)
         Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
         Text(curcon.rp, s + i, fit)
         IF curcon.sb
@@ -2317,6 +2917,10 @@ PROC render(buf, len)
           m := sarow(curcon.cy) + curcon.cx
           FOR j2 := 0 TO fit - 1
             m[j2] := curattr()
+          ENDFOR
+          m := ssrow(curcon.cy) + curcon.cx
+          FOR j2 := 0 TO fit - 1
+            m[j2] := curcon.cursty
           ENDFOR
         ENDIF
         curcon.cx := curcon.cx + fit
@@ -2327,6 +2931,7 @@ PROC render(buf, len)
       i := i + 1    -> other control bytes
     ENDIF
   ENDWHILE
+  setsoft(0)        -> the editor and cursor draw plain, always
 ENDPROC
 
 -> ---------- the line editor, out-of-band of the output cursor:
@@ -2357,29 +2962,107 @@ PROC edroom(n)
   ENDWHILE
 ENDPROC
 
+-> v1.1b8: erase ONLY what the editor painted. 1.0 erased from the
+-> anchor to EOL - pixels AND model - which STOLE CLIENT ROWS: a
+-> write may legally end mid-row (Type splits at \r), reanchor
+-> parks the anchor on the client's half-written row, and the next
+-> write's eraseedit destroyed it before its bytes arrived. Full-
+-> width overprinters ("50%\r51%\r") repaint what they lose, so
+-> 1.0 never showed it; the ccon-bisect t2 boot (19.7.26) did.
+-> Now: the model loses just the MIRRORED text cells (the editor's
+-> own), and the touched rows repaint whole from the model - blip,
+-> ghost and search-banner pixels evaporate (they are not in the
+-> model), client cells COME BACK (they are).
 PROC eraseedit()
-  DEF y, r, r1, x0, m:PTR TO CHAR, a:PTR TO CHAR, j
+  DEF y, r, r1, x0, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j,
+      cc
   IF curcon.win = NIL THEN RETURN
   IF curcon.ancx >= curcon.cols THEN RETURN -> inverted RectFill = wild writes
-  r1 := edlastrow(curcon.edlast)
-  IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
-  x0 := curcon.ancx
-  SetAPen(curcon.rp, 0)
-  FOR r := curcon.ancy TO r1
-    y := curcon.topy + Mul(r, curcon.ch)
-    RectFill(curcon.rp, curcon.left + Mul(x0, curcon.cw), y,
-             curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
-    IF curcon.sb                -> the mirror empties with the pixels
-      m := visrow(r)            -> (the edit line lives in the model
-      a := sarow(r)             -> now - see drawedit)
-      FOR j := x0 TO curcon.cols - 1
-        m[j] := 0
-        a[j] := 0
-      ENDFOR
-    ENDIF
-    x0 := 0                   -> continuation rows clear full width
+  IF curcon.sb
+    cc := curcon.ancx
+    r := curcon.ancy
+    FOR j := 0 TO curcon.edlast - 1
+      IF r <= (curcon.rows - 1)
+        m := visrow(r)
+        a := sarow(r)
+        stp := ssrow(r)
+        m[cc] := 0
+        a[cc] := 0
+        stp[cc] := 0
+      ENDIF
+      cc := cc + 1
+      IF cc >= curcon.cols
+        cc := 0
+        r := r + 1
+      ENDIF
+    ENDFOR
+    r1 := edlastrow(curcon.edext)
+    IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
+    FOR r := curcon.ancy TO r1
+      drawmodelrow(r)
+    ENDFOR
+  ELSE
+    -> no model: nothing to restore from - the old full clear
+    r1 := edlastrow(curcon.edext)
+    IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
+    x0 := curcon.ancx
+    SetAPen(curcon.rp, 0)
+    FOR r := curcon.ancy TO r1
+      y := curcon.topy + Mul(r, curcon.ch)
+      RectFill(curcon.rp, curcon.left + Mul(x0, curcon.cw), y,
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
+      x0 := 0                 -> continuation rows clear full width
+    ENDFOR
+    SetAPen(curcon.rp, curcon.deffg)
+  ENDIF
+  curcon.edlast := 0            -> the paint is gone; drawedit's b9
+  curcon.edext := 0             -> tail cleanup must not re-clean
+ENDPROC
+
+-> repaint cells x0..x1 of view row r from the model - drawmodelrow's
+-> bounded sibling, for the b9 drawedit tail cleanup
+PROC drawmodelcells(r, x0, x1)
+  DEF idx, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at,
+      sy, c, fg, bg, rowbuf[256]:ARRAY OF CHAR
+  IF curcon.sb = NIL THEN RETURN
+  IF x0 < 0 THEN x0 := 0
+  IF x1 > (curcon.cols - 1) THEN x1 := curcon.cols - 1
+  IF x0 > x1 THEN RETURN
+  idx := curcon.sbtop + r
+  IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
+  m := curcon.sb + Mul(idx, curcon.cols)
+  a := curcon.sa + Mul(idx, curcon.cols)
+  stp := curcon.ss + Mul(idx, curcon.cols)
+  FOR i := x0 TO x1
+    c := m[i]
+    rowbuf[i] := IF c < 32 THEN 32 ELSE c
   ENDFOR
+  i := x0
+  WHILE i <= x1
+    at := a[i]
+    sy := stp[i]
+    j := i
+    WHILE (j <= x1) AND (a[j] = at) AND (stp[j] = sy)
+      j++
+    ENDWHILE
+    fg := at AND 15
+    bg := Shr(at, 4) AND 7
+    IF sy AND 4
+      IF fg = bg THEN fg := curcon.deffg
+      SetAPen(curcon.rp, bg)
+      SetBPen(curcon.rp, fg)
+    ELSE
+      SetAPen(curcon.rp, fg)
+      SetBPen(curcon.rp, bg)
+    ENDIF
+    setsoft(sy)
+    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), curcon.topy + Mul(r, curcon.ch) + curcon.baseline)
+    Text(curcon.rp, rowbuf + i, j - i)
+    i := j
+  ENDWHILE
+  setsoft(0)
   SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
 ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
@@ -2392,12 +3075,20 @@ ENDPROC
 -> commit erases it and renders the real line over the same cells.
 PROC drawedit()
   DEF s:PTR TO CHAR, l, cch[2]:ARRAY OF CHAR, i, n, r, xc, bc,
-      m:PTR TO CHAR, a:PTR TO CHAR, j, gp, g:PTR TO CHAR, gn, gcol,
-      sd[80]:STRING
+      m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j, gp,
+      g:PTR TO CHAR, gn, gcol, gext, cc, sd[80]:STRING,
+      oldl, oldext, newext, c0, c1, rr, n2, x0, x1
   IF curcon.win = NIL THEN RETURN
+  -> b9: NO pre-erase - the b8 erase-then-paint repainted every row
+  -> twice per keystroke and the whole line flickered on bare
+  -> cursor moves (the sweep's finding). The text now paints IN
+  -> PLACE (JAM2 covers the old pixels; identical glyphs repaint
+  -> invisibly); what the new paint no longer covers is cleaned at
+  -> the END from the old extent (see the tail below).
+  oldl := curcon.edlast
+  oldext := curcon.edext
   l := StrLen(curcon.ebuf)
   edroom(l)
-  eraseedit()
   s := curcon.ebuf
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
@@ -2411,14 +3102,47 @@ PROC drawedit()
     IF curcon.sb
       CopyMem(s + i, visrow(r) + xc, n)
       a := sarow(r) + xc
+      stp := ssrow(r) + xc
       FOR j := 0 TO n - 1
         a[j] := curcon.deffg    -> deffg on background 0, the same
-      ENDFOR                    -> attr the pixels are drawn with
+        stp[j] := 0             -> attr the pixels are drawn with;
+      ENDFOR                    -> the edit line is never styled
     ENDIF
     i := i + n
     xc := 0
     r := r + 1
   ENDWHILE
+  -> zero the MIRROR where the old text out-reaches the new (cells
+  -> l..oldl-1) - BEFORE the blip below reads the model (b10: the
+  -> Ctrl+U ghost-of-the-killed-char sighting: the blip's model
+  -> read must never see the cells this paint just abandoned)
+  IF curcon.sb
+    IF oldl > l
+      j := l
+      cc := curcon.ancx + l
+      rr := curcon.ancy
+      WHILE cc >= curcon.cols
+        cc := cc - curcon.cols
+        rr := rr + 1
+      ENDWHILE
+      WHILE j < oldl
+        IF rr <= (curcon.rows - 1)
+          m := visrow(rr)
+          a := sarow(rr)
+          stp := ssrow(rr)
+          m[cc] := 0
+          a[cc] := 0
+          stp[cc] := 0
+        ENDIF
+        j := j + 1
+        cc := cc + 1
+        IF cc >= curcon.cols
+          cc := 0
+          rr := rr + 1
+        ENDIF
+      ENDWHILE
+    ENDIF
+  ENDIF
   -> the autosuggestion: only with the cursor at the end, only on a
   -> screen with a readable grey. The blip cell carries the ghost's
   -> FIRST character (inverse, fish fashion - accepted text lands
@@ -2437,11 +3161,19 @@ PROC drawedit()
   ENDIF
   bc := curcon.ancx + curcon.cpos
   r := bc / curcon.cols
+  IF (cch[0] = 32) AND (curcon.sb <> NIL)
+    -> a \r-parked anchor (b8): the blip may sit over CLIENT text -
+    -> show that char inverted, the block-cursor rule
+    m := visrow(curcon.ancy + r)
+    cc := m[bc - Mul(r, curcon.cols)]
+    IF cc >= 32 THEN cch[0] := cc
+  ENDIF
   SetAPen(curcon.rp, 0)
   SetBPen(curcon.rp, curcon.deffg)
   Move(curcon.rp, curcon.left + Mul(bc - Mul(r, curcon.cols), curcon.cw),
        curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
   Text(curcon.rp, cch, 1)
+  gext := 0
   IF curcon.sghost
     g := curcon.sghost
     gcol := bc - Mul(r, curcon.cols) + 1
@@ -2452,6 +3184,7 @@ PROC drawedit()
       Move(curcon.rp, curcon.left + Mul(gcol, curcon.cw),
            curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
       Text(curcon.rp, g + l + 1, gn)
+      gext := gn                -> ghost cells join the erase extent
     ENDIF
   ENDIF
   -> Ctrl+R feedback REPLACES the prompt, the bash way: the prompt
@@ -2481,7 +3214,33 @@ PROC drawedit()
   ENDIF
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
+  -> the b9 tail: repaint stale pixels (old blip/ghost beyond the
+  -> new extent) from the model. Interior cells need nothing: the
+  -> text pass painted over them. b10: the blip cell counts into
+  -> the extent ONLY when the blip actually sits at the line end
+  -> (cpos = l) - counting it unconditionally left the old end-
+  -> blip standing when the cursor jumped into the interior (the
+  -> Ctrl+Left garbage-marker sighting).
+  newext := l
+  IF curcon.cpos = l THEN newext := l + 1 + gext
+  IF curcon.sb
+    IF oldext > newext
+      c0 := curcon.ancx + newext        -> stale cells, linear from
+      c1 := curcon.ancx + oldext - 1    -> the anchor ROW's start
+      rr := Div(c0, curcon.cols)
+      n2 := Div(c1, curcon.cols)
+      WHILE rr <= n2
+        IF (curcon.ancy + rr) <= (curcon.rows - 1)
+          x0 := c0 - Mul(rr, curcon.cols)
+          x1 := c1 - Mul(rr, curcon.cols)
+          drawmodelcells(curcon.ancy + rr, x0, x1)
+        ENDIF
+        rr := rr + 1
+      ENDWHILE
+    ENDIF
+  ENDIF
   curcon.edlast := l
+  curcon.edext := newext        -> text + the blip cell + any ghost
 ENDPROC
 
 -> ---------- Ctrl+R incremental history search (readline) ----------
@@ -3543,7 +4302,7 @@ PROC drawmodelrow(r)
   DEF idx
   IF curcon.sb = NIL THEN RETURN
   idx := curcon.sbtop + r
-  IF idx >= SBMAX THEN idx := idx - SBMAX
+  IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
   drawmrow(idx, curcon.topy + Mul(r, curcon.ch))
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
@@ -3665,16 +4424,11 @@ PROC dotab(back)
     tcmenudraw()
     RETURN
   ENDIF
-  -> plain Tab prefers a visible autosuggestion: accept its next
-  -> word. Shift+Tab still FORCES the completion menu - the escape
-  -> hatch for when history shadows a filename you want completed
-  -> (bare Shift+Tab meant nothing outside an open menu anyway)
-  IF (back = FALSE) AND (curcon.sghost <> NIL) AND
-     (curcon.cpos = StrLen(curcon.ebuf))
-    sgword()
-    drawedit()
-    RETURN
-  ENDIF
+  -> v1.1 (19.7.26, the s:ccon-* lesson): Tab NEVER accepts the
+  -> ghost any more - `type s:c<Tab>` wanted the completion menu
+  -> and got history's suggestion instead. Tab is completion's key,
+  -> whole and alone; ghosts are accepted by Right/Shift+Right (all)
+  -> and Ctrl+Right (word) only. 1.0 had Tab prefer a visible ghost.
   IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
      (fsname = NIL) OR (curcon.tcpool = NIL) THEN RETURN
   s := curcon.ebuf
@@ -3793,4 +4547,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.0 (18.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1 (19.7.26b) CCON: LTX console handler', 0

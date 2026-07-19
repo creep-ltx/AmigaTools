@@ -876,6 +876,598 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       (D) Ed/More/CTerm/copy-paste regression per window; (E)
       CCON: and CRAW: simultaneously.
 
+## v1.1 — planned (two themes)
+
+### Theme A: "fits your system" — compatibility gaps that bite daily
+
+- [ ] **FONT option — `FONTname/size` in the open string.** The most
+      visible 1.0 gap: everything is Topaz 8 unless a borrowed
+      window brings its own font. THE WRINKLE, spotted before it
+      cost a boot: OpenDiskFont() does DOS I/O on the caller's
+      context — for a handler that is the no-DOS rule violated,
+      deadlock territory (DoPkt waits on pr_MsgPort, our client
+      port). So v1.1 accepts ALREADY-LOADED fonts only, via
+      OpenFont() (ROM fonts, anything FixFonts/a terminal has
+      loaded) — which covers the real use case, CTerm passing its
+      own font. Disk-font loading needs a helper task or a
+      mount-time load; deferred, design when wanted. Non-8x8
+      cells: cw/ch/gridcalc already derive from the rastport font,
+      but boot-verify the block cursor, blip, selection cell math
+      and menu columns at a non-topaz size.
+- [ ] **SGR 3/4/7 — italic, underline, inverse — as real soft
+      styles.** Stock console renders these; CCON drops them (Ed
+      is fine, but ports and BBS output lose face). The catch: the
+      attr plane is a FULL byte (fg+bg nibbles), so styles need a
+      third plane — roughly +300K/window at 1.0's geometry, which
+      is why the memory knob below lands in the same release.
+      Rendering: SetSoftStyle for 3/4, inverse = the drawselrow
+      fg/bg swap the selection already does. All the batched run
+      painters (drawmrow, drawselrow, render, outchr) grow a style
+      dimension to their run-splitting.
+- [ ] **The memory knob — `LINES=n` open option.** 4000-line model
+      per window is ~600K at 80 cols; a 2MB real machine chokes.
+      LINES=n clamps SBMAX per console (model allocation is
+      already per-console since M10 — the knob the design punted
+      is now trivial); consider a smaller default for windows
+      opened WITHOUT the option when total consoles > 1. Pays for
+      the style plane above.
+- [ ] **Insert/delete character — CSI @ / CSI P.** Small renderer
+      + model work (ScrollRaster horizontally inside the row, cell
+      copies in visrow/sarow like L/M do between rows). Closes a
+      compatibility hole a fullscreen app will eventually hit.
+- [ ] **xterm title sequences — ESC]0;title BEL (and ST).** A
+      feature and a bugfix in one: gives clients a proper retitle
+      path AND properly fixes the More-retitle stomp (the console
+      keeps the client title, appends its own [scrollback -n] /
+      [search:] state to it instead of replacing it).
+
+### 1.1b1 — Theme A built whole (19.7.26), awaiting boot
+
+All five Theme A items in one build; compiled clean (LARGE), vamos
+smoke test green (usage + refusal), deployed to L: with 1.0 kept
+beside it as `ccon-handler-1.0`. Boxes above stay open until the
+boot says so. How each landed:
+
+- **FONT**: the open string splits fields on `/`, so `FONTname/size`
+  arrives as TWO tokens — the parser sets `pfontexp` on the FONT
+  token and a bare number as the NEXT token becomes the size
+  (`FONT=name` and `LINES=n` forms accepted too). openwin appends
+  `.font` when missing, opens via OpenFont ONLY (the no-DOS rule:
+  loaded fonts — ROM plus whatever diskfont already pulled in),
+  rejects proportional faces (FPF_PROPORTIONAL, the grid needs
+  fixed cells) and falls back to topaz 8 silently. AskSoftStyle is
+  captured per window (`softmask`) for the styles below.
+- **SGR 3/4/7**: a third model plane `ss` (style bits: 1 italic,
+  2 underline, 4 inverse) allocated/resized/freed with sb/sa —
+  all three or none. Every painter grew the style dimension in its
+  run-splitting: drawmrow, drawselrow (selection over an inverse
+  cell re-inverts, xterm manners), render's batched runs, outchr,
+  cursdraw/curserase. Italic/underline go through SetSoftStyle
+  (only on change, `cursoft` tracks the rastport); inverse is a
+  pen swap at paint time, never a stored-pen change — so the attr
+  plane keeps its meaning and bg stays 3 bits. `setsoft(0)` at
+  every painter's exit: the editor and cursor always draw plain.
+- **LINES=n**: `sbmax` per console (floor 100, tcnum's cap 20000,
+  default SBMAX 4000). Every model index — visrow/sarow/ssrow,
+  screenscroll, doresize, redraw, selvidx, drawmodelrow — now wraps
+  on curcon.sbmax. The knob that pays for the style plane.
+- **CSI @ / CSI P**: inschars/delchars — horizontal ScrollRaster
+  from the cursor to the row edge (positive dx moves content left,
+  the screenscroll sign convention: insert scrolls by -n cells),
+  model row shifted the same way in all three planes.
+- **xterm titles**: OSC parser states in render (cesc 3 = body,
+  4 = ESC-seen; BEL, $9C and ESC \ all terminate, $9D opens like
+  ESC ]). The Ps number is skipped — 0/1/2 all retitle. The text
+  becomes wtitlebase, so [scrollback -n]/[search:] append to it.
+  AND the More-stomp fix: settitle now ADOPTS a foreign title it
+  finds on the window (More retitles via the DISK_INFO window
+  pointer and SetWindowTitles directly) as the new base instead of
+  overwriting it on the next view flip.
+
+Boot checklist (the usual ladder — every 1.0 feature must still
+hold, they all repaint through the grown painters):
+
+- [ ] plain boot: NewShell CCON: opens, types, completes, scrolls
+- [ ] `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"` — three
+      styles render, survive Shift+Up into scrollback and back,
+      select/copy over them, menu restore over them
+- [ ] `NewShell CCON:0/0/640/200/test/FONTtopaz/9` — topaz 9 is
+      the OTHER ROM size, guaranteed loaded: a real non-8x8 cell.
+      Block cursor, blip, selection cells, completion menu columns
+      all line up. (A disk font works only if something already
+      loaded it — that is the designed limit, not a bug.)
+- [ ] unknown font name → topaz 8, no crash
+- [ ] `NewShell CCON:0/0/640/200/small/LINES=200` — scrollback
+      stops at ~200 lines back, no wrap garbage
+- [ ] CSI @/P: Ed or a test echo `*e[5@` / `*e[3P` mid-line —
+      cells shift, colours/styles ride along
+- [ ] `echo "*e]0;retitled*07"` (BEL) — title changes; scroll back
+      and forth — suffix appends, title survives
+- [ ] More a file, let it retitle, scroll back → More's title keeps
+      the [scrollback -n] suffix instead of vanishing
+- [ ] Ed still: menus, raw arrows, block cursor — the render parser
+      grew states, Ed is the canary for parser regressions
+
+### 1.1b2 — disk fonts via the helper process (19.7.26)
+
+**Boot finding (1.1b1, 19.7.26):** FONT=microknight/8 came up
+topaz 8 — and so did FONT=topaz/9. Loaded-fonts-only proved
+useless in the FIRST MINUTE of real use: 3.1.4/3.2 moved even
+topaz 9 out of the ROM onto disk, so a cold boot has nothing for
+OpenFont to find but topaz 8. The "deferred, design when wanted"
+helper-task from the plan above got wanted immediately.
+
+**The design (the M5b trick's sibling):** the no-DOS rule binds
+the HANDLER process — DoPkt waits on pr_MsgPort, the port clients
+send to. A throwaway helper process has its own pr_MsgPort and
+talks DOS freely. fontload() spawns one per FONT request
+(CreateNewProc, NP_ENTRY, no input/output/dir/vars — nothing that
+would make CreateNewProc itself send packets), sleeps on a
+private signal while the helper runs OpenDiskFont, takes the
+font back through a global. Client packets queue on the port
+meanwhile; the open being served was waiting anyway. The helper
+sets its pr_WindowPtr to -1 so a missing volume never throws a
+requester, and ALWAYS signals, even on failure.
+
+**The A4 wrinkle:** an NP_Entry process starts without E's data
+base register. gluestub solves this for interrupts by reading A4
+out of is_Data — but a process entry carries no is_Data. So the
+stub is 24 bytes of machine code POKED AT RUNTIME with the glue
+vector's address as an immediate: MOVEM save, MOVEA.L #fhgd,A3,
+A4 and {fonthelper} loaded from the vector, JSR, MOVEM restore,
+RTS. Encoding verified by machine68k disassembly before boot
+(house rule: glue gets disassembled, not assumed). CacheClearU()
+after poking. Fallback ladder intact: no helper -> OpenFont
+(loaded fonts) -> topaz 8.
+
+Boot checklist deltas (rest of the 1.1b1 ladder unchanged):
+
+- [ ] `NewShell CCON:0/0/640/200/test/FONT=microknight/8` COLD —
+      MicroKnight from disk, no prefs dance
+- [ ] FONT=topaz/9 — the disk topaz 9, cells visibly taller
+- [ ] unknown font name → topaz 8, no requester, no hang
+- [ ] a second FONT window while the first lives (helper is
+      spawn-per-request — no shared state to collide)
+- [ ] `version l:ccon-handler` says 1.1b2
+
+### 1.1b3 — the font telemetry boot (19.7.26)
+
+**Boot finding (1.1b2):** FONT=MicroKnight/8 still topaz — but the
+window OPENED, so the handler never hung in Wait: the failure is
+in a rung that falls through, not a deadlock. Verified from the
+Linux side before rebuilding (the 0.14 telemetry-boot discipline):
+MicroKnight/8 IS on FONTS:; E's textfont offsets (ysize 20, style
+22, flags 23) and textattr offsets are right, so the proportional
+check is sound; process.windowptr = 184 is the TRUE pr_WindowPtr
+(hand-counted 186 was wrong - E's module knew better); every NP_*
+tag value matches dostags. Everything checkable without a boot
+checks out - so 1.1b3 makes the Amiga tell us the rest.
+
+**Telemetry:** the topaz fallback now appends ` [font eN]` to the
+title when a FONT option was asked for. Decode:
+  - no marker = the FONT option never PARSED (pfontname empty)
+  - e13 = plumbing never came up at init (signal/stub alloc)
+  - e14 = CreateNewProc itself failed
+  - e11 = helper ran, no diskfont.library
+  - e12 = helper ran, OpenDiskFont found no such name
+  - e15 = font loaded fine but proportional, rejected by design
+  - e10 = helper entered but neither branch finished (would hang
+    before the window opens - seeing it printed is near-impossible)
+  - a hang with no window = helper crashed before Signal (the stub)
+Helper stack bumped to 16384 while in there. Marker and fherr come
+OUT before 1.1 final.
+
+- [ ] boot FONT=MicroKnight/8, read the title, decode above
+
+### 1.1b4 — the telemetry was blind (19.7.26)
+
+**Boot finding (1.1b3):** title showed plain "Test2", no marker —
+and that told us NOTHING, twice over. (1) The b3 marker was
+StrAdd'ed into wtitlebase AFTER OpenWindowTagList had already
+painted the bar; Intuition keeps the POINTER and repaints only on
+SetWindowTitles, so the marker sat invisible in the buffer (a
+Shift+Up would have revealed it - the scrollback flip refreshes
+the title). The M4 pointer lesson, forgotten in its own file.
+(2) A no-marker title is also exactly what the b2 seglist shows,
+and the boot's CLI numbering left doubt about which build was
+even running. Telemetry that cannot distinguish its own absence
+is not telemetry.
+
+**b4:** every FONT attempt stamps ` [b4 font eN]` - e0 on SUCCESS
+too - and pushes it with an explicit SetWindowTitles (the window
+is open by then; the font block runs after OpenWindowTagList).
+Reading the next screenshot is now unambiguous: no marker = FONT
+never parsed OR an old build; [b4 font e0] + topaz glyphs = loaded
+but not applied; eN = the decode table above.
+
+- [ ] reboot, FONT=MicroKnight/8, read the title
+
+### 1.1b5 — the shell eats the spec (19.7.26)
+
+**Boot finding (1.1b4, FRESH boot):** still no marker. Everything
+on the Linux side is now PROVEN: parsecon extracted verbatim into
+a vamos harness parses 'ccon:0/0/640/80/Test/FONT=MicroKnight/8'
+perfectly (pfontname/pfontsize/ta.name all right); the deployed
+binary is md5-identical to the build; user-startup -> mountlist ->
+L:ccon-handler chain checked file by file; the marker sits gated
+on nothing but pfontname[0]. Ergo: the STRING reaching parsecon
+is not the string typed. And the ROM coughed up the suspect:
+
+    strings kicka1200.rom | grep -i 'con:'
+    CON:///130/AmigaShell/CLOSE/SHELL/ICONIFY
+    CON:///-1/AmigaDOS/Auto/NoClose/Smart
+
+The V47 shell REBUILDS the window spec from its template - fields
+it knows survive (geometry, title), foreign options (FONT=,
+LINES=) are eaten before Open() ever reaches the handler. NewShell
+was never a clean pipe.
+
+**b5 telemetry:** the window title is now the EXACT name DOS
+handed us (raw BSTR, 76 chars), with the [b4 font eN] stage
+appended when a FONT parsed. One boot, two opens, full truth:
+
+- [ ] `newshell ccon:0/0/640/80/test/FONT=microknight/8` - title
+      shows what the shell REALLY passes
+- [ ] `echo >ccon:0/0/640/80/test2/FONT=microknight/8/WAIT hello`
+      - echo's Open() bypasses the shell: expect the raw spec in
+      the title WITH the FONT tokens, [b4 font e0], and MicroKnight
+      glyphs if the loader chain is healthy
+
+If the split confirms, the fix direction: options must survive
+without the shell's cooperation - mountlist Startup args as
+device-wide defaults (the RAW precedent), and/or keep full spec
+support for direct Open() clients (CTerm et al on stock 3.2 pass
+specs verbatim).
+
+**Boot verdict (b5, 02:19): title = `ccon:0/0/640/80/test/FONT`.**
+The spec arrives VERBATIM - device name and all - and stops at the
+'='. The CON: template theory above was wrong (honest correction):
+the eater is the AmigaDOS COMMAND-LINE tokenizer, which treats
+unquoted `X=Y` as ReadArgs keyword syntax and splits there. The
+echo window "flashing briefly" confirms it: its redirect name was
+cut at '=' too, which amputated /WAIT - window died with the
+handle, correct CCON semantics. Every failed FONT boot tonight
+used '='; the disk-font loader has never once actually run.
+
+The cure costs nothing: the '='-less forms have parsed since b1
+and are the stock idiom anyway (SCREENname, PENn, WINDOW0x):
+
+    newshell ccon:0/0/640/80/test/FONTmicroknight/8
+    newshell ccon:0/0/640/200/big/LINES8000
+
+(or quote the whole spec when the '=' form is wanted). ccon.doc
+must say this out loud in the FONT/LINES sections: NO '=' on a
+shell command line unless the spec is quoted - the shell eats it,
+silently, before any handler sees the name.
+
+- [x] FONTmicroknight/8 (no '='): expect full spec in title,
+      [b4 font e0], MicroKnight glyphs - the loader's FIRST real run
+      -> **BOOT-GREEN (02:23):** full spec in the title, e0, and
+      MicroKnight rendering. The helper process, the poked A4 stub,
+      OpenDiskFont - the whole chain worked on its first genuine
+      run. The '=' window beside it: truncated title, topaz - the
+      culprit and the cure in one screenshot. Night lesson in one
+      line: the code was right from b2; the SHELL ate the option
+      and the first two telemetry builds could not see their own
+      absence. Instrument until the failure has a name.
+
+### 1.1b6 — telemetry out, ladder resumes (19.7.26)
+
+b5's raw-name title and the [b4 font eN] stamp are OUT (fherr's
+internal stage codes stay until 1.1 final - invisible, and the
+next mystery will want them). Remaining Theme A ladder unchanged:
+styles echo, FONTtopaz/11 for a real non-8x8 grid (topaz/11 is on
+disk - and the loader now REACHES disk), LINES200, CSI @/P, OSC
+titles, More retitle, Ed canary.
+
+### 1.1b7 — @/P repaint from model + Tab belongs to completion (19.7.26)
+
+**Boot results (b6 ladder, 02:36):**
+- [x] SGR 3/4/7 GREEN: italic slants, underline underlines, inverse
+      inverts, combos stack, SGR 23 drops italic mid-line. (Typed
+      via s:ccon-styles - raw escape bytes written from the Linux
+      side because the Swedish keymap has no reachable `*` in
+      FS-UAE; the s:ccon-* trio stays for future ladders.)
+- [x] OSC titles GREEN: title changed on the BEL sequence.
+- [x] FONTtopaz/11 GREEN: real 11px grid, cursor/cells aligned.
+- [x] LINES GREEN: LINES10 floored to 100, scroll range matches.
+- [ ] CSI @/P FAILED on boot: both result rows wiped except the
+      newly printed XYZ. The model shift was PROVEN right in a
+      vamos harness (01234XYZ56789 / 0123489 exactly) - the
+      horizontal ScrollRaster was the liar. b7 replaces it: shift
+      the model, repaint the row FROM the model (one drawmrow).
+      Pixels can no longer disagree with the model. ScrollRaster
+      survives only for the sb=NIL degenerate case. RETEST:
+      `type s:ccon-ichdch`.
+- [x] Scrollback survival of styles: pending explicit check but
+      styles repaint through drawmrow (menu restore already
+      proved that path) - verify with Shift+Up while at it.
+
+**Tab reclaimed (his call, 02:36):** `type s:c<Tab>` wanted the
+completion menu, got history's ghost instead. Tab NEVER accepts
+the ghost now - it is completion's key alone; ghosts accept via
+Right/Shift+Right (all) and Ctrl+Right (word). Was: 1.0's "Tab
+prefers a visible ghost". ccon.doc needs its Tab/ghost paragraphs
+updated for 1.1 (his pass - the doc is his voice).
+
+### 1.1b8 — the \r anchor theft: a 1.0 latent bug, caught by @/P (19.7.26)
+
+**The bisect verdict (02:53, both a WB window and inside CTerm):**
+t2 - pure CR overprint, not one CSI in it - FAILED. t3 (no CR)
+passed everywhere. t1/t4/t5 fail only because their lines carry
+\r. The scroll roundtrip left the wreckage unchanged: the MODEL
+itself lost the digits. CSI @/P were innocent from the start -
+b6's ScrollRaster and b7's repaint both told the truth about a
+model that had already been robbed.
+
+**The mechanism (the \r anchor theft):** a client write may end
+mid-row - Type splits its output at \r. dowrite's tail then runs
+reanchor() + drawedit(): the edit anchor parks at column 0 OF THE
+CLIENT'S HALF-WRITTEN ROW. The NEXT write opens with eraseedit(),
+which erased anchor-to-EOL, pixels AND model. The console stole
+the client's row, then rendered the new bytes into the void.
+LATENT SINCE THE MIRROR LANDED (0.25): every progress-style
+overprint ("50%\r51%\r") was being robbed - invisible because
+full-width overprinters repaint everything they lose. The @/P
+test lines print LESS than they overwrite; that is the only
+reason the theft ever showed.
+
+**The b8 fix - erase only what the editor painted:** eraseedit
+zeroes just the MIRRORED text cells (edlast of them, wrapped) and
+repaints the touched rows whole from the model: blip/ghost/search-
+banner pixels evaporate (not in the model), client cells COME BACK
+(in it). New edext field = text + blip + ghost extent, set by
+drawedit, bounds the repaint. Polish riding along: a blip parked
+over client text now shows THAT char inverted (the block-cursor
+rule) instead of a blank block. The sb=NIL branch keeps the old
+full clear - nothing to restore from without a model.
+
+- [x] retest: `type s:ccon-bisect` - all five lines must match
+      their printed expectations, in a WB window AND in CTerm
+      -> **BOOT-GREEN (03:03): all five, both windows.** t1
+      01234XYZ89, t2 XYZ3456789, t3 0123456Q89, t4 01234   56789,
+      t5 0123489 - byte-exact against the expectations.
+- [x] retest: `type s:ccon-ichdch` (@/P proper)
+      -> **BOOT-GREEN (03:03): 01234XYZ56789 / 0123489, both
+      windows.** CSI @ and CSI P verified; the \r anchor theft is
+      dead. With this, ALL FIVE Theme A features are boot-verified:
+      FONT (MicroKnight/8 + topaz/11 from disk), SGR 3/4/7, LINES,
+      CSI @/P, xterm titles.
+- [ ] regression sweep - eraseedit is EVERY keystroke's eraser
+      now repainting from model: type/edit/kill keys feel, ghost
+      accept/reject, Ctrl+R banner in and out, completion menu,
+      history walk, commit echo, wrapped long lines
+- [ ] a real \r client: `copy` a big file with a progress
+      printer, or lha - the 1.0-era theft should be gone
+- [ ] More retitle + [scrollback -n] suffix appending (the last
+      untested corner of the titles item)
+- [ ] Ed canary (parser grew OSC states + @/P since 1.0)
+
+### 1.1b9 — the sweep verdict: 29/30, one regression, one truth (19.7.26 morning)
+
+**His full-night sweep (the bughunt file): 29 of 30 boxes green.**
+Editor, ghosts/Tab split, Ctrl+R all exit paths, \r theft dead,
+styles under stress, FONT ladder incl. helvetica-rejection, LINES
+ceiling+resize, OSC, Ed, CTerm, craw, three-window life: GREEN.
+Two findings:
+
+1. **Flicker on Shift/Ctrl+Left/Right (b8 regression, fixed in
+   b9):** b8's eraseedit repainted rows from the model and then
+   drawedit painted the text AGAIN - every keystroke double-
+   painted, visible as whole-line flicker on bare cursor moves.
+   b9 inverts to paint-first: drawedit no longer pre-erases; the
+   text paints IN PLACE (JAM2 - identical glyphs repaint
+   invisibly), then a tail pass zeroes the mirror where the old
+   text out-reached the new (cells l..oldl-1) and repaints stale
+   pixels (old blip/ghost beyond the new extent) from the model
+   via drawmodelcells (drawmodelrow's bounded sibling). eraseedit
+   now zeroes edlast/edext after erasing so the tail never
+   re-cleans at a moved anchor (the theft pattern must not come
+   back through the back door). Standalone eraseedit callers
+   (dowrite, commit, Ctrl+L, raw transitions) unchanged.
+2. **More's --- More (xx%) --- bar stuck in scrollback history**
+   (see 10:10 screenshot; the title adoption + suffix WORKED in
+   the same shot): More paints its pager UI over the visible rows
+   - which ARE the model's live window - and rows that later
+   scroll off archive More's transient UI instead of transcript.
+   Stock CON: corrupts identically; it just has no scrollback to
+   show it. Not a bug in the b-series - an inherent property of
+   scrollback-without-altscreen. Candidate real fix, HIS CALL
+   (v1.1 or later): raw-session alternate screen - snapshot the
+   visible model rows on cooked->raw, restore on raw->cooked
+   (More/Ed/editors leave the transcript untouched, the unix
+   less-on-xterm behavior; no console on the platform does this).
+   Open question there: rows that SCROLL during raw (More's
+   line-by-line Return advance) still leak into history unless
+   raw-mode scrolls also stop archiving.
+
+- [x] b9 boot: NO flicker (his word) - but two tail-cleanup bugs:
+      Ctrl+Left/Right left a stale inverse block at the line END,
+      and Ctrl+U left the killed first char inside the blip.
+      Screenshots 10:30/10:31.
+
+### 1.1b10 — tail fixes + the raw-session alternate screen (19.7.26)
+
+**The two b9 sightings, both one-cause-one-line:**
+1. Stale end-blip: newext counted the blip cell UNCONDITIONALLY,
+   but the blip only occupies cell l when cpos = l - a cursor
+   jumped into the interior left oldext = newext and the old end-
+   blip standing. Now: newext = l, or l+1+ghost when cpos = l.
+2. Killed char in the blip: the mirror-zeroing ran in the tail,
+   AFTER the blip's b8 model-read - Ctrl+U's blip read the cell
+   the paint had just abandoned. The zeroing now runs right after
+   the text pass, before anything reads the model.
+
+**The feature (his yes, this morning): raw-session alternate
+screen.** altsave() on cooked->raw (after eraseedit: the vault
+holds a clean transcript): visible rows x3 planes + cursor +
+anchor + sbtop/sbcnt + geometry. altrestore() on raw->cooked:
+ring rewound, rows copied back, cursor AND anchor restored
+(reanchor skipped - the anchor is part of the restoration),
+redraw. Raw-scrolled rows reclaim ring rows; sbcnt shrinks by
+the overflow when a long raw session wraps into oldest history
+(rawscr counts in screenscroll). A resize during raw discards
+the snapshot (altdrop in doresize) - fallback is the old
+behavior. Snapshot dies with the window (closewin). No memory =
+no snapshot = 1.0 behavior. More/Ed now leave the transcript
+EXACTLY as they found it - no console on the platform ever did
+this.
+
+- [ ] b10 boot: b9's two garbage sightings dead (Ctrl+Left/Right
+      on long line, Ctrl+U from line end)
+- [ ] more s:startup-sequence, page around, quit: the transcript
+      is BACK, no More bar anywhere, Shift+Up history clean
+- [ ] Ed a file, edit, save, quit: transcript restored the same
+- [ ] More then RESIZE mid-More, quit: falls back gracefully
+      (no restore, no crash)
+- [ ] Ctrl+C break out of More (no clean exit): shell reprompts -
+      what does the screen do? (snapshot stays armed until the
+      next cooked SetMode... watch for weirdness, this is the
+      one soft corner)
+
+### 1.1b11 — the altscreen goes client-driven: CSI ?47h/l (19.7.26)
+
+**b10 boot findings:** garbage markers DEAD (both b9 tail bugs
+confirmed fixed). But More: its screen still there after quit and
+history scroll dead — the SetMode coupling was WRONG. The truth,
+dug out of More's own binary (strings + vamos dos-trace):
+
+    V47 More brackets its pager session with CSI ?47h ... CSI ?47l
+    — THE XTERM ALTERNATE-SCREEN PROTOCOL, in ROM-era Amiga
+    software. Its ?47l (and final tidy writes) come AFTER the
+    SetMode(0) — so b10's restore-at-SetMode fired mid-exit and
+    More's trailing output stomped the restored transcript.
+
+**b11:** the client drives it, xterm-exact. Parser grew the DEC
+private marker (cpriv on '?'/'>' in CSI params); csidispatch:
+?47h = altsave, ?47l = altrestore (mid-render is fine - dowrite's
+own tail reanchors on the restored cursor). SetMode hooks removed
+(raw/cooked back to b9 form). Scrollview refuses while ON the
+altscreen (xterm manners - fixes the mid-More history leak
+sighting). Safety net: an ACTION_END arriving while altvalid
+(a Ctrl+C'd More never says ?47l) restores the transcript on the
+dying handle. doresize/closewin drops unchanged.
+
+**The altscreen CONTRACT (say it in the doc):** content viewed on
+the alternate screen does NOT enter scrollback - exactly like
+less/vim on xterm. Quit More: transcript back, More's pages gone.
+Pre-More history intact. If he'd rather archive More's content
+into history (option B), that is a different, discussable design.
+
+- [x] b11 boot: **"works as intended!" (his words, 19.7 morning)**
+      - More in/out clean, transcript restored, altscreen contract
+      holding. The sweep is GREEN across the board.
+
+### Before 1.1 ships (when the sweep is green)
+
+- [x] strip fherr and its stage-sets (the b3 telemetry's insides)
+      -> stripped; $VER = "1.1 (19.7.26)", the b-suffix dropped;
+      RC compiled clean and deployed to L: for the final
+      confidence boot. From here the diff is docs and ritual only.
+- [x] RC2 (his catch during RC): a bare `newshell ccon:` now
+      defaults to the Font Prefs "System Default Text" font
+      (GfxBase DefaultFont - what stock CON: honors; already in
+      memory, plain OpenFont reopens it, no helper involved),
+      topaz 8 only as the last resort (unusable/proportional).
+      Offsets probe-verified (gb_DefaultFont=154, mn.ln.name=10).
+      RC2 boot check: `newshell ccon:` comes up in whatever Font
+      Prefs says; set prefs to another mono font, reboot, check
+      again; FONT option still overrides.
+
+**RC2 aftermath - the SLASH trap (his very next boot, verified via
+harness before touching code, per house rule):** `newshell
+ccon:FONTtopaz/8` still came up in the prefs font, not topaz. Not
+a defaults-code bug - a PARSER bug, confirmed with his exact
+string fed through the same parsecon harness: "FONTtopaz" landed
+in the poitional X field (not numeric, ignored) and "8" in Y
+(pwy:=8) - option parsing needs 5 slashes to even START (field
+index 5), so FONT never fired, and the (working-as-designed)
+prefs-default fallback took over. The technically-correct spelling
+was `ccon://///FONTtopaz/8` (verified) - five throwaway slashes to
+reach an option. Nobody should have to count that.
+
+**The fix (parseopt extraction, v1.1 "19.7.26b"):** the whole
+option-dispatch chain (WAIT/CLOSE/.../FONT/LINES) moved into its
+own PROC parseopt(tok), returning TRUE if it recognized the
+token. Field 0 now tries tcnum FIRST (unchanged); if that fails
+(non-numeric) AND parseopt recognizes the token as a real option,
+the ENTIRE spec becomes options-only (geometry/title stay
+default) - "ccon:FONTtopaz/8", "ccon:WAIT", "ccon:LINES200" all
+just work, zero throwaway slashes. Mixing geometry WITH options
+still needs the full positional spelling exactly as before
+(`ccon:0/0/640/80/title/FONTtopaz/8`) - unaffected, regression-
+tested via harness against every string verified earlier tonight
+(byte-identical results, incl. blank-bname and geometry-only
+opens). This is unrelated to the shell's '=' eating - that trap
+is still real and still needs FONTname/n or a quoted spec; this
+fix only removes the SLASH-COUNTING trap.
+
+- [ ] boot: `newshell ccon:FONTtopaz/8` -> topaz, no slashes needed
+- [ ] `newshell ccon:WAIT` and `newshell ccon:LINES200` - bare
+      keyword shortcuts, both should just work
+- [ ] `newshell ccon:0/0/640/80/test/FONTmicroknight/8` - the
+      OLD fully-positional spelling, unchanged
+- [ ] a bare `newshell ccon:` still honors Font Prefs (untouched
+      by this parser change)
+- [ ] decide the fate of s:ccon-styles/-osc/-ichdch/-bisect (keep
+      as the house test deck? they cost nothing and found gold)
+- [ ] ccon.doc: FONT + LINES sections, Tab/ghost split (Tab is
+      completion's alone now), and the '=' warning IN BOLD: the
+      shell eats unquoted '=' on ANY command line - use FONTname/n
+      and LINESn forms, or quote the whole spec (his doc pass -
+      the docs are his voice)
+- [ ] ccon.readme highlights line for 1.1
+- [ ] $VER -> 1.1, drop the b-suffix; README.md release page
+      section; lha + release when he calls it
+
+### Theme B: "the plumbing" — the Unix tier that needs filesystem work
+
+- [ ] **Shared + persistent history.** #1 by value: one history
+      ring across ALL windows again (M10 made it per-window —
+      with ghosts and Ctrl+R, a longer communal memory sharpens
+      three features at once), persisted to S:ccon-history on
+      close/last-window and loaded at first open. Writing a file
+      from a handler is the M5b trick in reverse: hand-rolled
+      FINDOUTPUT/WRITE/END packets straight to the filesystem's
+      port on the private fsport. Decide: per-process (CCON: and
+      CRAW: separate) or shared via the file. Dedupe on load;
+      HISTMAX may deserve growing past 32 with persistence in
+      play.
+- [ ] **First-word command completion.** Tab on word one completes
+      from the resident list (semaphore-walkable, no packets) and
+      the path: C: plus the CLI's path chain (cli_CommandDir lock
+      list — walk the sender's CLI like conbysender does, scan
+      each lock with the M5b machinery). Ghost synergy: people
+      run what they can complete.
+- [ ] **Scrollback search.** The last KingCON/ViNCEd feature CCON
+      lacks: a search key in the scrollback view (Ctrl+R while
+      scrolled? `/` cooked-style prompt? decide), matches
+      highlighted via the attr plane (style plane helps), n/N
+      jumps, any output snaps live as ever. The Ctrl+R search
+      machinery (srfind's fold-substring scan) generalizes from
+      the history ring to the model rows.
+- [ ] **Bracketed-paste safety.** RAMIGA-V currently replays LFs
+      as Returns — a pasted multi-line snippet EXECUTES as it
+      lands. zsh's answer, ours too: paste inserts inert text
+      (ghost-adjacent highlight while fresh?), nothing runs until
+      a real Enter. Keep a PASTEEXEC open option (or RAMIGA+
+      SHIFT+V) for the old behaviour where wanted. Raw-mode paste
+      (into Ed) stays byte-faithful, untouched.
+
+### Parked for v1.2 — the big swing
+
+- [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
+      console window in the system becomes a CCON window. Own
+      release, own test ladder — the blast radius changes from
+      "windows you asked for" to "every console the OS opens"
+      (Startup-Sequence output, requesters' CON: opens, EndCLI,
+      shells started before user-startup...). Open questions: keep
+      answering 'CCON' to the V47 shell probe (OUR editor owns
+      every prompt — the point) vs a per-mount startup arg;
+      whether anything hardcodes CON: quirks CCON lacks (ICH/DCH
+      and soft styles from Theme A are prerequisites); dn_Startup
+      naming so one binary carries CON:/RAW:/CCON:/CRAW: cleanly.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

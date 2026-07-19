@@ -28,21 +28,28 @@ FEATURES
     (IFF FTXT); drag, double-click word, triple-click line;
     output freezes under a drag like stock; RAMIGA-V pastes
   - SGR colour with the ANSI/Workbench pen separation: ls is
-    genuinely blue everywhere, Ed is never red
+    genuinely blue everywhere, Ed is never red - plus real
+    italic/underline/inverse soft styles
+  - FONT and LINES per window: pick your own font/size (loaded
+    from disk if needed) or scrollback depth; unset FONT follows
+    your Font Prefs default font instead of a hardcoded topaz 8
   - Fullscreen programs work: Ed with working MENUS, block
-    cursor, resize re-measure; More with real timed paging
+    cursor, resize re-measure; More with real timed paging, and
+    it restores your scrollback transcript on exit exactly as
+    xterm's alternate screen does - paged content never enters
+    your history
+  - xterm-style window titles (OSC) that survive scrollback
   - CRAW: - the same handler as a raw-from-byte-one device
   - Swedish (and other) dead-key composition survives raw mode
 
 LIMITATIONS
 
   - History is per window and dies with it
-  - ~600K of model per window at 80 columns
-  - Topaz 8 only (borrowed windows keep their owner's font)
-  - No SGR italic/underline; CSI K erases to black under colour
+  - ~600K of model per window at 80 columns (LINES=n scales it)
+  - Borrowed windows (WINDOW0x) keep their owner's font
+  - CSI K erases to black under colour
   - Completion: no quoted words, one menu page of 80
   - SMART/SIMPLE, ALT, ICONIFY not implemented
-  - Leaving scrollback overwrites a client's title (cosmetic)
 
 INSTALL
 
