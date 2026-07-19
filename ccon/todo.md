@@ -1411,14 +1411,16 @@ fix only removes the SLASH-COUNTING trap.
       by this parser change)
 - [ ] decide the fate of s:ccon-styles/-osc/-ichdch/-bisect (keep
       as the house test deck? they cost nothing and found gold)
-- [ ] ccon.doc: FONT + LINES sections, Tab/ghost split (Tab is
-      completion's alone now), and the '=' warning IN BOLD: the
-      shell eats unquoted '=' on ANY command line - use FONTname/n
-      and LINESn forms, or quote the whole spec (his doc pass -
-      the docs are his voice)
-- [ ] ccon.readme highlights line for 1.1
-- [ ] $VER -> 1.1, drop the b-suffix; README.md release page
-      section; lha + release when he calls it
+- [x] ccon.doc: FONT + LINES sections, Tab/ghost split (Tab is
+      completion's alone now), the '=' warning, the slash-shortcut
+      form, and the altscreen contract -> done (19.7.26b commit,
+      "ccon 1.1b12"), $VER left at "1.1 (19.7.26b)" (unchanged,
+      still the same boot-verified binary - only docs moved)
+- [x] ccon.readme highlights line for 1.1 -> done, same commit
+- [ ] $VER -> 1.1, drop the b-suffix; file_id.diz refresh;
+      README.md release page section; lha + gh release - deferred
+      to the real 1.1 tag, AFTER Theme B (his call, 19.7.26b: "we
+      do not create a .lha archive for the beta")
 
 ### Theme B: "the plumbing" — the Unix tier that needs filesystem work
 
