@@ -68,7 +68,7 @@ INSTALL
   copy L/ccon-handler L:
   copy DEVS/#? DEVS:
   Mount CCON: FROM DEVS:CCON-mountlist
-  Mount CRAW: FROM DEVS:CRAW-mountlist
+  Mount CRAW: FROM DEVS:CCON-mountlist
   NewShell CCON:
 
   The drawers mirror SYS:. Put the Mounts in S:User-Startup to
@@ -83,8 +83,8 @@ BUILDING
 FILES
 
   L/ccon-handler        the handler
-  DEVS/CCON-mountlist   Mount CCON: FROM this
-  DEVS/CRAW-mountlist   the raw-by-default second device
+  DEVS/CCON-mountlist   Mount CCON: or CRAW: FROM this - one file,
+                        two device stanzas, same shape KingCON uses
   ccon.doc              the handbook - options, keys, the works
   ccon.readme           this file
 

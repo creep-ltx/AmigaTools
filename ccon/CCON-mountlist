@@ -1,9 +1,24 @@
-/* CCON-mountlist - the CCON: console handler.
+/* CCON-mountlist - the CCON: console handler, its CRAW: (raw-by-
+** default) counterpart, and CON:/RAW: stanzas for testing the
+** system-wide takeover (v1.2 territory - EXPERIMENTAL, see
+** ccon/todo.md "Mount it AS CON:"). One file, four devices - same
+** shape KingCON's own mountlist uses.
 **
 ** Install:  copy ccon-handler to L:
 **           copy CCON-mountlist to DEVS:
-** Mount:    Mount CCON: FROM DEVS:CCON-mountlist
+** Mount (safe, opt-in, additional devices):
+**           Mount CCON: FROM DEVS:CCON-mountlist
+**           Mount CRAW: FROM DEVS:CCON-mountlist
 ** Test:     echo >CCON: hello
+**
+** Mount (the takeover - replaces the STOCK console system-wide,
+** exactly KingCON's own recipe, put in S:User-Startup so it only
+** takes effect from there on, not for anything Startup-Sequence
+** already did before it):
+**           Assign CON: DISMOUNT
+**           Assign RAW: DISMOUNT
+**           Mount CON: FROM DEVS:CCON-mountlist
+**           Mount RAW: FROM DEVS:CCON-mountlist
 **
 ** The handler process is created on first reference, not at Mount.
 ** (The E runtime swaps to its own 10000-byte stack at startup, so
@@ -15,4 +30,27 @@ CCON:
     StackSize = 8192
     Priority = 5
     GlobVec = -1
+#
+
+CRAW:
+    Handler = L:ccon-handler
+    StackSize = 8192
+    Priority = 5
+    GlobVec = -1
+    Startup = "RAW"
+#
+
+CON:
+    Handler = L:ccon-handler
+    StackSize = 8192
+    Priority = 5
+    GlobVec = -1
+#
+
+RAW:
+    Handler = L:ccon-handler
+    StackSize = 8192
+    Priority = 5
+    GlobVec = -1
+    Startup = "RAW"
 #

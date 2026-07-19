@@ -2893,6 +2893,78 @@ fix only removes the SLASH-COUNTING trap.
       the previous entry) is next but deliberately not bundled
       into this commit.
 
+      **b45 — mountlist consolidation, his observation.** Asked
+      what CCON lacks vs CON:/ConMan/KingCON/ViNCEd; the "mount it
+      AS CON:" parked item came up (see above), and he supplied the
+      actual KingCON-mountlist file to show how the takeover really
+      works (plain `Assign DISMOUNT` + `Mount FROM`, no handler
+      code involved) — and pointed out in passing that KingCON's
+      OWN mountlist is a SINGLE file with four device stanzas
+      (`KCON:`/`KRAW:`/`CON:`/`RAW:`, all the same handler), while
+      CCON was shipping the equivalent of `CCON:` and `CRAW:` as
+      TWO separate files — "unnecessary." Real, correct observation:
+      `Mount <device>: FROM <file>` selects just the named stanza
+      out of a multi-entry mountlist, so nothing about AmigaDOS
+      required the split. Consolidated `CRAW-mountlist` into
+      `CCON-mountlist` as a second stanza (`Startup = "RAW"` on the
+      `CRAW:` entry, unchanged from before) and deleted the now-
+      redundant file. Swept every reference: `ccon.doc`,
+      `ccon.readme`, `README.md` (install steps and FILES listings
+      in all three), plus the one comment in `ccon-handler.e` that
+      named `CRAW-mountlist` specifically. `Mount CCON: FROM
+      DEVS:CCON-mountlist` / `Mount CRAW: FROM DEVS:CCON-mountlist`
+      — same file, different device argument, matching exactly how
+      KingCON's own install recipe uses its one file four times.
+      No handler-behavior change; recompiled/redeployed anyway to
+      keep the deployed binary's source comments in sync with the
+      repo. Deployed as "1.1b45".
+
+      **The "mount it AS CON:" item, actually tested, same day.**
+      Added `CON:`/`RAW:` stanzas to the same `CCON-mountlist`
+      (clearly marked EXPERIMENTAL in its header comment) so he
+      could try the real takeover recipe: `Assign CON:/RAW:
+      DISMOUNT` then `Mount CON:/RAW: FROM DEVS:CCON-mountlist`.
+      Checked the source first for anything hardcoded to the literal
+      device name `CCON:` that might misbehave: the V47 shell-probe
+      answer (`id.disktype := $43434F4E`, "CCON") is DELIBERATELY
+      never the literal `'CON\0'` regardless of what device name
+      the handler is mounted under — it already works correctly as
+      a CON: replacement with zero code changes, that was the whole
+      point of the existing design. Two purely cosmetic loose ends,
+      not blockers: the input.device interrupt node's debug label
+      and the default window title both still say "CCON:" even
+      when serving as CON:. Tested interactively first (typed at an
+      already-open shell, not baked into `S:User-Startup` yet, so
+      an existing shell stays on stock CON: as a recovery path if
+      anything went sideways) — **his result: "Yes it works."** He
+      then added it to his own `S:User-Startup` himself, same
+      pattern as the CRAW: line earlier. First real, working proof
+      that CCON can replace the system console, not just theory.
+
+      **b46 — a real bug in the -1/-1 fill-screen feature, caught
+      immediately by actually using the takeover.** His report:
+      `newshell ccon:0/11/-1/-1` opened a window covering the WHOLE
+      screen, ignoring the `0/11` position — he wanted it to fill
+      only what's LEFT of the screen from that X/Y, not the raw
+      screen dimensions regardless of where the window starts.
+      Real bug, not a misunderstanding: `openwin()`'s -1 resolution
+      (`curcon.pww := pubscr.width`) never subtracted `curcon.pwx`,
+      so a window at a nonzero X/Y with -1 width ran that many
+      pixels past the screen's right edge; same for Y/height.
+      Fixed: `pubscr.width - curcon.pwx` / `pubscr.height -
+      curcon.pwy`. Verified via harness (`fillscreentest.e`)
+      before deploying: his exact case (0/11/-1/-1 on a 720×480
+      screen) now lands the far edge EXACTLY on the screen edge
+      (720, 480); an offset-both-axes case; the original 0/0/-1/-1
+      case confirmed unaffected; the existing 160×60 floor clamp
+      still catches a degenerate near-edge offset; and explicit
+      (non-`-1`) width/height confirmed untouched by the change —
+      five for five. `ccon.doc`'s geometry section corrected to
+      describe "fills the REST of the screen, measured from X/Y"
+      instead of the old, now-wrong "fills the screen" wording, with
+      his exact `0/11/-1/-1` case added as a worked example. Deployed
+      as "1.1b46".
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
@@ -2900,12 +2972,71 @@ fix only removes the SLASH-COUNTING trap.
       release, own test ladder — the blast radius changes from
       "windows you asked for" to "every console the OS opens"
       (Startup-Sequence output, requesters' CON: opens, EndCLI,
-      shells started before user-startup...). Open questions: keep
-      answering 'CCON' to the V47 shell probe (OUR editor owns
-      every prompt — the point) vs a per-mount startup arg;
-      whether anything hardcodes CON: quirks CCON lacks (ICH/DCH
-      and soft styles from Theme A are prerequisites); dn_Startup
-      naming so one binary carries CON:/RAW:/CCON:/CRAW: cleanly.
+      shells started before user-startup...).
+
+      **The mechanism itself, confirmed (his own knowledge of how
+      KingCON does it, 19.7.26d) — no OS-level magic, plain
+      AmigaDOS device management:**
+      ```
+      Assign CON: DISMOUNT
+      Assign RAW: DISMOUNT
+      Mount CON: FROM Devs:KingCON-mountlist
+      Mount RAW: FROM Devs:KingCON-mountlist
+      ```
+      Dismount the stock device names, then Mount the SAME handler
+      binary back under those names via a mountlist — exactly the
+      shape CCON already ships (`DEVS/CCON-mountlist`, one file,
+      `CCON:`/`CRAW:` stanzas — consolidated from two separate
+      files into this single-file shape the same day, matching
+      KingCON's own mountlist exactly once he pasted it and pointed
+      out CCON's two-file version was unnecessary), just pointed at
+      `CON:`/`RAW:` stanzas instead of `CCON:`/`CRAW:`. This
+      meaningfully de-risks the item: the "become the
+      system console" part needs no handler code at all, only a
+      Startup-Sequence recipe and a mountlist — the remaining open
+      questions are entirely about the HANDLER's own behavior once
+      mounted under the stock names, not the mounting mechanism:
+      keep answering 'CCON' to the V47 shell probe (OUR editor owns
+      every prompt — the point) vs a per-mount startup arg that
+      changes the probe answer; whether anything hardcodes CON:
+      quirks CCON lacks (ICH/DCH and soft styles from Theme A are
+      prerequisites, already shipped); `dn_Startup` naming so one
+      binary carries CON:/RAW:/CCON:/CRAW: cleanly and knows which
+      name it was mounted under.
+
+- [ ] **ICONIFY.** Stock CON:'s option, not implemented (`ccon.doc`
+      LIMITATIONS has said so since Theme A). A gadget on the
+      window that collapses it to a Workbench AppIcon and restores
+      it on a click. Real, multi-part work, not a quick fix: needs
+      an actual icon image asset; `AddAppIcon()`/`RemoveAppIcon()`
+      from icon.library, which is DOS-touching and so needs the
+      same helper-process escape already built for disk-loaded
+      FONT (no-DOS rule); a new message class in the main Wait()/
+      GetMsg() loop to catch AppIcon clicks (a separate port, not
+      IDCMP); and a real design decision on what "iconified" means
+      for a window whose entire state lives in `curcon` — hide-and-
+      restore the actual window, or fully close it and reopen
+      against the same model. Asked about 19.7.26d, deliberately
+      not scoped further yet — "note it down for later," his words.
+
+- [ ] **Double buffering** (or a cheaper partial fix) for screen
+      redraws. His observation: under stock CON:, a full-page
+      client redraw (More paging) flips to the new page instantly;
+      under CCON the same redraw is visibly progressive, "scroll
+      updates" row by row, more distracting. Root cause: CCON draws
+      every graphics op straight to the window's rastport as it
+      parses each one, no offscreen buffer — a multi-row redraw is
+      genuinely progressive on screen. Stock CON:'s hand-tuned ROM
+      assembly likely just finishes within one screen refresh where
+      CCON's higher-level per-row overhead (scrollback model
+      bookkeeping included) can spread across a couple of frames.
+      Two paths, given to him, not chosen yet: the real fix (an
+      offscreen bitmap + one blit per redraw — guarantees atomicity,
+      but touches every drawing call in the handler, a genuine
+      architecture change) vs. the cheaper fix (trim per-row
+      overhead so redraws usually finish within one frame — lower
+      risk, but doesn't GUARANTEE the sweep never shows). Asked
+      19.7.26d, his call on scope still open.
 
 ## Design notes
 

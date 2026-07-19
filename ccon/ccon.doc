@@ -84,9 +84,8 @@
 
     copy L/ccon-handler L:
     copy DEVS/CCON-mountlist DEVS:
-    copy DEVS/CRAW-mountlist DEVS:
     Mount CCON: FROM DEVS:CCON-mountlist
-    Mount CRAW: FROM DEVS:CRAW-mountlist
+    Mount CRAW: FROM DEVS:CCON-mountlist
 
   Add the two Mount lines to S:User-Startup to make them permanent.
 
@@ -115,9 +114,13 @@
     dir >CCON:0/0/400/200/dir/WAIT
     echo >CCON:0/0/300/80/log/AUTO/WAIT starting...
 
-  width or height of -1 fills the screen it opens on:
+  width or height of -1 fills the REST of the screen it opens
+  on, measured from X/Y - not the screen's raw size regardless of
+  position, so the window's far edge always lands exactly on the
+  screen's edge:
 
-    NewShell CCON:0/0/-1/-1
+    NewShell CCON:0/0/-1/-1        (the whole screen)
+    NewShell CCON:0/11/-1/-1       (everything below a title bar)
     NewShell CCON:0/0/-1/300
 
   EVERY open gets its own console and window, exactly as with stock
@@ -563,8 +566,8 @@
 --------------------------------------------------------------------------
 
   L/ccon-handler         the handler
-  DEVS/CCON-mountlist    Mount CCON: FROM this
-  DEVS/CRAW-mountlist    the raw-by-default second device
+  DEVS/CCON-mountlist    Mount CCON: or CRAW: FROM this - one file,
+                         two device stanzas, same shape KingCON uses
   ccon.readme            short-form readme
   ccon.doc               this manual
 

@@ -358,10 +358,11 @@ PROC main()
   pkt := msg.ln.name              -> a packet rides in its message's ln_Name
 
   dnode := Shl(pkt.arg3, 2)       -> BPTR to our DeviceNode
-  -> M9: one binary, two devices - a mountlist with Startup = "RAW"
-  -> (CRAW-mountlist) makes this instance open its streams raw by
-  -> default, the RAW: counterpart. dn_Startup holds a BPTR to a
-  -> BSTR when it is not a small integer.
+  -> M9: one binary, two devices - a mountlist stanza with
+  -> Startup = "RAW" (CCON-mountlist's CRAW: entry) makes this
+  -> instance open its streams raw by default, the RAW: counterpart.
+  -> dn_Startup holds a BPTR to a BSTR when it is not a small
+  -> integer.
   tmp := dnode.startup
   IF tmp > 1024
     stps := Shl(tmp, 2)
@@ -1496,13 +1497,18 @@ PROC openwin()
       pubscr := LockPubScreen(NIL)
     ENDIF
     -> his ask, 19.7.26: WIDTH/HEIGHT=-1 fills the screen he's
-    -> opening on. A failed lock (named screen gone, or the
-    -> default somehow unavailable) falls back to a sane fixed
-    -> size rather than leaving the -1 sentinel to hit the floor
-    -> clamps below and open as a tiny 160x60 window instead.
+    -> opening on. v1.1b46 correction (his catch): "fills the
+    -> screen" has to mean "fills what's LEFT of the screen from
+    -> X/Y", not "the whole screen's raw width/height regardless of
+    -> X/Y" - the old math let a window at 0/11/-1/-1 run pwy
+    -> pixels past the bottom edge, since it never subtracted the
+    -> offset it was ALSO honouring. A failed lock (named screen
+    -> gone, or the default somehow unavailable) falls back to a
+    -> sane fixed size rather than leaving the -1 sentinel to hit
+    -> the floor clamps below and open as a tiny 160x60 window.
     IF pubscr
-      IF curcon.pww = -1 THEN curcon.pww := pubscr.width
-      IF curcon.pwh = -1 THEN curcon.pwh := pubscr.height
+      IF curcon.pww = -1 THEN curcon.pww := pubscr.width - curcon.pwx
+      IF curcon.pwh = -1 THEN curcon.pwh := pubscr.height - curcon.pwy
     ENDIF
     IF curcon.pww = -1 THEN curcon.pww := 640
     IF curcon.pwh = -1 THEN curcon.pwh := 200
@@ -5535,4 +5541,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b44 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b46 CCON: LTX console handler', 0

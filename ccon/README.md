@@ -70,9 +70,8 @@ the real prompt comes back from the scrollback model:
 ```
 copy ccon-handler L:
 copy CCON-mountlist DEVS:
-copy CRAW-mountlist DEVS:
 Mount CCON: FROM DEVS:CCON-mountlist
-Mount CRAW: FROM DEVS:CRAW-mountlist
+Mount CRAW: FROM DEVS:CCON-mountlist
 NewShell CCON:
 ```
 
@@ -85,7 +84,8 @@ design notes. A running handler keeps its seglist: after updating
 
 - `ccon-handler.e` — the source, Amiga E, one file.
 - `ccon-handler` — prebuilt AmigaOS binary.
-- `CCON-mountlist` / `CRAW-mountlist` — mountlists for `DEVS:`.
+- `CCON-mountlist` — one mountlist, two device stanzas (`CCON:`
+  and `CRAW:`) for `DEVS:`, same shape KingCON's own uses.
 - `ccon.readme` — short-form readme for the release archive.
 - `ccon.doc` — the full plain-text manual (Amiga-width lines).
 - `ccon.lha` — the release archive (`L/`, `DEVS/`, docs).
