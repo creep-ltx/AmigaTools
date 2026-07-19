@@ -68,7 +68,12 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
        'keymap','diskfont'
 
-CONST MARGIN=4,
+CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
+                        -> all, text sits flush against the border;
+                        -> the borrowed-window path already ran at
+                        -> zero (fwin forces i:=0 in gridcalc()), so
+                        -> zero-margin was already exercised, tested
+                        -> territory, not new ground
       LINEMAX=400,      -> longest editable input line
       HISTMAX=200,      -> shared prompt history ring, entries (v1.1
                         -> Theme B: ONE ring per process now, not per
@@ -76,12 +81,16 @@ CONST MARGIN=4,
                         -> LINEMAX is ~80K once, not 32 * N windows)
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
-      SBMAX=1000,       -> scrollback model, lines - the DEFAULT
-                        -> depth (his footprint pass, 19.7.26: 4000
-                        -> was the 1.0 hardcode; LINES=n opts UP,
+      SBMAX=512,        -> scrollback model, lines - the DEFAULT
+                        -> depth (v1.1b44, his call: 1000 -> 512,
+                        -> a kinder default; 4000 was the 1.0
+                        -> hardcode before the 19.7.26 footprint
+                        -> pass took it to 1000; LINES=n opts UP,
                         -> capped at SBMAXCAP below)
-      SBMAXCAP=4000,    -> LINES=n ceiling - no accidental multi-MB
-                        -> windows from a typo or a big number
+      SBMAXCAP=5000,    -> LINES=n ceiling (v1.1b44: 4000 -> 5000,
+                        -> room for beefier systems) - no accidental
+                        -> multi-MB windows from a typo or a big
+                        -> number
       TCMAX=80,         -> tab completion: max candidates collected
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       WQMAX=16,         -> writes parked during a selection drag
@@ -568,10 +577,10 @@ PROC coninit(c:PTR TO console)
   c.tcsel := -1                 -> no completion pick
   c.deffg := 1
   c.curfg := 1
-  c.pwx := 40                   -> parsecon() re-derives these per
-  c.pwy := 40                   -> first-open; ground them anyway
-  c.pww := 520
-  c.pwh := 160
+  c.pwx := 0                    -> parsecon() re-derives these per
+  c.pwy := 18                   -> first-open; ground them anyway -
+  c.pww := 640                  -> v1.1b43: matches stock newshell's
+  c.pwh := 130                  -> own default CON: window exactly
   c.ebuf := String(404)
   c.stash := String(404)
   c.wtitle := String(112)
@@ -1140,7 +1149,7 @@ PROC parseopt(tok:PTR TO CHAR)
   ELSEIF StrCmp(tok, 'LINES', 5)
     -> v1.1: the memory knob - model depth per console. tcnum
     -> already caps at 20000; openwin floors at 100, ceilings at
-    -> SBMAXCAP (4000, the OLD 1.0-era default).
+    -> SBMAXCAP (5000, v1.1b44 - room for beefier systems).
     v := 5
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
@@ -1166,10 +1175,10 @@ ENDPROC matched
 PROC parsecon(bname)
   DEF s:PTR TO CHAR, l, i, f, tl, v, c, optmode=FALSE,
       tok[84]:ARRAY OF CHAR, torig[84]:ARRAY OF CHAR
-  curcon.pwx := 40
-  curcon.pwy := 40
-  curcon.pww := 520
-  curcon.pwh := 160
+  curcon.pwx := 0
+  curcon.pwy := 18
+  curcon.pww := 640
+  curcon.pwh := 130
   StrCopy(curcon.wtitlebase, 'CCON:')
   curcon.waitmode := FALSE
   curcon.closegad := TRUE              -> stock 3.2 shape: close gadget on
@@ -2895,6 +2904,20 @@ PROC csidispatch(c)
     inslines(n)
   ELSEIF c = "M"
     dellines(n)
+  ELSEIF c = "S"
+    -> SU (Scroll Up, v1.1b38): the ACTUAL sequence Ed sends for
+    -> plain-arrow line scrolling - found via the dbgring telemetry
+    -> (b36/b37), not guessed: his down-arrow ring showed a
+    -> repeating H/S/K cycle (position, THIS, erase-line), never
+    -> the bare ESC D the b35 fix added - two genuinely different
+    -> VT100 scroll mechanisms, and Ed uses the CSI one. Unlike
+    -> CSI L/M (cursor-row-relative), SU/SD scroll the WHOLE region
+    -> regardless of cursor row - we don't track DECSTBM margins,
+    -> so the region is the whole window, always row 0.
+    scrollup(n)
+  ELSEIF c = "T"
+    -> SD (Scroll Down): the up-arrow half of the same pair.
+    scrolldown(n)
   ELSEIF c = "@"
     inschars(n)                 -> v1.1: ICH, the L/M pattern sideways
   ELSEIF c = "P"
@@ -3067,6 +3090,47 @@ PROC dellines(n)
   ENDIF
 ENDPROC
 
+-> CSI S / CSI T (v1.1b38, SU/SD): dellines()/inslines()'s exact
+-> shape, region-anchored at row 0 always instead of curcon.cy -
+-> SU/SD scroll the whole region regardless of where the cursor is
+PROC scrollup(n)
+  DEF r
+  IF n < 1 THEN n := 1
+  IF n > curcon.rows THEN n := curcon.rows
+  ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
+               curcon.left, curcon.topy,
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF curcon.sb
+    FOR r := 0 TO curcon.rows - 1 - n
+      CopyMem(visrow(r + n), visrow(r), curcon.cols)
+      CopyMem(sarow(r + n), sarow(r), curcon.cols)
+      CopyMem(ssrow(r + n), ssrow(r), curcon.cols)
+    ENDFOR
+    FOR r := curcon.rows - n TO curcon.rows - 1
+      clearrow(r)
+    ENDFOR
+  ENDIF
+ENDPROC
+
+PROC scrolldown(n)
+  DEF r
+  IF n < 1 THEN n := 1
+  IF n > curcon.rows THEN n := curcon.rows
+  ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
+               curcon.left, curcon.topy,
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF curcon.sb
+    FOR r := curcon.rows - 1 TO n STEP -1
+      CopyMem(visrow(r - n), visrow(r), curcon.cols)
+      CopyMem(sarow(r - n), sarow(r), curcon.cols)
+      CopyMem(ssrow(r - n), ssrow(r), curcon.cols)
+    ENDFOR
+    FOR r := 0 TO n - 1
+      clearrow(r)
+    ENDFOR
+  ENDIF
+ENDPROC
+
 -> CSI @ / CSI P (v1.1): insert/delete blank cells inside the row.
 -> b7: the model row is shifted, then the ROW IS REPAINTED FROM THE
 -> MODEL (one drawmrow) - the b6 horizontal ScrollRaster wiped the
@@ -3134,10 +3198,14 @@ PROC delchars(n)
 ENDPROC
 
 -> the answer to `CSI 0 SPACE q`, injected straight into the input
--> stream where the asker's Read finds it
+-> stream where the asker's Read finds it - ESC+'[' (v1.1b42), same
+-> reasoning as rawcsikey(): this rides the same input path a raw
+-> client's own key-reading loop consumes, not the ROM-verified
+-> event-report shape ihreport() uses for a different protocol.
 PROC sendreport()
   DEF b[24]:STRING, i
-  enqueue($9B)
+  enqueue(27)
+  enqueue("[")
   StringF(b, '1;1;\d;\d', curcon.rows, curcon.cols)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
@@ -3182,6 +3250,46 @@ PROC render(buf, len)
         csistart()
       ELSEIF c = "]"
         oscstart()        -> v1.1: xterm title sequence
+      ELSEIF c = "D"
+        -> IND (Index, v1.1): move down a row, scrolling at the
+        -> bottom margin same as an ordinary LF would (outnl()
+        -> minus the CR half) - a bare ESC D/M pair, no CSI needed,
+        -> is the classic VT100 way a full-screen client scrolls
+        -> ONE line without repainting the whole screen. This whole
+        -> ELSE arm used to just drop ESC D/M silently (cesc := 0,
+        -> nothing else) - his catch: "in Ed if I scroll the
+        -> document only the bottom row changes" is exactly what a
+        -> dropped Index looks like from the outside - Ed moves the
+        -> cursor and writes the new line assuming the scroll
+        -> already happened, and it never did.
+        curcon.cy := curcon.cy + 1
+        IF curcon.cy >= curcon.rows
+          screenscroll()
+          curcon.cy := curcon.rows - 1
+        ENDIF
+        curcon.cesc := 0
+      ELSEIF c = "M"
+        -> RI (Reverse Index): move up a row, or at the TOP margin
+        -> insert a blank row and shift everything else down -
+        -> exactly inslines(1)'s own job, already ScrollRaster-
+        -> correct and harness-provable, just reused at row 0
+        -> instead of at the cursor.
+        IF curcon.cy > 0
+          curcon.cy := curcon.cy - 1
+        ELSE
+          inslines(1)
+        ENDIF
+        curcon.cesc := 0
+      ELSEIF c = "E"
+        -> NEL (Next Line): CR+IND in one byte - same scroll rule
+        -> as D, plus the column reset LF already does.
+        curcon.cx := 0
+        curcon.cy := curcon.cy + 1
+        IF curcon.cy >= curcon.rows
+          screenscroll()
+          curcon.cy := curcon.rows - 1
+        ENDIF
+        curcon.cesc := 0
       ELSE
         curcon.cesc := 0
       ENDIF
@@ -3770,7 +3878,8 @@ ENDPROC
 -> they already RENDER, so a fragment with a space in it can match
 -> blank cells the same way it would match visible ones.
 PROC sbfind(fromv, dir)
-  DEF fl, maxv, v, idx, m:PTR TO CHAR, i, j, ok, f:PTR TO CHAR, c
+  DEF fl, maxv, v, idx, m:PTR TO CHAR, i, j, ok, f:PTR TO CHAR, c,
+      rb[256]:ARRAY OF CHAR, rl, k
   f := curcon.srbuf
   fl := StrLen(f)
   IF fl = 0 THEN RETURN FALSE
@@ -3790,6 +3899,26 @@ PROC sbfind(fromv, dir)
       IF ok
         curcon.sbidx := v
         curcon.viewoff := v
+        -> bash-search parity (his fury, rightly): srfind() already
+        -> loads a matched HISTORY line into ebuf live, as you type -
+        -> sbfind() never did the equivalent, so Enter/Tab/anything
+        -> always landed on whatever was ALREADY in ebuf (usually
+        -> nothing) no matter what content search found. Same fix:
+        -> the matched ROW's text (right-trimmed of the never-
+        -> written/blank tail) lands in ebuf now too, live.
+        rl := curcon.cols
+        WHILE (rl > 0) AND ((m[rl - 1] = 0) OR (m[rl - 1] = 32))
+          rl := rl - 1
+        ENDWHILE
+        FOR k := 0 TO rl - 1
+          rb[k] := m[k]
+        ENDFOR
+        rb[rl] := 0
+        StrCopy(curcon.ebuf, rb)
+        WHILE StrLen(curcon.ebuf) > edcap()
+          SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
+        ENDWHILE
+        curcon.cpos := StrLen(curcon.ebuf)
         redraw()
         sbhighlight(v, i, fl)
         srtitle()
@@ -3806,6 +3935,9 @@ PROC sbenter()
   IF curcon.sb = NIL THEN RETURN
   curcon.sbsrch := TRUE
   curcon.sbstash := curcon.viewoff
+  StrCopy(curcon.srstash, curcon.ebuf)  -> srch/sbsrch never run at
+                                         -> once, srstash is free to
+                                         -> double as sbcancel()'s undo
   StrCopy(curcon.srbuf, '')
   curcon.sbidx := curcon.viewoff
   srtitle()                     -> the [search: ] chip appears NOW
@@ -3846,9 +3978,13 @@ PROC sbexit()
 ENDPROC
 
 -> Esc: the search never happened, view snaps back to where it was
+-> AND whatever was on the prompt before Ctrl+R comes back too -
+-> sbfind() may have overwritten ebuf with a match while typing
 PROC sbcancel()
   curcon.sbsrch := FALSE
   curcon.viewoff := curcon.sbstash
+  StrCopy(curcon.ebuf, curcon.srstash)
+  curcon.cpos := StrLen(curcon.ebuf)
   redraw()
   settitle()
 ENDPROC
@@ -3968,9 +4104,21 @@ PROC dovanilla(code, qual)
     ELSEIF ((code >= 32) AND (code <= 126)) OR (code >= 160)
       sbadd(code)                -> a literal 'n'/'N' narrows the
       RETURN                     -> fragment here - jump meaning
-    ELSE                         -> only applies AFTER typing ends
-      sbexit()
-    ENDIF
+    ELSE                         -> only applies AFTER typing ends -
+      sbexit()                   -> Enter included: it must NOT fall
+      snaplive()                 -> through to the Return-commit path
+      RETURN                     -> below, or it runs the (empty) line.
+    ENDIF                        -> his call (19.7.26c): closing a
+                                  -> search should always hand the
+                                  -> live prompt back, same as arrows
+                                  -> already do - not stay parked on
+                                  -> the match (that broke his mental
+                                  -> model badly enough to retest it
+                                  -> twice). n/N survive this: they
+                                  -> still work whenever viewoff>0 by
+                                  -> ANY other means (plain scrolling
+                                  -> after a past search), just no
+                                  -> longer right after typing ends.
   ELSEIF curcon.viewoff > 0
     IF code = 18
       IF curcon.altvalid = FALSE THEN sbenter()
@@ -4163,30 +4311,46 @@ ENDPROC
 -> use; shifted arrows and F-keys flagged for a boot check): Up/Down/
 -> Right/Left = CSI A/B/C/D, shifted = CSI T / S / SPACE @ / SPACE A,
 -> F1-F10 = CSI 0~..9~, shifted F = CSI 10~..19~, Help = CSI ?~
+-> v1.1b42: the CSI introducer was the bare 8-bit C1 byte ($9B) -
+-> real AmigaOS raw-key reporting (and the overwhelming majority of
+-> ANSI-aware programs, including apparently More) expects the
+-> 7-bit ESC+'[' two-byte form instead. His direct side-by-side
+-> proof: the SAME More binary navigates correctly under stock
+-> CON: (Up arrow moves 99% -> 50%) and does not under CCON - the
+-> same client, a different console, therefore CCON's own encoding
+-> choice, not something broken inside More. Every one of these
+-> used to start with a bare enqueue($9B); now they all start with
+-> ESC(27) then '['.
 PROC rawcsikey(code, qual)
   DEF sh
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   IF code = RK_UP
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     IF sh THEN enqueue("T") ELSE enqueue("A")
   ELSEIF code = RK_DOWN
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     IF sh THEN enqueue("S") ELSE enqueue("B")
   ELSEIF code = RK_RIGHT
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("@") ELSE enqueue("C")
   ELSEIF code = RK_LEFT
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("A") ELSE enqueue("D")
   ELSEIF (code >= $50) AND (code <= $59)     -> F1..F10
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     IF sh THEN enqueue("1")
     enqueue(48 + (code - $50))
     enqueue("~")
   ELSEIF code = $5F                          -> Help
-    enqueue($9B)
+    enqueue(27)
+    enqueue("[")
     enqueue("?")
     enqueue("~")
   ELSE
@@ -4205,6 +4369,10 @@ PROC dorawkey(code, qual)
   -> mapping for its shifted form: dispatch it to completion too
   IF (code = $42) AND (curcon.rawmode = FALSE)
     IF curcon.srch THEN srexit()
+    IF curcon.sbsrch                -> same two-pass trap: Tab never
+      sbexit()                      -> reaches dovanilla's sbsrch gate
+      snaplive()                    -> and completion needs the live
+    ENDIF                           -> prompt visible, not a scrolled one
     dotab(sh)
     RETURN TRUE
   ENDIF
@@ -4275,10 +4443,32 @@ PROC dorawkey(code, qual)
   -> editing): every ordinary key passes through this proc on its
   -> RAW pass before the keymap makes its vanilla byte - an
   -> unconditional exit killed the search before the letter could
-  -> reach it (the two-pass trap, third sighting tonight)
+  -> reach it (the two-pass trap, third/fourth sighting tonight).
+  -> srch's matched command lives in curcon.ebuf, so falling through
+  -> to the arrow-editing code below is exactly the point - the
+  -> arrow now moves the cursor inside what search just loaded.
   IF curcon.srch
     IF (code = RK_UP) OR (code = RK_DOWN) OR
        (code = RK_LEFT) OR (code = RK_RIGHT) THEN srexit()
+  ENDIF
+  -> sbsrch is NOT the same shape: there is no matched command in
+  -> ebuf to keep editing, only a scrolled position to keep looking
+  -> at - falling through to the arrow-editing code below would call
+  -> drawedit(), which has never been viewoff-aware (nothing called
+  -> it while scrolled before this feature existed) and paints the
+  -> live edit line straight over the scrolled rows, desyncing the
+  -> screen from a model that still correctly thinks it's scrolled.
+  -> Consume the arrow here completely instead, same as Enter does.
+  IF curcon.sbsrch
+    IF (code = RK_UP) OR (code = RK_DOWN) OR
+       (code = RK_LEFT) OR (code = RK_RIGHT)
+      sbexit()
+      RETURN TRUE
+    ENDIF
+  ENDIF
+  IF curcon.sbsrch
+    IF (code = RK_UP) OR (code = RK_DOWN) OR
+       (code = RK_LEFT) OR (code = RK_RIGHT) THEN sbexit()
   ENDIF
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
@@ -5345,4 +5535,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b31 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b44 CCON: LTX console handler', 0

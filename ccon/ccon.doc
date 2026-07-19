@@ -36,8 +36,8 @@
   The reason it exists is OUTPUT SCROLLBACK. The stock 3.2 console
   has none, and cannot be given any from the outside: commands talk
   to the handler, so a terminal program cannot bolt scrollback on.
-  CCON: keeps 1000 lines of history behind every window by
-  default (LINES=n asks for more, up to 4000).
+  CCON: keeps 512 lines of history behind every window by
+  default (LINES=n asks for more, up to 5000).
 
   Around that core it grew into a full console with a modern shell
   feel:
@@ -72,8 +72,8 @@
   where the history, completion, ghosts and search live.
 
   Memory: each window allocates its scrollback model at open time,
-  roughly 235K at 80 columns and the default 1000 lines (LINES=n
-  scales it directly, up to 4000). Plenty on an expanded machine;
+  roughly 120K at 80 columns and the default 512 lines (LINES=n
+  scales it directly, up to 5000). Plenty on an expanded machine;
   mind it on a 2MB one.
 
 
@@ -185,7 +185,7 @@
              fit the cell model). Example: FONTmicroknight/8.
 
   LINESn     How many lines of scrollback THIS window keeps
-             (default 1000, floor 100, ceiling 4000). Raise it for
+             (default 512, floor 100, ceiling 5000). Raise it for
              a deep transcript, lower it on a tight machine - see
              section 15 for the cost per line.
 
@@ -327,16 +327,21 @@
 10. SCROLLBACK
 --------------------------------------------------------------------------
 
-  Every window remembers 1000 lines by default (LINESn asks for
-  more, up to 4000 - section 5). Viewing:
+  Every window remembers 512 lines by default (LINESn asks for
+  more, up to 5000 - section 5). Viewing:
 
     Shift+Up / Shift+Down   page back / forward  (cooked mode)
     Ctrl+Up / Ctrl+Down     one line at a time   (ALL modes)
     mouse wheel             three lines a tick   (ALL modes)
 
-  "All modes" means raw mode too: you can wheel back through More's
-  display or a fullscreen program's output while it runs. Raw
-  programs never see the scroll keys or the wheel.
+  "All modes" means raw mode too - a raw client that just streams
+  output (CRAW:, or anything that never takes the screen over) is
+  scrolled back exactly like a cooked window. Ed and More are the
+  exception: they run on the ALTERNATE SCREEN (section 13) for
+  essentially their whole session, and scrolling is refused there,
+  xterm manners - there is nothing to scroll TO until they exit and
+  your transcript comes back. Raw programs never see the scroll
+  keys or the wheel either way.
 
   While you are back, the title bar shows [scrollback -n]. Any new
   output, or any other key, snaps the view to live. Colours are
@@ -349,21 +354,36 @@
   incremental feel, a different target:
 
     (search: fra_)   as you type, the newest matching line jumps
-                      into view and is shown INVERTED so you can
-                      find it at a glance
+                      into view and is shown INVERTED, AND its
+                      full text lands on your prompt - same as
+                      history search already does with a matched
+                      command, just now true for content search
+                      too
 
     Ctrl+R (again)   step to the next OLDER match
-    n / N            the same, once typing has stopped - n for
-                      older, N for newer (vim/less habit); works
-                      as long as you stay scrolled back
     Backspace        shorten the fragment (search widens back)
-    Return / anything else
-                      stop typing, keep the match on screen
-    Esc              cancel - back to where you were before Ctrl+R
+    Return, Tab, or any other ordinary key
+                      stop typing AND return you to your live
+                      prompt, with the found line sitting there
+                      ready to edit or run - the search is over,
+                      same as it would be if you had just scrolled
+                      back up yourself and typed it in by hand
+    Esc              cancel - the found text is dropped, whatever
+                      was on your prompt before Ctrl+R comes back
 
-  This works in raw mode too - search through More's or Ed's
-  scrolled-away output the same way. Whatever you find stays put
-  until you scroll, search again, or return to live.
+  n and N step through the SAME fragment's older/newer matches
+  whenever you are scrolled back for any other reason (plain
+  Shift/Ctrl+Up, the wheel) after a search - handy for re-checking
+  a match without retyping it, but Return/Tab/typing no longer
+  leave you parked at one on their own; they always hand the live
+  prompt straight back.
+
+  This works in raw mode too, on a raw client that is NOT on the
+  alternate screen (CRAW:, or More/Ed's own restored transcript
+  once you have quit them) - the same "no scrollback on the
+  alternate screen" rule above applies here too, since there is
+  nothing on screen to search until it does. Whatever you find
+  stays put until you scroll, search again, or return to live.
 
 
 11. COPY AND PASTE
@@ -445,6 +465,11 @@
     - More's single-key paging uses real timed WAIT_CHARs.
     - The block cursor is drawn by the console, as Ed expects.
     - Swedish (and other) dead-key composition works in raw mode.
+    - Ed's own line-by-line document scrolling (moving the cursor
+      past the top or bottom of the visible window) uses the
+      standard ANSI Scroll Up/Down controls, and CCON: honours
+      them properly - the WHOLE view shifts, not just the one new
+      line.
     - More restores your scrollback transcript exactly as it found
       it on exit: it brackets its session in CSI ?47h / ?47l, the
       same alternate-screen sequence xterm honours, and CCON:
@@ -483,8 +508,8 @@
   are translated BY COLOUR to the screen's nearest real pens. So
   directories are genuinely blue everywhere, and Ed is never red.
 
-  Each window's display is backed by a scrollback model (1000
-  lines by default, LINES=n for more up to 4000) with one
+  Each window's display is backed by a scrollback model (512
+  lines by default, LINES=n for more up to 5000) with one
   attribute byte per cell
   plus a style byte for SGR 3/4/7 (italic, underline, inverse -
   inverse is a pen swap at paint time, never a stored colour).
@@ -509,8 +534,8 @@
 15. KNOWN LIMITATIONS
 --------------------------------------------------------------------------
 
-  - The scrollback model costs about 235K per window at 80 columns
-    and the default 1000 lines (LINES=n scales this up to 4000,
+  - The scrollback model costs about 120K per window at 80 columns
+    and the default 512 lines (LINES=n scales this up to 5000,
     or down to a floor of 100).
   - CSI K under a coloured background erases to black.
   - Completion: no quoted words, one menu page, no volume-name

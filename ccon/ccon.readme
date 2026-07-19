@@ -5,17 +5,21 @@ WHAT IT IS
 
   A mounted console handler - what CON:, KingCON and ViNCEd are -
   built around the one feature the stock 3.2 console cannot be
-  given from outside: output scrollback. 1000 lines of history
-  behind every window by default (up to 4000), and a line editor
+  given from outside: output scrollback. 512 lines of history
+  behind every window by default (up to 5000), and a line editor
   that brings the modern shell feel to the Amiga prompt.
 
 FEATURES
 
   - Output scrollback: Shift/Ctrl+arrows and the mouse wheel,
-    working in raw mode too (wheel back through More mid-page);
-    Ctrl+R searches it once you're scrolled back (same key as
-    history search, retargeted), matches shown inverted, n/N
-    step through older/newer - works in raw mode too
+    working in raw mode too for a client that isn't fullscreen
+    (More/Ed refuse it on their own alternate screen, xterm
+    manners); Ctrl+R searches it once you're scrolled back (same
+    key as history search, retargeted) - matches shown inverted
+    AND land on your prompt live, same as history search already
+    does; Return/Tab/typing hand the live prompt straight back
+    with the found line ready to edit or run, n/N re-walk the
+    same matches if you scroll back again later
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0x, NOBORDER, ...) per window
   - Hosts real AmigaShells: NewShell CCON:
@@ -41,18 +45,19 @@ FEATURES
     from disk if needed) or scrollback depth; unset FONT follows
     your Font Prefs default font instead of a hardcoded topaz 8
   - Fullscreen programs work: Ed with working MENUS, block
-    cursor, resize re-measure; More with real timed paging, and
-    it restores your scrollback transcript on exit exactly as
-    xterm's alternate screen does - paged content never enters
-    your history
+    cursor, resize re-measure, and proper whole-view scrolling
+    (ANSI Scroll Up/Down honoured, not just the one changed line);
+    More with real timed paging, and it restores your scrollback
+    transcript on exit exactly as xterm's alternate screen does -
+    paged content never enters your history
   - xterm-style window titles (OSC) that survive scrollback
   - CRAW: - the same handler as a raw-from-byte-one device
   - Swedish (and other) dead-key composition survives raw mode
 
 LIMITATIONS
 
-  - ~235K of model per window at 80 columns and the default 1000
-    lines (LINES=n scales it, up to 4000)
+  - ~120K of model per window at 80 columns and the default 512
+    lines (LINES=n scales it, up to 5000)
   - Borrowed windows (WINDOW0x) keep their owner's font
   - CSI K erases to black under colour
   - Completion: no quoted words, one menu page of 80

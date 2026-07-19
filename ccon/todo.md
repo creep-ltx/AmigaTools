@@ -2120,6 +2120,779 @@ fix only removes the SLASH-COUNTING trap.
       his boot test pending — this is the retest that actually
       exercises the b30 feature for the first time.
 
+      **b32, two findings from that retest — one real bug, one
+      stale doc claim.** He wrote both up directly in his private
+      bughunt file rather than describing them in chat, `[v]`/`[x]`
+      marks and observed-behaviour notes inline on the checklist —
+      first time he's used the file that way; read it directly
+      rather than asking him to re-describe.
+
+      **Finding 1, real, fixed:** Enter while a scrollback search
+      was still typing gave a new EMPTY PROMPT instead of just
+      exiting search in place ("I get a new empty prompt"). Root
+      cause was in the `ELSE` arm of `dovanilla()`'s `sbsrch`
+      dispatch — the one that catches "any key that isn't Ctrl+R/
+      Esc/Backspace/a fragment character," which correctly called
+      `sbexit()` but then had no `RETURN`, so execution fell
+      straight through into `snaplive()` and the ordinary Return-
+      commit path a few lines down. For Enter specifically, that
+      meant: exit search, THEN also run whatever's in the (empty)
+      `ebuf`, i.e. act exactly like pressing Enter on a blank
+      CCON: prompt. Every OTHER arm of that same `IF curcon.sbsrch`
+      block already had its own `RETURN` — this was the one
+      omission. Fix: `sbexit()` followed by `RETURN`, matching the
+      pattern already used everywhere else in that block.
+
+      Caught a second instance of the identical gap while fixing
+      the first, not yet reported by him: arrow keys pressed mid-
+      search never reached `dovanilla()`'s `sbsrch` block at all
+      (arrows are raw-only, no vanilla byte), so they'd silently
+      move the cursor in the — again, probably empty — edit line
+      underneath a search banner that was still claiming to be
+      active. `dorawkey()` already special-cases arrows to exit the
+      OLDER `curcon.srch` (history search) for exactly this reason
+      (`srexit()` on RK_UP/DOWN/LEFT/RIGHT, the comment calling it
+      "the two-pass trap"); `curcon.sbsrch` just never got the same
+      treatment when it was added in b30. Added an identical
+      `IF curcon.sbsrch ... sbexit()` guard right next to the
+      existing one.
+
+      **Finding 2, not a bug — a stale doc claim, corrected:** "I
+      can't go up in more. I can not scroll in ed" is CORRECT
+      behaviour, not broken — Ed and More both run on the
+      alternate screen (the ?47h/?47l xterm trick from Theme A)
+      for essentially their whole session, and `scrollview()` has
+      ALWAYS unconditionally refused while `curcon.altvalid` is
+      TRUE (`IF curcon.altvalid THEN RETURN` — the exact fix that
+      stopped More's own pager bars leaking into scrollback in the
+      first place). What was actually wrong: `ccon.doc` section 10
+      claimed "you can wheel back through More's display or a
+      fullscreen program's output while it runs," and
+      `ccon.readme` echoed the same claim — flatly contradicting
+      section 13's own correct caveat ("except on the alternate
+      screen... where scrolling is refused, xterm manners") two
+      sections later in the SAME document. Section 10's claim
+      predates the alternate-screen feature (or was simply never
+      reconciled with it once added) and was never exercised until
+      this retest actually tried it. Corrected both section 10 and
+      the readme to match section 13's accurate framing: raw-mode
+      scrollback genuinely works for a client that never takes the
+      whole screen (CRAW:, plain streaming output) — Ed and More
+      specifically are the standing exception, not the rule, since
+      they're on the alternate screen for nearly their entire
+      runtime. The b30 retest checklist's "raw mode" item was
+      testing an impossible scenario as written; replaced it with
+      the two scenarios that actually exercise raw-mode content
+      search (CRAW: streaming past a screenful, and More/Ed's own
+      restored transcript once quit).
+
+      No harness needed for either — the Enter/arrow fix is pure
+      control-flow (verified by hand-tracing the same way b31 was),
+      and finding 2 turned out to need a document correction, not
+      a code change. Deployed as "1.1b32", his boot test pending.
+
+      **b33, his b32 retest: the Enter fix alone wasn't enough.**
+      He marked the Enter checklist item `[x]` again — "enter puts
+      me back at the prompt but the searched/marked item gone and
+      not filled in. any other key exits the search and returns me
+      to the prompt." That's a DIFFERENT symptom than b32's ("I get
+      a new empty prompt") — no more accidental command execution,
+      but still not the documented "keep the match on screen."
+
+      Built an actual harness this time instead of hand-tracing
+      again (`entertest.e` — the real `dovanilla()` sbsrch/viewoff
+      block extracted verbatim, drawing calls stubbed to WriteF
+      markers, model mutations kept real): sbenter → type "TARGET"
+      char by char → Ctrl+R again → Enter, printing `sbsrch`/
+      `viewoff` at each step. Result: Enter's own control flow is
+      CORRECT — `sbexit()`+`RETURN` fires exactly as written,
+      `snaplive()` is never reached, `viewoff` ends the run
+      unchanged. So pure Enter, in isolation, was never actually
+      broken at the model level.
+
+      Two OTHER real bugs were still live, both in the same "two-
+      pass trap" family as b31 and both plausibly what he actually
+      triggered while probing "any other key" in the same test
+      pass — either one would leave `sbsrch`/`viewoff` in a state
+      that makes a LATER Enter genuinely misbehave too, which would
+      explain why Enter looked broken again even though its own
+      logic checks out:
+
+      1. **Tab bypasses `sbsrch` entirely.** `dorawkey()`'s very
+         first check intercepts Tab before `dovanilla()` ever runs
+         (`IF (code=$42) AND (rawmode=FALSE) ... dotab(sh); RETURN
+         TRUE`) — it already calls `srexit()` for the OLD history
+         search there, but nobody taught it about `sbsrch` when b30
+         added it. Pressing Tab mid content-search would open the
+         completion menu while still scrolled back, leaving the
+         search banner stuck and `sbsrch` never cleared. Fixed:
+         `IF curcon.sbsrch THEN sbexit()` right next to the
+         existing `srexit()` call.
+
+      2. **The b32 arrow-key fix was incomplete.** b32 added
+         `sbexit()` for arrows in `dorawkey()`'s search-mode-exit
+         block, mirroring `curcon.srch`'s own arrow handling — but
+         for `curcon.srch`, falling through afterward to the arrow-
+         editing code below is the WHOLE POINT (the matched command
+         is sitting in `curcon.ebuf`; the arrow should move the
+         cursor inside it). `sbsrch` has no such command loaded —
+         there is nothing to edit, only a scrolled position to keep
+         looking at. Falling through anyway meant `drawedit()` ran
+         with `curcon.viewoff` still non-zero. `drawedit()` has
+         NEVER been viewoff-aware (nothing had ever called it while
+         scrolled before this feature existed — every other caller
+         always went through `snaplive()` first) — it unconditionally
+         paints the live edit line straight onto the bottom rows,
+         desyncing the SCREEN from a model that still correctly
+         thinks it's scrolled. Exactly "back at the prompt" while
+         the title and `viewoff` disagree. Fixed: arrows now
+         `sbexit(); RETURN TRUE` immediately in `dorawkey()`,
+         consuming the key completely instead of falling through -
+         same treatment Enter already gets in `dovanilla()`.
+
+      Lesson for the record: b31's hand-tracing was real and caught
+      a real bug, but b32's follow-up hand-trace missed these two
+      because it only re-verified the SAME code paths already
+      touched, not the adjacent ones sharing the same trap. The
+      harness this time forced an honest verdict on the ONE code
+      path it covered (Enter: genuinely fine) instead of letting
+      hand-tracing quietly cover for the paths it doesn't reach.
+
+      Deployed as "1.1b33", his boot test pending.
+
+      **b34, the b33 retest: a genuine design mismatch, not more
+      bugs.** He tested Enter/Tab/arrows each in isolation as asked
+      and reported all four `[x]` items in detail this time (asked
+      specifically: "PLEASE read all X items"). The picture that
+      came back was consistent and telling:
+
+      - Enter, isolated: "I'm still in search, I can not see my
+        prompt... I have no idea if anything is pasted into
+        prompt... This IS NOT working." Matches the harness proof
+        from b33 exactly — `sbsrch` correctly clears, `viewoff`
+        correctly stays put, nothing executes. The CODE was right;
+        the DESIGN (stay scrolled, matched text never touches the
+        prompt) never matched what a bash-Ctrl+R user expects to
+        happen when a search ends.
+      - Tab, isolated: "gives me the tab menu IN SEARCH! Not at the
+        prompt.!!" — b33's fix correctly stopped the search first,
+        but the completion menu then opened on a still-scrolled
+        view, which is disorienting even though technically
+        "working as coded."
+      - Arrows, isolated: "takes me out of search and into the
+        prompt. If this is the intended behaviour it works." —
+        the one that already felt right, purely as a side effect
+        of b31's unrelated "arrows have no vanilla counterpart,
+        always snap live" rule, not because anyone designed it
+        that way for `sbsrch` specifically.
+      - Raw mode / More+Ed: "SCROLLING IN MORE AND ED (OR ANY CLI
+        APP) IS A MUST!" — strong pushback on the deliberate
+        altscreen-blocks-scrollback rule from earlier tonight.
+
+      Rather than guess at a fix that might trade one complaint for
+      another, asked him directly (AskUserQuestion) instead of
+      patching blind a third time:
+
+      1. Should finishing a search ALWAYS return to the live
+         prompt (matching what arrows already do by accident), even
+         though that retires n/N's "keep browsing more matches
+         without retyping Ctrl+R" convenience? His call: **yes,
+         always return to live** (recommended option, his pick).
+      2. For the More/Ed complaint specifically — was he trying to
+         use PLAIN arrow keys for More/Ed's own internal paging (a
+         possible real forwarding bug, distinct from the deliberate
+         altscreen rule), or trying to use CCON's OWN scroll gesture
+         (Shift/Ctrl+Up, wheel) to look back at what a STILL-RUNNING
+         session had already shown (a real but much bigger feature
+         asking to partially reverse tonight's earlier altscreen
+         work)? His answer: **plain arrow keys for More's own
+         paging.**
+
+      **Fix 1, implemented:** `dovanilla()`'s sbsrch `ELSE` branch
+      (Enter and every other non-search key) now calls `snaplive()`
+      right after `sbexit()`, and `dorawkey()`'s Tab interception
+      does the same before calling `dotab()` — both now behave
+      exactly like arrows already did. n/N are NOT dead code: they
+      still fire whenever `viewoff>0` by ANY other means (plain
+      Shift/Ctrl+Up after a past search, with `srbuf` still holding
+      the last fragment) — only the specific "still parked right
+      after typing" moment goes away, which was the confusing part.
+
+      **Fix 2, NOT a CCON bug — verified from the real client, not
+      assumed:** read the actual `SYS:Utilities/More` binary's own
+      strings (the S:More script just runs it; there is no More in
+      C: at all, worth knowing for next time this comes up) — its
+      OWN help text lists its supported keys explicitly: `<Space>`
+      next page, `<Return>` next line, `<BackSpace>` previous page
+      ("Less" style), `<`/`>` first/last page, `h` help. No mention
+      of arrow keys anywhere, and no CSI/escape-recognition strings
+      in the binary either. More was simply never written to
+      understand arrow keys, on ANY console — this is a property of
+      the client program's own key table, not something a console
+      handler forwards differently. CCON already passes Space/
+      Return/Backspace through untouched in raw mode; the fix here
+      was explaining this to him with the actual evidence, not
+      touching the handler. (Ed's arrow-key document navigation was
+      already confirmed working in the b8 sweep — unaffected,
+      unrelated to this question.)
+
+      Deployed as "1.1b34", his boot test pending — this is also
+      the point where his "PLEASE read all X items" request paid
+      for itself: the OLD, pre-scrollback-search `[x]` on More's
+      title stomping into history (section 8 of the file, way
+      below) turned out to already be resolved by the b10
+      alternate-screen work — stale, not a live bug, flagged to him
+      rather than silently ignored or silently "fixed" again.
+
+      **b35 — b34 was wrong on both counts, and this time he said
+      so directly.** His retest of b34: Enter on a found "dir"
+      match STILL landed on an empty prompt ("What is the purpose
+      of a search that can't grab the result?"), and both the More
+      and Ed verdicts were flatly rejected ("HOW THE FUCK CAN CON
+      USE ARROWKEYS... IF IT HAS NOTHING TO DO WITH CCON" and a new,
+      very specific, previously-unmentioned detail: "IN ED IF I
+      SCROLL THE DOCUMENT ONLY THE BOTTOM ROW CHANGES! IN CON THE
+      ENTIRE DOCUMENT IS SCROLLED"). Both complaints turned out to
+      be real, and both were missed by b34's investigation for the
+      same underlying reason: verifying a NEGATIVE claim ("this
+      isn't a bug") from documentation/help-text/architecture
+      intent is much weaker evidence than tracing the actual code
+      path — b34 stopped one level too early on both.
+
+      **Bug 1: scrollback content search never filled in the
+      prompt — the actual root cause, not a design question.**
+      Re-reading the OLD, working Ctrl+R history search
+      (`srfind()`) side by side with `sbfind()` for the first time
+      (should have been the very first thing checked back in b30)
+      found the gap immediately: `srfind()` does
+      `StrCopy(curcon.ebuf, h)` the moment it matches — the found
+      HISTORY line lands on the prompt LIVE, as you type, which is
+      exactly what makes bash-style Ctrl+R feel like "grabbing" a
+      result. `sbfind()` NEVER did the equivalent — it moved
+      `viewoff` and painted a highlight, but `curcon.ebuf` was
+      never touched, so no matter which key ended the search there
+      was never anything to land on the prompt. This was never a
+      "should Enter return to live" design question at all (b34's
+      framing was itself a symptom of missing the real gap) — it
+      was a straightforwardly incomplete port of the history-search
+      pattern to content search. Fixed: `sbfind()` now builds the
+      matched row's text (right-trimmed of the model's
+      never-written/blank tail, capped by `edcap()` exactly like
+      `srfind()`) into `curcon.ebuf` on every match, live while
+      typing. `sbenter()` now also stashes the pre-search `ebuf`
+      into `curcon.srstash` (safe to share with history search —
+      the two are mutually exclusive by construction) and
+      `sbcancel()` restores it on Esc, mirroring `srenter()`/
+      `srcancel()` exactly. b34's actual code change (Enter/Tab/
+      arrows snapping live) stays — it's still correct and still
+      wanted, it just wasn't the fix for THIS complaint, since
+      landing on a live but EMPTY prompt was always going to read
+      as broken regardless of scroll state.
+
+      Verified via harness (`escsbtest.e`, extending the sbfind
+      extraction pattern from b30): a fake 8-column row `"dir foo"`
+      matched by fragment `"dir"` lands in `ebuf` as exactly
+      `"dir foo"` (trailing model padding correctly stripped),
+      `cpos` lands at 7. Exact match to hand-derived expectation.
+
+      **Bug 2: Ed's "only the bottom row changes" — a real,
+      previously undiscovered parser gap, unrelated to scrollback
+      entirely.** Traced `render()`'s escape-sequence state machine
+      for the first time end-to-end for this specific complaint
+      (rather than reasoning about it from documentation) and found
+      it directly: the `cesc = 1` state (the byte immediately after
+      a bare ESC) only recognizes `[` (CSI) and `]` (OSC) — EVERY
+      other byte, including the classic VT100 single-character
+      Index (`ESC D`, scroll down one line at the bottom margin)
+      and Reverse Index (`ESC M`, scroll up one line at the top
+      margin), was being silently dropped, `cesc` reset to 0,
+      nothing else happens. A full-screen editor scrolling its
+      viewport by ONE line via a bare `ESC D`/`ESC M` (rather than
+      clearing and repainting the whole screen, or using the
+      heavier CSI L/M this handler already supports) would have
+      that scroll command eaten entirely — then position its
+      cursor and write the new line's text, which DOES show up,
+      producing exactly "only the bottom row changes" while
+      everything above it silently goes stale. This has nothing to
+      do with the alternate-screen/scrollback work at all; it is a
+      gap in the base escape parser that has presumably been there
+      since Theme A, just never exercised by anything tested before
+      (shell output doesn't emit bare Index/Reverse-Index; a
+      full-screen document editor doing line-at-a-time scrolling
+      is exactly the case that would).
+
+      Fixed by adding `D`/`M`/`E` (Index/Reverse-Index/Next-Line)
+      to the `cesc=1` dispatch: Index and Next-Line reuse the exact
+      same cy-increment-then-`screenscroll()`-if-past-the-bottom
+      logic `outnl()` already uses for ordinary LF-driven
+      scrolling (Next-Line just also resets the column, matching
+      CR+LF); Reverse Index reuses `inslines(1)` — already correct,
+      already `ScrollRaster`-based, already model-synced — called
+      at row 0 instead of at the cursor, since "insert one blank
+      line and shift everything else down" is exactly what
+      happens at the top margin. No new drawing code was written;
+      both directions were solved by wiring the SAME already-
+      proven primitives (`screenscroll`/`inslines`) to two bytes
+      nothing had ever routed to them before.
+
+      Verified via harness (same `escsbtest.e`): fed `ESC D` not at
+      the bottom margin (cy increments, no scroll call) and at the
+      bottom margin (scroll call fires, cy pins at rows-1); `ESC M`
+      not at the top margin (cy decrements) and at the top margin
+      (`inslines(1)` fires, cy stays 0); `ESC E` (cy increments,
+      same as D); and three regression checks that `ESC [`/`ESC ]`
+      still correctly start a CSI/OSC and `ESC` followed by an
+      unrecognized byte still safely drops — all six matched
+      exactly. The real `ScrollRaster`/pixel result still needs his
+      eyes, same as every screen-facing change tonight.
+
+      **On the More arrow-key question specifically**: left
+      genuinely unresolved this beta. The Ed fix may incidentally
+      help if More's own line-stepping ALSO relies on Index/Reverse
+      Index internally (plausible, unconfirmed) — but the earlier
+      claim that More's binary has no arrow-key awareness at all
+      (from its help text and a `strings` pass) was too shallow a
+      check to stand as a verdict, and won't be repeated as one.
+      His b35 retest will show directly whether the Ed fix also
+      moved this one.
+
+      Deployed as "1.1b35", his boot test pending.
+
+      **b36 — his b35 retest.** Search: confirmed working ("Search
+      now works"), no further action. More: confirmed, in his own
+      words, that arrow keys really don't page it — the b34 finding
+      was right after all, just asserted with too little evidence
+      at the time; now empirically settled by his own retest rather
+      than a `strings` pass, closed for real.
+
+      Ed's scroll bug is NOT fixed by the b35 ESC D/M/E change,
+      and the failure mode he described is more specific than "no
+      scroll happens": holding Down, only the BOTTOM row updates
+      and everything above stays frozen; holding Up, only the TOP
+      row updates and everything below stays frozen; Shift+Up/Down
+      (page-at-a-time) redraws correctly. That symmetry doesn't
+      match a simple "Index is being dropped" story — if it were
+      just a dropped Index, cy would never reach the scroll trigger
+      and nothing new would render at all, not just the one row. A
+      third guess wasn't worth another beta of his anger if wrong
+      again, so instead: added a genuinely temporary diagnostic
+      (`dbgmark()`/`dbgring`, clearly labelled TEMPORARY at every
+      touch point — the struct fields, the two call sites in
+      `csidispatch()`/`render()`, and `settitle()`'s new rawmode
+      branch) that records the last 16 escape/CSI final bytes
+      Ed actually sends and shows them live in the window title
+      as `[dbg:xxxxxxxxxxxxxxxx]` whenever `curcon.rawmode` is
+      true. This is exactly the house rule from the FONT hunt and
+      the More ?47h discovery: when a protocol question can be
+      answered by instrumenting and reading the REAL bytes, do
+      that instead of reasoning about it from outside. Ring math
+      (oldest-to-newest reconstruction across the wrap point)
+      verified via harness (`dbgringtest.e`) before deploying —
+      fed it 18 marks into a 16-slot ring, got back exactly the
+      expected last-16 sequence, byte for byte.
+
+      His next boot: open Ed on a file long enough to scroll, hold
+      Down for a few seconds, screenshot the title; do the same
+      holding Up; do the same with Shift+Down as a control (the
+      case that already works) for comparison. Whatever the title
+      shows will have a name for the fix instead of a third guess.
+
+      Separately noted, not yet investigated: "when opening ed I
+      can see a glimpse of the prompt sticking down from the
+      window border... ed should obviously open a new page." The
+      cooked→raw `ACTION_SCREEN_MODE` transition (`eraseedit()` +
+      `cursdraw()` only) never clears the whole window — only
+      `altsave()`, triggered separately by the CLIENT's own CSI
+      ?47h, snapshots anything, and `altsave()` itself is a pure
+      MODEL copy with no visible repaint. So old cooked content can
+      stay on screen, at least briefly, until Ed's own first writes
+      cover it. Deliberately NOT touched yet: tying a screen clear
+      to the raw-mode transition itself is exactly the design
+      mistake already made and reverted once this session (the
+      altscreen coupling that raced More's exit tidy-up, b10/b11)
+      — inferring behaviour from a packet lifecycle event instead
+      of what the client actually sends. Needs its own look, not a
+      reflexive fix bundled into this beta.
+
+      Deployed as "1.1b36" — a debug build, not a fix. His boot
+      test is the diagnostic run, not a retest.
+
+      **b37 — the b36 diagnostic was itself broken, AND he corrected
+      a real misread.** His screenshot of Ed post-b36 showed a
+      plain "CCON:" title, no `[dbg:...]` suffix at all — the ring
+      (`dbgring`/`dbgn`) was filling correctly on every escape/CSI
+      byte, but `dbgmark()` never actually called `settitle()`, so
+      nothing ever pushed the ring into the real window title via
+      `SetWindowTitles()`. A bug in the INSTRUMENTATION, not a clue
+      about Ed — fixed by calling `settitle()` at the end of
+      `dbgmark()` itself, refreshing the title live on every mark.
+
+      Separately, and more importantly: his prior "of course it
+      does not work paging up/down with the arrowkeys. How could I
+      even expect that you would fix it?" was read as sarcastic
+      AGREEMENT that More genuinely has no arrow-key paging (i.e.
+      confirming the original b34 finding) — that was wrong. It was
+      sarcasm about ME FAILING to fix it, not agreement that there
+      was nothing to fix — confirmed emphatically the next message
+      ("MORE IS NOT F*ING WORKING!!!!!!!!! AND NOT ED NEITHER!").
+      `ccon-architecture.md`'s "closed for good" note from that
+      misread needs correcting once More is actually investigated
+      properly — `machine68k` (already used this session for the
+      NP_Entry poke verification) is available for a real
+      disassembly pass on `SYS:Utilities/More`, rather than the
+      shallow `strings`/help-text check from b34 that started this
+      whole misunderstanding. Not yet done as of this entry.
+
+      Deployed as "1.1b37".
+
+      **b38 — the dbgring paid for itself immediately.** With b37's
+      title actually refreshing, his three screenshots gave a
+      direct, unambiguous answer instead of another guess:
+
+      - Holding Down in Ed: `[dbg:HHHHHSKHSKHSKHSK]` — a repeating
+        H (CSI H, position) / S / K (CSI K, erase-to-EOL) cycle.
+      - Shift+Down in Ed (the one that already worked):
+        `[dbg:KHKHKHKHKHKHKHKH]` — K/H alternating, NO scroll
+        command at all — it just repaints every visible line from
+        scratch each time, which is exactly why it was never
+        broken by anything in the parser.
+      - More (page-back key): `[dbg:mmpHKmmmpqpHKmmm]` — mostly
+        `m` (SGR, already handled) plus `H`/`K`, and two still-
+        unrecognized finals (`p`, and `q` — `q` is actually already
+        handled, DA/device-attributes report; `p` is not and is
+        unexplained, noted for later, not chased this beta).
+
+      The `S` in Ed's down-scroll ring is CSI **S** — SU, "Scroll
+      Up" (ECMA-48/ANSI), parameterized, region-relative. This is
+      NOT the same control as the bare `ESC D`/`ESC M` (IND/RI)
+      b35 added — two genuinely different, both-real VT100 scroll
+      mechanisms, and Ed uses the CSI-parameterized pair (`S`/`T`,
+      SU/SD) for its plain-arrow line-at-a-time scrolling, not the
+      bare-ESC pair. b35's fix was a real, correct fix for a real,
+      separate gap — it just wasn't the one Ed's arrow-key path
+      actually exercises, which explains why his retest showed
+      literally no change from it.
+
+      Fixed by implementing CSI S / CSI T in `csidispatch()`,
+      calling new `scrollup(n)`/`scrolldown(n)` procs. Deliberately
+      NOT built by reusing `inslines()`/`dellines()` directly: those
+      are cursor-row-relative (correct for CSI L/M, which scroll
+      from the CURSOR's row down — Insert/Delete Line is defined
+      that way), but SU/SD scroll the WHOLE region regardless of
+      where the cursor currently is. Since DECSTBM (scroll-region
+      margins) still isn't implemented, "the whole region" is
+      simply "the whole window," so `scrollup()`/`scrolldown()` are
+      `dellines()`/`inslines()`'s exact `ScrollRaster`+model-shift
+      shape, just anchored at row 0 always instead of `curcon.cy`.
+
+      Verified via harness (`scrolltest.e`) before deploying: the
+      model-shift math alone (skipping `ScrollRaster`, pixels vamos
+      can't show) for `scrollup(1)`, `scrollup(2)`, `scrolldown(1)`,
+      `scrolldown(2)` against a 5-row fake grid — all four matched
+      hand-derived expected row contents exactly, including which
+      rows end up cleared.
+
+      The dbgring telemetry (b36/b37) stays live in this build —
+      one more round to visually confirm the fix, and to keep
+      watching in case Ed's up-arrow (Reverse case, presumably CSI
+      T) or anything else still doesn't fully resolve. Strip it
+      once he confirms clean.
+
+      Deployed as "1.1b38". More's `strings`-based "not a bug" claim
+      is STILL not properly re-verified (see the b37 entry above) —
+      unrelated to this fix, not forgotten, next up.
+
+      **b39 — Ed confirmed fixed ("thank god"), and a real
+      disassembly of More at his explicit request** ("disassemble
+      or disect or just mutilate more to find out how it works,
+      maybe it can give us information that can be applied wider
+      than just getting more to work").
+
+      Tooling: `machine68k` (already used earlier this session for
+      the NP_Entry poke verification) provides `CPU.disassemble_raw
+      (pc, bytes)` — no full Amiga environment needed, just decode
+      raw 68k bytes. Wrote a minimal AmigaOS hunk-file parser
+      (`hunkparse.py`, HUNK_HEADER/CODE/DATA/BSS/RELOC32/RELOC16/
+      SYMBOL/EXT/DEBUG/END, enough to extract hunk bodies — no
+      relocation applied, unneeded for reading branch/compare logic
+      against immediate values) to pull `SYS:Utilities/More`'s
+      10148-byte CODE hunk out cleanly, then linearly disassembled
+      the whole thing (`disasm.py`) to `more.dis`, one instruction
+      per line with its file offset, for grepping.
+
+      Found the actual keystroke loop by searching for dos.library
+      `Read()` (LVO -$2A) call sites — 4 total, 3 were file I/O
+      (a ~126-byte config read, a 4096-byte chunked read of the
+      file being paged) and one real hit: `WaitForChar(fh, 200000)`
+      (LVO -$CC) immediately followed by `Read(fh, buf, 1)` — a
+      genuine one-byte-at-a-time keystroke reader, matching
+      `ccon.doc`'s existing "More's single-key paging uses real
+      timed WAIT_CHARs" note exactly.
+
+      Traced the dispatch immediately after that single-byte read:
+      byte `< $20` (control chars) falls through to "ignore, loop
+      back and read the next byte" for anything not separately
+      matched; byte `$20-$7e` (printable) is checked against digits
+      (accumulating a repeat-count prefix, vi `5j`-style) and a
+      small fixed table of command letters; byte `> $7e` — which
+      covers DEL AND EVERY BYTE $80-$FF, meaning `$9B` (CSI)
+      UNCONDITIONALLY — branches straight to the same "ignore, read
+      next" path, no exceptions. There is no code anywhere in this
+      dispatch that treats a byte as the start of a multi-byte
+      escape sequence.
+
+      **The actual, code-verified reason arrow keys don't work in
+      More**: when CCON forwards an arrow key as `ESC [ A` (three
+      bytes, `rawcsikey()`'s standard encoding), More's one-byte
+      reader sees three completely independent, meaningless
+      keystrokes — `ESC` swallowed as an unmatched control char,
+      `[` and `A` each checked against the command-letter table and
+      almost certainly matching nothing. This isn't a rejection of
+      arrow keys specifically; More was simply never written with
+      any concept of ANSI cursor sequences. True on any console,
+      stock CON: included — settles the b34→b37 back-and-forth for
+      real this time, with the actual mechanism proven from the
+      compiled code rather than inferred from help text or an
+      assertion in either direction.
+
+      **The wider lesson he asked for**: Ed and More are NOT the
+      same category of "raw client" despite both running through
+      CCON's raw mode. Ed genuinely parses CSI sequences — proven
+      twice now, via its output scrolling (`CSI S`/`T`, this
+      session) and its menu system (CSI raw-event reports,
+      disassembled earlier tonight). More does not; it's a single-
+      byte reader from an earlier, simpler generation of Amiga CLI
+      tooling. CCON speaking the ANSI protocol correctly (which it
+      now does noticeably better after b35-b39) is the right and
+      only correct design; whether a given CLIENT understands that
+      protocol is entirely the client's own property, and no
+      console-side cleverness can retrofit escape-sequence
+      awareness into a binary that was never written to parse one.
+      Filed as a settled architecture fact, not an open question.
+
+      **Cleanup, same beta**: with Ed confirmed working, stripped
+      the b36/b37 dbgring diagnostic entirely — the struct fields
+      (`dbgn`/`dbgring`), `dbgmark()`, its two call sites in
+      `csidispatch()`/`render()`, and `settitle()`'s temporary
+      rawmode branch. `settitle()` is back to exactly its pre-b36
+      shape. `ccon.doc`/`ccon.readme`'s Ed-scrolling line corrected
+      from "Index/Reverse Index" (b35's guess, wrong mechanism) to
+      "ANSI Scroll Up/Down" (the actual one, b38).
+
+      Deployed as "1.1b39" — a normal build again, no debug
+      scaffolding, nothing pending a boot test this round beyond
+      ordinary confidence in what's already confirmed working.
+
+      **b40 — the "settled" More verdict wasn't the whole story
+      either.** His immediate next report: "I can't scroll up in
+      more. If I press the up arrow it's the same page as is
+      displayed that scrolls up, so I can scroll up for all
+      eternity without going anywhere." Went back into `more.dis`
+      (still on disk from b39) rather than re-guess from the b39
+      summary, and found a SECOND dispatch path in the same
+      keystroke loop that b39's trace missed: a state flag (tested
+      right after `Read()`, before the byte-classification chain
+      b39 documented) routes to an entirely separate block that
+      DOES recognize `ESC` then `[` (or bare CSI `$9B` directly) as
+      a sequence start, resetting several "position" registers to
+      their CURRENT value rather than advancing them — a mechanism
+      exactly consistent with "same page, going nowhere."
+
+      Genuinely uncertain of the full picture this time (unlike the
+      Ed CSI-S find, which was unambiguous once spotted) — the
+      interaction between this path and the one b39 already traced
+      needs more than hand-reading to pin down with confidence, and
+      hand-tracing control flow has already burned this session
+      once (see [[amigatools-workflow]]'s harness-over-hand-trace
+      lesson). Live hypothesis: More may ALWAYS have sent something
+      like this in response to arrow keys, harmlessly invisible
+      before b38/b39 since CSI S/T were unimplemented no-ops — and
+      only NOW visible, now that CCON actually acts on them (for
+      Ed's benefit). If true, this isn't a new CCON regression, just
+      a newly-exposed consequence of a real, correct fix.
+
+      Rather than keep reading assembly, brought the b36-style
+      dbgring back (title-bar `[dbg:...]`, CSI-final-byte-only this
+      time — no need for the bare-ESC-D/M/E markers from the Ed
+      hunt) to directly observe what More sends in response to
+      arrow keys, same proven method as the Ed investigation.
+      Waiting on his screenshots (Up a few times, Down a few times,
+      Space/Backspace as a working-key control) before concluding
+      anything definite.
+
+      Deployed as "1.1b40" — diagnostic, not a fix.
+
+      **b41 — the More arrow-key investigation, closed for real.**
+      His screenshot (title `[dbg:mmpHKmmmpqpHKmmm]`, confirmed by
+      him to be from pressing Up — a first read misjudged it as a
+      repeat of the earlier "back a page" screenshot purely because
+      the ring happened to look identical; he corrected that
+      sharply and correctly, no second-guessing needed) settled the
+      live hypothesis from the b40 entry: there is NO `S`/`T` in the
+      ring anywhere. What IS there — `m`/`H`/`K` repeating — is
+      the exact same shape as the ALREADY-CONFIRMED-WORKING page
+      redraw (compare the b38 Shift+Down control ring:
+      `KHKHKHKHKHKHKHKH`). So the b40 hypothesis (CCON's new CSI
+      S/T support making a previously-invisible bad scroll command
+      newly visible) is WRONG — ruled out cleanly by the absence of
+      the very codes it depended on.
+
+      What's actually happening, tying back to the b39/b40
+      disassembly finds: pressing an arrow key in More triggers its
+      ESC/CSI recognizer (the one found in b40 that resets internal
+      "position" registers to their own current value instead of
+      advancing them), and More then does a completely normal,
+      correctly-functioning FULL PAGE REDRAW from that position —
+      using the identical `H`/`K` mechanism as every other page
+      redraw in this program. The redraw itself is not broken at
+      all. It's just redrawing the position it was already at,
+      because the arrow key confused which position that should be.
+      This is 100% inside More's own compiled logic; CCON's role
+      (parse and act on real CSI codes) is unrelated to this bug
+      and there's nothing on the console side to change.
+
+      Stripped the b40 dbgring immediately — same struct fields,
+      `dbgmark()`, its one call site in `csidispatch()`, and
+      `settitle()`'s temporary branch, all removed, `settitle()`
+      back to its exact clean shape. Deployed as "1.1b41".
+
+      **The More investigation is now closed, definitively, on
+      three independently-confirmed facts** (not assertions): (1)
+      its own keystroke loop reads one byte via `WaitForChar`+
+      `Read(...,1)`; (2) it DOES have a real ESC/CSI recognizer,
+      just one whose position-tracking gets reset rather than
+      advanced by an arrow key; (3) the resulting "scroll" the user
+      sees is a genuine, working full-page redraw landing on the
+      wrong (unchanged) position — confirmed by the total absence
+      of scroll commands in the observed byte trace. Nothing further
+      to try here; this is a real, small bug in a ~2021-vintage
+      Amiga utility binary, unrelated to and unfixable from CCON.
+
+      **b42 — the b41 "closed for real" verdict was WRONG, and this
+      time the proof was completely conclusive rather than another
+      disassembly read.** He did the one test that actually settles
+      an "is it the client or the console" question: same file,
+      same version of More, run under STOCK CON: instead of CCON:.
+      Two screenshots — Up arrow pressed a few times moved the
+      percentage indicator from 99% down to 50%, with genuinely
+      different file content on screen. More CAN navigate backward
+      correctly on arrow keys. It just doesn't under CCON. Same
+      binary, different console, different result — inescapably a
+      CCON-side issue, not a bug inside More at all. The b41 "100%
+      inside More's own compiled logic, unrelated to and unfixable
+      from CCON" conclusion was flat wrong, and shouldn't have been
+      written as settled without this exact kind of test having
+      been run first.
+
+      Found a concrete, well-justified candidate immediately:
+      `rawcsikey()` (and `sendreport()`, the CSI-report responder)
+      were both sending the CSI introducer as the bare 8-bit C1
+      byte (`$9B`) for every special key — arrows, function keys,
+      Help. Real AmigaOS raw-key reporting conventionally uses the
+      two-byte 7-bit form (`ESC` `[`) instead, which is also far
+      more universally understood by ANSI-aware programs in
+      general. Switched both to `enqueue(27); enqueue("[")`.
+      Deliberately did NOT touch `ihreport()` (the OTHER `$9B`-
+      emitting proc) — that one's byte-for-byte ROM-disassembly-
+      verified against the real console.device 46.1 event-report
+      builder, a different protocol (Ed's CSI n{ raw-event
+      subscription) with independently-confirmed-correct bytes;
+      no reason to touch something already proven right.
+
+      Genuinely uncertain whether this is the WHOLE fix or just A
+      fix — the disassembly reading that led here (`more.dis`,
+      still on disk) had already produced contradictory conclusions
+      twice this stretch (b39's "no CSI recognition at all" wrong,
+      b40's "CSI S/T" hypothesis wrong), so this change is offered
+      as a concrete, justified, testable hypothesis based on the
+      REAL discrepancy observed, not a re-asserted "this settles
+      it." Deployed as "1.1b42" — needs his direct test: does Up/
+      Down arrow now navigate correctly in More under CCON, and
+      separately, does Ed's scrolling (already confirmed working,
+      b38) still work with the encoding changed underneath it.
+
+      **Confirmed, same beta: "Yes!!!!!!!!!!!!!!!!!!!!!!!!! Finally."**
+      Up/Down arrow paging in More now works under CCON, ESC+'['
+      was the actual fix, and Ed's scrolling survived the encoding
+      change untouched. The b39-b42 More saga is genuinely closed
+      this time, on real confirmed behavior, not another disassembly
+      read. This also closes Theme B's arrow-key/scrolling thread
+      entirely — see [[ccon-architecture]] for the full multi-round
+      writeup and the process lesson it cost (stock CON: comparison
+      should have run FIRST, not last).
+
+      His immediate follow-up, a new and separate ask, not a bug:
+      under stock CON:, More's page redraw appears to FLIP instantly
+      to the new page; under CCON it visibly "scroll updates" row by
+      row instead, which reads as more distracting. Assessed, not
+      implemented: CCON draws every graphics op straight to the
+      window as it parses it, no offscreen buffer, so a client's
+      multi-row page redraw is genuinely progressive on screen;
+      stock CON:'s hand-tuned ROM assembly likely just finishes
+      within one screen refresh where CCON's higher-level per-row
+      overhead (scrollback model bookkeeping included) can spread
+      across a couple of frames, becoming visible. Two paths given
+      to him: real fix (offscreen bitmap + one blit per redraw,
+      genuine architecture change, touches every drawing call in
+      the handler) vs. cheaper fix (trim per-row overhead, likely
+      helps but doesn't GUARANTEE atomicity). His call on scope,
+      not taken up yet — a real, separately-scoped ask, not folded
+      into this beta.
+
+      **b43 — two quick, independent asks, both cosmetic/geometry,
+      both shipped same beta.** (1) Default window geometry changed
+      from `40/40/520/160` to `0/18/640/130` — matches stock
+      `newshell`'s own default CON: window exactly, his ask, so a
+      bare `newshell ccon:` now looks and sits like the stock shell
+      window rather than an arbitrary offset/size CCON picked on
+      its own. Changed in both places that ground this default
+      (the struct-init safety default and `parsecon()`'s real,
+      actually-used default — kept in sync, matching the existing
+      pattern where both blocks already mirrored each other).
+      Side effect, not a coincidence to chase further: 640px width
+      at topaz-8 works out to ~80 columns, which is what
+      `ccon.doc`'s memory-footprint section already assumed as
+      "the default" — the OLD 520px default was actually ~65
+      columns, a small pre-existing doc/reality mismatch that this
+      change happens to close rather than open.
+
+      (2) The ~3px top-inset he screenshotted (CCON's prompt sits
+      visibly lower than stock CON:'s, which starts flush against
+      the border) — traced to `MARGIN=4` in `gridcalc()`, applied
+      to BOTH `curcon.left` and `curcon.topy`. Changed to `MARGIN=0`.
+      Low-risk: the borrowed-window path (`curcon.fwin`) already
+      forces `i:=0` in the exact same calculation, so zero-margin
+      was already live, exercised code, not new untested ground —
+      this just makes it the default for ordinary windows too, not
+      only borrowed ones. No doc numbers needed updating (the
+      handbook never stated the old margin/geometry as specific
+      pixel values, only described things generically).
+
+      Deployed as "1.1b43", his boot test pending — pure visual/
+      geometry changes, need his eyes on both: does the default
+      window now match a stock `newshell` window's position/size
+      and does the prompt sit flush at the top like CON:'s does.
+
+      **b43 confirmed** ("the window and margin is now top notch").
+
+      **b44 — the memory knob, his call.** Default `SBMAX` 1000 ->
+      512 (a kinder default; 1000 was itself the 19.7.26 footprint-
+      pass reduction from 1.0's 4000 hardcode — this continues that
+      same direction rather than reversing it), `SBMAXCAP` (the
+      `LINES=n` ceiling) 4000 -> 5000, room for beefier systems
+      without removing the safety cap concept. `ccon.doc`/
+      `ccon.readme` fully re-swept for every "1000"/"4000" mention
+      (six spots across both files) plus the derived memory figure
+      recalculated from the new default: `512 × 80 cols × 3 planes`
+      = ~120K, replacing the old "~235K at 80 columns and the
+      default 1000 lines" line everywhere it appeared.
+
+      Deployed as "1.1b44". His instruction this round, explicit
+      and in order: fix the scrollback default, THEN commit and
+      push — double buffering (the More redraw-flicker ask from
+      the previous entry) is next but deliberately not bundled
+      into this commit.
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
