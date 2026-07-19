@@ -1805,13 +1805,87 @@ fix only removes the SLASH-COUNTING trap.
       jumps, any output snaps live as ever. The Ctrl+R search
       machinery (srfind's fold-substring scan) generalizes from
       the history ring to the model rows.
-- [ ] **Bracketed-paste safety.** RAMIGA-V currently replays LFs
-      as Returns — a pasted multi-line snippet EXECUTES as it
-      lands. zsh's answer, ours too: paste inserts inert text
-      (ghost-adjacent highlight while fresh?), nothing runs until
-      a real Enter. Keep a PASTEEXEC open option (or RAMIGA+
-      SHIFT+V) for the old behaviour where wanted. Raw-mode paste
-      (into Ed) stays byte-faithful, untouched.
+- [x] **Bracketed-paste safety — two designs, the second one
+      shipped (b27→b28) — deployed as "1.1b28", his boot test
+      pending.** RAMIGA-V used to replay every LF in a pasted clip
+      as a Return, so a multi-line paste EXECUTED line by line as
+      it landed — no chance to see or stop a dangerous line before
+      it ran.
+
+      **b27, the first attempt (drip-feed):** only the first line
+      landed live; anything past the first embedded LF queued in a
+      new `pasteq` buffer and was fed back ONE LINE PER REAL ENTER
+      via `pastepull()`, called from `dovanilla`'s Return-commit
+      path. Fully harness-verified, boot-deployed — and wrong: his
+      catch was that the queue advanced on ANY Enter, including a
+      totally unrelated command he typed fresh after seeing only
+      one pasted line. A queued line would silently pop up after
+      that unrelated command finished, looking like paste content
+      arriving from nowhere. Asked what he actually expected: "all
+      lines pasted without any send (enter)" — the drip-feed model
+      was never going to satisfy that, no matter how well-tested.
+
+      **b28, the redesign:** the WHOLE clip lands live as ONE long,
+      fully editable line — cursor movement, Backspace, Ctrl+W/U/K,
+      all of it just work, because it reuses the width-wrap editing
+      model completely unchanged. The one real design question was
+      how to show an embedded newline in that single-line model
+      without teaching `edcap()`/`edlastrow()` (which have NO
+      concept of an explicit line break, only width-driven wrap) a
+      new idea — that machinery is exactly what took three separate
+      fixes to get right earlier tonight (the b8→b9→b10 eraseedit
+      saga), and reopening it for this felt like the wrong trade.
+      The answer: `PASTENL` (182, a Latin-1 pilcrow) stands in for
+      an embedded LF while editing — chosen as a byte essentially
+      never found in real command text. `pasteinsert()` does the
+      substitution going in; `pasteundo()` reverses it in place,
+      called from `dovanilla`'s Return-commit path AFTER
+      `histremember()` (so Up/Down recall re-shows a pasted multi-
+      line command correctly, still editable, exactly like a fresh
+      paste) but BEFORE `render()`/`enqueue()` (so what actually
+      echoes to the transcript and what the shell actually reads
+      both have real newlines — `render()` was already newline-
+      aware, since it draws all ordinary command output, and
+      `enqueue()`/`satisfyreads()` were already LF-splitting by
+      design, so the shell reads a multi-line commit as the several
+      separate commands it always was, with ZERO changes to either).
+      One Enter, once pressed, runs everything, in order — nothing
+      runs before that. Esc clears the whole line, pilcrows and
+      all, in one shot — it was already just ordinary `ebuf`
+      content, no separate queue left to abandon.
+
+      Deliberately NOT routed through `dovanilla`'s normal dispatch
+      for the inserted text — `pasteinsert()` mirrors just its
+      printable-character insert shape (shift-right, drop in,
+      `SetStr`) directly, now also accepting the substituted
+      pilcrow. `injectbyte()`'s old byte-by-byte `dovanilla(c,0)`
+      call (still used for the forceexec/raw paths) would let a
+      pasted Tab/Ctrl-R/Esc byte trigger completion/search/line-
+      clear as a SIDE EFFECT of pasting — already true before
+      tonight; the safe path avoids it, a stray control byte is
+      just an odd literal character, never a triggered action.
+
+      Two escape hatches back to the old instant-run behaviour,
+      unchanged from b27: RAMIGA+SHIFT+V forces it for one paste
+      (`ihmap[0]="V"` vs `"v"` — MapRawKey already folds Shift into
+      the mapped letter, no new qualifier plumbing); the `PASTEEXEC`
+      open option makes a whole window behave that way always. Raw
+      mode is completely untouched — still `injectbyte`'s byte-
+      faithful `enqueue()`, no substitution concept there at all.
+
+      `pasteq`/`pastepull`/`pasteappend`/`PASTEQMAX` (b27's queue
+      machinery) are gone entirely — the new design has nothing to
+      queue, so there was nothing to keep. Net simpler than b27,
+      not more complex, despite doing more.
+
+      **Verified with a harness** before deployment, same as b27's
+      was: a three-line paste producing the exact expected pilcrow-
+      substituted string, `pasteundo()`'s exact reversal back to
+      real LF bytes, a cursor-position insert into the MIDDLE of
+      existing text (not just appending at the end), and a
+      deliberately oversized paste against `edcap()`'s existing
+      400-char cap (truncates cleanly, no overflow) — all landed
+      exactly as designed.
 
 ### Parked for v1.2 — the big swing
 

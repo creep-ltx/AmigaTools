@@ -86,6 +86,10 @@ CONST MARGIN=4,
       TCPOOLSZ=4096,    -> tab completion: candidate name pool, bytes
       WQMAX=16,         -> writes parked during a selection drag
       CLIPMAX=16384,    -> clipboard transfer buffer, bytes
+      PASTENL=182,      -> Latin-1 pilcrow (P): the visible stand-in
+                        -> for an embedded newline while a multi-line
+                        -> paste is still being edited - real command
+                        -> text essentially never contains one
       IHMAX=64,         -> input-event ring, slots (power of two)
       IHPRI=20,         -> chain position: below Intuition's 50, above
                         -> console.device's 0 - menu operations arrive
@@ -223,6 +227,9 @@ OBJECT console
   pauto                         -> AUTO: window on first I/O
   autopend                      -> an AUTO open waits, windowless
   pnoborder, pnodrag, pnodepth, pnosize, pbackdrop, pinactive
+  pasteexec                     -> Theme B: PASTEEXEC open option -
+                                -> the OLD RAMIGA-V behaviour (every
+                                -> LF runs its line) for this window
   plines                        -> v1.1 LINES=n parsed (0 = default)
   pfontsize, pfontexp           -> v1.1 FONTname/size parse state (the
                                 -> size rides the NEXT '/'-token)
@@ -1060,6 +1067,13 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.pbackdrop := TRUE
   ELSEIF StrCmp(tok, 'INACTIVE')
     curcon.pinactive := TRUE
+  ELSEIF StrCmp(tok, 'PASTEEXEC')
+    -> Theme B: opt this WHOLE window back into the 1.0/pre-safety
+    -> behaviour - every RAMIGA-V runs each pasted line as it lands,
+    -> no queueing. RAMIGA+SHIFT+V still overrides per-paste even
+    -> without this option; this is for someone who wants that to
+    -> just always be how the window behaves.
+    curcon.pasteexec := TRUE
   ELSEIF StrCmp(tok, 'SCREEN', 6)
     -> SCREENname, stock syntax: open on that public screen
     -> (name taken case-preserved from the raw token). A bare
@@ -1151,6 +1165,8 @@ PROC parsecon(bname)
   curcon.pnosize := FALSE
   curcon.pbackdrop := FALSE
   curcon.pinactive := FALSE
+  curcon.pasteexec := FALSE            -> Theme B: safe paste is the
+                                        -> default; PASTEEXEC opts out
   curcon.pscrname[0] := 0              -> global array: garbage until set
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
   curcon.pfontname[0] := 0             -> open like everything else
@@ -2336,12 +2352,22 @@ PROC selcopy()
 ENDPROC
 
 -> RAMIGA-V: read unit 0, dig the CHRS text out of the FTXT form,
--> inject it as typed input. Cooked runs every byte through the line
--> editor (LF becomes Return, so a pasted command line executes like
--> a typed one); raw hands the client the bytes as they are.
-PROC dopaste()
+-> inject it as typed input. Raw hands the client the bytes as they
+-> are, byte-faithful, always - a raw client (Ed) owns its own
+-> screen, there is no "line" for a paste to prematurely commit.
+-> Cooked is the safety question: forceexec (RAMIGA+SHIFT+V) or the
+-> PASTEEXEC open option replay every LF as a Return, 1.0-style,
+-> each pasted line running the instant it lands - the DEFAULT now
+-> is safer (his call, Theme B): the WHOLE clip lands live as one
+-> long, fully editable line (embedded newlines shown as a PASTENL
+-> pilcrow, real Return/Backspace/kill keys all just work - see
+-> pasteinsert), and NONE of it runs until a real Enter commits it,
+-> at which point it all runs at once, in order, like any terminal
+-> paste - so a pasted `rm important-file` sits there to be seen
+-> and edited out, not executed before you can react.
+PROC dopaste(forceexec)
   DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
-      lw:PTR TO LONG, b:PTR TO CHAR
+      lw:PTR TO LONG, b:PTR TO CHAR, exec
   IF curcon.selon THEN RETURN
   IF clipopen() = FALSE THEN RETURN
   clipreq.command := CMD_READ
@@ -2360,6 +2386,7 @@ PROC dopaste()
   IF got < 20 THEN RETURN
   lw := clipbuf
   IF (lw[0] <> $464F524D) OR (lw[2] <> $46545854) THEN RETURN
+  exec := forceexec OR curcon.rawmode OR curcon.pasteexec
   i := 12
   WHILE (i + 8) <= got
     lw := clipbuf + i
@@ -2368,13 +2395,22 @@ PROC dopaste()
     IF id = $43485253           -> CHRS: inject its text
       b := clipbuf + i + 8
       take := Min(sz, got - i - 8)
-      FOR c := 0 TO take - 1
-        injectbyte(b[c])
-      ENDFOR
+      IF exec
+        FOR c := 0 TO take - 1
+          injectbyte(b[c])
+        ENDFOR
+      ELSE
+        pasteinsert(b, take)
+      ENDIF
     ENDIF
     i := i + 8 + sz + (sz AND 1)
   ENDWHILE
-  IF curcon.rawmode THEN inputarrived()
+  IF exec
+    IF curcon.rawmode THEN inputarrived()
+  ELSE
+    drawedit()                  -> pasteinsert never draws itself -
+  ENDIF                         -> one clean paint after the whole
+                                -> clip is in, not one per line
 ENDPROC
 
 PROC injectbyte(c)
@@ -2384,6 +2420,55 @@ PROC injectbyte(c)
     IF c = 10 THEN c := 13      -> LF = Return to the line editor
     dovanilla(c, 0)
   ENDIF
+ENDPROC
+
+-> safe-paste insert: the WHOLE clip becomes literal text at the
+-> cursor in one go - NOT via dovanilla, deliberately: a pasted
+-> Tab/Ctrl-R/Esc byte must never trigger completion or search or a
+-> line-clear, it should just be an odd-looking literal character,
+-> the same way a stray control byte typed by hand would be if this
+-> codepath ever saw it. An embedded LF becomes PASTENL (a pilcrow,
+-> chosen as a byte vanishingly unlikely to appear in real command
+-> text) rather than a raw newline - reusing the ALREADY-CORRECT
+-> width-wrap editing model unchanged (edcap/edlastrow have never
+-> heard of a newline, and teaching them one meant reopening the
+-> exact eraseedit/drawedit machinery that took three fixes to get
+-> right earlier tonight). The whole pasted block is fully visible
+-> and fully editable - cursor movement, Backspace, kill keys, all
+-> of it - as one long line that wraps by width like any other.
+-> pasteundo() reverses the substitution at commit time, so what
+-> actually RUNS still has real newlines in it.
+PROC pasteinsert(b:PTR TO CHAR, take)
+  DEF s:PTR TO CHAR, l, cap, k, c, j
+  s := curcon.ebuf
+  l := StrLen(s)
+  cap := edcap()
+  FOR k := 0 TO take - 1
+    c := b[k]
+    IF c = 10 THEN c := PASTENL
+    IF ((c >= 32) AND (c <= 126)) OR (c >= 160)
+      IF l < cap
+        FOR j := l - 1 TO curcon.cpos STEP -1
+          s[j + 1] := s[j]
+        ENDFOR
+        s[curcon.cpos] := c
+        l := l + 1
+        curcon.cpos := curcon.cpos + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  SetStr(curcon.ebuf, l)
+ENDPROC
+
+-> reverse pasteinsert's substitution on a committed line: PASTENL
+-> back to a real LF, in place. Called right before a commit is
+-> echoed/enqueued, never before - the edit line itself keeps
+-> showing the pilcrow right up to the moment it actually runs.
+PROC pasteundo(s:PTR TO CHAR, l)
+  DEF i
+  FOR i := 0 TO l - 1
+    IF s[i] = PASTENL THEN s[i] := 10
+  ENDFOR
 ENDPROC
 
 -> redraw the whole grid from the model at the current view offset;
@@ -3617,14 +3702,15 @@ PROC dovanilla(code, qual)
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF code = 13
-    -> commit: echo the line into the transcript, feed the readers
+    -> commit: echo the line into the transcript, feed the readers.
+    -> Theme B: history remembers a pasted line with its PASTENL
+    -> pilcrows still in it (so Up/Down recall re-shows them
+    -> correctly, still editable, exactly like a fresh paste would)
+    -> - only AFTER that does pasteundo turn them back into the
+    -> real newlines render()/enqueue() need, so a multi-line paste
+    -> echoes as proper multi-row output and the shell reads it as
+    -> the several separate commands it always was.
     eraseedit()
-    render(curcon.ebuf, l)
-    outnl()
-    FOR j := 0 TO l - 1
-      enqueue(s[j])
-    ENDFOR
-    enqueue(10)
     IF l > 0
       histremember(curcon.ebuf)  -> shared ring (Theme B)
       -> flush to disk on every command, not just last-window-close -
@@ -3633,6 +3719,13 @@ PROC dovanilla(code, qual)
       -> so an unclean reboot lost everything since the last close)
       savehistfile()
     ENDIF
+    pasteundo(curcon.ebuf, l)
+    render(curcon.ebuf, l)
+    outnl()
+    FOR j := 0 TO l - 1
+      enqueue(s[j])
+    ENDFOR
+    enqueue(10)
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
     curcon.hpos := -1
@@ -3649,6 +3742,10 @@ PROC dovanilla(code, qual)
       Signal(curcon.breaktask, Shl(SIGBREAKF_CTRL_C, code - 3))
     ENDIF
   ELSEIF code = 27
+    -> a pending multi-line paste (its embedded newlines still
+    -> showing as PASTENL pilcrows) is just ordinary ebuf content
+    -> now - clearing the line clears all of it, nothing separate
+    -> left over to surprise a later Enter
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
     drawedit()
@@ -4051,11 +4148,14 @@ PROC ihkey(e:PTR TO ihev)
                                 -> forever
   IF q AND IEQUALIFIER_RCOMMAND
     -> RAMIGA-V pastes (M7). Other RAMIGA combos fall through
-    -> unchanged.
+    -> unchanged. Theme B: MapRawKey already folded Shift into the
+    -> mapped letter, so "V" (Shift held) IS the RAMIGA+SHIFT+V
+    -> override - force the old every-line-runs behaviour for just
+    -> this one paste, no PASTEEXEC option needed for a one-off.
     n := ihmaprawkey(e)
     IF n = 1
       IF (ihmap[0] = "v") OR (ihmap[0] = "V")
-        dopaste()
+        dopaste(ihmap[0] = "V")
         RETURN
       ENDIF
       IF (ihmap[0] = "c") OR (ihmap[0] = "C")
@@ -4902,4 +5002,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b26 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b28 CCON: LTX console handler', 0

@@ -27,6 +27,10 @@ FEATURES
   - Copy & paste with the stock console family, both directions
     (IFF FTXT); drag, double-click word, triple-click line;
     output freezes under a drag like stock; RAMIGA-V pastes
+    safely - the whole clip lands as one fully editable line
+    (embedded breaks shown as a pilcrow), nothing runs until you
+    press Enter yourself (RAMIGA+SHIFT+V or PASTEEXEC for the old
+    instant-run way)
   - SGR colour with the ANSI/Workbench pen separation: ls is
     genuinely blue everywhere, Ed is never red - plus real
     italic/underline/inverse soft styles

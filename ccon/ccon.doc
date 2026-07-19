@@ -157,6 +157,9 @@
   NOSIZE     No sizing gadget.
   BACKDROP   A backdrop window.
   INACTIVE   Do not activate the window on open.
+  PASTEEXEC  RAMIGA-V pastes the old way in this window: every LF
+             in the clip runs its line immediately, no queueing.
+             See section 11.
 
   WINDOW0xADDR
              Render into an EXISTING window at that address instead
@@ -357,11 +360,25 @@
 
   Pasting:
 
-    RAMIGA-V   paste the clipboard as typed input. In cooked mode
-               it runs through the line editor (a multi-line clip
-               executes line by line); in raw mode the program
-               receives the bytes (pasting into Ed works).
+    RAMIGA-V   paste the clipboard as typed input. In raw mode the
+               program receives the bytes as they are (pasting into
+               Ed works). In COOKED mode, the WHOLE clip lands live
+               in the edit line as one long, fully editable line -
+               move the cursor, Backspace, kill words, edit any of
+               it, exactly like typed text. An embedded line break
+               shows as a pilcrow (P) rather than a real newline
+               while you edit; nothing in the paste RUNS until you
+               press Enter, at which point everything commits and
+               runs at once, in order, same as pasting into any
+               terminal. Esc clears it all, nothing runs.
+    RAMIGA+SHIFT+V
+               paste the OLD way for just this once: every line in
+               the clip runs immediately as it lands, LF for Return.
     RAMIGA-C   re-copy the standing highlight.
+
+  PASTEEXEC (an open option, section 5) makes a window behave like
+  RAMIGA+SHIFT+V for EVERY paste, if you want the old behaviour as
+  the default rather than the exception.
 
   Selection works on the scrollback view as well - scroll back,
   copy an old error, snap live, paste it.
