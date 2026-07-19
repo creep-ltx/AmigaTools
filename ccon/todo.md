@@ -3038,6 +3038,30 @@ fix only removes the SLASH-COUNTING trap.
       risk, but doesn't GUARANTEE the sweep never shows). Asked
       19.7.26d, his call on scope still open.
 
+- [ ] **DECSTBM (scroll-region margins).** Never implemented, and
+      until now never even written down as a to-do — it was a
+      passing comment (`ccon-handler.e`, `scrollup()`/`scrolldown()`:
+      "we don't track DECSTBM margins") from the Ed/More CSI-S/T
+      investigation (b38), promoted to a real tracked item
+      20.7.26. Right now every scroll operation (`CSI L`/`M` insert/
+      delete line, `CSI S`/`T` scroll up/down, bare `ESC D`/`M`
+      index/reverse-index) treats the WHOLE window as the scrolling
+      region — `CSI L`/`M` are cursor-row-relative (correct per
+      spec), but `S`/`T`/bare-ESC always act on the full window
+      regardless of any margin a client might have asked for. A
+      client that sets a top/bottom margin (e.g. to keep a status
+      line pinned while scrolling only the body) and then scrolls
+      would get the WHOLE window scrolled, status line included -
+      wrong, though not yet observed against a real client that
+      actually sets margins (neither Ed nor More do, as far as
+      anything this session's disassembly work found). Would need:
+      recognizing `CSI top;bottom r` (DECSTBM) to set/clear a
+      per-console margin pair, then threading that pair through
+      `scrollup()`/`scrolldown()`/`inslines()`/`dellines()` (and
+      probably `outnl()`/`screenscroll()`'s bottom-margin check) so
+      "the whole window" becomes "the current margin, defaulting to
+      the whole window when none is set." Not scoped further yet.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
