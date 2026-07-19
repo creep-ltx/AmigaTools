@@ -1424,17 +1424,107 @@ fix only removes the SLASH-COUNTING trap.
 
 ### Theme B: "the plumbing" — the Unix tier that needs filesystem work
 
-- [ ] **Shared + persistent history.** #1 by value: one history
-      ring across ALL windows again (M10 made it per-window —
-      with ghosts and Ctrl+R, a longer communal memory sharpens
-      three features at once), persisted to S:ccon-history on
-      close/last-window and loaded at first open. Writing a file
-      from a handler is the M5b trick in reverse: hand-rolled
-      FINDOUTPUT/WRITE/END packets straight to the filesystem's
-      port on the private fsport. Decide: per-process (CCON: and
-      CRAW: separate) or shared via the file. Dedupe on load;
-      HISTMAX may deserve growing past 32 with persistence in
-      play.
+- [x] **Shared + persistent history — done, boot-confirmed
+      ("It WORKS!!!!", 19.7.26).** Also where $VER stopped growing
+      date-letter suffixes (1.1, 26b, 26c, 26d) — his call: plain
+      sequential `1.1bN` from here on, no more dates in the
+      string. Counting every deployed build since 1.1 started
+      (b1-b11, the RC, RC2/26b, 26c, 26d = 15) landed the next one
+      on **1.1b16** — the history file's move from S: to L: was
+      folded into that same build. His calls on the two open
+      questions: ONE shared history file (not split by device —
+      CRAW: barely contributes anyway, raw mode bypasses history
+      entirely), and HISTMAX 32 -> 200 (now a single ring per
+      process instead of one per window, so 200 * LINEMAX is
+      ~80K once, not 32 * N windows — a straight win).
+
+      The move: `hist[32]`/`htotal`/`histdone` came OFF the
+      console OBJECT and became process-global `ghist`/`ghtotal`
+      (console keeps only `hpos`, the per-window Up/Down walk
+      cursor — two windows can browse the shared ring
+      independently). Every read site (sgfind's ghost match,
+      srfind's Ctrl+R scan, histload's Up/Down, the Return-commit
+      append) now points at the shared ring; the append itself
+      became one shared `histremember(s)` (same dedupe rule,
+      newest-collapses-with-previous, used by both live typing
+      AND the disk load).
+
+      Persistence is the M5b trick in reverse: `loadhistfile()`
+      and `savehistfile()` hand-roll ACTION_FINDOUTPUT/FINDINPUT/
+      WRITE/READ/END straight at L:'s filesystem port (reusing
+      tcresolve/fscall/tcbstr verbatim — no new DOS-list code;
+      his boot-test call: L:ccon-history, right next to the
+      handler binary, not S: — a one-line tcresolve target swap).
+      The one genuinely new piece: acting as the FINDOUTPUT/
+      FINDINPUT CALLER instead of the answerer — a zeroed
+      `filehandle` is allocated, its BPTR rides as arg1, the
+      filesystem writes ITS OWN file id into `.args` (offset 36,
+      cross-checked against amitools' FileHandleStruct —
+      fh_Link/fh_Port/fh_Type/fh_Buf/fh_Pos/fh_End/fh_Funcs/
+      fh_Func2/fh_Func3/fh_Args/fh_Arg2, SIZEOF 44, matches the E
+      module field-for-field), reused as arg1 on every WRITE/
+      READ/END after. Load runs once, at the first-ever console
+      open this process serves (curcon must be a live console for
+      tcresolve to scratch through — main() has none yet, so it
+      cannot happen any earlier).
+
+      **b17, his catch:** save only ran in conclose() when the
+      LAST window across the process closed — a plain reset
+      (not a clean close-all) lost the entire session's history,
+      since that was the only save point. Fixed: `savehistfile()`
+      now runs after EVERY committed command too (dovanilla's
+      Return handler, right after `histremember`), not just on
+      last-close. Rewritten to not regress interactively doing
+      that: it used to fire one ACTION_WRITE packet PER history
+      line (fine once, at close) — at 200 entries that's 200
+      round-trips after every single Enter, which would be felt
+      as lag. Now it batches the whole ring into one 2048-byte
+      buffer, flushing via WRITE only when the buffer would
+      overflow — a handful of packets per save regardless of
+      ring size, not one per line. The old last-close save stays
+      as a now-mostly-redundant safety net (conclose still calls
+      it; it's a same-content rewrite in the normal case, cheap).
+
+      **Verification note:** vamos could not close the loop this
+      time — its dos.library does not back a `Lock()`'d file with
+      a real handler process/port (`.task` reads back 0; vamos
+      resolves paths on the host side, bypassing the packet layer
+      entirely for guest calls), and `FindDosEntry` isn't
+      implemented at all (logs "-> d0=0 (default)"). Confirmed by
+      building the harness anyway and watching both fail exactly
+      that way — not assumed. What COULD be verified on Linux was
+      verified: the `filehandle` struct offsets against amitools'
+      ground truth (above), and the packet field conventions
+      (arg1=id/arg2=CPTR buffer/arg3=length for WRITE/READ, arg1=
+      id for END) by reading ccon-handler.e's OWN dofind/dowrite/
+      satisfyreads — code that has been boot-verified for months
+      as the SERVER side of this exact protocol; the new code is
+      its mirror image as a CLIENT, built from the same ground
+      truth. This is FS-UAE boot-test territory now, same as the
+      original M5b tab-completion packet code must have been.
+
+      **b18, his catch:** Up/Down walked the WHOLE ring regardless
+      of what was already typed — `ls` then Up surfaced `version
+      l:ccon-handler` right alongside every `ls` command. This one
+      IS pure in-memory logic (no packets, no filesystem), so
+      unlike the save/load code above it COULD be fully proven on
+      Linux: a throwaway harness (fake ghist ring, same
+      histmatches/doup/dodown bodies) ran all four cases — filtered
+      up, filtered down, unfiltered (empty prompt), filter matching
+      nothing — and every one landed exactly on the expected line
+      and hpos before the real build was touched.
+
+      The fix: `histmatches(idx, pfx)` — does ring rank `idx` start
+      with `pfx`, case-folded, empty `pfx` always TRUE. RK_UP/
+      RK_DOWN now scan for the next/previous match instead of a
+      flat `hpos +/- 1`; `curcon.stash` (already captured at walk
+      start, previously only used as "the half-typed line to
+      restore") doubles as the filter — no new per-console field.
+      Fish/zsh convention: the filter is whatever was on the line
+      when the FIRST Up fires, fixed for the whole walk; editing
+      the recalled line mid-walk doesn't change it. A bare Up/Down
+      on an empty prompt is `histmatches` with an empty filter, so
+      it's the exact same code path as before, not a fork.
 - [ ] **First-word command completion.** Tab on word one completes
       from the resident list (semaphore-walkable, no packets) and
       the path: C: plus the CLI's path chain (cli_CommandDir lock

@@ -70,7 +70,10 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
 
 CONST MARGIN=4,
       LINEMAX=400,      -> longest editable input line
-      HISTMAX=32,       -> prompt history ring, entries
+      HISTMAX=200,      -> shared prompt history ring, entries (v1.1
+                        -> Theme B: ONE ring per process now, not per
+                        -> window, so this can be generous - 200 *
+                        -> LINEMAX is ~80K once, not 32 * N windows)
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
       SBMAX=4000,       -> scrollback model, lines (like CTerm 0.1)
@@ -150,9 +153,9 @@ OBJECT console
   dccnt                         -> click run length: 1 drag, 2 word,
   dcrow                         -> 3 line; same-row clicks only
   tcmrow0                       -> completion menu's first row, frozen
-  hist[32]:ARRAY OF LONG        -> prompt history: E-string ptrs
-  htotal, hpos
-  histdone                      -> hist strings are made only once
+  hpos                          -> Theme B: the ring itself (ghist/
+                                -> ghtotal) is process-shared now;
+                                -> only the walk position stays here
   -> cooked input plumbing
   inqh, inqt                    -> head/tail of the inq ring below
   cesc                          -> CSI parser state (survives split
@@ -252,6 +255,15 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fspkt=NIL:PTR TO standardpacket,
     fsfib=NIL:PTR TO fileinfoblock,  -> longword-aligned (BPTR arg)
     fsname=NIL:PTR TO CHAR,     -> BSTR build buffer, longword-aligned
+    -> v1.1 Theme B: ONE shared prompt history for every window this
+    -> process serves (was per-console) - persisted to L:ccon-history,
+    -> loaded once at the first-ever open, saved when the last window
+    -> closes. hpos (the per-window Up/Down walk position) and the
+    -> Ctrl+R search state stay on the console - two windows can
+    -> browse the same shared ring independently.
+    ghist[HISTMAX]:ARRAY OF LONG, -> the ring: E-string ptrs
+    ghtotal=0,                  -> running count (Mod HISTMAX for slot)
+    ghistloaded=FALSE,           -> disk load attempted once
     -> M6: the input.device chain - ONE per process, by design (the
     -> M10 decision: N chain handlers is the wrong shape)
     ihgd[2]:ARRAY OF LONG,      -> glue data: [E's A4][{ihchain}]
@@ -343,6 +355,14 @@ PROC main()
   IF tmp THEN fsfib := Shl(Shr(tmp + 3, 2), 2)  -> aligned; round up
   tmp := New(260)
   IF tmp THEN fsname := Shl(Shr(tmp + 3, 2), 2)
+
+  -> v1.1 Theme B: the shared history ring's strings, allocated once
+  -> here; the disk LOAD happens later, at the first real console
+  -> open (histinit is curcon-scoped like tcresolve - no console
+  -> exists yet at this point in main() for it to scratch through)
+  FOR tmp := 0 TO HISTMAX - 1
+    ghist[tmp] := String(LINEMAX)
+  ENDFOR
 
   -> v1.1b2: the disk-font loader plumbing. The helper's entry is
   -> 24 bytes of hand-poked machine code: an NP_Entry process
@@ -630,12 +650,6 @@ ENDPROC conlist
 -> everything a console owns goes back to the heap (the window
 -> resources went down in closewin already)
 PROC condispose(c:PTR TO console)
-  DEF i
-  IF c.histdone
-    FOR i := 0 TO HISTMAX - 1
-      IF c.hist[i] THEN Dispose(c.hist[i])
-    ENDFOR
-  ENDIF
   IF c.ebuf THEN Dispose(c.ebuf)
   IF c.stash THEN Dispose(c.stash)
   IF c.wtitle THEN Dispose(c.wtitle)
@@ -657,6 +671,15 @@ PROC conclose(c:PTR TO console)
   curcon := c
   closewin()                    -> replies parked writers/reads/waits
   conrm(c)
+  -> Theme B: belt-and-suspenders - every command already flushes
+  -> the ring (dovanilla's Return commit), so this is normally a
+  -> same-content rewrite. Kept for the one gap that isn't: a
+  -> console dying with unsaved state some OTHER way. curcon is
+  -> still c here (about to be disposed) - savehistfile needs a
+  -> live console to scratch tcresolve's fields through, and
+  -> conlist is NIL (the last window) so there is nothing else to
+  -> use.
+  IF conlist = NIL THEN savehistfile()
   n := ihtail
   WHILE n <> ihhead
     e := ihring + Shl(n AND (IHMAX - 1), 5)
@@ -1222,6 +1245,14 @@ PROC dofind(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    -> Theme B: the shared history ring loads from L:ccon-history
+    -> once, on this process's first-ever real window - curcon must
+    -> already be a live console for tcresolve to scratch through,
+    -> so this cannot happen any earlier than here (main() has none)
+    IF ghistloaded = FALSE
+      ghistloaded := TRUE
+      loadhistfile()
+    ENDIF
     parsecon(pkt.arg3)          -> THIS open's spec, nobody else's
     conadd(c)                   -> listed unarmed: the chain ignores
     IF c.pauto                  -> it until openwin's last line
@@ -1524,12 +1555,6 @@ PROC openwin()
   curcon.oscn := 0
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
-  IF curcon.histdone = FALSE           -> the history survives window
-    FOR i := 0 TO HISTMAX - 1   -> close/reopen; allocate once
-      curcon.hist[i] := String(LINEMAX)
-    ENDFOR
-    curcon.histdone := TRUE
-  ENDIF
   -> a fresh console: every per-window state starts over
   curcon.cx := 0
   curcon.cy := 0
@@ -3274,16 +3299,15 @@ ENDPROC
 PROC srfind(from)
   DEF avail, idx, h:PTR TO CHAR, fl, hl, i, j, ok, f:PTR TO CHAR,
       got
-  IF curcon.histdone = FALSE THEN RETURN FALSE
   fl := StrLen(curcon.srbuf)
   IF fl = 0 THEN RETURN FALSE
   f := curcon.srbuf
   got := FALSE
-  avail := Min(curcon.htotal, HISTMAX)
+  avail := Min(ghtotal, HISTMAX)
   IF from < 0 THEN from := 0
   FOR idx := from TO avail - 1
     IF got = FALSE
-      h := curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)]
+      h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
       hl := StrLen(h)
       i := 0
       WHILE (got = FALSE) AND (i <= (hl - fl))
@@ -3384,14 +3408,13 @@ ENDPROC -1
 PROC sgfind()
   DEF l, avail, idx, h:PTR TO CHAR, i, ok, s:PTR TO CHAR
   curcon.sghost := NIL
-  IF curcon.histdone = FALSE THEN RETURN
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF l = 0 THEN RETURN
-  avail := Min(curcon.htotal, HISTMAX)
+  avail := Min(ghtotal, HISTMAX)
   FOR idx := 0 TO avail - 1
     IF curcon.sghost = NIL
-      h := curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)]
+      h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
       IF StrLen(h) > l
         ok := TRUE
         FOR i := 0 TO l - 1
@@ -3437,16 +3460,31 @@ PROC sgword()
   curcon.cpos := l
 ENDPROC
 
+-> does history entry idx (0 = newest) start with pfx, case-folded?
+-> an empty pfx matches everything - the plain, unfiltered Up/Down
+-> walk (an empty prompt) is just this with a no-op filter, not a
+-> separate code path.
+PROC histmatches(idx, pfx:PTR TO CHAR)
+  DEF h:PTR TO CHAR, pl, i
+  pl := StrLen(pfx)
+  IF pl = 0 THEN RETURN TRUE
+  h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
+  IF StrLen(h) < pl THEN RETURN FALSE
+  FOR i := 0 TO pl - 1
+    IF tcfold(h[i]) <> tcfold(pfx[i]) THEN RETURN FALSE
+  ENDFOR
+ENDPROC TRUE
+
 -> put history entry idx (0 = newest) into ebuf, cut to fit
 PROC histload(idx)
-  StrCopy(curcon.ebuf, curcon.hist[Mod(curcon.htotal - 1 - idx, HISTMAX)])
+  StrCopy(curcon.ebuf, ghist[Mod(ghtotal - 1 - idx, HISTMAX)])
   WHILE StrLen(curcon.ebuf) > edcap()
     SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
   ENDWHILE
 ENDPROC
 
 PROC dovanilla(code, qual)
-  DEF s:PTR TO CHAR, l, j, dup, k
+  DEF s:PTR TO CHAR, l, j, k
   snaplive()                    -> typing returns the view to live
   IF curcon.rawmode
     -> raw: every key is just a byte for the client - Return is CR 13,
@@ -3505,17 +3543,13 @@ PROC dovanilla(code, qual)
       enqueue(s[j])
     ENDFOR
     enqueue(10)
-    -> remember the line: newest first, consecutive repeats once.
-    -> (E's OR does not short-circuit: the 0.1 one-liner evaluated
-    -> hist[Mod(-1,32)] on an empty history - survivable in an app,
-    -> a guru in a handler - hence the nested IF.)
-    dup := FALSE
-    IF curcon.htotal > 0
-      IF StrCmp(curcon.hist[Mod(curcon.htotal - 1, HISTMAX)], curcon.ebuf) THEN dup := TRUE
-    ENDIF
-    IF (l > 0) AND (dup = FALSE)
-      StrCopy(curcon.hist[Mod(curcon.htotal, HISTMAX)], curcon.ebuf)
-      curcon.htotal := curcon.htotal + 1
+    IF l > 0
+      histremember(curcon.ebuf)  -> shared ring (Theme B)
+      -> flush to disk on every command, not just last-window-close -
+      -> a reset/crash mid-session must not cost the whole session
+      -> (his catch: closing every window was the only save point,
+      -> so an unclean reboot lost everything since the last close)
+      savehistfile()
     ENDIF
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
@@ -3656,7 +3690,7 @@ ENDPROC TRUE
 -> know when to run the keymap instead); the legacy IDCMP path
 -> ignores the result - vanilla bytes arrive as their own events there
 PROC dorawkey(code, qual)
-  DEF s:PTR TO CHAR, l, avail, sh
+  DEF s:PTR TO CHAR, l, avail, sh, idx
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   -> Tab can arrive as a RAW key when the keymap has no vanilla
   -> mapping for its shifted form: dispatch it to completion too
@@ -3727,20 +3761,33 @@ PROC dorawkey(code, qual)
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF code = RK_UP
-    -> plain Up/Down walk the prompt history (output scrollback lives
-    -> on Shift/Ctrl, above)
-    avail := curcon.htotal
+    -> Up/Down walk the prompt history (output scrollback lives on
+    -> Shift/Ctrl, above). Whatever was on the line when the walk
+    -> STARTS becomes a prefix filter for the whole walk (fish/zsh
+    -> style) - an empty prompt filters nothing, so this is also
+    -> the plain unfiltered walk, not a separate path. Editing the
+    -> recalled line mid-walk does not change the filter; stash
+    -> was already captured.
+    avail := ghtotal
     IF avail > HISTMAX THEN avail := HISTMAX
-    IF curcon.hpos < (avail - 1)
-      IF curcon.hpos = -1 THEN StrCopy(curcon.stash, curcon.ebuf)  -> the half-typed line
-      curcon.hpos := curcon.hpos + 1
+    IF curcon.hpos = -1 THEN StrCopy(curcon.stash, curcon.ebuf)  -> the half-typed line / filter
+    idx := curcon.hpos + 1
+    WHILE (idx < avail) AND (histmatches(idx, curcon.stash) = FALSE)
+      idx++
+    ENDWHILE
+    IF idx < avail
+      curcon.hpos := idx
       histload(curcon.hpos)
       curcon.cpos := StrLen(curcon.ebuf)
       drawedit()
     ENDIF
   ELSEIF code = RK_DOWN
     IF curcon.hpos >= 0
-      curcon.hpos := curcon.hpos - 1
+      idx := curcon.hpos - 1
+      WHILE (idx >= 0) AND (histmatches(idx, curcon.stash) = FALSE)
+        idx--
+      ENDWHILE
+      curcon.hpos := idx
       IF curcon.hpos = -1
         StrCopy(curcon.ebuf, curcon.stash)    -> back to the half-typed line
       ELSE
@@ -4200,6 +4247,135 @@ PROC tcfreelock()
   curcon.fsdirfree := FALSE
 ENDPROC
 
+-> ---------- v1.1 Theme B: shared + persistent history ----------
+-> Writing a file from a handler is the M5b trick in reverse: no
+-> Open/Write/Close (those DoPkt on pr_MsgPort - the no-DOS rule),
+-> so ACTION_FINDOUTPUT/FINDINPUT/WRITE/READ/END are hand-rolled at
+-> exec level instead, same fscall()/tcresolve() plumbing tab
+-> completion already proved. The one new piece is acting as the
+-> CALLER of FINDOUTPUT/FINDINPUT rather than the answerer: a zeroed
+-> filehandle is allocated here (SIZEOF filehandle, offsets cross-
+-> checked against amitools' FileHandleStruct - fh_Args at 36, the
+-> field this code reads back as .args), its BPTR rides as arg1, and
+-> the filesystem writes ITS OWN per-file id into .args - reused as
+-> arg1 on every WRITE/READ/END that follows, exactly as fh.args
+-> carries the console pointer for OUR clients in dofind() above.
+
+-> add a line to the shared ring: newest last, consecutive repeats
+-> collapse to one. Shared by live Enter-commits and by loading
+-> L:ccon-history at startup - one dedupe rule for both.
+PROC histremember(s:PTR TO CHAR)
+  DEF dup
+  IF StrLen(s) = 0 THEN RETURN
+  dup := FALSE
+  IF ghtotal > 0
+    IF StrCmp(ghist[Mod(ghtotal - 1, HISTMAX)], s) THEN dup := TRUE
+  ENDIF
+  IF dup = FALSE
+    StrCopy(ghist[Mod(ghtotal, HISTMAX)], s)
+    ghtotal := ghtotal + 1
+  ENDIF
+ENDPROC
+
+-> read L:ccon-history (oldest line first) into the shared ring. A
+-> missing file is not an error - first run ever, or S: not yet
+-> assigned this early. Runs once, at the first real console open
+-> (curcon must already be live for tcresolve to scratch through).
+PROC loadhistfile()
+  DEF fh:PTR TO filehandle, res, port:PTR TO mp, id, i, n,
+      buf[256]:ARRAY OF CHAR, line[LINEMAX + 4]:ARRAY OF CHAR, lp, c
+  IF tcresolve('L:') = FALSE THEN RETURN
+  port := curcon.fsdirport
+  fh := New(SIZEOF filehandle)
+  IF fh = NIL
+    tcfreelock()
+    RETURN
+  ENDIF
+  res := fscall(port, ACTION_FINDINPUT, Shr(fh, 2), curcon.fsdirlock,
+                tcbstr('ccon-history'))
+  tcfreelock()
+  IF res = 0
+    Dispose(fh)
+    RETURN                      -> no history file yet
+  ENDIF
+  id := fh.args
+  lp := 0
+  n := fscall(port, ACTION_READ, id, buf, 255)
+  WHILE n > 0
+    FOR i := 0 TO n - 1
+      c := buf[i]
+      IF c = 10
+        line[lp] := 0
+        IF lp > 0 THEN histremember(line)
+        lp := 0
+      ELSEIF lp < LINEMAX - 1
+        line[lp] := c
+        lp++
+      ENDIF
+    ENDFOR
+    n := fscall(port, ACTION_READ, id, buf, 255)
+  ENDWHILE
+  IF lp > 0
+    line[lp] := 0
+    histremember(line)
+  ENDIF
+  fscall(port, ACTION_END, id, 0, 0)
+  Dispose(fh)
+ENDPROC
+
+-> write the shared ring to L:ccon-history, oldest entry first (the
+-> conventional shell-history order). Called after EVERY committed
+-> command now (a reset before any window closes must not cost the
+-> whole session), so this batches entries into ONE buffer and
+-> flushes it in a handful of WRITEs, not one packet per line - 200
+-> individual round-trips after every Enter would be felt as lag.
+-> Best-effort: a WRITE failure partway through does not abort the
+-> loop, ACTION_END still runs to release whatever was opened.
+PROC savehistfile()
+  DEF fh:PTR TO filehandle, res, port:PTR TO mp, id, i, avail,
+      buf[2048]:ARRAY OF CHAR, bp, s:PTR TO CHAR, l
+  IF ghtotal = 0 THEN RETURN
+  IF tcresolve('L:') = FALSE THEN RETURN
+  port := curcon.fsdirport
+  fh := New(SIZEOF filehandle)
+  IF fh = NIL
+    tcfreelock()
+    RETURN
+  ENDIF
+  res := fscall(port, ACTION_FINDOUTPUT, Shr(fh, 2), curcon.fsdirlock,
+                tcbstr('ccon-history'))
+  tcfreelock()
+  IF res = 0
+    Dispose(fh)
+    RETURN
+  ENDIF
+  id := fh.args
+  avail := Min(ghtotal, HISTMAX)
+  bp := 0
+  FOR i := 0 TO avail - 1
+    s := ghist[Mod(ghtotal - avail + i, HISTMAX)]
+    l := 0
+    WHILE (s[l] <> 0) AND (l < LINEMAX)
+      IF bp >= 2048
+        fscall(port, ACTION_WRITE, id, buf, bp)
+        bp := 0
+      ENDIF
+      buf[bp] := s[l]
+      bp++
+      l++
+    ENDWHILE
+    IF bp >= 2048
+      fscall(port, ACTION_WRITE, id, buf, bp)
+      bp := 0
+    ENDIF
+    buf[bp] := 10
+    bp++
+  ENDFOR
+  IF bp > 0 THEN fscall(port, ACTION_WRITE, id, buf, bp)
+  fscall(port, ACTION_END, id, 0, 0)
+  Dispose(fh)
+ENDPROC
+
 -> scan the resolved directory for names starting with the prefix
 PROC tcscan(pfx:PTR TO CHAR, plen)
   DEF res, nbuf[112]:ARRAY OF CHAR, l, p:PTR TO CHAR
@@ -4547,4 +4723,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1 (19.7.26b) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.1b18 CCON: LTX console handler', 0
