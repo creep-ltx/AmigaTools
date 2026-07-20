@@ -81,6 +81,10 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> LINEMAX is ~80K once, not 32 * N windows)
       INQMAX=2048,      -> input byte queue (finished lines)
       RDMAX=16,         -> pending ACTION_READ packets
+      WCMAX=8,          -> pending ACTION_WAIT_CHAR packets (the
+                        -> OBJECT array below spells 8 literally,
+                        -> like inq/rdq/wq do - E wants a literal
+                        -> there; this const is for the code)
       SBMAX=512,        -> scrollback model, lines - the DEFAULT
                         -> depth (v1.1b44, his call: 1000 -> 512,
                         -> a kinder default; 4000 was the 1.0
@@ -206,6 +210,8 @@ OBJECT console
   breaktask                     -> who gets Ctrl+C..F (AROS pattern)
   rawmode                       -> ACTION_SCREEN_MODE: DOSTRUE = raw
   wcq[8]:ARRAY OF LONG          -> pending ACTION_WAIT_CHAR packets
+                                -> (8 = WCMAX; literal here, see the
+                                -> const - the code uses the name)
   wcn
   evmask                        -> raw event classes via CSI n{
   -> the scrollback model (M5)
@@ -321,7 +327,12 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     ihtask=NIL, ihsigbit=-1, ihsig=0,
     ihring=NIL:PTR TO CHAR,     -> IHMAX slots, stride 32
     ihhead=0, ihtail=0,         -> free-running; slot = n AND (IHMAX-1)
-    ihdrop=0,                   -> events lost to a full ring
+    ihdrop=0,                   -> events lost to a full ring. Write-
+                                -> only on purpose: nothing reads it
+                                -> at runtime, it is a post-mortem
+                                -> field to inspect under a debugger
+                                -> (or to print from a telemetry
+                                -> build) when keys go missing
     ihie=NIL:PTR TO inputevent, -> rebuilt event for MapRawKey
     ihiebuf[8]:ARRAY OF LONG,   -> its longword-aligned storage
     -> v1.1b2: the disk-font loader - a throwaway helper process
@@ -903,7 +914,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     -> let timer.device answer (input arrival wakes all waiters)
     IF inavail() > 0
       ReplyPkt(pkt, DOSTRUE, 0)
-    ELSEIF (pkt.arg1 <= 0) OR (treq = NIL) OR (curcon.wcn >= 8)
+    ELSEIF (pkt.arg1 <= 0) OR (treq = NIL) OR (curcon.wcn >= WCMAX)
       ReplyPkt(pkt, DOSFALSE, 0)
     ELSE
       curcon.wcq[curcon.wcn] := pkt
@@ -1986,37 +1997,53 @@ ENDPROC
 -> paint one MODEL ring row (by ring index) at pixel row y, in
 -> attr-batched runs - the piece redraw, drawmodelrow and the menu
 -> restore share, and where the colours come back from
+-> audit P4: curcon and the fields this proc reads per cell go
+-> through locals. E reloads the global AND then the field on every
+-> single `curcon.x` reference - it cannot hoist that itself - and
+-> this is the proc a full redraw calls once per row, with an inner
+-> run-scan that touches cols, deffg, rp, left, cw and baseline. The
+-> row offset (idx * cols) was also being multiplied three times for
+-> the three planes; it is one Mul now.
 PROC drawmrow(idx, y)
   DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at, c, sy,
-      fg, bg, rowbuf[256]:ARRAY OF CHAR
-  m := curcon.sb + Mul(idx, curcon.cols)
-  a := curcon.sa + Mul(idx, curcon.cols)
-  stp := curcon.ss + Mul(idx, curcon.cols)
-  FOR i := 0 TO curcon.cols - 1
+      fg, bg, rowbuf[256]:ARRAY OF CHAR, k:PTR TO console,
+      rp:PTR TO rastport, cols, off, left, cw, dfg, ybase
+  k := curcon
+  rp := k.rp
+  cols := k.cols
+  left := k.left
+  cw := k.cw
+  dfg := k.deffg
+  ybase := y + k.baseline
+  off := Mul(idx, cols)
+  m := k.sb + off
+  a := k.sa + off
+  stp := k.ss + off
+  FOR i := 0 TO cols - 1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
   ENDFOR
   i := 0
-  WHILE i < curcon.cols
+  WHILE i < cols
     at := a[i]
     sy := stp[i]
     j := i
-    WHILE (j < curcon.cols) AND (a[j] = at) AND (stp[j] = sy)
+    WHILE (j < cols) AND (a[j] = at) AND (stp[j] = sy)
       j++
     ENDWHILE
     fg := at AND 15
     bg := Shr(at, 4) AND 7
     IF sy AND 4                 -> inverse cell: the drawselrow swap
-      IF fg = bg THEN fg := curcon.deffg
-      SetAPen(curcon.rp, bg)
-      SetBPen(curcon.rp, fg)
+      IF fg = bg THEN fg := dfg
+      SetAPen(rp, bg)
+      SetBPen(rp, fg)
     ELSE
-      SetAPen(curcon.rp, fg)
-      SetBPen(curcon.rp, bg)
+      SetAPen(rp, fg)
+      SetBPen(rp, bg)
     ENDIF
     setsoft(sy)
-    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
-    Text(curcon.rp, rowbuf + i, j - i)
+    Move(rp, left + Mul(i, cw), ybase)
+    Text(rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
   setsoft(0)
@@ -2129,25 +2156,39 @@ ENDPROC Mul(r, curcon.cols) + x
 
 -> paint one view row like drawmrow, but cells inside [lo,hi) draw
 -> inverse video (fg=bg empties get deffg, the block-cursor rule)
+-> audit P4: drawmrow's treatment, plus the one that was costing
+-> three ring-index resolutions - selvidx(r) was called once per
+-> plane for the same r, and it is a wrap-checked add feeding a Mul
+-> each time. One call, one offset, three adds now.
 PROC drawselrow(r, lo, hi)
   DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at, c, s,
-      sy, sw, fg, bg, base, y, rowbuf[256]:ARRAY OF CHAR
-  m := curcon.sb + Mul(selvidx(r), curcon.cols)
-  a := curcon.sa + Mul(selvidx(r), curcon.cols)
-  stp := curcon.ss + Mul(selvidx(r), curcon.cols)
-  y := curcon.topy + Mul(r, curcon.ch)
-  base := Mul(r, curcon.cols)
-  FOR i := 0 TO curcon.cols - 1
+      sy, sw, fg, bg, base, y, rowbuf[256]:ARRAY OF CHAR,
+      k:PTR TO console, rp:PTR TO rastport, cols, off, left, cw, dfg,
+      ybase
+  k := curcon
+  rp := k.rp
+  cols := k.cols
+  left := k.left
+  cw := k.cw
+  dfg := k.deffg
+  off := Mul(selvidx(r), cols)
+  m := k.sb + off
+  a := k.sa + off
+  stp := k.ss + off
+  y := k.topy + Mul(r, k.ch)
+  ybase := y + k.baseline
+  base := Mul(r, cols)
+  FOR i := 0 TO cols - 1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
   ENDFOR
   i := 0
-  WHILE i < curcon.cols
+  WHILE i < cols
     at := a[i]
     sy := stp[i]
     s := ((base + i) >= lo) AND ((base + i) < hi)
     j := i
-    WHILE (j < curcon.cols) AND (a[j] = at) AND (stp[j] = sy) AND
+    WHILE (j < cols) AND (a[j] = at) AND (stp[j] = sy) AND
           ((((base + j) >= lo) AND ((base + j) < hi)) = s)
       j++
     ENDWHILE
@@ -2157,16 +2198,16 @@ PROC drawselrow(r, lo, hi)
     IF sy AND 4 THEN sw := (sw = FALSE)  -> selection over an inverse
                                          -> cell re-inverts (xterm)
     IF sw
-      IF fg = bg THEN fg := curcon.deffg
-      SetAPen(curcon.rp, bg)
-      SetBPen(curcon.rp, fg)
+      IF fg = bg THEN fg := dfg
+      SetAPen(rp, bg)
+      SetBPen(rp, fg)
     ELSE
-      SetAPen(curcon.rp, fg)
-      SetBPen(curcon.rp, bg)
+      SetAPen(rp, fg)
+      SetBPen(rp, bg)
     ENDIF
     setsoft(sy)
-    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), y + curcon.baseline)
-    Text(curcon.rp, rowbuf + i, j - i)
+    Move(rp, left + Mul(i, cw), ybase)
+    Text(rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
   setsoft(0)
@@ -3251,7 +3292,7 @@ ENDPROC
 -> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
 -> the rest silently.
 PROC render(buf, len)
-  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2
+  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2, at, sty
   IF curcon.win = NIL THEN RETURN
   s := buf
   WHILE i < len
@@ -3373,6 +3414,14 @@ PROC render(buf, len)
         j := j + 1
       ENDWHILE
       run := j - i
+      -> audit P1: the attr and style a run's cells all get, resolved
+      -> ONCE. curattr() calls fgpen(), so the old per-cell form was a
+      -> nested call per character on the hottest loop in the file -
+      -> 80 of them for a full-width line. Nothing inside the run can
+      -> move the SGR state (outnl scrolls, it does not recolour), so
+      -> one evaluation out here is the same answer every cell got.
+      at := curattr()
+      sty := curcon.cursty
       WHILE run > 0
         IF curcon.cx >= curcon.cols THEN outnl()
         fit := curcon.cols - curcon.cx
@@ -3385,11 +3434,11 @@ PROC render(buf, len)
           CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
           m := sarow(curcon.cy) + curcon.cx
           FOR j2 := 0 TO fit - 1
-            m[j2] := curattr()
+            m[j2] := at
           ENDFOR
           m := ssrow(curcon.cy) + curcon.cx
           FOR j2 := 0 TO fit - 1
-            m[j2] := curcon.cursty
+            m[j2] := sty
           ENDFOR
         ENDIF
         curcon.cx := curcon.cx + fit
@@ -3490,18 +3539,30 @@ ENDPROC
 
 -> repaint cells x0..x1 of view row r from the model - drawmodelrow's
 -> bounded sibling, for the b9 drawedit tail cleanup
+-> audit P4: drawmrow's treatment again - and the Move() here was
+-> recomputing the row's pixel Y (topy + r*ch + baseline) inside the
+-> run loop, once per run, though r cannot change within the call.
 PROC drawmodelcells(r, x0, x1)
   DEF idx, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, i, j, at,
-      sy, c, fg, bg, rowbuf[256]:ARRAY OF CHAR
-  IF curcon.sb = NIL THEN RETURN
+      sy, c, fg, bg, rowbuf[256]:ARRAY OF CHAR, k:PTR TO console,
+      rp:PTR TO rastport, cols, off, left, cw, dfg, ybase
+  k := curcon
+  IF k.sb = NIL THEN RETURN
+  rp := k.rp
+  cols := k.cols
+  left := k.left
+  cw := k.cw
+  dfg := k.deffg
   IF x0 < 0 THEN x0 := 0
-  IF x1 > (curcon.cols - 1) THEN x1 := curcon.cols - 1
+  IF x1 > (cols - 1) THEN x1 := cols - 1
   IF x0 > x1 THEN RETURN
-  idx := curcon.sbtop + r
-  IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
-  m := curcon.sb + Mul(idx, curcon.cols)
-  a := curcon.sa + Mul(idx, curcon.cols)
-  stp := curcon.ss + Mul(idx, curcon.cols)
+  idx := k.sbtop + r
+  IF idx >= k.sbmax THEN idx := idx - k.sbmax
+  off := Mul(idx, cols)
+  m := k.sb + off
+  a := k.sa + off
+  stp := k.ss + off
+  ybase := k.topy + Mul(r, k.ch) + k.baseline
   FOR i := x0 TO x1
     c := m[i]
     rowbuf[i] := IF c < 32 THEN 32 ELSE c
@@ -3517,21 +3578,21 @@ PROC drawmodelcells(r, x0, x1)
     fg := at AND 15
     bg := Shr(at, 4) AND 7
     IF sy AND 4
-      IF fg = bg THEN fg := curcon.deffg
-      SetAPen(curcon.rp, bg)
-      SetBPen(curcon.rp, fg)
+      IF fg = bg THEN fg := dfg
+      SetAPen(rp, bg)
+      SetBPen(rp, fg)
     ELSE
-      SetAPen(curcon.rp, fg)
-      SetBPen(curcon.rp, bg)
+      SetAPen(rp, fg)
+      SetBPen(rp, bg)
     ENDIF
     setsoft(sy)
-    Move(curcon.rp, curcon.left + Mul(i, curcon.cw), curcon.topy + Mul(r, curcon.ch) + curcon.baseline)
-    Text(curcon.rp, rowbuf + i, j - i)
+    Move(rp, left + Mul(i, cw), ybase)
+    Text(rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
   setsoft(0)
-  SetAPen(curcon.rp, curcon.deffg)
-  SetBPen(curcon.rp, 0)
+  SetAPen(rp, dfg)
+  SetBPen(rp, 0)
 ENDPROC
 
 -> the cell at cpos is drawn inverted - the blip - so the cursor is
@@ -5007,17 +5068,24 @@ ENDPROC
 -> missing file is not an error - first run ever, or S: not yet
 -> assigned this early. Runs once, at the first real console open
 -> (curcon must already be live for tcresolve to scratch through).
+-> audit H1: the filesystem's port is `fsp`, NOT `port` - `port` is
+-> the global pr_MsgPort our own clients send to, and a local of that
+-> name shadowing it in here was a loaded gun. fscall() refuses to
+-> send to `port` (the self-deadlock guard) and resolves the global in
+-> its own scope, so the old spelling worked - but any later edit in
+-> this proc that meant "our port" would have got the filesystem's,
+-> silently, in one of the two procs where that mistake hangs the box.
 PROC loadhistfile()
-  DEF fh:PTR TO filehandle, res, port:PTR TO mp, id, i, n,
+  DEF fh:PTR TO filehandle, res, fsp:PTR TO mp, id, i, n,
       buf[256]:ARRAY OF CHAR, line[LINEMAX + 4]:ARRAY OF CHAR, lp, c
   IF tcresolve('L:') = FALSE THEN RETURN
-  port := curcon.fsdirport
+  fsp := curcon.fsdirport
   fh := New(SIZEOF filehandle)
   IF fh = NIL
     tcfreelock()
     RETURN
   ENDIF
-  res := fscall(port, ACTION_FINDINPUT, Shr(fh, 2), curcon.fsdirlock,
+  res := fscall(fsp, ACTION_FINDINPUT, Shr(fh, 2), curcon.fsdirlock,
                 tcbstr('ccon-history'))
   tcfreelock()
   IF res = 0
@@ -5026,7 +5094,7 @@ PROC loadhistfile()
   ENDIF
   id := fh.args
   lp := 0
-  n := fscall(port, ACTION_READ, id, buf, 255)
+  n := fscall(fsp, ACTION_READ, id, buf, 255)
   WHILE n > 0
     FOR i := 0 TO n - 1
       c := buf[i]
@@ -5039,13 +5107,13 @@ PROC loadhistfile()
         lp++
       ENDIF
     ENDFOR
-    n := fscall(port, ACTION_READ, id, buf, 255)
+    n := fscall(fsp, ACTION_READ, id, buf, 255)
   ENDWHILE
   IF lp > 0
     line[lp] := 0
     histremember(line)
   ENDIF
-  fscall(port, ACTION_END, id, 0, 0)
+  fscall(fsp, ACTION_END, id, 0, 0)
   Dispose(fh)
 ENDPROC
 
@@ -5057,18 +5125,19 @@ ENDPROC
 -> individual round-trips after every Enter would be felt as lag.
 -> Best-effort: a WRITE failure partway through does not abort the
 -> loop, ACTION_END still runs to release whatever was opened.
+-> audit H1: `fsp`, not `port` - see loadhistfile above
 PROC savehistfile()
-  DEF fh:PTR TO filehandle, res, port:PTR TO mp, id, i, avail,
+  DEF fh:PTR TO filehandle, res, fsp:PTR TO mp, id, i, avail,
       buf[2048]:ARRAY OF CHAR, bp, s:PTR TO CHAR, l
   IF ghtotal = 0 THEN RETURN
   IF tcresolve('L:') = FALSE THEN RETURN
-  port := curcon.fsdirport
+  fsp := curcon.fsdirport
   fh := New(SIZEOF filehandle)
   IF fh = NIL
     tcfreelock()
     RETURN
   ENDIF
-  res := fscall(port, ACTION_FINDOUTPUT, Shr(fh, 2), curcon.fsdirlock,
+  res := fscall(fsp, ACTION_FINDOUTPUT, Shr(fh, 2), curcon.fsdirlock,
                 tcbstr('ccon-history'))
   tcfreelock()
   IF res = 0
@@ -5083,7 +5152,7 @@ PROC savehistfile()
     l := 0
     WHILE (s[l] <> 0) AND (l < LINEMAX)
       IF bp >= 2048
-        fscall(port, ACTION_WRITE, id, buf, bp)
+        fscall(fsp, ACTION_WRITE, id, buf, bp)
         bp := 0
       ENDIF
       buf[bp] := s[l]
@@ -5091,14 +5160,14 @@ PROC savehistfile()
       l++
     ENDWHILE
     IF bp >= 2048
-      fscall(port, ACTION_WRITE, id, buf, bp)
+      fscall(fsp, ACTION_WRITE, id, buf, bp)
       bp := 0
     ENDIF
     buf[bp] := 10
     bp++
   ENDFOR
-  IF bp > 0 THEN fscall(port, ACTION_WRITE, id, buf, bp)
-  fscall(port, ACTION_END, id, 0, 0)
+  IF bp > 0 THEN fscall(fsp, ACTION_WRITE, id, buf, bp)
+  fscall(fsp, ACTION_END, id, 0, 0)
   Dispose(fh)
 ENDPROC
 
@@ -5504,16 +5573,20 @@ ENDPROC
 
 -> ---------- cooked input plumbing ----------
 
+-> audit P2: INQMAX is 2048 - a power of two, so the ring arithmetic
+-> is AND (INQMAX - 1), not Mod (a DIVS per call, and inavail() is a
+-> loop condition in satisfyreads). The same idiom the input-event
+-> ring already uses: ihring + Shl(n AND (IHMAX - 1), 5).
 PROC enqueue(c)
   DEF nt
-  nt := Mod(curcon.inqt + 1, INQMAX)
+  nt := (curcon.inqt + 1) AND (INQMAX - 1)
   IF nt <> curcon.inqh               -> full queue drops (should never happen)
     curcon.inq[curcon.inqt] := c
     curcon.inqt := nt
   ENDIF
 ENDPROC
 
-PROC inavail() IS Mod(curcon.inqt - curcon.inqh + INQMAX, INQMAX)
+PROC inavail() IS (curcon.inqt - curcon.inqh + INQMAX) AND (INQMAX - 1)
 
 -> reply queued reads while finished-line bytes (or an EOF) are there;
 -> a read gets at most one line - cooked semantics - and a short buffer
@@ -5536,7 +5609,7 @@ PROC satisfyreads()
       stop := FALSE
       WHILE (n < max) AND (stop = FALSE) AND (inavail() > 0)
         c := curcon.inq[curcon.inqh]
-        curcon.inqh := Mod(curcon.inqh + 1, INQMAX)
+        curcon.inqh := (curcon.inqh + 1) AND (INQMAX - 1)
         dst[n] := c
         n++
         IF (c = 10) AND (curcon.rawmode = FALSE) THEN stop := TRUE
@@ -5546,4 +5619,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b1 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b2 CCON: LTX console handler', 0

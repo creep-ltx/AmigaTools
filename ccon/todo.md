@@ -3004,6 +3004,103 @@ can't reach, since it doesn't emulate `SameLock()` — `cp -f info info`
 correctly answers "source and target are the same file" on real
 hardware. Deployed as 1.2b1.
 
+### 1.2b2 — a code audit, and its first batch (21.7.26)
+
+A full read of `ccon-handler.e` (all 5549 lines) looking for flaws,
+leaks, races and performance, written up as `audit.md` with a working
+order in `audit-fix-roadmap.md`. Sixteen findings: six bugs (B1–B6),
+five performance items (P1–P5), five hardening items (H1–H5). Nothing
+was boot-verified at audit time — it is a static read, and both
+documents say so, because a finding argued from the source is not the
+same thing as a finding observed on the machine.
+
+The two worth naming here, both still open:
+
+- **B1 — `eraseedit()`'s early returns skip the `edlast`/`edext`
+  reset.** The b9 note above is explicit that the reset exists so "the
+  tail never re-cleans at a moved anchor (the theft pattern must not
+  come back through the back door)" — and the `ancx >= cols` guard,
+  added later for the inverted-RectFill problem, is that back door. A
+  write ending exactly at the right margin leaves `cx = cols` (the
+  pending-wrap state), `reanchor()` parks `ancx = cols`, the next
+  `eraseedit()` bails with `edlast` still holding the old anchor's
+  count, and `drawedit()` then zeroes `oldl - l` model cells measured
+  from the NEW anchor. Reasoned, not yet reproduced — batch 2 states
+  the repro (full-width line, then drag-select the row and check what
+  the clipboard actually got; the model is what selection copies, so
+  selection is the honest test, not the glass).
+- **B2 — `sbcnt` is not re-clamped when a resize GROWS the grid.** The
+  ring invariant is `sbcnt <= sbmax - rows`; `screenscroll()` enforces
+  it on the way up, nothing re-establishes it when `gridcalc()`
+  increases `rows` underneath it. Fill the scrollback, enlarge the
+  window, scroll to the far end: stale rows.
+
+**Batch 1 landed here** — the mechanical, no-behaviour-change items,
+grouped so one boot test covers all six:
+
+- **P1:** `render()`'s printable-run loop was calling `curattr()` —
+  which calls `fgpen()` — once per CELL to fill the attr plane. A
+  nested call per character on the hottest loop in the file; 80 of
+  them for a full-width line. Nothing in a run can move the SGR state
+  (`outnl()` scrolls, it does not recolour), so it is one evaluation
+  now, hoisted with `cursty` beside it.
+- **P2:** `INQMAX` is 2048 — a power of two — but `enqueue()`,
+  `inavail()` and `satisfyreads()` were all doing `Mod(…, INQMAX)`, a
+  DIVS per call, with `inavail()` sitting in a loop condition. Now
+  `AND (INQMAX - 1)`: the same idiom the input-event ring already used
+  (`ihring + Shl(n AND (IHMAX - 1), 5)`), it had just never reached the
+  byte queue.
+- **P4:** `drawmrow`, `drawselrow` and `drawmodelcells` take `curcon`
+  and the fields they read per cell (`rp`, `cols`, `left`, `cw`,
+  `deffg`, the row's pixel Y) through locals. E reloads the global and
+  then the field on every `curcon.x` reference and cannot hoist that
+  itself, and these are the procs a full redraw calls once per row.
+  The row offset `idx * cols` was also being multiplied three times
+  for the three planes — one Mul now — and `drawselrow` was resolving
+  `selvidx(r)` three times for the same `r`, once per plane.
+  `render()` was deliberately LEFT alone beyond P1: it calls out to
+  `outnl`/`outchr`/`csidispatch`, so a wholesale caching pass there is
+  a much larger diff to review for a much smaller win than the three
+  pure paint procs, where the per-cell cost actually lives.
+- **H1:** `loadhistfile()`/`savehistfile()` each declared a local
+  `port` shadowing the GLOBAL `port` — our `pr_MsgPort`, the one
+  clients send to. It worked (`fscall()` resolves the global in its own
+  scope for its self-deadlock guard), but it was a loaded gun in the
+  two procs where "our port" instead of "the filesystem's port" hangs
+  the machine. Renamed `fsp`.
+- **H2:** `WCMAX=8` for the WAIT_CHAR queue depth, which was a bare
+  literal at the `wcn >=` test while every other queue had a named
+  const. The OBJECT array still spells `8` literally, like `inq`/`rdq`/
+  `wq` do — E wants a literal there; the const is for the code.
+- **H5:** `ihdrop` annotated as deliberately write-only — a
+  post-mortem field for a debugger or a telemetry build, not dead code
+  someone should "tidy up".
+
+Compiled clean (LARGE). The warning set is byte-identical to the
+baseline build — the same three known A4/A5 inline-asm warnings, and an
+UNREFERENCED list naming the same symbols (`vers`, `domenupick`'s five
+stub params, `dopkt`'s `c`/`len`, the parked `tcscancmd`) with only the
+line numbers moved, which is the check that says none of the new locals
+are dangling. **Binary 73072 → 72728, 344 bytes smaller**: pulling a
+call out of a per-character loop, folding the Muls and swapping
+Mod/Div for AND all cut code as well as cycles.
+
+His FS-UAE boot test passed: shell, `list SYS:` colours and wrapping,
+scrollback paging, and the drag-select round trip — the last one being
+the case that matters most here, since `drawselrow` is the only proc
+that exercises the `selvidx` fold and selection copies from the MODEL,
+not the glass. Deployed as 1.2b2.
+
+One thing the deploy turned up, worth recording so it isn't
+re-discovered: the binary sitting in `L/` was stamped **1.1b46**, not
+1.2b1 — same 73072 bytes, differing from the committed build in exactly
+28 contiguous bytes, all of them the `$VER` string. The code was
+identical; the copy into `L/` had been taken from the build just before
+the version bump. Harmless (the b42/`$9B` fix was present either way),
+but it means "what version is deployed" cannot be read off the file
+size, and the old binary is kept as `L/ccon-handler.bak` as the revert
+point for this batch.
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
