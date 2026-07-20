@@ -4,6 +4,43 @@ What a file manager should have that CFile does not, roughly in the
 order the friction hits a daily driver. Keys marked (?) are
 suggestions, not decided.
 
+## 0.3b1 — inside archives (done)
+
+`Right`/`Enter` on an lha archive goes inside it and the pane works
+like a directory; `v e c m r n Del` all work on members. `lha v` is
+parsed once on entry into a per-pane member cache and each level is
+filtered out of that, so navigating costs no lha runs. Writes go
+through LhA and rewrite the archive; the bar steps per file, driven
+by counting lha's own per-file output over an async `PIPE:`.
+
+Four LhA 2.15 behaviours cost boot tests and are worth remembering:
+
+- `lha l` is the **terse** flag layout that hides paths — the listing
+  to parse is `lha v`, whose Name column is the full stored path.
+- Its Ratio field is variable width (`40.5%` vs `100.0%`), so the
+  columns shift row to row: parse by **field count**, never by column.
+- Fed `NIL:` for input, lha cannot create a missing output directory
+  (it wants to prompt), so extraction into a subdirectory failed until
+  CFile pre-built the path itself. `-M` is also needed or lha tries to
+  autoshow readme/`.doc` members into a `con:` window that never opens.
+- `lha a` flattens an explicit `sub/file` argument to `file`, and
+  skips a member that already exists. Paths survive only through `-r`
+  recursion of a directory, and replacing means delete-then-add.
+
+Follow-ups:
+
+- [ ] **lzx / zip inside** — the architecture is format-agnostic apart
+      from the listing parser and four command shapes; each tool's
+      list format and per-member add/delete want the same dump-driven
+      verification lha got. lzx's member delete is the doubtful one.
+- [ ] **Batch the repacking** — every single change re-streams the
+      whole archive through lha. Fine at Amiga sizes, but editing
+      three members repacks three times; a "commit on exit" would
+      collapse that into one.
+- [ ] **Per-byte progress inside a file** — the bar ticks once per
+      file, so one big member is a single jump. lha prints a
+      `(done/total)` byte counter that could drive it finer.
+
 ## 0.3 candidates — "fast in the hand"
 
 - [ ] **`/` filter with live narrowing** — `/` enters a prompt mode

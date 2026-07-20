@@ -17,10 +17,12 @@ KEYS
 
   Tab          switch the active pane
   Up/Down      move the selection (Shift = page, Ctrl = first/last)
-  Right        enter the selected directory or volume
-  Left         parent directory; at a device root, the volume list
-  Enter        open by type: enter a directory, view text or ANSI,
-               run an executable (asks first), hex-view the rest
+  Right        enter the selected directory, volume, or lha archive
+  Left         parent directory; at a device root, the volume list;
+               inside an archive, up a level and then back out
+  Enter        open by type: enter a directory or lha archive, view
+               text or ANSI, run an executable (asks first),
+               hex-view the rest
   v            view: text pager, ANSI art in the classic palette,
                hex dump for binaries, contents listing for archives;
                with marks, a tour - Right = next (unmarks the viewed
@@ -92,6 +94,37 @@ ARCHIVES
   The archivers themselves (LhA, LZX, UnZip/Zip) must be in the
   command path.
 
+INSIDE AN ARCHIVE
+
+  Right or Enter on an lha archive goes inside it, and the pane
+  behaves like a directory: the archive's tree is listed a level at
+  a time, Right walks into a folder, Left comes back up and finally
+  out to the real directory the archive sits in. The border row
+  shows where you are, archive path and all.
+
+  The archive is listed once on entry and the panes are filtered
+  from that listing, so moving around inside costs nothing.
+
+  Most verbs work inside:
+
+    v / Enter   view a member - text, ANSI or hex, by header
+    e           edit a text member in place; it is written back
+                into the archive when you save
+    c / C       copy the selection or marked set out to the other
+                pane, files and folders alike - or, with the other
+                pane inside an archive, copy into it
+    m / M       move likewise (out of, or into, the archive)
+    r           rename a member or a folder
+    n           new: a name ending in "/" makes a directory inside
+                the archive, anything else opens the editor on a
+                new member, added when it is saved
+    Del / D     delete members and folders (asks first)
+
+  Writing goes through LhA, so each change rewrites the archive.
+  The progress bar steps once per file for the longer operations.
+  p, u and : have no meaning on a member and say so. Only lha is
+  supported inside for now; lzx and zip still open from outside.
+
 THE CONSOLE
 
   Commands - u, p, :, and running an executable with Enter - stream
@@ -162,3 +195,9 @@ VERIFIED BEHAVIOUR
   fonts, live reload from an in-CFile edit, and SAVEDIRS preserving
   hand edits. The pack verb, the prompt-line Shift jumps and the
   ENV:/T: bootstrap have had the least testing so far.
+
+  Going inside lha archives was exercised the same way: browsing a
+  nested archive, viewing members, editing one in place, copying and
+  moving files and whole folders both out and in and across
+  subdirectories, renaming, deleting, and making new files and empty
+  directories - all confirmed against LhA 2.15 on the same install.

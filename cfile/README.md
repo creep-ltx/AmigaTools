@@ -18,9 +18,9 @@ ANSI, text), and each verb does the natural thing for the type.
 |-----|--------|
 | `Tab` | switch the active pane |
 | `Up` / `Down` | move the selection (`Shift` = page, `Ctrl` = first/last) |
-| `Right` | enter the selected directory or volume |
-| `Left` | parent directory; at a device root, the volume list |
-| `Enter` | open by type: enter a directory, view text/ANSI, run an executable (asks first), hex-view the rest |
+| `Right` | enter the selected directory, volume, or lha archive |
+| `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
+| `Enter` | open by type: enter a directory or lha archive, view text/ANSI, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live |
@@ -74,6 +74,33 @@ selection or marked set into a new archive there — the filename you
 type picks the packer: `.lha`/`.lzh`, `.lzx` or `.zip`. The archiver
 runs from the source directory, so archives contain clean relative
 paths. `v` on an archive shows its contents listing in the viewer.
+
+## Inside an archive
+
+`Right` or `Enter` on an lha archive goes **inside** it, and the pane
+behaves like a directory: the tree is listed a level at a time,
+`Right` walks into a folder, `Left` comes back up and finally out to
+the real directory the archive sits in. The border row shows where
+you are, archive path and all. The archive is listed once on entry
+and the panes are filtered from that listing, so moving around
+inside costs nothing.
+
+Most verbs work in there:
+
+| Key | Inside an archive |
+|-----|-------------------|
+| `v` / `Enter` | view a member — text, ANSI or hex, by header |
+| `e` | edit a text member in place; written back on save |
+| `c` / `C` | copy the selection or marked set out to the other pane, files and folders alike — or, with the other pane inside an archive, copy *into* it |
+| `m` / `M` | move likewise, out of or into the archive |
+| `r` | rename a member or a folder |
+| `n` | a name ending in `/` makes a directory inside the archive; anything else opens the editor on a new member, added when saved |
+| `Del` / `D` | delete members and folders (asks first) |
+
+Writing goes through LhA, so each change rewrites the archive; the
+progress bar steps once per file on the longer operations. `p`, `u`
+and `:` have no meaning on a member and say so. Only lha is
+supported inside for now — lzx and zip still open from outside.
 
 ## The console
 
@@ -163,6 +190,12 @@ and the config file end to end — custom fonts (a 7×7 and an 8-pixel
 MicroKnight, plus Topaz/8), live reload from an in-CFile edit, and
 `SAVEDIRS` preserving hand edits. The pack verb, the prompt-line
 `Shift` jumps and the `ENV:`/`T:` bootstrap have had the least
-testing. One known limit: FS-UAE directory drives can hold host
+testing.
+
+Going inside lha archives was exercised the same way: browsing a
+nested archive, viewing members, editing one in place, copying and
+moving files and whole folders both out and in and across
+subdirectories, renaming, deleting, and making new files and empty
+directories — all confirmed against LhA 2.15 on the same install. One known limit: FS-UAE directory drives can hold host
 filenames the Amiga side cannot see; CFile reports these as
 "invisible entries remain" when they block a delete.

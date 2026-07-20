@@ -11,11 +11,14 @@
 -> Keys:
 ->   Tab         switch the active pane
 ->   Up/Down     move the selection (Shift = page, Ctrl = first/last)
-->   Right       enter the selected directory or volume
+->   Right       enter the selected directory, volume, or lha archive
+->               (an archive opens like a directory - browse it, view,
+->               and c/m/r/n/Del/e all work inside it; Left exits)
 ->   Left        back to the parent directory (re-selects where you
-->               came from); at a device root, the volume list
-->   Enter       open by type: enter a directory, view text, run a
-->               hunk executable (asks first), hex-view the rest
+->               came from); at a device root, the volume list; inside
+->               an archive, up a level, then out to the real directory
+->   Enter       open by type: enter a directory or lha archive, view
+->               text, run a hunk executable (asks first), hex the rest
 ->   v           view the file: text pager, ANSI, or hex; with
 ->               marks, a tour - Right = next file (consumes the
 ->               mark), Left = back, Esc keeps the rest marked
@@ -70,6 +73,7 @@ MODULE 'intuition/intuition','intuition/screens',
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
       EDMAXL=8192, EDLW=200,    -> editor: line count / line length caps
       CMAXL=4000,    -> console scrollback, lines of 80
+      MAXMEM=1500,   -> members cached when going inside one lha archive
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
@@ -110,6 +114,7 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     msgup=FALSE,      -> a message covers the paths row; next key clears
     opmsg[120]:STRING,    -> last message, re-shown after a bulk refresh
     progon=FALSE, progtotal=1, progdone=0, progpx=0, progx=0, progy=0,
+    progbyfile=FALSE,    -> bar counts lha's per-file lines, not copy bytes
     statbytes=0, statfiles=0,    -> pre-scan totals for the progress bar
     gfails=0,    -> entries a delete run could not remove
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
@@ -121,6 +126,15 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
     edcur=0, edcol=0, edvtop=0, edxoff=0, edmod=FALSE, ednew=FALSE,
+    -> "inside an archive": a third pane mode beside real-dir and the
+    -> volume list. arcpath[p] holds the real .lha (empty = not inside);
+    -> arcsub[p] is where we are within it (empty = archive root). The
+    -> whole member list is parsed once on entry into amem/amsz and the
+    -> pane listings are filtered out of that cache - no lha per keypress.
+    arcpath[2]:ARRAY OF LONG, arcsub[2]:ARRAY OF LONG,
+    amem[2]:ARRAY OF LONG,     -> New()'d LONG[] of member-path String ptrs
+    amsz[2]:ARRAY OF LONG,     -> New()'d LONG[] of member sizes
+    amcnt[2]:ARRAY OF LONG,    -> members cached for the pane
     rc=0
 
 -> the global arrays are NOT zero-initialised (E globals live in the
@@ -130,6 +144,11 @@ PROC initpanes()
   DEF p
   FOR p := 0 TO 1
     IF (ppath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (arcpath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (arcsub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    amem[p] := NIL
+    amsz[p] := NIL
+    amcnt[p] := 0
     ealloc[p] := 0
     ecount[p] := 0
     esel[p] := 0
@@ -389,6 +408,36 @@ ENDPROC
 PROC involume(p)
 ENDPROC EstrLen(ppath[p]) = 0
 
+-> the pane is browsing inside an lha archive (read-only, for now)
+PROC inarchive(p)
+ENDPROC EstrLen(arcpath[p]) > 0
+
+-> drop the member cache a pane built on entering an archive
+PROC freearccache(p)
+  DEF a:PTR TO LONG, i
+  IF amem[p]
+    a := amem[p]
+    FOR i := 0 TO amcnt[p] - 1
+      IF a[i] THEN DisposeLink(a[i])
+    ENDFOR
+    Dispose(amem[p])
+    amem[p] := NIL
+  ENDIF
+  IF amsz[p]
+    Dispose(amsz[p])
+    amsz[p] := NIL
+  ENDIF
+  amcnt[p] := 0
+ENDPROC
+
+-> leave the archive: clear the mode, forget the cache. The caller
+-> restores ppath and reselects the .lha in its real parent.
+PROC leavearchive(p)
+  freearccache(p)
+  SetStr(arcpath[p], 0)
+  SetStr(arcsub[p], 0)
+ENDPROC
+
 PROC addentry(p, name, isdir, size)
   DEF i
   i := ecount[p]
@@ -470,6 +519,184 @@ PROC sortpane(p)
   ENDFOR
 ENDPROC
 
+-> run a command with its output captured to a file, quietly - no
+-> console render, no window. dir (or NIL) is the CWD to run it in.
+-> Returns the DOS return code, or -1 if the command could not start.
+PROC runcapture(dir, cmd, outfile)
+  DEF dlock=NIL, old=NIL, res=-1, fout=NIL, fin=NIL
+  IF dir
+    dlock := Lock(dir, SHARED_LOCK)
+    IF dlock THEN old := CurrentDir(dlock)
+  ENDIF
+  fin := Open('NIL:', OLDFILE)
+  fout := Open(outfile, NEWFILE)
+  IF fout
+    res := SystemTagList(cmd,
+      [SYS_INPUT,  fin,
+       SYS_OUTPUT, fout,
+       SYS_ASYNCH, FALSE,
+       TAG_DONE,   NIL])
+    Close(fout)
+  ENDIF
+  IF fin THEN Close(fin)
+  IF dlock
+    CurrentDir(old)
+    UnLock(dlock)
+  ENDIF
+ENDPROC res
+
+-> one member into the pane's archive cache
+PROC arcadd(p, name, size)
+  DEF a:PTR TO LONG, z:PTR TO LONG, k, s
+  k := amcnt[p]
+  IF k >= MAXMEM THEN RETURN
+  a := amem[p]
+  z := amsz[p]
+  IF (s := String(EstrLen(name) + 1)) = NIL THEN RETURN
+  StrCopy(s, name)
+  a[k] := s
+  z[k] := size
+  amcnt[p] := k + 1
+ENDPROC
+
+-> a listing separator row: only dashes/equals and spaces, and enough
+-> of them to be the real rule, not a stray line of text
+PROC issepline(s:PTR TO CHAR)
+  DEF i=0, c, ndash=0
+  WHILE c := s[i]
+    IF (c = "-") OR (c = "=")
+      ndash++
+    ELSEIF c <> 32
+      RETURN FALSE
+    ENDIF
+    i++
+  ENDWHILE
+ENDPROC ndash >= 6
+
+-> how many space-delimited fields sit before the Name column on the
+-> header row, or -1 if this is not the header. LhA's short list is
+->   Original Packed Ratio Date Time Name
+-> so five fields precede Name. We count by word rather than by column
+-> because LhA's Ratio field is variable width ("40.5%" is five chars,
+-> "100.0%" six - %2ld overflows for stored files), which shifts the
+-> Name column by one between rows. None of the five fields hold a
+-> space, and the name (which can) is everything past them.
+PROC hdrnamefields(s:PTR TO CHAR)
+  DEF i=0, c, inword=FALSE, nwords=0, namei=-1
+  WHILE c := s[i]
+    IF c = 32
+      inword := FALSE
+    ELSE
+      IF inword = FALSE
+        inword := TRUE
+        IF ((c = "N") OR (c = "n")) AND
+           ((s[i+1] = "A") OR (s[i+1] = "a")) AND
+           ((s[i+2] = "M") OR (s[i+2] = "m")) AND
+           ((s[i+3] = "E") OR (s[i+3] = "e")) AND
+           ((s[i+4] = 0) OR (s[i+4] = 32))
+          namei := nwords    -> word index of Name = fields before it
+        ENDIF
+        nwords++
+      ENDIF
+    ENDIF
+    i++
+  ENDWHILE
+ENDPROC namei
+
+-> the member name from a data row: skip `nfields` space-delimited
+-> tokens (none contain a space), then take the rest, right-trimmed.
+-> Internal spaces in the name survive; the leading ratio-width drift
+-> no longer matters.
+PROC namefield(dst, line:PTR TO CHAR, nfields)
+  DEF i=0, f, e
+  FOR f := 1 TO nfields
+    WHILE line[i] = 32
+      i++
+    ENDWHILE
+    WHILE (line[i] <> 0) AND (line[i] <> 32)
+      i++
+    ENDWHILE
+  ENDFOR
+  WHILE line[i] = 32
+    i++
+  ENDWHILE
+  MidStr(dst, line, i, ALL)
+  e := EstrLen(dst)
+  WHILE (e > 0) AND ((dst[e-1] = 32) OR (dst[e-1] = 9))
+    e--
+  ENDWHILE
+  SetStr(dst, e)
+ENDPROC
+
+PROC loadarchive(p, arcfile)
+  DEF cmd[340]:STRING, res, buf:PTR TO CHAR, n, i=0, j, l, st=0,
+      line[340]:STRING, nfld=-1, dcol, sz, fh, nm[300]:STRING
+  freearccache(p)
+  amem[p] := New(MAXMEM * 4)
+  amsz[p] := New(MAXMEM * 4)
+  IF (amem[p] = NIL) OR (amsz[p] = NIL)
+    freearccache(p)
+    RETURN FALSE
+  ENDIF
+  amcnt[p] := 0
+  -> 'v' (verbose), NOT 'l': LhA 2.15's terse 'l' is a Tm/Sz/Pr/Fn/Del
+  -> flag layout that hides the path; 'v' is the Original/Packed/Ratio/
+  -> Date/Time/Name columns, Name being the full stored path we parse.
+  StringF(cmd, 'lha v "\s"', arcfile)
+  res := runcapture(NIL, cmd, 'T:CFile-arc')
+  IF res = -1
+    freearccache(p)
+    RETURN FALSE
+  ENDIF
+  buf := New(131072)
+  IF buf = NIL
+    DeleteFile('T:CFile-arc')
+    freearccache(p)
+    RETURN FALSE
+  ENDIF
+  IF (fh := Open('T:CFile-arc', OLDFILE))
+    n := Read(fh, buf, 131071)
+    Close(fh)
+  ELSE
+    n := 0
+  ENDIF
+  IF n < 0 THEN n := 0
+  WHILE i < n
+    -> pull one line into `line`
+    j := i
+    WHILE (j < n) AND (buf[j] <> 10)
+      j++
+    ENDWHILE
+    l := j - i
+    IF l > 338 THEN l := 338
+    StrCopy(line, IF l > 0 THEN buf + i ELSE '', l)
+    i := j + 1
+    IF st = 0
+      -> find the header row and take its field count before Name
+      dcol := hdrnamefields(line)
+      IF dcol >= 0
+        nfld := dcol
+        st := 1
+      ENDIF
+    ELSEIF st = 1
+      -> data rows until the closing rule. The rule directly under the
+      -> header comes before any member, so it just gets skipped; the
+      -> next rule (after members exist) closes the listing.
+      IF issepline(line)
+        IF amcnt[p] > 0 THEN st := 2
+      ELSEIF EstrLen(line) > 0
+        namefield(nm, line, nfld)
+        IF EstrLen(nm) > 0
+          sz := Val(line)    -> first number on the row = original size
+          arcadd(p, nm, sz)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+  Dispose(buf)
+  DeleteFile('T:CFile-arc')
+ENDPROC amcnt[p] > 0
+
 PROC readdir(p)
   DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more
   ecount[p] := 0
@@ -501,6 +728,78 @@ PROC readdir(p)
   ENDIF
   FreeDosObject(DOS_FIB, fib)
   UnLock(lock)
+  sortpane(p)
+  IF esel[p] >= ecount[p] THEN esel[p] := ecount[p] - 1
+  IF esel[p] < 0 THEN esel[p] := 0
+  IF etop[p] > esel[p] THEN etop[p] := esel[p]
+ENDPROC
+
+-> case-insensitive: does m begin with the first n chars of pfx?
+PROC ncprefix(m:PTR TO CHAR, pfx:PTR TO CHAR, n)
+  DEF i, ca, cb
+  FOR i := 0 TO n - 1
+    ca := m[i]
+    cb := pfx[i]
+    IF ca = 0 THEN RETURN FALSE
+    IF (ca >= "a") AND (ca <= "z") THEN ca := ca - 32
+    IF (cb >= "a") AND (cb <= "z") THEN cb := cb - 32
+    IF ca <> cb THEN RETURN FALSE
+  ENDFOR
+ENDPROC TRUE
+
+-> has this subdirectory name already been added at this level?
+PROC arcdirseen(p, name)
+  DEF b, i
+  b := p * MAXENT
+  FOR i := 0 TO ecount[p] - 1
+    IF edirs[b + i]
+      IF nccmp(enames[b + i], name) = 0 THEN RETURN TRUE
+    ENDIF
+  ENDFOR
+ENDPROC FALSE
+
+-> the pane's listing when it is inside an archive: the cached member
+-> paths, filtered to arcsub and cut at the next "/" so each level
+-> shows just its own files and the subdirectories one step down.
+PROC readarcdir(p)
+  DEF a:PTR TO LONG, z:PTR TO LONG, k, m:PTR TO CHAR, pfx[CPATHLEN]:STRING,
+      pl, rest:PTR TO CHAR, sl, comp[200]:STRING, e
+  ecount[p] := 0
+  efail[p] := FALSE
+  clearmarks(p)
+  StrCopy(pfx, arcsub[p])
+  pl := EstrLen(pfx)
+  IF pl > 0
+    IF pfx[pl-1] <> "/"    -> the prefix always ends in a slash
+      StrAdd(pfx, '/')
+      pl++
+    ENDIF
+  ENDIF
+  a := amem[p]
+  z := amsz[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF (pl = 0) OR ncprefix(m, pfx, pl)
+        rest := m + pl
+        IF rest[0]    -> not the level's own directory entry
+          sl := -1
+          e := 0
+          WHILE (rest[e] <> 0) AND (sl < 0)
+            IF rest[e] = "/" THEN sl := e
+            e++
+          ENDWHILE
+          IF sl < 0
+            StrCopy(comp, rest)
+            addentry(p, comp, FALSE, z[k])    -> a file at this level
+          ELSE
+            StrCopy(comp, rest, sl)           -> a subdirectory name
+            IF arcdirseen(p, comp) = FALSE THEN addentry(p, comp, 255, 0)
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDFOR
+  ENDIF
   sortpane(p)
   IF esel[p] >= ecount[p] THEN esel[p] := ecount[p] - 1
   IF esel[p] < 0 THEN esel[p] := 0
@@ -551,7 +850,9 @@ PROC readvolumes(p)
 ENDPROC
 
 PROC readpane(p)
-  IF involume(p)
+  IF inarchive(p)
+    readarcdir(p)
+  ELSEIF involume(p)
     readvolumes(p)
   ELSE
     readdir(p)
@@ -943,20 +1244,35 @@ ENDPROC
 -> the pane paths live in the border row above the panes, drawn plain;
 -> the selection bar alone shows which pane is active. Deep paths show
 -> their tail end, truncated to 32 characters.
+-> the pane's location as one string: a real path, "(volumes)", or the
+-> archive path with the subpath inside it appended for the border row
+PROC paneloc(p, dst)
+  IF inarchive(p)
+    StrCopy(dst, arcpath[p])
+    IF EstrLen(arcsub[p]) > 0
+      StrAdd(dst, '/')
+      StrAdd(dst, arcsub[p])
+    ENDIF
+  ELSEIF EstrLen(ppath[p]) = 0
+    StrCopy(dst, '(volumes)')
+  ELSE
+    StrCopy(dst, ppath[p])
+  ENDIF
+ENDPROC
+
 PROC drawpaths()
-  DEF p, s[200]:STRING, l, x, j
+  DEF p, full[620]:STRING, s[200]:STRING, l, x, j
   frow(5)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   FOR p := 0 TO 1
     j := (IF p = 0 THEN panewl ELSE panewr) - 6    -> label room
-    l := EstrLen(ppath[p])
-    IF l = 0
-      StrCopy(s, '(volumes)')
-    ELSEIF l > j
-      MidStr(s, ppath[p], l - j, j)
+    paneloc(p, full)
+    l := EstrLen(full)
+    IF l > j
+      MidStr(s, full, l - j, j)
     ELSE
-      StrCopy(s, ppath[p])
+      StrCopy(s, full)
     ENDIF
     x := IF p = 0 THEN 3 ELSE divcol + 4
     Move(rp, x0 + (x * cw), bordy + baseline)
@@ -1283,13 +1599,50 @@ PROC switchpane()
   drawrow(active, esel[active] - etop[active])
 ENDPROC
 
+-> go inside an lha archive selected in a real directory. On success
+-> the pane switches to archive mode rooted at the archive; ppath[p]
+-> stays put (the archive's own directory), ready for the exit.
+PROC enterarchive(p, fpath)
+  IF loadarchive(p, fpath)
+    StrCopy(arcpath[p], fpath)
+    SetStr(arcsub[p], 0)
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    drawpane(p)
+  ELSE
+    freearccache(p)
+    showmsg('could not read the archive - is C:lha present?')
+  ENDIF
+ENDPROC
+
 PROC enterdir()
-  DEF p, i
+  DEF p, i, fpath[CPATHLEN+12]:STRING
   p := active
   IF efail[p] THEN RETURN
   IF ecount[p] = 0 THEN RETURN
   i := (p * MAXENT) + esel[p]
-  IF edirs[i] = 0 THEN RETURN    -> files do nothing yet (viewer later)
+  IF inarchive(p)
+    IF edirs[i] = 0 THEN RETURN    -> a member file: Right does nothing
+    IF EstrLen(arcsub[p]) > 0 THEN StrAdd(arcsub[p], '/')
+    StrAdd(arcsub[p], enames[i])   -> descend a virtual subdirectory
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    drawpane(p)
+    RETURN
+  ENDIF
+  IF edirs[i] = 0
+    -> a file in a real directory: Right enters it only if it is an
+    -> lha archive (other types stay files)
+    IF involume(p) = FALSE
+      buildfull(fpath, ppath[p], enames[i])
+      IF sniff(fpath) = TY_LHA THEN enterarchive(p, fpath)
+    ENDIF
+    RETURN
+  ENDIF
   IF involume(p)
     StrCopy(ppath[p], enames[i])    -> a volume entry IS the new root
   ELSE
@@ -1306,6 +1659,35 @@ ENDPROC
 PROC parentdir()
   DEF p, s:PTR TO CHAR, l, i, cut=-1, colon=-1, start
   p := active
+  IF inarchive(p)
+    IF EstrLen(arcsub[p]) > 0
+      -> up one level inside the archive: drop the last path component
+      s := arcsub[p]
+      l := EstrLen(arcsub[p])
+      cut := -1
+      FOR i := 0 TO l - 1
+        IF s[i] = "/" THEN cut := i
+      ENDFOR
+      IF cut >= 0
+        MidStr(prevname, arcsub[p], cut + 1, ALL)   -> reselect the child
+        SetStr(arcsub[p], cut)
+      ELSE
+        StrCopy(prevname, arcsub[p])
+        SetStr(arcsub[p], 0)
+      ENDIF
+    ELSE
+      -> at the archive root: leave the archive, back to its real
+      -> directory, and reselect the archive file there
+      StrCopy(prevname, FilePart(arcpath[p]))
+      leavearchive(p)
+    ENDIF
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    selectbyname(p)
+    RETURN
+  ENDIF
   s := ppath[p]
   l := EstrLen(ppath[p])
   IF l = 0 THEN RETURN    -> already at the volume list
@@ -1407,7 +1789,7 @@ PROC copyfile(src, dst)
           ok := FALSE
           err := IoErr()
         ELSE
-          progadd(n)
+          IF progbyfile = FALSE THEN progadd(n)    -> archive bar is by file
         ENDIF
       ENDIF
     ENDIF
@@ -1851,6 +2233,487 @@ PROC transferone(p, q, name, tname, isdir, ismove, samevol)
   ENDIF
 ENDPROC 1
 
+-> ---- copy / move with archives (files only, for now) --------------
+
+-> build the stored member path: "sub/name", or just "name" at the root
+PROC arcmember(dst, sub, name)
+  StrCopy(dst, sub)
+  IF EstrLen(dst) > 0 THEN StrAdd(dst, '/')
+  StrAdd(dst, name)
+ENDPROC
+
+-> the first path component of `path` (up to the first slash)
+PROC firstcomp(dst, path:PTR TO CHAR)
+  DEF i=0
+  WHILE (path[i] <> 0) AND (path[i] <> "/")
+    i++
+  ENDWHILE
+  StrCopy(dst, path, i)
+ENDPROC
+
+-> wipe a scratch tree without disturbing the delete-run failure count
+PROC arcwipe(dir)
+  DEF savg
+  savg := gfails
+  IF pathtype(dir) > 0 THEN deltree(dir, 0, FALSE)
+  gfails := savg
+ENDPROC
+
+-> is `full` already a member of pane q's cached archive?
+PROC archasmember(q, full)
+  DEF a:PTR TO LONG, k
+  a := amem[q]
+  IF amcnt[q] > 0
+    FOR k := 0 TO amcnt[q] - 1
+      IF nccmp(a[k], full) = 0 THEN RETURN TRUE
+    ENDFOR
+  ENDIF
+ENDPROC FALSE
+
+-> delete one member from an archive by its exact stored path. -Qw
+-> turns off wildcards so a pattern character in the name cannot make
+-> the delete match anything but that one member.
+PROC arcdelmember(arcfile, member)
+  DEF cmd[700]:STRING, res
+  StringF(cmd, 'lha -M -Qw d "\s" "\s"', arcfile, member)
+  res := arcrunprog(NIL, cmd)
+  DeleteFile('T:CFile-out')
+ENDPROC res
+
+-> run an lha command asynchronously through a PIPE and drive the
+-> progress bar from its output: LhA prints one line per file, each
+-> ending "...ing:" (Extract/Add/Delet-ing), so every "ing:" that goes
+-> by is one file done - progadd(1). No console render, just the bar.
+-> A byte-by-byte match survives the marker splitting across reads.
+-> Returns the launch result (-1 could not start); the effect is
+-> verified by the caller, not by an exit code the asynch run hides.
+PROC arcrunprog(dir, cmd)
+  DEF wout=NIL, nin=NIL, rdr=NIL, dlock=NIL, old=NIL, res,
+      buf[260]:ARRAY OF CHAR, n, i, c, st=0
+  IF (wout := Open('PIPE:cfile-arc', NEWFILE)) = NIL
+    RETURN runcapture(dir, cmd, 'T:CFile-out')    -> no PIPE: no bar
+  ENDIF
+  IF dir
+    dlock := Lock(dir, SHARED_LOCK)
+    IF dlock THEN old := CurrentDir(dlock)
+  ENDIF
+  nin := Open('NIL:', OLDFILE)
+  res := SystemTagList(cmd,
+    [SYS_INPUT,  nin,
+     SYS_OUTPUT, wout,
+     SYS_ASYNCH, TRUE,
+     TAG_DONE,   NIL])
+  IF dlock
+    CurrentDir(old)
+    UnLock(dlock)
+  ENDIF
+  IF res = -1
+    Close(wout)
+    IF nin THEN Close(nin)
+    RETURN -1
+  ENDIF
+  -> the launched command owns nin/wout now (asynch closes them)
+  IF rdr := Open('PIPE:cfile-arc', OLDFILE)
+    n := Read(rdr, buf, 256)
+    WHILE n > 0
+      FOR i := 0 TO n - 1
+        c := buf[i]
+        IF (st = 3) AND (c = ":")
+          progadd(1)
+          st := 0
+        ELSEIF (st = 2) AND (c = "g")
+          st := 3
+        ELSEIF (st = 1) AND (c = "n")
+          st := 2
+        ELSEIF c = "i"
+          st := 1
+        ELSE
+          st := 0
+        ENDIF
+      ENDFOR
+      n := Read(rdr, buf, 256)
+    ENDWHILE
+    Close(rdr)
+  ENDIF
+ENDPROC res
+
+-> how many file members of pane p's archive live under `prefix`
+PROC arccountunder(p, prefix)
+  DEF a:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl, m:PTR TO CHAR, n=0
+  StrCopy(pfx, prefix)
+  StrAdd(pfx, '/')
+  pl := StrLen(pfx)
+  a := amem[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF ncprefix(m, pfx, pl)
+        IF m[pl] THEN n := n + 1
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC n
+
+-> extract every member of pane p's archive that lives under `prefix`
+-> (a directory member path, no trailing slash) into T:CFile-x, its
+-> stored subtree intact. Members go on the command line in batches -
+-> lha takes several filespecs at once - and makepath pre-builds each
+-> target dir so lha never has to (the NIL:-input directory bug). The
+-> prefix dir itself is created even when it holds no files.
+PROC arcextracttree(p, prefix)
+  DEF a:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl, m:PTR TO CHAR,
+      cmd[700]:STRING, base[360]:STRING, sfile[CPATHLEN]:STRING,
+      res, ok=TRUE, baselen
+  StrCopy(pfx, prefix)
+  StrAdd(pfx, '/')
+  pl := StrLen(pfx)
+  StrCopy(sfile, 'T:CFile-x/')    -> make sure the prefix dir exists
+  StrAdd(sfile, pfx)
+  StrAdd(sfile, '.')
+  makepath(sfile)
+  StringF(base, 'lha -M x "\s"', arcpath[p])
+  StrCopy(cmd, base)
+  baselen := EstrLen(cmd)
+  a := amem[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF ncprefix(m, pfx, pl)
+        IF m[pl]    -> a real file below the dir, not the bare dir entry
+          StrCopy(sfile, 'T:CFile-x/')
+          StrAdd(sfile, m)
+          makepath(sfile)
+          DeleteFile(sfile)
+          IF (EstrLen(cmd) + StrLen(m)) > 600
+            StrAdd(cmd, ' "T:CFile-x/"')
+            res := arcrunprog(NIL, cmd)
+            IF res = -1 THEN ok := FALSE
+            StrCopy(cmd, base)
+          ENDIF
+          StrAdd(cmd, ' "')
+          StrAdd(cmd, m)
+          StrAdd(cmd, '"')
+        ENDIF
+      ENDIF
+    ENDFOR
+  ENDIF
+  IF EstrLen(cmd) > baselen
+    StrAdd(cmd, ' "T:CFile-x/"')
+    res := arcrunprog(NIL, cmd)
+    IF res = -1 THEN ok := FALSE
+  ENDIF
+  DeleteFile('T:CFile-out')
+ENDPROC ok
+
+-> delete every member under `prefix` (the dir entry included) from
+-> pane p's archive, in batches. Iterates the CURRENT cache; the caller
+-> reloads it afterwards.
+PROC arcdeltree(p, prefix)
+  DEF a:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl, m:PTR TO CHAR,
+      cmd[700]:STRING, base[360]:STRING, res, ok=TRUE, baselen
+  StrCopy(pfx, prefix)
+  StrAdd(pfx, '/')
+  pl := StrLen(pfx)
+  -> -Qw: no wildcards, so each stored name is matched literally and a
+  -> member with pattern characters cannot delete more than itself
+  StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
+  StrCopy(cmd, base)
+  baselen := EstrLen(cmd)
+  a := amem[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF ncprefix(m, pfx, pl)
+        IF (EstrLen(cmd) + StrLen(m)) > 600
+          res := arcrunprog(NIL, cmd)
+          IF res = -1 THEN ok := FALSE
+          StrCopy(cmd, base)
+        ENDIF
+        StrAdd(cmd, ' "')
+        StrAdd(cmd, m)
+        StrAdd(cmd, '"')
+      ENDIF
+    ENDFOR
+  ENDIF
+  IF EstrLen(cmd) > baselen
+    res := arcrunprog(NIL, cmd)
+    IF res = -1 THEN ok := FALSE
+  ENDIF
+  DeleteFile('T:CFile-out')
+ENDPROC ok
+
+-> c/m when the ACTIVE pane is inside an archive: extract the selected
+-> file(s) to the other pane. move = also delete the member afterwards.
+PROC arcxfer_out(p, q, ismove, force)
+  DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
+      sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
+      cmd[700]:STRING, mb[130]:STRING, res, t, k, stop=FALSE,
+      ndone=0, deld=FALSE, doit, total=0
+  IF involume(q) OR efail[q]
+    showmsg('the other pane needs a directory to receive the files')
+    RETURN
+  ENDIF
+  IF inarchive(q)
+    showmsg('archive-to-archive is not supported')
+    RETURN
+  ENDIF
+  b := p * MAXENT
+  nmark := markcount(p)
+  -> pre-count files (extract ticks per file); the extract, then a move's
+  -> delete, each report one line per file, so the bar spans them both
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick
+      IF edirs[b + i]
+        arcmember(member, arcsub[p], enames[b + i])
+        total := total + arccountunder(p, member)
+      ELSE
+        total := total + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  IF ismove THEN total := total * 2    -> extract pass + delete pass
+  progbyfile := TRUE
+  IF total > 1 THEN progshow(total)
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick AND (stop = FALSE)
+      IF edirs[b + i]
+        nm := enames[b + i]
+        arcmember(member, arcsub[p], nm)    -> the dir's full stored path
+        buildfull(dfile, ppath[q], nm)
+        IF pathtype(dfile) = 1
+          showmsg('a file with that name is in the way')
+        ELSEIF arcextracttree(p, member) = FALSE
+          faultmsg('could not extract the folder')
+          stop := TRUE
+        ELSE
+          StrCopy(sfile, 'T:CFile-x/')
+          StrAdd(sfile, member)
+          IF copytree(sfile, dfile, 0)
+            ndone := ndone + 1
+            IF ismove
+              arcdeltree(p, member)
+              deld := TRUE
+            ENDIF
+          ELSE
+            stop := TRUE
+          ENDIF
+        ENDIF
+      ELSE
+        nm := enames[b + i]
+        arcmember(member, arcsub[p], nm)
+        StrCopy(tname, nm)
+        buildfull(dfile, ppath[q], tname)
+        doit := TRUE
+        t := pathtype(dfile)
+        IF t > 0
+          IF force
+            k := "o"
+          ELSE
+            StringF(mb, '"\s" exists: (s)kip (o)verwrite (r)ename?', tname)
+            promptrow(mb)
+            k := waitvanilla()
+          ENDIF
+          IF (k = "o") OR (k = "O")
+            IF t = 2
+              showmsg('the target exists as a directory')
+              doit := FALSE
+            ENDIF
+          ELSEIF (k = "r") OR (k = "R")
+            IF lineinput('new name: ', tname, 30, TRUE) = 0
+              drawpaths()
+              doit := FALSE
+            ELSEIF EstrLen(tname) = 0
+              doit := FALSE
+            ELSE
+              buildfull(dfile, ppath[q], tname)
+              IF pathtype(dfile) = 2
+                showmsg('that name is a directory')
+                doit := FALSE
+              ENDIF
+            ENDIF
+          ELSEIF k = 27
+            drawpaths()
+            stop := TRUE
+            doit := FALSE
+          ELSE
+            doit := FALSE    -> skip
+          ENDIF
+        ENDIF
+        IF doit
+          StrCopy(sfile, 'T:CFile-x/')
+          StrAdd(sfile, member)
+          makepath(sfile)
+          DeleteFile(sfile)
+          StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member,
+                  'T:CFile-x/')
+          res := arcrunprog(NIL, cmd)
+          DeleteFile('T:CFile-out')
+          IF (res = -1) OR (pathtype(sfile) <> 1)
+            faultmsg('could not extract from the archive')
+            stop := TRUE
+          ELSEIF copyfile(sfile, dfile)
+            ndone := ndone + 1
+            IF ismove
+              arcdelmember(arcpath[p], member)
+              deld := TRUE
+            ENDIF
+          ELSE
+            stop := TRUE
+          ENDIF
+          DeleteFile(sfile)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+  progoff()
+  progbyfile := FALSE
+  arcwipe('T:CFile-x')
+  IF deld THEN loadarchive(p, arcpath[p])    -> cache lost some members
+  refreshall()
+  IF ndone > 0
+    StringF(mb, '\d file\s \s', ndone, IF ndone = 1 THEN '' ELSE 's',
+            IF ismove THEN 'moved out' ELSE 'copied out')
+    showmsg(mb)
+  ENDIF
+ENDPROC
+
+-> c/m when the OTHER pane is an archive: add the selected file(s) into
+-> it at the pane's current location. move = also delete the source.
+PROC arcxfer_in(p, q, ismove, force)
+  DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
+      src[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
+      cmd[700]:STRING, mb[130]:STRING, res, k, stop=FALSE, ndone=0,
+      added=FALSE, doit, replace, total=0
+  IF involume(p) OR efail[p] OR (ecount[p] = 0)
+    showmsg('nothing to add from this pane')
+    RETURN
+  ENDIF
+  b := p * MAXENT
+  nmark := markcount(p)
+  -> pre-count files: the lha add reports one line per file added
+  statbytes := 0
+  statfiles := 0
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick
+      IF edirs[b + i]
+        buildfull(src, ppath[p], enames[b + i])
+        treestat(src, 0)
+      ELSE
+        statfiles := statfiles + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  total := statfiles
+  progbyfile := TRUE
+  IF total > 1 THEN progshow(total)
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick AND (stop = FALSE)
+      IF edirs[b + i]
+        nm := enames[b + i]
+        arcmember(member, arcsub[q], nm)
+        buildfull(src, ppath[p], nm)
+        IF EstrLen(arcsub[q]) = 0
+          -> add straight from the source pane: -r stores nm/... at the
+          -> archive root, no mirror copy needed
+          StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], nm)
+          res := arcrunprog(ppath[p], cmd)
+        ELSE
+          -> mirror the tree under the arcsub prefix, then -r add its top
+          arcwipe('T:CFile-a')
+          StrCopy(sfile, 'T:CFile-a/')
+          StrAdd(sfile, member)
+          makepath(sfile)
+          IF copytree(src, sfile, 0)
+            firstcomp(topname, arcsub[q])
+            StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            res := arcrunprog('T:CFile-a', cmd)
+          ELSE
+            res := -1
+          ENDIF
+        ENDIF
+        DeleteFile('T:CFile-out')
+        IF res = -1
+          faultmsg('could not add the folder')
+          stop := TRUE
+        ELSE
+          added := TRUE
+          ndone := ndone + 1
+          IF ismove THEN arcwipe(src)    -> move: drop the source tree
+        ENDIF
+      ELSE
+        nm := enames[b + i]
+        arcmember(member, arcsub[q], nm)
+        doit := TRUE
+        replace := FALSE
+        IF archasmember(q, member)
+          IF force
+            k := "o"
+          ELSE
+            StringF(mb, '"\s" is in the archive: (s)kip (o)verwrite?', nm)
+            promptrow(mb)
+            k := waitvanilla()
+          ENDIF
+          IF (k = "o") OR (k = "O")
+            replace := TRUE    -> the delete waits until the copy is staged
+          ELSEIF k = 27
+            drawpaths()
+            stop := TRUE
+            doit := FALSE
+          ELSE
+            doit := FALSE
+          ENDIF
+        ENDIF
+        IF doit
+          arcwipe('T:CFile-a')
+          StrCopy(sfile, 'T:CFile-a/')
+          StrAdd(sfile, member)
+          makepath(sfile)
+          buildfull(src, ppath[p], nm)
+          IF copyfile(src, sfile)
+            IF EstrLen(arcsub[q]) > 0
+              firstcomp(topname, arcsub[q])
+            ELSE
+              StrCopy(topname, nm)
+            ENDIF
+            -> now the source is safely staged, drop the old member so the
+            -> add is not skipped as "already present"
+            IF replace THEN arcdelmember(arcpath[q], member)
+            -> -r a from the scratch root: lha stores the tree-relative
+            -> path, the only add form that keeps a subdirectory prefix
+            StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            res := arcrunprog('T:CFile-a', cmd)
+            DeleteFile('T:CFile-out')
+            IF res = -1
+              faultmsg('could not add to the archive')
+              stop := TRUE
+            ELSE
+              added := TRUE
+              ndone := ndone + 1
+              IF ismove THEN zap(src, FALSE)
+            ENDIF
+          ELSE
+            stop := TRUE
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+  progoff()
+  progbyfile := FALSE
+  arcwipe('T:CFile-a')
+  IF added THEN loadarchive(q, arcpath[q])    -> cache gained members
+  refreshall()
+  IF ndone > 0
+    StringF(mb, '\d file\s \s', ndone, IF ndone = 1 THEN '' ELSE 's',
+            IF ismove THEN 'moved in' ELSE 'copied in')
+    showmsg(mb)
+  ENDIF
+ENDPROC
+
 -> copy or move to the other pane: the marked set if the active pane
 -> has marks, the selection otherwise. force = overwrite collisions.
 -> Three phases: (1) resolve every collision up front - any refusal
@@ -1863,6 +2726,14 @@ PROC doxfer(ismove, force)
       tname[110]:STRING, tpath[310]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF inarchive(p)
+    arcxfer_out(p, q, ismove, force)    -> extract file(s) to the pane
+    RETURN
+  ENDIF
+  IF inarchive(q)
+    arcxfer_in(p, q, ismove, force)     -> add file(s) into the archive
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -1972,12 +2843,77 @@ PROC delone(p, i)
   ENDIF
 ENDPROC ok
 
+-> Del/D inside an archive: remove the selected member(s) - a file by
+-> its exact name, a folder and everything under it. lha rewrites the
+-> archive; the bar ticks per member removed.
+PROC arcdelete(p)
+  DEF b, nmark, i, pick, k, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
+      mb[130]:STRING, total=0, ndel=0
+  IF ecount[p] = 0 THEN RETURN
+  b := p * MAXENT
+  nmark := markcount(p)
+  IF nmark > 0
+    StringF(mb, 'delete \d marked from the archive? (y)es (n)o', nmark)
+  ELSEIF edirs[b + esel[p]]
+    StringF(mb, 'delete "\s" and all it holds from the archive? (y)es (n)o',
+            enames[b + esel[p]])
+  ELSE
+    StringF(mb, 'delete "\s" from the archive? (y)es (n)o',
+            enames[b + esel[p]])
+  ENDIF
+  promptrow(mb)
+  k := waitvanilla()
+  IF (k <> "y") AND (k <> "Y")
+    drawpaths()
+    RETURN
+  ENDIF
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick
+      IF edirs[b + i]
+        arcmember(member, arcsub[p], enames[b + i])
+        total := total + arccountunder(p, member)
+      ELSE
+        total := total + 1
+      ENDIF
+    ENDIF
+  ENDFOR
+  progbyfile := TRUE
+  IF total > 1 THEN progshow(total)
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick
+      nm := enames[b + i]
+      arcmember(member, arcsub[p], nm)
+      IF edirs[b + i]
+        arcdeltree(p, member)
+      ELSE
+        arcdelmember(arcpath[p], member)
+      ENDIF
+      ndel := ndel + 1
+    ENDIF
+  ENDFOR
+  progoff()
+  progbyfile := FALSE
+  loadarchive(p, arcpath[p])    -> rebuild the cache without the deleted
+  refreshall()
+  IF ndel > 0
+    StringF(mb, '\d entr\s deleted from the archive', ndel,
+            IF ndel = 1 THEN 'y' ELSE 'ies')
+    showmsg(mb)
+  ENDIF
+ENDPROC
+
 -> delete the marked set (one confirmation for the lot) or the
 -> selection. Directories go recursively, contents and all.
 PROC dodelete()
   DEF p, i, b, k, nmark, showbar=FALSE,
       dpath[310]:STRING, mb[120]:STRING
   p := active
+  IF inarchive(p)
+    arcdelete(p)
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -2082,6 +3018,10 @@ PROC infowindow()
       db[20]:ARRAY OF CHAR, tb[20]:ARRAY OF CHAR,
       fl[10]:STRING, cmt[80]:STRING, ln[40]:STRING
   p := active
+  IF inarchive(p)
+    showmsg('file info is not available inside an archive yet')
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file information in the volume list')
     RETURN
@@ -2638,6 +3578,78 @@ PROC bulkview(p)
   drawall()
 ENDPROC
 
+-> the few verbs that still have no meaning inside an archive (pack,
+-> unpack, shell) land here; c/m/r/n/Del/e and viewing all work inside
+PROC arcreadonly()
+  showmsg('that verb does not work inside an archive')
+ENDPROC
+
+-> create every directory along `path` up to (not including) the last
+-> component. Each level is made in turn - CreateDir needs the parent
+-> to exist already - and a device/assign root (ending ":") is skipped.
+PROC makepath(path)
+  DEF s:PTR TO CHAR, i, l, seg[CPATHLEN]:STRING, sl, lock
+  s := path
+  l := StrLen(path)
+  FOR i := 0 TO l - 1
+    IF s[i] = "/"
+      StrCopy(seg, path, i)
+      sl := StrLen(seg)
+      IF sl > 0
+        IF seg[sl - 1] <> ":"
+          IF lock := CreateDir(seg) THEN UnLock(lock)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> view one member: extract it to a T: scratch dir (with its stored
+-> path, so lha's own matching does the work), view by sniffed type,
+-> then drop the temp. Read-only: an 'e' in the viewer does nothing.
+PROC arcviewsel(p, sel)
+  DEF nm:PTR TO CHAR, member[CPATHLEN]:STRING, cmd[700]:STRING,
+      out[CPATHLEN]:STRING, res, ty
+  nm := enames[(p * MAXENT) + sel]
+  StrCopy(member, arcsub[p])
+  IF EstrLen(member) > 0 THEN StrAdd(member, '/')
+  StrAdd(member, nm)
+  StrCopy(out, 'T:CFile-v/')
+  StrAdd(out, member)
+  -> make T:CFile-v AND every subdirectory the member sits in. lha,
+  -> fed NIL: for input, cannot create a missing output directory (it
+  -> would prompt), so a member in a subdir failed with "unable to open
+  -> output file". Pre-building the path lets lha just write the file.
+  makepath(out)
+  DeleteFile(out)           -> no stale target to prompt an overwrite
+  -> -M: no autoshow. LhA auto-DISPLAYS readme/.doc-type files during
+  -> extraction by opening a con: window that waits on 'Press return';
+  -> under our redirected I/O that stalls or fails the extract, so the
+  -> file never lands. -M turns it off and the extract runs clean.
+  StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-v/')
+  res := runcapture(NIL, cmd, 'T:CFile-out')
+  DeleteFile('T:CFile-out')
+  IF (res = -1) OR (pathtype(out) <> 1)
+    showmsg('could not extract that file')
+    RETURN
+  ENDIF
+  ty := sniff(out)
+  IF ty = TY_ANSI
+    viewfile(out, nm, 2, FALSE)
+  ELSEIF ty = TY_TEXT
+    IF viewfile(out, nm, 0, FALSE) = 1
+      -> 'e' in the viewer: edit this member in place (arcedit works on
+      -> the same selection, re-extracting into its own scratch)
+      DeleteFile(out)
+      arcedit(p)
+      RETURN
+    ENDIF
+  ELSE
+    viewfile(out, nm, 1, FALSE)
+  ENDIF
+  DeleteFile(out)
+ENDPROC
+
 PROC doview()
   DEF p, i, ty, fpath[310]:STRING, cmd[680]:STRING
   p := active
@@ -2646,6 +3658,11 @@ PROC doview()
     RETURN
   ENDIF
   IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  IF inarchive(p)
+    i := (p * MAXENT) + esel[p]
+    IF edirs[i] THEN showmsg('cannot view a directory') ELSE arcviewsel(p, esel[p])
+    RETURN
+  ENDIF
   IF markcount(p) > 0
     bulkview(p)
     RETURN
@@ -3061,9 +4078,76 @@ PROC editfile(path, name)
 ENDPROC saved
 
 -> e: edit the selected text file
+-> re-add an edited member from a scratch root, replacing what is there.
+-> LhA's 'a' skips an existing member, so the old one is dropped first,
+-> then -r a from the scratch (which holds only this member's tree).
+-> Returns the add result; -1 means the caller should keep the scratch
+-> so the edit is not lost.
+PROC arcreadd(p, scratchroot, member)
+  DEF topname[CPATHLEN]:STRING, cmd[700]:STRING, res
+  firstcomp(topname, member)    -> member's first path component
+  arcdelmember(arcpath[p], member)
+  StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+  res := runcapture(scratchroot, cmd, 'T:CFile-out')
+  DeleteFile('T:CFile-out')
+ENDPROC res
+
+-> e inside an archive: extract the selected member, edit it, and on
+-> save re-add it in place. Text (or empty) members only, like the
+-> normal editor. A failed re-add keeps the edit in T:CFile-x.
+PROC arcedit(p)
+  DEF i, nm:PTR TO CHAR, member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING,
+      ty, r, res
+  IF ecount[p] = 0 THEN RETURN
+  i := (p * MAXENT) + esel[p]
+  IF edirs[i]
+    showmsg('cannot edit a directory')
+    RETURN
+  ENDIF
+  nm := enames[i]
+  arcmember(member, arcsub[p], nm)
+  arcwipe('T:CFile-x')
+  IF arcextractone(p, member) = FALSE
+    arcwipe('T:CFile-x')
+    faultmsg('could not extract for edit')
+    RETURN
+  ENDIF
+  StrCopy(sfile, 'T:CFile-x/')
+  StrAdd(sfile, member)
+  ty := sniff(sfile)
+  IF (ty <> TY_TEXT) AND (esize[i] <> 0)
+    arcwipe('T:CFile-x')
+    showmsg('only text files can be edited')
+    RETURN
+  ENDIF
+  drawpaths()
+  r := editfile(sfile, nm)
+  IF r = 1
+    res := arcreadd(p, 'T:CFile-x', member)
+    IF res = -1
+      loadarchive(p, arcpath[p])
+      refreshall()
+      showmsg('edit could not be re-added - kept in T:CFile-x')
+    ELSE
+      arcwipe('T:CFile-x')
+      loadarchive(p, arcpath[p])
+      StrCopy(prevname, nm)
+      refreshall()
+      selectbyname(p)
+    ENDIF
+  ELSE
+    arcwipe('T:CFile-x')
+    drawall()
+  ENDIF
+ENDPROC
+
 PROC doedit()
   DEF p, i, ty, r, fpath[310]:STRING
   p := active
+  IF inarchive(p)
+    arcedit(p)
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('nothing to edit in the volume list')
     RETURN
@@ -3435,6 +4519,10 @@ ENDPROC
 -> : - a shell command line, run in the active pane's directory
 PROC docommand()
   DEF cmd[140]:STRING
+  IF inarchive(active)
+    showmsg('shell commands do not run inside an archive - Left exits')
+    RETURN
+  ENDIF
   IF involume(active)
     showmsg('enter a volume first')
     RETURN
@@ -3479,6 +4567,10 @@ PROC dopack()
       mb[130]:STRING, base[400]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF inarchive(p) OR inarchive(q)
+    arcreadonly()
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -3578,6 +4670,10 @@ PROC dounpack()
       hdr[130]:STRING, s:PTR TO CHAR, l
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF inarchive(p) OR inarchive(q)
+    arcreadonly()
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -3661,6 +4757,10 @@ PROC doopen()
     enterdir()
     RETURN
   ENDIF
+  IF inarchive(p)    -> a member file: view it (read-only)
+    arcviewsel(p, esel[p])
+    RETURN
+  ENDIF
   buildfull(fpath, ppath[p], enames[i])
   ty := sniff(fpath)
   IF ty = TY_EXEC
@@ -3680,8 +4780,10 @@ PROC doopen()
     ENDIF
   ELSEIF ty = TY_ANSI
     viewfile(fpath, enames[i], 2, FALSE)
-  ELSEIF (ty = TY_LHA) OR (ty = TY_LZX) OR (ty = TY_ZIP)
-    showmsg('an archive - u unpacks it to the other pane, v lists it')
+  ELSEIF ty = TY_LHA
+    enterarchive(p, fpath)    -> Enter goes inside, like Right
+  ELSEIF (ty = TY_LZX) OR (ty = TY_ZIP)
+    showmsg('lzx/zip: u unpacks it to the other pane, v lists it')
   ELSE
     viewfile(fpath, enames[i], 1, FALSE)
   ENDIF
@@ -3702,10 +4804,111 @@ PROC togglemark()
   ENDIF
 ENDPROC
 
+-> extract one file member of pane p's archive into T:CFile-x, path
+-> intact. TRUE if the file landed where expected.
+PROC arcextractone(p, member)
+  DEF cmd[700]:STRING, sfile[CPATHLEN]:STRING, res
+  StrCopy(sfile, 'T:CFile-x/')
+  StrAdd(sfile, member)
+  makepath(sfile)
+  DeleteFile(sfile)
+  StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-x/')
+  res := runcapture(NIL, cmd, 'T:CFile-out')
+  DeleteFile('T:CFile-out')
+ENDPROC (res <> -1) AND (pathtype(sfile) = 1)
+
+-> r inside an archive: LhA has no rename, so extract the member (a
+-> whole subtree for a folder) into the work area, rename it there,
+-> add it back under the new name, then delete the old member. The
+-> marked set renames one at a time like the real-file rename; the
+-> stale cache is fine within the run - each entry's members are its
+-> own - and one reload at the end refreshes everything.
+PROC arcrename(p)
+  DEF b, nmark, i, pick, r, stopped=FALSE, any=FALSE, exists, j,
+      nm:PTR TO CHAR, isdir, ok, tname[110]:STRING,
+      oldm[CPATHLEN]:STRING, newm[CPATHLEN]:STRING,
+      oldp[CPATHLEN]:STRING, newp[CPATHLEN]:STRING,
+      topname[CPATHLEN]:STRING, cmd[700]:STRING, res
+  b := p * MAXENT
+  nmark := markcount(p)
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick AND (stopped = FALSE)
+      nm := enames[b + i]
+      isdir := edirs[b + i]
+      StrCopy(tname, nm)
+      r := lineinput('rename to: ', tname, 30, TRUE)    -> TRUE bars / and :
+      IF r = 0
+        stopped := TRUE
+      ELSEIF (EstrLen(tname) > 0) AND (nccmp(tname, nm) <> 0)
+        exists := FALSE
+        FOR j := 0 TO ecount[p] - 1
+          IF nccmp(enames[b + j], tname) = 0 THEN exists := TRUE
+        ENDFOR
+        IF exists
+          showmsg('a name like that is already here')
+        ELSE
+          arcmember(oldm, arcsub[p], nm)
+          arcmember(newm, arcsub[p], tname)
+          IF EstrLen(arcsub[p]) > 0
+            firstcomp(topname, arcsub[p])
+          ELSE
+            StrCopy(topname, tname)
+          ENDIF
+          arcwipe('T:CFile-x')
+          IF isdir
+            ok := arcextracttree(p, oldm)
+          ELSE
+            ok := arcextractone(p, oldm)
+          ENDIF
+          IF ok = FALSE
+            faultmsg('could not extract for rename')
+            stopped := TRUE
+          ELSE
+            StrCopy(oldp, 'T:CFile-x/')
+            StrAdd(oldp, oldm)
+            StrCopy(newp, 'T:CFile-x/')
+            StrAdd(newp, newm)
+            IF Rename(oldp, newp) = FALSE
+              faultmsg('cannot rename in the work area')
+              stopped := TRUE
+            ELSE
+              StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+              res := runcapture('T:CFile-x', cmd, 'T:CFile-out')
+              DeleteFile('T:CFile-out')
+              IF res = -1
+                faultmsg('cannot add the renamed entry')
+                stopped := TRUE
+              ELSE
+                -> the new name is safely in; drop the old member(s)
+                IF isdir THEN arcdeltree(p, oldm) ELSE arcdelmember(arcpath[p], oldm)
+                any := TRUE
+                StrCopy(prevname, tname)
+              ENDIF
+            ENDIF
+          ENDIF
+          arcwipe('T:CFile-x')
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+  IF any
+    loadarchive(p, arcpath[p])
+    refreshall()
+    IF nmark = 0 THEN selectbyname(p)
+  ELSE
+    drawpaths()
+  ENDIF
+ENDPROC
+
 PROC dorename()
   DEF p, i, b, nmark, r, pick, stopped=FALSE, any=FALSE,
       src2[310]:STRING, dst[310]:STRING, tname[110]:STRING
   p := active
+  IF inarchive(p)
+    arcrename(p)
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -3749,10 +4952,102 @@ ENDPROC
 
 -> n: a name ending in "/" makes a directory; anything else opens
 -> the editor on a NEW file - which only exists once it is saved
+-> n inside an archive: a trailing "/" makes an empty directory member
+-> (lha -e stores it), any other name opens the editor on a new file
+-> that is added only if it is saved. Both land at the pane's current
+-> location and are stored through the same scratch-mirror + -r add the
+-> copy-in path uses.
+PROC arcnew(p)
+  DEF tname[40]:STRING, s:PTR TO CHAR, i, l, b, wantdir=FALSE, r, exists=FALSE,
+      member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
+      cmd[700]:STRING, res, lock
+  StrCopy(tname, '')
+  IF lineinput('new (name/ = dir): ', tname, 31, FALSE) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  l := EstrLen(tname)
+  IF l = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  s := tname
+  IF s[l - 1] = "/"
+    wantdir := TRUE
+    SetStr(tname, l - 1)
+    l := l - 1
+  ENDIF
+  IF l = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  FOR i := 0 TO l - 1
+    IF (s[i] = "/") OR (s[i] = ":")
+      showmsg('plain names only (a trailing / makes a directory)')
+      RETURN
+    ENDIF
+  ENDFOR
+  b := p * MAXENT
+  IF ecount[p] > 0
+    FOR i := 0 TO ecount[p] - 1
+      IF nccmp(enames[b + i], tname) = 0 THEN exists := TRUE
+    ENDFOR
+  ENDIF
+  IF exists
+    showmsg('that name is already here')
+    RETURN
+  ENDIF
+  arcmember(member, arcsub[p], tname)
+  IF EstrLen(arcsub[p]) > 0
+    firstcomp(topname, arcsub[p])
+  ELSE
+    StrCopy(topname, tname)
+  ENDIF
+  arcwipe('T:CFile-a')
+  StrCopy(sfile, 'T:CFile-a/')
+  StrAdd(sfile, member)
+  makepath(sfile)    -> the member's parent directories
+  IF wantdir
+    IF (lock := CreateDir(sfile)) = NIL
+      arcwipe('T:CFile-a')
+      showmsg('cannot make the folder')
+      RETURN
+    ENDIF
+    UnLock(lock)
+    -> -e so the empty directory is actually stored
+    StringF(cmd, 'lha -M -r -e a "\s" "\s"', arcpath[p], topname)
+    res := runcapture('T:CFile-a', cmd, 'T:CFile-out')
+  ELSE
+    drawpaths()
+    r := editfile(sfile, tname)    -> the file exists only if saved
+    IF r <> 1
+      arcwipe('T:CFile-a')
+      drawall()
+      RETURN
+    ENDIF
+    StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+    res := runcapture('T:CFile-a', cmd, 'T:CFile-out')
+  ENDIF
+  DeleteFile('T:CFile-out')
+  arcwipe('T:CFile-a')
+  IF res = -1
+    faultmsg('could not add to the archive')
+    RETURN
+  ENDIF
+  loadarchive(p, arcpath[p])
+  StrCopy(prevname, tname)
+  refreshall()
+  selectbyname(p)
+ENDPROC
+
 PROC donew()
   DEF p, lock, tname[40]:STRING, dpath[310]:STRING,
       s:PTR TO CHAR, i, l, wantdir=FALSE, r
   p := active
+  IF inarchive(p)
+    arcnew(p)
+    RETURN
+  ENDIF
   IF involume(p)
     showmsg('no file operations in the volume list')
     RETURN
@@ -3840,10 +5135,10 @@ PROC helpscreen()
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   y := 0
-  helptext('CFile 0.2', y)
+  helptext('CFile 0.3b1', y)
   helptext('Tab ........ switch pane', y + 2)
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 3)
-  helptext('Right/Left . enter / parent, then the volume list', y + 4)
+  helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
   helptext('Enter ...... open: enter dir, view text, run binary', y + 5)
   helptext('v .......... view; marks tour with Right/Left', y + 6)
   helptext('e .......... edit text file (e in the viewer works too)', y + 7)
@@ -4063,4 +5358,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.2 (16.7.26) E build',0
+version: CHAR '$VER: CFile 0.3b1 (20.7.26) E build',0
