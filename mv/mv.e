@@ -1,12 +1,16 @@
 /* mv.e -- Unix-style move for AmigaDOS
-   Usage: mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
+   usage: mv [-fb] FROM ... TO
    e.g.   mv oldname newname
           mv work:file work:archive/file
           mv work:file work:archive         (into the directory)
           mv work:file ram:                 (cross-volume: copy+delete)
           mv #?.mod mods:                   (pattern move)
           mv a.txt b.txt c.txt work:stuff   (multiple sources)
-          mv #?.iff pics: OVERWRITE         (replace existing targets)
+          mv -f #?.iff pics:                (replace existing targets)
+
+   Flags are bundled Unix-style (-f, -b, or -fb), matching ls/cp in
+   this set; the last path is TO, everything before it is a source.
+   `mv ?` still prints usage, as an AmigaDOS command should.
 
    AmigaDOS Rename() is already a full move within one volume -- a
    rename is just a directory-entry relink, so relocating a file (or
@@ -21,20 +25,20 @@
    -- TO must be an existing directory. A single plain FROM keeps the
    simple rename/move-into-directory behaviour.
 
-   An existing target is skipped by default; every file that wasn't
-   moved is listed at the end (return code 5). With OVERWRITE the
-   target is deleted and replaced. With BACKUP the target is renamed
-   to <name>.mvbak first and the move proceeds -- but if that backup
-   name is already taken, the file is refused: nothing is touched,
-   the reason is printed, and it joins the not-moved list (rc 10).
-   The .mvbak suffix belongs to this tool (unlike .old, which people
-   hand-craft), so BACKUP OVERWRITE is allowed to mean "replace a
-   stale .mvbak" -- OVERWRITE consistently sanctions destroying one
-   thing: alone it's the target, with BACKUP it's the old backup.
+   mv is non-destructive by default: an existing target is skipped,
+   and every file that wasn't moved is listed at the end (return code
+   5). This is deliberately safer than Unix mv's silent clobber -- it
+   is effectively `mv -n`. With -f the target is deleted and replaced.
+   With -b the target is renamed to <name>.mvbak first and the move
+   proceeds -- but if that backup name is already taken, the file is
+   refused: nothing is touched, the reason is printed, and it joins
+   the not-moved list (rc 10). The .mvbak suffix belongs to this tool
+   (unlike .old, which people hand-craft), so -bf is allowed to mean
+   "replace a stale .mvbak" -- -f consistently sanctions destroying
+   one thing: alone it's the target, with -b it's the old backup.
    Neither flag touches anything when source and target are the same
-   object (checked with SameLock(), otherwise `mv file file
-   OVERWRITE` would delete the only copy) or when the target is a
-   directory.
+   object (checked with SameLock(), otherwise `mv -f file file`
+   would delete the only copy) or when the target is a directory.
 
    Ctrl-C is honoured between files and between copy chunks; a break
    mid-copy removes the partial target file, like any failed copy.
@@ -45,9 +49,9 @@
    file failed, 20 break.
 */
 
-MODULE 'dos/dos', 'dos/dosextens', 'dos/rdargs', 'dos/dosasl'
+MODULE 'dos/dos', 'dos/dosextens', 'dos/dosasl'
 
-CONST BUFSIZE=32768, PATHLEN=512
+CONST BUFSIZE=32768, PATHLEN=512, MAXARGS=32
 
 OBJECT snode
   next:PTR TO snode
@@ -64,28 +68,22 @@ DEF gbuf=NIL                       -> copy buffer, allocated on first use
 DEF skiphead=NIL:PTR TO snode, skiptail=NIL:PTR TO snode, skipcount
 
 PROC main() HANDLE
-  DEF rdargs=NIL:PTR TO rdargs
-  DEF argarray[4]:ARRAY OF LONG
-  DEF fromlist:PTR TO LONG
-  DEF n, i, wild, multi, lock
+  DEF paths[MAXARGS]:ARRAY OF LONG
+  DEF npaths, n, i, wild, multi, lock
   DEF node:PTR TO snode
 
   rc := RETURN_OK
 
-  rdargs := ReadArgs('FROM/A/M,TO/A,OVERWRITE/S,BACKUP/S', argarray, NIL)
-  IF rdargs=NIL THEN Throw("DOS", IoErr())
+  npaths := parseargs(paths)
+  IF npaths < 2 THEN Throw("MV", 'usage: mv [-fb] FROM ... TO')
 
-  fromlist  := argarray[0]
-  gto       := argarray[1]
-  overwrite := argarray[2]
-  backup    := argarray[3]
+  gto := paths[npaths-1]
+  n   := npaths-1                    -> everything before TO is a source
 
-  n := 0
   wild := FALSE
-  WHILE fromlist[n]
-    IF ParsePatternNoCase(fromlist[n], gpatbuf, 1024)=1 THEN wild := TRUE
-    n := n+1
-  ENDWHILE
+  FOR i := 0 TO n-1
+    IF ParsePatternNoCase(paths[i], gpatbuf, 1024)=1 THEN wild := TRUE
+  ENDFOR
   multi := wild OR (n>1)
 
   NEW gfib
@@ -100,7 +98,7 @@ PROC main() HANDLE
 
   IF multi AND (toisdir=FALSE) THEN Throw("MV", 'mv: with several files or a pattern, TO must be an existing directory')
 
-  FOR i:=0 TO n-1 DO dosource(fromlist[i])
+  FOR i:=0 TO n-1 DO dosource(paths[i])
 
   IF skipcount>0
     WriteF('not moved:\n')
@@ -113,18 +111,119 @@ PROC main() HANDLE
   ENDIF
 
 EXCEPT DO
-  IF rdargs THEN FreeArgs(rdargs)
   IF exception="DOS"
     PrintFault(exceptioninfo, 'mv')
     setrc(RETURN_ERROR)
   ELSEIF exception="BRK"
     WriteF('***Break: mv\n')
     setrc(RETURN_FAIL)
+  ELSEIF exception="USG"
+    usage()
+  ELSEIF exception="ARG"
+    WriteF('mv: unknown option (mv ? for usage)\n')
+    setrc(RETURN_ERROR)
   ELSEIF exception
     WriteF('\s\n', exceptioninfo)
     setrc(RETURN_ERROR)
   ENDIF
   CleanUp(rc)
+ENDPROC
+
+PROC usage()
+  WriteF('mv 0.4 -- Unix-style move\n')
+  WriteF('usage: mv [-fb] FROM ... TO\n')
+  WriteF('  -f  force: replace an existing target\n')
+  WriteF('  -b  back up an existing target as <name>.mvbak first\n')
+ENDPROC
+
+/* Tokenizes E's raw command line, ls-style: whitespace-separated,
+   double quotes group, `*` escapes inside quotes (AmigaDOS rules, *n
+   and *e get their control meanings). -x bundles set flags; a lone ?
+   prints usage; everything else is a path. The last path collected
+   is TO, the rest are sources (main sorts that out). */
+PROC parseargs(paths:PTR TO LONG)
+  DEF p:PTR TO CHAR, np, tl, c, inq, done
+  DEF t[PATHLEN]:ARRAY OF CHAR
+  DEF s:PTR TO CHAR
+
+  np := 0
+  p := arg
+  WHILE p[]
+    WHILE (p[] > 0) AND (p[] <= 32) DO p++
+    IF p[] = 0 THEN RETURN np
+
+    tl := 0
+    inq := FALSE
+    done := FALSE
+    WHILE done = FALSE
+      c := p[]
+      IF c = 0
+        done := TRUE
+      ELSEIF inq
+        IF c = 34                            -> closing quote
+          inq := FALSE
+          p++
+        ELSEIF c = 42                        -> * escape
+          p++
+          c := p[]
+          IF c = 0
+            done := TRUE
+          ELSE
+            IF (c = "n") OR (c = "N") THEN c := 10
+            IF (c = "e") OR (c = "E") THEN c := 27
+            t[tl] := c
+            tl++
+            p++
+          ENDIF
+        ELSE
+          t[tl] := c
+          tl++
+          p++
+        ENDIF
+      ELSE
+        IF c <= 32
+          done := TRUE
+        ELSEIF c = 34                        -> opening quote
+          inq := TRUE
+          p++
+        ELSE
+          t[tl] := c
+          tl++
+          p++
+        ENDIF
+      ENDIF
+      IF tl >= (PATHLEN-1) THEN done := TRUE
+    ENDWHILE
+    t[tl] := 0
+
+    IF tl > 0
+      IF (t[0] = "-") AND (tl > 1)
+        setflags(t)
+      ELSEIF (t[0] = "?") AND (tl = 1)
+        Throw("USG", 0)
+      ELSE
+        IF np < MAXARGS
+          s := String(tl)
+          StrCopy(s, t)
+          paths[np] := s
+          np++
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC np
+
+PROC setflags(t:PTR TO CHAR)
+  DEF i, c
+  i := 1
+  WHILE (c := t[i]) <> 0
+    SELECT c
+    CASE "f" ; overwrite := TRUE
+    CASE "b" ; backup := TRUE
+    DEFAULT  ; Throw("ARG", c)
+    ENDSELECT
+    i++
+  ENDWHILE
 ENDPROC
 
 PROC setrc(v)
@@ -351,4 +450,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: mv 0.3 (14.7.26) E build',0
+version: CHAR '$VER: mv 0.4 (20.7.26) E build',0

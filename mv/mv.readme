@@ -4,16 +4,19 @@ mv - a Unix-style move command for AmigaDOS
 WHAT IT IS
 
   mv moves or renames files and directories, like Unix mv, with
-  AmigaDOS pattern support. It comes as two implementations with
-  identical behaviour: one in Amiga E (mv.e, 4952 bytes) and one in
-  68000 assembly (mv.asm, 2620 bytes). Build whichever you prefer
-  and install it as C:mv.
+  AmigaDOS pattern support. The reference build is in Amiga E (mv.e);
+  a 68000 assembly sibling (mv.asm) mirrors it. Build whichever you
+  prefer and install it as C:mv.
+
+  Note: the assembly build has not yet been regenerated for the -f/-b
+  flags -- it still uses the older OVERWRITE/BACKUP keyword template.
+  Use the E build for the interface below.
 
   Requires Kickstart 2.04 or newer.
 
 USAGE
 
-  mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
+  mv [-fb] FROM ... TO
 
     mv oldname newname                (rename)
     mv work:file work:archive/file    (move within a volume)
@@ -22,7 +25,12 @@ USAGE
     mv work:somedir work:elsewhere    (directories too, same volume)
     mv #?.mod mods:                   (AmigaDOS pattern)
     mv a.txt b.txt c.txt work:stuff   (multiple sources)
-    mv #?.iff pics: OVERWRITE         (replace existing targets)
+    mv -f #?.iff pics:                (replace existing targets)
+    mv -b config work:app             (existing target -> config.mvbak)
+
+  Flags are bundled Unix-style -- -f, -b, or -fb -- matching ls and
+  the rest of this set; the last path is TO, everything before it is
+  a source. `mv ?` prints usage.
 
   FROM takes any number of names and/or patterns. With several files
   or a pattern, TO must be an existing directory; a single plain name
@@ -30,19 +38,19 @@ USAGE
   directory, sources are moved into it under their own names.
 
   An existing target is skipped by default; everything that wasn't
-  moved is listed under "not moved:" at the end, return code 5.
-  OVERWRITE deletes and replaces the target instead -- after checking
-  with SameLock() that source and target aren't the same object, so
-  `mv file file OVERWRITE` can never delete your only copy.
+  moved is listed under "not moved:" at the end, return code 5. This
+  is deliberately safer than Unix mv's silent clobber -- it is
+  effectively `mv -n`. -f deletes and replaces the target instead --
+  after checking with SameLock() that source and target aren't the
+  same object, so `mv -f file file` can never delete your only copy.
 
-  BACKUP renames the existing target to <name>.mvbak first, then
-  moves the source in. If that backup name is already taken the file
-  is refused: nothing is touched, the reason is printed, and it joins
+  -b renames the existing target to <name>.mvbak first, then moves
+  the source in. If that backup name is already taken the file is
+  refused: nothing is touched, the reason is printed, and it joins
   the not-moved list (return code 10). The .mvbak suffix belongs to
-  this tool, so BACKUP OVERWRITE is allowed and means "replace the
-  stale .mvbak" -- OVERWRITE consistently sanctions destroying
-  exactly one thing: alone it's the target, with BACKUP it's the old
-  backup.
+  this tool, so -bf is allowed and means "replace the stale .mvbak"
+  -- -f consistently sanctions destroying exactly one thing: alone
+  it's the target, with -b it's the old backup.
 
   Ctrl-C is honoured between files and during copies; a break or a
   failed copy removes the partial target file. Errors on one file are
@@ -71,7 +79,9 @@ HOW IT WORKS
 BUILDING
 
   Both prebuilt binaries are included: mv (the E build) and mv-asm
-  (the assembly build). No compiler needed; copy either one to C:mv.
+  (the assembly build). No compiler needed; copy the mv E build to
+  C:mv for the -f/-b interface above (mv-asm still carries the older
+  keyword syntax until it is regenerated).
 
   To build them yourself -- the E version, with the E-VO E compiler:
 

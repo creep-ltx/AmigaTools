@@ -1,14 +1,17 @@
 # mv
 
-A Unix-style move command for AmigaDOS — implemented twice: once in
-Amiga E ([mv.e](mv.e)) and once in 68000 assembly ([mv.asm](mv.asm)).
-Identical behaviour, identical argument template; build whichever one
-you like and install it as `C:mv`.
+A Unix-style move command for AmigaDOS. The reference build is in Amiga
+E ([mv.e](mv.e)); a 68000 assembly sibling ([mv.asm](mv.asm)) mirrors
+it. Build whichever you like and install it as `C:mv`.
+
+> **Note:** the assembly build hasn't been regenerated for the `-f`/`-b`
+> flags yet — it still uses the older `OVERWRITE`/`BACKUP` keyword
+> template. Use the E build (`mv.e`) for the interface documented below.
 
 | Implementation | Binary size |
 |---|---|
-| mv.e (E-VO) | 4952 bytes |
-| mv.asm (vasm) | 2620 bytes |
+| mv.e (E-VO) | 6124 bytes |
+| mv.asm (vasm) | 2620 bytes — pending `-f`/`-b` update |
 
 Speed is identical — a move spends all its time inside dos.library —
 so the assembly version's win is size, not speed.
@@ -16,7 +19,7 @@ so the assembly version's win is size, not speed.
 ## Usage
 
 ```
-mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
+mv [-fb] FROM ... TO
 ```
 
 ```
@@ -27,30 +30,32 @@ mv work:file ram:                 (cross-volume: copy + delete)
 mv work:somedir work:elsewhere    (directories move too, same volume)
 mv #?.mod mods:                   (AmigaDOS pattern)
 mv a.txt b.txt c.txt work:stuff   (multiple sources)
-mv #?.iff pics: OVERWRITE         (replace existing targets)
-mv config work:app BACKUP         (existing target -> config.mvbak)
+mv -f #?.iff pics:                (replace existing targets)
+mv -b config work:app             (existing target -> config.mvbak)
 ```
 
+- Flags are bundled Unix-style — `-f`, `-b`, or `-fb` — matching `ls`
+  and the rest of this set; the last path is `TO`, everything before
+  it is a source. `mv ?` prints usage.
 - `FROM` takes any number of names and/or AmigaDOS patterns. With
   several files or a pattern, `TO` must be an existing directory; a
   single plain name keeps the simple rename/move behaviour.
 - If `TO` is an existing directory, sources are moved into it under
   their own names.
-- An existing target is **skipped** by default; everything that
-  wasn't moved is listed under `not moved:` at the end, return code
-  5 (WARN). `OVERWRITE` deletes and replaces the target instead —
-  after checking (with `SameLock()`) that source and target aren't
-  the same object, so `mv file file OVERWRITE` can never delete your
-  only copy.
-- `BACKUP` renames the existing target to `<name>.mvbak` first, then
-  moves the source in. If that backup name is already taken the file
-  is **refused** — nothing is touched, the reason is printed, and it
-  joins the not-moved list (return code 10). The `.mvbak` suffix
-  belongs to this tool (unlike `.old`, which people hand-craft for
-  their own backups), so `BACKUP OVERWRITE` is allowed and means
-  "replace the stale `.mvbak`" — `OVERWRITE` consistently sanctions
-  destroying exactly one thing: alone it's the target, with `BACKUP`
-  it's the old backup.
+- An existing target is **skipped** by default; everything that wasn't
+  moved is listed under `not moved:` at the end, return code 5 (WARN).
+  This is deliberately safer than Unix `mv`'s silent clobber — it's
+  effectively `mv -n`. `-f` deletes and replaces the target instead —
+  after checking (with `SameLock()`) that source and target aren't the
+  same object, so `mv -f file file` can never delete your only copy.
+- `-b` renames the existing target to `<name>.mvbak` first, then moves
+  the source in. If that backup name is already taken the file is
+  **refused** — nothing is touched, the reason is printed, and it joins
+  the not-moved list (return code 10). The `.mvbak` suffix belongs to
+  this tool (unlike `.old`, which people hand-craft for their own
+  backups), so `-bf` is allowed and means "replace the stale `.mvbak`"
+  — `-f` consistently sanctions destroying exactly one thing: alone
+  it's the target, with `-b` it's the old backup.
 - Cross-volume moves preserve the protection bits and datestamp, and
   a failed copy deletes the partial target rather than leaving half a
   file behind. If the copy succeeds but the source can't be deleted
@@ -63,8 +68,7 @@ mv config work:app BACKUP         (existing target -> config.mvbak)
   runs. Return code is the worst that happened: 0 clean, 5 skips,
   10 errors, 20 break.
 
-Requires Kickstart 2.04+ (`ReadArgs()`, `MatchFirst()`, `AddPart()`,
-`SetFileDate()`).
+Requires Kickstart 2.04+ (`MatchFirst()`, `AddPart()`, `SetFileDate()`).
 
 ## Why AmigaDOS almost had this already
 
@@ -87,8 +91,9 @@ and matches literal names with the same code path.
 ## Building
 
 Both prebuilt binaries are included in this directory — `mv` (the E
-build) and `mv-asm` (the assembly build). No compiler needed; copy
-either one to `C:mv` and go.
+build) and `mv-asm` (the assembly build). No compiler needed; copy the
+`mv` E build to `C:mv` for the `-f`/`-b` interface above (`mv-asm` still
+carries the older keyword syntax until it's regenerated).
 
 To build them yourself — the E version, with the E-VO compiler:
 
@@ -106,12 +111,15 @@ Both produce an AmigaOS loadseg()able executable. The asm source uses
 Devpac-style Motorola syntax and plain 68000 instructions, so other
 assemblers should cope with at most minor tweaks.
 
-Both versions were verified on an AmigaOS 3.2 install (FS-UAE):
-rename, move-into-directory, pattern expansion, cross-volume
-copy+delete with datestamp and protection bits intact across repeated
-moves, skip-and-list-at-end, OVERWRITE replacement, BACKUP rescue to
-`.mvbak` (including the clash refusal, `BACKUP OVERWRITE` replacing a
-stale backup, and backups on the far side of a cross-volume move),
-the `mv file file OVERWRITE` self-move guard, existing-target and
-cross-volume-directory refusals, Ctrl-C mid-copy, and same-volume
-directory moves.
+The `-f`/`-b` E build has been exercised under the E-VO toolchain
+(vamos): usage, bad-flag rejection, rename, move-into-directory,
+pattern expansion, multiple sources into a directory, skip-and-list-at-
+end, `-f` replacement, and `-b` rescue to `.mvbak`. The underlying
+behaviours it inherits unchanged — cross-volume copy+delete with
+datestamp and protection bits intact across repeated moves, the
+`mv -f file file` self-move guard, existing-target and cross-volume-
+directory refusals, Ctrl-C mid-copy, and same-volume directory moves —
+were verified earlier on an AmigaOS 3.2 install (FS-UAE) under the
+previous keyword build. A fresh FS-UAE boot-test of the `-f`/`-b` build
+is worth doing before relying on it, since the self-move guard depends
+on `SameLock()`, which the emulator does not reproduce.
