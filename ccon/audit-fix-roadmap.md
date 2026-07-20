@@ -68,9 +68,46 @@ visible yet - P3 is where that lives.
 
 ---
 
-## Batch 2 - the anchor guard (B1 + H4)
+## Batch 2 - the anchor guard (B1 + H4) - DONE (1.2b3, 21.7.26)
 
 **Findings:** B1, H4
+
+**Outcome:** the repro-first sequencing below was worth it twice over.
+
+1. A throwaway harness (`edanchortest.e`) extracted the anchor/extent
+   logic over a fake ring and reproduced the model corruption - and
+   pinned a precondition the audit had OVERSTATED. A cols-wide write
+   turned out to be necessary but not sufficient: the row the
+   post-commit anchor lands on must also hold content. audit.md B1 is
+   corrected accordingly.
+2. The harness also caught a wrong first draft of the FIX. "Zero the
+   fields at the top" would have skipped the erase on the normal path,
+   because the erase loop reads the count. Scenario C was added to
+   guard that specifically, and the shipped fix takes the extent into
+   locals instead.
+3. Because only the fixed binary was deployed, a clean result would
+   have been ambiguous - "the fix works" and "the repro never fired"
+   look identical. So an A/B pair was built, differing ONLY in this
+   proc plus the version string (source diff verified). On hardware:
+   `1.2b3-BROKEN-B1` punches a hole in the row below the echoed
+   command, exactly as wide as the typed line; `1.2b3` leaves it
+   intact. Everything else in the two screenshots is identical.
+
+**H4 resolved as a COMMENT, and the guard would have been wrong** - see
+audit.md. `ancx = cols` is the legal pending-wrap anchor and the editor
+must still paint there.
+
+**Regression:** the existing gates all still pass - `ccon-bisect` five
+for five, `ccon-progress`, `ccon-ichdch`. Those are the b8
+theft-pattern tests, i.e. the direct gate on this code path.
+
+**Test scripts added** to `S/` in the house `Type`-a-byte-file style:
+`ccon-b1` (Execute; fills the screen and sets an invisible prompt that
+parks the anchor on the margin via `CSI 7;999H`, width-independent
+because csidispatch clamps the column to `cols`), `ccon-b1-fill`,
+`ccon-b1-off`.
+
+The original plan follows, kept for the record.
 
 These are one problem seen from both ends: `eraseedit` and `drawedit`
 disagree about whether `ancx >= cols` is a legal state. Fix them
@@ -265,7 +302,7 @@ client and why - and that answer is more valuable than the fix.
 
 ```
 1. [DONE 1.2b2] audit batch 1 - hoist curattr, power-of-two inq, paint-loop locals
-2. ccon 1.2b3: eraseedit's early returns must not leave a stale paint extent
+2. [DONE 1.2b3] eraseedit's early returns must not leave a stale paint extent
 3. ccon 1.2b4: clamp sbcnt when a resize grows the grid; stop AUTO retrying a failed open
 4. ccon 1.2b5: CSI reports enqueue whole or not at all
 5. ccon 1.2b6: history persists by append, not by rewriting the ring per command

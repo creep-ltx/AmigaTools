@@ -1,0 +1,18 @@
+; CCON audit B1 - stale paint extent carried across a moved anchor
+;
+; Run:   Execute S:ccon-b1
+; Then:  type   Echo x >NIL:   and press Enter
+; Then:  look at the row directly BELOW the echoed command.
+;
+;   BROKEN -> a 12-character gap punched into that row of #
+;   FIXED  -> the row of # is unbroken
+;
+; Undo with:  Execute S:ccon-b1-off
+;
+; The prompt below is invisible on purpose: it is only a cursor
+; move (CSI 7;999H). The column is clamped to the window width by
+; csidispatch, so this parks the anchor exactly on the right margin
+; whatever width the window is - that is the pending-wrap state the
+; bug needs, without having to count characters.
+Type S:ccon-b1-fill
+Prompt "*e[7;999H"

@@ -1,0 +1,2 @@
+; restore the normal shell prompt after S:ccon-b1
+Prompt "%N.%S> "

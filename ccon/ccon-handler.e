@@ -3493,13 +3493,33 @@ ENDPROC
 -> model), client cells COME BACK (they are).
 PROC eraseedit()
   DEF y, r, r1, x0, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j,
-      cc
+      cc, n, ext
+  -> audit B1 (harness-verified, edanchortest.e): the paint extent is
+  -> TAKEN into locals and the fields cleared HERE, above both guards,
+  -> because a guard that returns early must still leave "there is no
+  -> editor paint on screen" behind it. The old code cleared them at
+  -> the BOTTOM, so either return left edlast/edext describing a paint
+  -> made at a DIFFERENT anchor - and drawedit's oldl > l loop then
+  -> zeroed that many model cells measured from the NEW anchor, which
+  -> is client text, not editor text. Exactly the theft pattern b9
+  -> closed, walking back in through the ancx >= cols guard added
+  -> after it. Harness: a cols-wide write parks ancx = cols (legal
+  -> pending wrap), the user types, Enter bails this proc, and the
+  -> commit's anchor lands a row down - five typed characters cost
+  -> five cells of whatever was already on that row.
+  -> NOT simply "zero the fields at the top": the erase loop below
+  -> reads the count, so zeroing first would skip the erase on the
+  -> normal path (the harness's scenario C guards that mistake).
+  n := curcon.edlast
+  ext := curcon.edext
+  curcon.edlast := 0
+  curcon.edext := 0
   IF curcon.win = NIL THEN RETURN
   IF curcon.ancx >= curcon.cols THEN RETURN -> inverted RectFill = wild writes
   IF curcon.sb
     cc := curcon.ancx
     r := curcon.ancy
-    FOR j := 0 TO curcon.edlast - 1
+    FOR j := 0 TO n - 1
       IF r <= (curcon.rows - 1)
         m := visrow(r)
         a := sarow(r)
@@ -3514,14 +3534,14 @@ PROC eraseedit()
         r := r + 1
       ENDIF
     ENDFOR
-    r1 := edlastrow(curcon.edext)
+    r1 := edlastrow(ext)
     IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
     FOR r := curcon.ancy TO r1
       drawmodelrow(r)
     ENDFOR
   ELSE
     -> no model: nothing to restore from - the old full clear
-    r1 := edlastrow(curcon.edext)
+    r1 := edlastrow(ext)
     IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
     x0 := curcon.ancx
     SetAPen(curcon.rp, 0)
@@ -3533,9 +3553,8 @@ PROC eraseedit()
     ENDFOR
     SetAPen(curcon.rp, curcon.deffg)
   ENDIF
-  curcon.edlast := 0            -> the paint is gone; drawedit's b9
-  curcon.edext := 0             -> tail cleanup must not re-clean
-ENDPROC
+ENDPROC                         -> (edlast/edext were cleared at the
+                                -> top - see the B1 note there)
 
 -> repaint cells x0..x1 of view row r from the model - drawmodelrow's
 -> bounded sibling, for the b9 drawedit tail cleanup
@@ -3609,6 +3628,17 @@ PROC drawedit()
       g:PTR TO CHAR, gn, gcol, gext, cc, sd[80]:STRING,
       oldl, oldext, newext, c0, c1, rr, n2, x0, x1
   IF curcon.win = NIL THEN RETURN
+  -> audit H4: no `ancx >= cols` guard here, DELIBERATELY - eraseedit
+  -> has one and this proc must not copy it. ancx = cols is the legal
+  -> pending-wrap anchor (a write that ended flush on the margin), and
+  -> the editor still has to paint there: bailing would leave the line
+  -> invisible until the next write moved the anchor. The arithmetic
+  -> already handles it - the mirror loop's first pass computes
+  -> n = Min(cols - ancx, l) = 0, rolls to the next row, and the blip
+  -> math (bc = ancx + cpos, r = bc / cols) lands on that same row, so
+  -> the two agree. eraseedit's guard is about an inverted RectFill,
+  -> a pixel concern this proc does not have. Harness-checked
+  -> alongside B1 (edanchortest.e).
   -> b9: NO pre-erase - the b8 erase-then-paint repainted every row
   -> twice per keystroke and the whole line flickered on bare
   -> cursor moves (the sweep's finding). The text now paints IN
@@ -5619,4 +5649,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b2 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b3 CCON: LTX console handler', 0

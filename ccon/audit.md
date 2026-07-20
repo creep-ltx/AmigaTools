@@ -20,7 +20,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | Finding | State |
 |---|---|
 | P1, P2, P4, H1, H2, H5 | **fixed in 1.2b2** (batch 1, boot-tested 21.7.26) |
-| B1, H4 | open - batch 2 |
+| B1, H4 | **fixed in 1.2b3** (batch 2, harness + A/B hardware proof 21.7.26) |
 | B2, B4 | open - batch 3 |
 | B3 | open - batch 4 |
 | P5 | open - batch 5 |
@@ -68,11 +68,38 @@ documented as legal at `doresize` (:1857). `reanchor()` then parks
 
 **Consequence:** client text erased from the model at a moved anchor -
 the exact theft pattern b9 closed, re-entered through the guard.
-Any output whose last line is exactly `cols` wide qualifies: full-width
-`ls` output, box drawing, a progress bar that fills the row.
 
-**Fix:** zero `edlast`/`edext` before both `RETURN`s, or restructure so
-the resets cannot be bypassed.
+**Trigger, CORRECTED (21.7.26).** This section first said "any output
+whose last line is exactly `cols` wide qualifies". That was too broad,
+and the harness caught it: an identical cols-wide write does NO damage
+when the row the anchor lands on is blank. All four of these have to
+hold at once:
+
+1. a write ends flush on the right margin, so `reanchor` parks
+   `ancx = cols`, AND
+2. the edit line is non-empty when Enter is pressed (`edlast > 0`), AND
+3. the line SHRINKS in the same `drawedit` that sees the moved anchor -
+   in practice the Enter-commit path specifically, since a plain
+   `dowrite` never touches `ebuf`, so its stale `edlast` is consumed
+   against an equal `l` and nothing is zeroed, AND
+4. the row the post-commit anchor lands on still holds content
+
+So it needs content BELOW the prompt, which is not the everyday
+bottom-of-screen shell case - reachable via `CSI H` positioning, a
+full-screen client's restored transcript, or a prompt sitting
+mid-screen.
+
+**Status: FIXED in 1.2b3, confirmed on hardware.** Harness
+(`edanchortest.e`, throwaway) proved the model corruption and pinned
+the precondition; an A/B pair of binaries differing ONLY in this proc
+showed the gap appear and disappear in FS-UAE. Damage width always
+equals the length of the typed line.
+
+**Fix as applied:** take the extent into locals and clear the fields
+ABOVE both guards. Note it is NOT "zero the fields at the top" - the
+erase loop reads the count, so zeroing first would skip the erase on
+the normal path (the harness's scenario C exists to catch exactly that
+mistake, and did).
 
 ---
 
@@ -341,8 +368,15 @@ and rolls to the next row consistently with the blip math at :3634-3646
 - but two procs that must agree on the same anchor disagreeing on its
 legal range is the kind of thing that bites on the next edit.
 
-**Fix:** add the guard, or a comment stating why it is not needed. See
-also B1, which is the same guard causing a real bug at the other end.
+**Resolved 1.2b3: COMMENT, and the guard would have been WRONG.** The
+audit offered "add the guard, or a comment"; that was a false choice.
+`ancx = cols` is the legal pending-wrap anchor and the editor still has
+to paint there - a guard would have made the typed line invisible until
+the next write moved the anchor. Confirmed on hardware: at the
+margin-parked prompt in the B1 repro, typing renders normally on the
+row below. The comment now in `drawedit` says why the asymmetry with
+`eraseedit` is correct (eraseedit's guard is about an inverted
+RectFill, a pixel concern `drawedit` does not have).
 
 ### H5 - `ihdrop` is write-only
 

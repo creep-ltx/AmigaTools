@@ -3101,6 +3101,77 @@ but it means "what version is deployed" cannot be read off the file
 size, and the old binary is kept as `L/ccon-handler.bak` as the revert
 point for this batch.
 
+### 1.2b3 — audit batch 2: the theft pattern's back door (21.7.26)
+
+B1 from the audit, and the first finding that went the whole route:
+reasoned from source, proven in a harness, then proven again on real
+hardware with an A/B pair. Both later steps changed the answer, which
+is the argument for doing it this way.
+
+**The bug.** `eraseedit()` cleared `edlast`/`edext` at the BOTTOM of
+the proc, so its two early returns — `win = NIL`, and the
+`ancx >= cols` guard added later for the inverted-RectFill problem —
+skipped the clear. The b9 note says that clear exists so "the tail
+never re-cleans at a moved anchor (the theft pattern must not come
+back through the back door)"; the `ancx >= cols` guard *was* the back
+door. Leave `edlast` set, let the anchor move, and `drawedit()`'s
+`oldl > l` loop zeroes that many model cells measured from the NEW
+anchor — client text, not editor text.
+
+**What the harness changed.** `edanchortest.e` (throwaway, the
+`fillscreentest.e`/`sbsearchtest.e` pattern: fake 10-row ring, the
+anchor/extent logic transcribed, every pixel call dropped since
+`drawmodelrow`/`drawmodelcells` read the model and never write it).
+Two things came out of it that reading the source had not:
+
+- The audit's trigger description was **too broad**. It claimed any
+  output whose last line is exactly `cols` wide qualifies. Scenario B
+  disproved that: an identical cols-wide write does nothing when the
+  row the anchor lands on is blank. The real precondition is four
+  things at once — margin-flush write, non-empty edit line, the line
+  shrinking in the same `drawedit` that sees the moved anchor (which
+  means the Enter-commit path specifically, since a plain write never
+  touches `ebuf`), and content on the row the anchor lands on. So it
+  needs content BELOW the prompt: `CSI H` positioning, a full-screen
+  client's restored transcript, a prompt mid-screen. Not the everyday
+  bottom-of-screen case.
+- It caught a **wrong first draft of the fix**. "Just zero the fields
+  at the top" would have skipped the erase on the normal path, because
+  the erase loop reads the count. Scenario C was added to guard that
+  and immediately earned its place. The shipped fix takes the extent
+  into locals (`n`, `ext`) and clears the fields above both guards.
+
+**What the A/B changed.** With only the fixed binary deployed, a clean
+screen would have been ambiguous — "the fix works" and "the repro never
+fired" look identical, and the first hardware run did come back clean.
+So a second binary was built differing ONLY in this proc plus the
+version string (source diff verified before compiling). Result:
+`1.2b3-BROKEN-B1` punches a hole in the row directly below the echoed
+command, exactly as wide as the typed line; `1.2b3` leaves that row
+intact; everything else in the two screenshots is identical. B1 is a
+real observable bug, not a latent-correctness tidy-up.
+
+**H4, and a correction to the audit.** The audit offered "add the
+guard to `drawedit`, or a comment saying why it isn't needed". That was
+a false choice — the guard would have been **wrong**. `ancx = cols` is
+the legal pending-wrap anchor and the editor still has to paint there;
+a guard would have made the typed line invisible until the next write
+moved the anchor. Hardware confirms typing renders normally at the
+margin-parked prompt. `drawedit` now carries a comment explaining why
+the asymmetry with `eraseedit` is correct: eraseedit's guard is about
+an inverted RectFill, a pixel concern `drawedit` does not have.
+
+**Regression:** `ccon-bisect` five for five, `ccon-progress` and
+`ccon-ichdch` clean — the b8 theft-pattern gates, i.e. the direct gate
+on this code path.
+
+**New test scripts** in `S/`, house style (`Type` a byte file / a short
+`Execute` script): `ccon-b1` fills the screen and sets an invisible
+prompt that is only `CSI 7;999H` — csidispatch clamps the column to
+`cols`, so it parks the anchor exactly on the right margin at ANY
+window width without counting characters. `ccon-b1-fill` is the screen,
+`ccon-b1-off` restores the prompt. Deployed as 1.2b3.
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
