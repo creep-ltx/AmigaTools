@@ -2965,6 +2965,45 @@ fix only removes the SLASH-COUNTING trap.
       his exact `0/11/-1/-1` case added as a worked example. Deployed
       as "1.1b46".
 
+### 1.2b1 — the window-bounds report spoke the wrong CSI (20.7.26)
+
+First v1.2 beta. A phantom `1: Unknown command` turned up after every
+`ls` under CCON — and only CCON, never ViNCEd, never stock CON:. It
+shrugged off the first repro attempts (not after warm reboots, not
+after a cold boot) until the pattern sharpened: it fired on the command
+right after an `ls`, every time. His call: "ls is leaving garbage
+behind."
+
+Root cause was in CCON, not ls. `ls` sizes its columns the way stock
+`C:Dir` does — write the window-bounds request `CSI 0 SP q`, read back
+`CSI 1;1;rows;cols SP r` on the input stream. `sendreport()` was
+introducing that report with the 7-bit `ESC [` two-byte form — the
+raw-KEY convention from b42 (correct for More's arrows) — instead of
+the 8-bit CSI `$9B` that console-to-client reports use, the way
+`ihreport` already does and what `C:Dir`/`ls` scan for. `ls` looks for
+`$9B`; it got `ESC` (ignored), then `[` ($5B), and since `$5B >= $40`
+its parser treats that as the report's final byte — so it stopped after
+two bytes and the real payload `1;1;rows;cols r` was left sitting in the
+input queue, read as the next line: command `1`, unknown. ViNCEd works
+because it sends the standard `$9B`.
+
+The same bug also meant `ls` never actually read CCON's width — it
+bailed before the params, so every `ls` under CCON silently fell back
+to its 77-column default.
+
+- **CCON:** `sendreport()` now emits `enqueue($9B)`, with a comment
+  pinning down why it must be `$9B` and not `ESC[` here, so it doesn't
+  get swept back into the b42 raw-key convention.
+- **ls:** hardened in parallel to accept either introducer (`$9B` or
+  `ESC[`), so it reads any console's report through to the terminator
+  and this class of leak can't recur. Bumped 0.1 to 0.2.
+
+His FS-UAE boot test confirmed all of it: no phantom command after any
+`ls`, `mkdir -p test/test2` and `cp` run clean, and — the case vamos
+can't reach, since it doesn't emulate `SameLock()` — `cp -f info info`
+correctly answers "source and target are the same file" on real
+hardware. Deployed as 1.2b1.
+
 ### Parked for v1.2 — the big swing
 
 - [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every

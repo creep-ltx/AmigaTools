@@ -3210,8 +3210,13 @@ ENDPROC
 -> event-report shape ihreport() uses for a different protocol.
 PROC sendreport()
   DEF b[24]:STRING, i
-  enqueue(27)
-  enqueue("[")
+  -> the window-bounds report is a console->app report and must use the
+  -> 8-bit CSI ($9B) -- like ihreport, and what stock C:Dir and ls scan
+  -> for -- NOT the 7-bit ESC[ of the raw-KEY sequences (b42, for More).
+  -> With ESC[ here, ls read the '[' ($5B, >= $40) as the report's final
+  -> byte, stopped after two bytes, and the 1;1;rows;cols tail leaked
+  -> into the input queue as a phantom "1" command after every ls.
+  enqueue($9B)
   StringF(b, '1;1;\d;\d', curcon.rows, curcon.cols)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
@@ -5541,4 +5546,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.1b46 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b1 CCON: LTX console handler', 0

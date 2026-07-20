@@ -143,7 +143,7 @@ PROC checkbreak()
 ENDPROC
 
 PROC usage()
-  WriteF('ls 0.1 -- Unix-style directory lister\n')
+  WriteF('ls 0.2 -- Unix-style directory lister\n')
   WriteF('usage: ls [-1ahlrRSt] [path | pattern ...]\n')
   WriteF('  -l  long listing (protection, size, date, filenote)\n')
   WriteF('  -a  show .info files and hidden (h-bit) entries\n')
@@ -259,12 +259,15 @@ ENDPROC FALSE
 
 /* Asks the console for its size: raw mode, CSI `0 q`, parse the
    `CSI 1;1;rows;cols r` report (params until the first byte >=
-   $40 -- the CSI rule). Every read is guarded by WaitForChar so a
+   $40 -- the CSI rule). The report introducer may be the 8-bit CSI
+   ($9B) stock CON: sends or the 7-bit ESC[ two-byte form; both are
+   accepted, so the whole report is consumed and nothing leaks into
+   the next command line. Every read is guarded by WaitForChar so a
    console that never answers costs 0.5s, not a hang. */
 PROC termwidth()
   DEF req[4]:ARRAY OF CHAR, b[4]:ARRAY OF CHAR
   DEF params[8]:ARRAY OF LONG
-  DEF w, np, i, c, done, infh, outfh
+  DEF w, np, i, c, done, infh, outfh, gotesc
 
   w := 77
   infh := Input()
@@ -276,6 +279,7 @@ PROC termwidth()
   Write(outfh, req, 4)
 
   np := 0
+  gotesc := FALSE
   done := FALSE
   IF WaitForChar(infh, 500000) = FALSE THEN done := TRUE
   WHILE done = FALSE
@@ -283,8 +287,13 @@ PROC termwidth()
       done := TRUE
     ELSE
       c := b[0]
-      IF c = $9B
-        np := 0                              -> report start
+      IF gotesc
+        gotesc := FALSE
+        IF c = "[" THEN np := 0              -> ESC [ : 7-bit CSI introducer
+      ELSEIF c = 27
+        gotesc := TRUE                       -> maybe a 7-bit CSI (ESC [)
+      ELSEIF c = $9B
+        np := 0                              -> 8-bit CSI introducer
       ELSEIF (c >= "0") AND (c <= "9")
         IF np < 8 THEN params[np] := (params[np] * 10) + (c - "0")
       ELSEIF c = ";"
@@ -803,4 +812,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.1 (17.7.26) E build',0
+version: CHAR '$VER: ls 0.2 (20.7.26) E build',0
