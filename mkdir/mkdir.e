@@ -179,16 +179,22 @@ ENDPROC
 
 /* Plain mode: create the directory directly. Its parent must exist,
    and an already-existing target is an error -- both surface as the
-   dos.library fault (Object already exists / Object not found). */
+   dos.library fault (Object already exists / Object not found), and
+   PrintFault supplies the single trailing newline. Grab IoErr() BEFORE
+   the WriteF: a successful Write() zeroes IoErr on real AmigaDOS, so
+   reading it afterwards feeds PrintFault a 0 -- which prints nothing at
+   all, not even the newline (vamos doesn't clobber it, which is how
+   this slipped through). */
 PROC makeone(path:PTR TO CHAR)
-  DEF lock
+  DEF lock, err
   lock := CreateDir(path)
   IF lock
     UnLock(lock)
     RETURN
   ENDIF
+  err := IoErr()
   WriteF('mkdir: \s: ', path)
-  PrintFault(IoErr(), NIL)
+  PrintFault(err, NIL)
   setrc(RETURN_ERROR)
 ENDPROC
 

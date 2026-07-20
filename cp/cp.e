@@ -340,8 +340,9 @@ PROC prepfile(srcpath:PTR TO CHAR, tpath:PTR TO CHAR)
   ENDIF
   IF force
     IF DeleteFile(tpath) = FALSE
+      err := IoErr()
       WriteF('cp: cannot replace \s: ', tpath)
-      PrintFault(IoErr(), NIL)
+      PrintFault(err, NIL)
       setrc(RETURN_ERROR)
       RETURN FALSE
     ENDIF
@@ -438,8 +439,9 @@ PROC copydir(src:PTR TO CHAR, dst:PTR TO CHAR) HANDLE
 
   lock := Lock(src, ACCESS_READ)
   IF lock = NIL
+    err := IoErr()
     WriteF('cp: \s: ', src)
-    PrintFault(IoErr(), NIL)
+    PrintFault(err, NIL)
     setrc(RETURN_WARN)
     RETURN
   ENDIF
@@ -502,7 +504,7 @@ ENDPROC
    effort; the datestamp is left as creation time, since populating
    the directory would only touch it again). */
 PROC ensuredir(src:PTR TO CHAR, dst:PTR TO CHAR)
-  DEF dlock, slock, isdir, prot, comm[80]:ARRAY OF CHAR, have
+  DEF dlock, slock, isdir, prot, comm[80]:ARRAY OF CHAR, have, err
 
   dlock := Lock(dst, ACCESS_READ)
   IF dlock
@@ -530,8 +532,9 @@ PROC ensuredir(src:PTR TO CHAR, dst:PTR TO CHAR)
 
   dlock := CreateDir(dst)
   IF dlock = NIL
+    err := IoErr()
     WriteF('cp: cannot create \s: ', dst)
-    PrintFault(IoErr(), NIL)
+    PrintFault(err, NIL)
     setrc(RETURN_ERROR)
     RETURN FALSE
   ENDIF

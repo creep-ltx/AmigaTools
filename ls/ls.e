@@ -317,7 +317,7 @@ ENDPROC w
 /* One command-line argument: a pattern lists its matches, a plain
    directory lists its contents, a plain file lists itself. */
 PROC listpath(path:PTR TO CHAR)
-  DEF lock, isdir, wild
+  DEF lock, isdir, wild, err
 
   wild := ParsePatternNoCase(path, gpatbuf, 1024) = 1
   IF wild
@@ -327,8 +327,9 @@ PROC listpath(path:PTR TO CHAR)
 
   lock := Lock(path, ACCESS_READ)
   IF lock = NIL
+    err := IoErr()
     WriteF('ls: cannot access \s: ', path)
-    PrintFault(IoErr(), NIL)
+    PrintFault(err, NIL)
     setrc(RETURN_WARN)
     RETURN
   ENDIF
@@ -420,8 +421,9 @@ PROC listdir(path:PTR TO CHAR) HANDLE
 
   lock := Lock(path, ACCESS_READ)
   IF lock = NIL
+    err := IoErr()
     WriteF('ls: cannot access \s: ', path)
-    PrintFault(IoErr(), NIL)
+    PrintFault(err, NIL)
     setrc(RETURN_WARN)
     RETURN
   ENDIF

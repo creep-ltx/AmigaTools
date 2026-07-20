@@ -319,8 +319,9 @@ PROC moveone(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock)
         IF overwrite
           -> BACKUP OVERWRITE: sanctioned to replace a stale .mvbak
           IF DeleteFile(gbak)=FALSE
+            err := IoErr()
             WriteF('mv: cannot replace \s: ', gbak)
-            PrintFault(IoErr(), NIL)
+            PrintFault(err, NIL)
             setrc(RETURN_ERROR)
             RETURN
           ENDIF
@@ -333,15 +334,17 @@ PROC moveone(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock)
         ENDIF
       ENDIF
       IF Rename(gtarget, gbak)=FALSE
+        err := IoErr()
         WriteF('mv: cannot back up \s: ', gtarget)
-        PrintFault(IoErr(), NIL)
+        PrintFault(err, NIL)
         setrc(RETURN_ERROR)
         RETURN
       ENDIF
     ELSEIF overwrite
       IF DeleteFile(gtarget)=FALSE
+        err := IoErr()
         WriteF('mv: cannot replace \s: ', gtarget)
-        PrintFault(IoErr(), NIL)
+        PrintFault(err, NIL)
         setrc(RETURN_ERROR)
         RETURN
       ENDIF
@@ -371,7 +374,7 @@ ENDPROC
    over protection bits and datestamp, delete the source. A failed or
    broken copy deletes the partial target file. */
 PROC copymove(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock) HANDLE
-  DEF fhin=NIL, fhout=NIL, n, partial
+  DEF fhin=NIL, fhout=NIL, n, partial, err
 
   partial := FALSE
 
@@ -403,8 +406,9 @@ PROC copymove(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock) HANDLE
   SetFileDate(gtarget, {ifib.datestamp})
 
   IF DeleteFile(srcpath)=FALSE
+    err := IoErr()
     WriteF('mv: copied to \s but could not delete \s: ', gtarget, srcpath)
-    PrintFault(IoErr(), NIL)
+    PrintFault(err, NIL)
     setrc(RETURN_WARN)
   ENDIF
 
