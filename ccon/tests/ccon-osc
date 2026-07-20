@@ -1,0 +1,2 @@
+]0;retitled by OSC - scroll back, suffix must appendThe title above should have changed the moment this printed.
+Now Shift+Up: expect [scrollback -n] APPENDED to the new title.

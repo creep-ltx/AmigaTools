@@ -19,8 +19,14 @@
 /cfile/layout binary
 /cfile/console-and-view-layout binary
 
-# CCON's console test files are raw escape bytes -- keep them exact
+# CCON's console test files are fed to the console byte-for-byte --
+# escape sequences, and bare CRs that are overprints, not line ends
 /ccon/tests/ccon-b1-fill binary
+/ccon/tests/ccon-bisect binary
+/ccon/tests/ccon-ichdch binary
+/ccon/tests/ccon-osc binary
+/ccon/tests/ccon-progress binary
+/ccon/tests/ccon-styles binary
 
 # CTerm's art mockups are raw high-bit bytes -- keep them exact
 /cterm/cterm-mockup binary

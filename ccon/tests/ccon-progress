@@ -1,0 +1,5 @@
+progress overprints, expect: ccbbaaaaaa
+aaaaaaaaaabbbbcc
+shrinking counter, expect: 9%%% (leftovers are normal, no theft)
+100%99%9%
+--- end ---

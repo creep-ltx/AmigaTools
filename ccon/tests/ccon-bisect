@@ -1,0 +1,11 @@
+t1 CR+move+print, expect: 01234XYZ89
+0123456789[5CXYZ
+t2 pure CR overprint, expect: XYZ3456789
+0123456789XYZ
+t3 move-left+print, expect: 0123456Q89
+0123456789[3DQ
+t4 insert only, expect: 01234   56789
+0123456789[5C[3@
+t5 delete only, expect: 0123489
+0123456789[5C[3P
+--- end ---

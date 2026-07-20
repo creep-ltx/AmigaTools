@@ -70,10 +70,28 @@ wide the window is.
 `ccon-b1-fill` contains raw escape bytes and is marked `binary` in
 `.gitattributes` so the bytes stay exact.
 
-## Related, still only on the Amiga side
+## The older console tests - run on the Amiga
 
-`S:ccon-bisect`, `S:ccon-progress`, `S:ccon-ichdch`, `S:ccon-styles`
-and `S:ccon-osc` are the older console tests. `ccon-bisect`,
-`ccon-progress` and `ccon-ichdch` are the regression check for this
-area - they all passed after the 1.2b3 fix. They are not in the repo
-yet and would be worth copying here for the same reason these are.
+Same idea, written earlier for other fixes. Copy into `S:` and run
+with `Type`, e.g. `Type S:ccon-bisect`. Each one prints what it
+expects on the line above what it actually did, so a pass is just
+"the two lines match".
+
+- **ccon-bisect** - five overprint cases (carriage return, cursor
+  moves, insert, delete). This is the main regression check for the
+  edit line and the scrollback model: if a change breaks the console's
+  handling of client text, this is usually what notices.
+- **ccon-progress** - progress-bar style overprints, the kind a
+  program makes when it rewrites `50%` into `51%` on the same row.
+- **ccon-ichdch** - insert-character and delete-character.
+- **ccon-styles** - italic, underline, inverse and colour.
+- **ccon-osc** - a program retitling the window, and the scrollback
+  indicator appending to that new title rather than stomping it.
+
+All three of the first ones passed after the 1.2b3 fix; they are the
+gate to re-run whenever the edit line or the model changes.
+
+These are fed to the console byte for byte - the escape sequences and
+the bare carriage returns are the test - so they are marked `binary`
+in `.gitattributes` and must not be "tidied up" by anything that
+rewrites line endings.

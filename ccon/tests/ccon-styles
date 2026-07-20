@@ -1,0 +1,5 @@
+--- CCON v1.1 style test (type me into a CCON window) ---
+[3mitalic[0m  [4munderline[0m  [7minverse[0m  plain
+[3;4mitalic+underline[0m  [1;31;4mbold red underline[0m
+[33;7myellow inverse[0m  [32;3mgreen italic[23m still green, upright[0m
+--- after this line everything is plain again ---

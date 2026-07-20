@@ -1,0 +1,5 @@
+insert: expect 01234XYZ56789
+0123456789[5C[3@XYZ
+delete: expect 0123489
+0123456789[5C[3P
+--- done ---
