@@ -79,7 +79,12 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
-      TY_ANSI=6
+      TY_ANSI=6,
+      -> per-member cache status for deferred archive writes (0.3b3):
+      -> a member is CLEAN, flagged for DELETE at commit, or is a new
+      -> member ADDed since entry and not yet written. Set by the write
+      -> verbs when ARCWRITE is ONEXIT; committed on leaving the archive.
+      MST_CLEAN=0, MST_DEL=1, MST_ADD=2
 
 DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     edirs[1000]:ARRAY OF CHAR,    -> nonzero = entry is a directory
@@ -126,6 +131,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     cmodel=NIL, cmrow=0,    -> its text model: the scrollback
     cfgleft[300]:STRING, cfgright[300]:STRING,    -> start paths
     savedirs=TRUE,          -> rewrite the config with them on quit
+    arcwrite=FALSE,         -> ARCWRITE key: FALSE = DIRECT (repack per
+                            -> edit), TRUE = ONEXIT (batch, commit on
+                            -> leave/quit). Read but not yet acted on -
+                            -> the batched write path lands in 0.3b3.
     cfgfont[40]:STRING,     -> FONT key, applied by the grid build
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
@@ -138,6 +147,7 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     arcpath[2]:ARRAY OF LONG, arcsub[2]:ARRAY OF LONG,
     amem[2]:ARRAY OF LONG,     -> New()'d LONG[] of member-path String ptrs
     amsz[2]:ARRAY OF LONG,     -> New()'d LONG[] of member sizes
+    amst[2]:ARRAY OF LONG,     -> New()'d LONG[] of MST_* status per member
     amcnt[2]:ARRAY OF LONG,    -> members cached for the pane
     rc=0
 
@@ -152,6 +162,7 @@ PROC initpanes()
     IF (arcsub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     amem[p] := NIL
     amsz[p] := NIL
+    amst[p] := NIL
     amcnt[p] := 0
     ealloc[p] := 0
     ecount[p] := 0
@@ -278,6 +289,9 @@ PROC loadconfig()
           ELSEIF StrCmp(key, 'SAVEDIRS')
             UpperStr(val)
             savedirs := StrCmp(val, 'ON')
+          ELSEIF StrCmp(key, 'ARCWRITE')
+            UpperStr(val)
+            arcwrite := StrCmp(val, 'ONEXIT')    -> else DIRECT
           ELSEIF StrCmp(key, 'FONT')
             StrCopy(cfgfont, val)
           ENDIF
@@ -355,7 +369,7 @@ PROC saveconfig()
   IF n = 0
     StringF(line, '; CFile configuration - LEFT/RIGHT start paths,\n')
     wline(fh, line)
-    StringF(line, '; SAVEDIRS ON|OFF, FONT name/size\n')
+    StringF(line, '; SAVEDIRS ON|OFF, ARCWRITE DIRECT|ONEXIT, FONT name/size\n')
     wline(fh, line)
     StringF(line, 'SAVEDIRS ON\n')
     wline(fh, line)
@@ -416,6 +430,21 @@ ENDPROC EstrLen(ppath[p]) = 0
 PROC inarchive(p)
 ENDPROC EstrLen(arcpath[p]) > 0
 
+-> TRUE if the pane's archive carries uncommitted edits: any cached
+-> member flagged for deletion, or a member added since entry. Drives
+-> the "modified" tag on the border row and, later, the commit on exit.
+PROC arcdirty(p)
+  DEF st:PTR TO LONG, k
+  IF inarchive(p) = FALSE THEN RETURN FALSE
+  IF amst[p] = NIL THEN RETURN FALSE
+  st := amst[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      IF st[k] <> MST_CLEAN THEN RETURN TRUE
+    ENDFOR
+  ENDIF
+ENDPROC FALSE
+
 -> drop the member cache a pane built on entering an archive
 PROC freearccache(p)
   DEF a:PTR TO LONG, i
@@ -430,6 +459,10 @@ PROC freearccache(p)
   IF amsz[p]
     Dispose(amsz[p])
     amsz[p] := NIL
+  ENDIF
+  IF amst[p]
+    Dispose(amst[p])
+    amst[p] := NIL
   ENDIF
   amcnt[p] := 0
 ENDPROC
@@ -696,7 +729,8 @@ PROC loadarchive(p, arcfile)
   freearccache(p)
   amem[p] := New(MAXMEM * 4)
   amsz[p] := New(MAXMEM * 4)
-  IF (amem[p] = NIL) OR (amsz[p] = NIL)
+  amst[p] := New(MAXMEM * 4)    -> New() clears, so every member is CLEAN
+  IF (amem[p] = NIL) OR (amsz[p] = NIL) OR (amst[p] = NIL)
     freearccache(p)
     RETURN FALSE
   ENDIF
@@ -824,7 +858,8 @@ ENDPROC FALSE
 -> paths, filtered to arcsub and cut at the next "/" so each level
 -> shows just its own files and the subdirectories one step down.
 PROC readarcdir(p)
-  DEF a:PTR TO LONG, z:PTR TO LONG, k, m:PTR TO CHAR, pfx[CPATHLEN]:STRING,
+  DEF a:PTR TO LONG, z:PTR TO LONG, st:PTR TO LONG, k, m:PTR TO CHAR,
+      pfx[CPATHLEN]:STRING,
       pl, rest:PTR TO CHAR, sl, comp[200]:STRING, e
   ecount[p] := 0
   efail[p] := FALSE
@@ -839,10 +874,13 @@ PROC readarcdir(p)
   ENDIF
   a := amem[p]
   z := amsz[p]
+  st := amst[p]
   IF amcnt[p] > 0
     FOR k := 0 TO amcnt[p] - 1
       m := a[k]
-      IF (pl = 0) OR ncprefix(m, pfx, pl)
+      -> a member queued for deletion is gone from the view already;
+      -> the pane shows what the archive will be once committed
+      IF (st[k] <> MST_DEL) AND ((pl = 0) OR ncprefix(m, pfx, pl))
         rest := m + pl
         IF rest[0]    -> not the level's own directory entry
           sl := -1
@@ -1367,6 +1405,12 @@ PROC panefield(p, dst)
   IF (nm := markcount(p)) > 0
     fmtbytes(sz, markbytes(p))
     StringF(dst, '\d* \s', nm, sz)
+    RETURN
+  ENDIF
+  -> an archive with uncommitted edits flags itself here (there is no
+  -> free space to show inside one); the edits commit on leaving it
+  IF arcdirty(p)
+    StrCopy(dst, 'modified')
     RETURN
   ENDIF
   IF (fb := freebytes(p)) >= 0
