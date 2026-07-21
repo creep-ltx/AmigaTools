@@ -380,7 +380,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> anchor. Source side is a ring row + column, destination side a
     -> LINEAR dest row + column (converted to a screen row at the end).
     rftr[2]:ARRAY OF LONG, rftc[2]:ARRAY OF LONG,
-    rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG
+    rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG,
+    -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
+    -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
+    -> DOS re-mounts a fresh handler on the next open). ihdevopen tracks
+    -> that input.device actually opened - ihreq alone cannot say so,
+    -> since it is created before the OpenDevice that may fail.
+    dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
@@ -403,6 +409,7 @@ PROC main()
   pkt := msg.ln.name              -> a packet rides in its message's ln_Name
 
   dnode := Shl(pkt.arg3, 2)       -> BPTR to our DeviceNode
+  mydnode := dnode                -> B5: the DIE handler clears dn_Task
   -> M9: one binary, two devices - a mountlist stanza with
   -> Startup = "RAW" (CCON-mountlist's CRAW: entry) makes this
   -> instance open its streams raw by default, the RAW: counterpart.
@@ -512,6 +519,7 @@ PROC main()
       ihreq := CreateIORequest(ihport, SIZEOF iostd)
       IF ihreq
         IF OpenDevice('input.device', 0, ihreq, 0) = 0
+          ihdevopen := TRUE       -> B5: matched by killhandler's CloseDevice
           ihis := New(SIZEOF is)
           IF ihis
             ihis.ln.type := NT_INTERRUPT
@@ -530,7 +538,11 @@ PROC main()
   ENDIF
 
   psig := Shl(1, port.sigbit)
-  WHILE TRUE
+  -> B5: was WHILE TRUE - now ACTION_DIE can end the loop. dieing is set
+  -> inside dopkt when an unmount arrives and no console is open; the
+  -> current packet/event drain finishes, then the loop falls out to
+  -> killhandler() below.
+  WHILE dieing = FALSE
     wsig := 0
     c := conlist                  -> M10b: every console's UserPort
     WHILE c                       -> joins the wait mask
@@ -605,6 +617,75 @@ PROC main()
       UNTIL msg = NIL
     ENDIF
   ENDWHILE
+  killhandler()                 -> B5: release exec resources, then E's
+ENDPROC                         -> exit (CLEANUPALL) frees the New memory
+
+-> B5: release the EXEC resources that E's exit does NOT track - the
+-> input.device handler, the three devices, the message ports, the
+-> library and the signals. Everything allocated with New()/String()
+-> (ghist, ihring, ihis, fsfib/fsname's backing, fspkt, clipbuf, and
+-> every console's buffers) rides E's memory list and is freed
+-> automatically when main() returns (CLEANUPALL -> FREEBUFFERS,
+-> verified in E-VO.S); freeing it here as well would double-free.
+-> ORDER: the input.device interrupt comes out FIRST, before E frees
+-> ihis/ihring underneath a still-live handler. CloseDevice before
+-> DeleteIORequest before DeleteMsgPort throughout.
+PROC killhandler()
+  IF ihon                       -> the chain handler was added
+    ihreq.command := IND_REMHANDLER
+    ihreq.data := ihis
+    DoIO(ihreq)
+    ihon := FALSE
+  ENDIF
+  IF ihdevopen                  -> input.device actually opened
+    CloseDevice(ihreq)
+    ihdevopen := FALSE
+  ENDIF
+  IF ihreq
+    DeleteIORequest(ihreq)
+    ihreq := NIL
+  ENDIF
+  IF ihport
+    DeleteMsgPort(ihport)
+    ihport := NIL
+  ENDIF
+  IF keymapbase
+    CloseLibrary(keymapbase)
+    keymapbase := NIL
+  ENDIF
+  IF ihsigbit >= 0
+    FreeSignal(ihsigbit)
+    ihsigbit := -1
+  ENDIF
+  IF fhsigbit >= 0
+    FreeSignal(fhsigbit)
+    fhsigbit := -1
+  ENDIF
+  -> clipboard.device (M7): opened lazily, so treq/clipreq being
+  -> non-NIL means their OpenDevice SUCCEEDED (setup nils them on
+  -> failure), unlike input.device above.
+  IF clipreq
+    CloseDevice(clipreq)
+    DeleteIORequest(clipreq)
+    clipreq := NIL
+  ENDIF
+  IF clipport
+    DeleteMsgPort(clipport)
+    clipport := NIL
+  ENDIF
+  IF treq                       -> timer.device
+    CloseDevice(treq)
+    DeleteIORequest(treq)
+    treq := NIL
+  ENDIF
+  IF tport
+    DeleteMsgPort(tport)
+    tport := NIL
+  ENDIF
+  IF fsport                     -> the tab-completion reply port
+    DeleteMsgPort(fsport)
+    fsport := NIL
+  ENDIF
 ENDPROC
 
 -> M10a: a console starts life here. New() zeroed it; these are the
@@ -1039,6 +1120,23 @@ PROC dopkt(pkt:PTR TO dospacket)
     -> Seek on a console fails-with-style: -1 result, reason in res2
     -> (the Guru Book rule, same as the AROS con-handler)
     ReplyPkt(pkt, DOSTRUE, ERROR_ACTION_NOT_KNOWN)
+  CASE ACTION_DIE
+    -> audit B5: unmount/shutdown. Refuse while any console is open -
+    -> a live client still holds file handles and window resources, and
+    -> DOS's own Unmount already declines a busy device, but check
+    -> ourselves too. With nothing open, agree: clear our DeviceNode's
+    -> dn_Task so DOS routes the next open to a FRESH mount (reloading
+    -> the seglist) rather than to a process that is exiting, reply
+    -> DOSTRUE, and set dieing so main()'s loop falls out to
+    -> killhandler(). No new packets arrive after dn_Task is cleared;
+    -> any already queued drain normally as this iteration finishes.
+    IF conlist <> NIL
+      ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_IN_USE)
+    ELSE
+      IF mydnode THEN mydnode.task := NIL
+      dieing := TRUE
+      ReplyPkt(pkt, DOSTRUE, 0)
+    ENDIF
   CASE ACTION_IS_FILESYSTEM
     ReplyPkt(pkt, DOSFALSE, 0)  -> we are a console, not a filesystem
   CASE ACTION_EXAMINE_FH
@@ -6233,4 +6331,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b12 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b13 CCON: LTX console handler', 0
