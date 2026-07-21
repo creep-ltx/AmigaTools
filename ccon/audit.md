@@ -22,7 +22,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | P1, P2, P4, H1, H2, H5 | **fixed in 1.2b2** (batch 1, boot-tested 21.7.26) |
 | B1, H4 | **fixed in 1.2b6** (batch 2, harness + A/B hardware proof, corrected after a 1.2b3 regression - see B1) |
 | B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
-| B3 | open - batch 4, in progress |
+| B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
 | P5 | open - batch 5 |
 | B5, B6 | open - batch 6, decision first |
 | B7 | open - new finding 21.7.26, needs a decision (structural, not bounded) |
@@ -196,11 +196,22 @@ rather than "Ed missed a key".
 reports) that stops reading. `ihreport` is ~50 bytes/event against
 `INQMAX` 2048 - roughly 40 events fills it.
 
-**Fix:** make reports atomic. Either check
-`inavail() + needed < INQMAX` before the first byte and drop the whole
-report, or add `enqueuestr(buf, len)` that does the check once. The
-report builders already know their length (`StrLen(b)` + introducer +
-terminator).
+**Fix as applied (1.2b8):** `inqroom(n)` predicate
+(`(INQMAX-1) - inavail() >= n`), asked once per report before any byte
+of it is written. `rawcsikey()`'s branches each know their own fixed
+length once `sh` is resolved, so each got its own guard rather than a
+shared `enqueuestr()` buffer-and-length call.
+
+**Status: FIXED in 1.2b8.** A/B pair with `INQMAX` shrunk to 64 and
+the three guards stripped back out on the broken side (source diff
+verified to be exactly those changes). The broken build showed a
+report with a field merged mid-record
+(`...911467|2;0;255;327682;0` - a stray digit landed inside what
+should have been a fresh value), confirming the byte-drop truncation
+this finding describes. The fixed build's comparison round used a
+different drive and wasn't a matched A/B, so this rests on the one
+positive repro plus the fix's own narrowness, not a clean before/after
+pair like B1/B2 got.
 
 ---
 

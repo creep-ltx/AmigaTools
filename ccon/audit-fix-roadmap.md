@@ -269,9 +269,41 @@ two boot tests are not needed, but two repros are.
 
 ---
 
-## Batch 4 - atomic reports (B3)
+## Batch 4 - atomic reports (B3) - DONE (1.2b8, 21.7.26)
 
 **Finding:** B3
+
+**Outcome:** `inqroom(n)` landed as the predicate (`(INQMAX-1) -
+inavail() >= n`), not a separate `enqueuestr()` - `rawcsikey()`'s
+branches each know a different fixed length depending on `sh`, which
+fits a per-branch guard-then-enqueue-loop better than a single
+concatenate-then-call helper. All three sites now measure their body
+before writing a single byte and bail whole on `inqroom() = FALSE`.
+
+**Verify, done as an A/B pair (not just reasoned).** A throwaway
+`INQMAX=64` build with the three guards stripped back out
+(`1.2b8-INQ64-BROKEN`) against the same shrink with the guards kept
+(`1.2b8-INQ64-FIXED`) - source diff verified to be exactly the eight
+guard lines plus the version string, same discipline as the B1 pair.
+
+Round 1 (broken): playing in Ed then dropping back to the Shell showed
+leaked `ihreport()` text - expected either way, since Ed reads reports
+in raw mode fast enough this is normally invisible, and leftover bytes
+get echoed once a cooked reader (the Shell) picks them up - but one
+report showed a field merged mid-record (`...911467|2;0;255;327682;0`,
+where a stray `2` landed inside what should have been a fresh `32768`),
+confirming the byte-drop truncation B3 describes.
+
+Round 2 (fixed) used a different drive (window resize + key-mashing
+rather than round 1's Ed+mouse movement) and showed only short
+unstructured fragments, not `ihreport()`'s `;`-delimited format at all
+- consistent with ordinary keystrokes, not report corruption, but not
+a matched comparison with round 1 either. Not repeated with a matched
+drive; shipping on round 1's positive repro plus the fix's own
+narrowness (whole-or-nothing is straightforwardly correct on its
+terms) rather than insisting on a clean round 2.
+
+The original plan follows, kept for the record.
 
 The first batch that adds a function rather than editing one.
 

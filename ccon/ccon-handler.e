@@ -3304,8 +3304,13 @@ PROC sendreport()
   -> With ESC[ here, ls read the '[' ($5B, >= $40) as the report's final
   -> byte, stopped after two bytes, and the 1;1;rows;cols tail leaked
   -> into the input queue as a phantom "1" command after every ls.
-  enqueue($9B)
+  -> audit B3: the body is built and measured BEFORE anything is
+  -> queued, so inqroom() can ask for the whole report - introducer +
+  -> body + space + "r" - in one go. Whole or nothing, never a report
+  -> cut short partway if the queue happened to fill mid-write.
   StringF(b, '1;1;\d;\d', curcon.rows, curcon.cols)
+  IF inqroom(StrLen(b) + 3) = FALSE THEN RETURN
+  enqueue($9B)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
   ENDFOR
@@ -4504,34 +4509,45 @@ ENDPROC
 -> choice, not something broken inside More. Every one of these
 -> used to start with a bare enqueue($9B); now they all start with
 -> ESC(27) then '['.
+-> audit B3: each branch below knows its own exact byte count before
+-> writing a single one (3-5 bytes, fixed once sh is known), so each
+-> asks inqroom() for that count first and bails whole - never a bare
+-> ESC or a stray CSI introducer left sitting in the queue with the
+-> letter that would have made it a real sequence dropped behind it.
 PROC rawcsikey(code, qual)
   DEF sh
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   IF code = RK_UP
+    IF inqroom(3) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     IF sh THEN enqueue("T") ELSE enqueue("A")
   ELSEIF code = RK_DOWN
+    IF inqroom(3) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     IF sh THEN enqueue("S") ELSE enqueue("B")
   ELSEIF code = RK_RIGHT
+    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("@") ELSE enqueue("C")
   ELSEIF code = RK_LEFT
+    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("A") ELSE enqueue("D")
   ELSEIF (code >= $50) AND (code <= $59)     -> F1..F10
+    IF inqroom(IF sh THEN 5 ELSE 4) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     IF sh THEN enqueue("1")
     enqueue(48 + (code - $50))
     enqueue("~")
   ELSEIF code = $5F                          -> Help
+    IF inqroom(4) = FALSE THEN RETURN TRUE
     enqueue(27)
     enqueue("[")
     enqueue("?")
@@ -4929,11 +4945,14 @@ ENDPROC n
 -> the freezes themselves were the UserPort fight, solved above)
 PROC ihreport(e:PTR TO ihev)
   DEF b[64]:STRING, i
-  enqueue($9B)
+  -> audit B3: measure the body before queuing anything, same reason
+  -> as sendreport() - whole report or none, never truncated mid-CSI.
   StringF(b, '\d;\d;\d;\d;\d;\d;\d;\d',
           e.cls, e.sub, e.code AND $FFFF, e.qual AND $FFFF,
           Shr(e.addr, 16) AND $FFFF, e.addr AND $FFFF,
           e.secs AND $7FFFFFFF, e.mics)
+  IF inqroom(StrLen(b) + 2) = FALSE THEN RETURN
+  enqueue($9B)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
   ENDFOR
@@ -5699,6 +5718,16 @@ ENDPROC
 
 PROC inavail() IS (curcon.inqt - curcon.inqh + INQMAX) AND (INQMAX - 1)
 
+-> audit B3: true free space is INQMAX-1, not INQMAX - the ring always
+-> keeps one slot empty so a full queue can be told apart from an
+-> empty one (enqueue()'s own nt <> inqh check above). A caller that
+-> knows its whole message's length up front asks this ONCE and either
+-> writes the entire thing or drops it whole - never the byte-by-byte
+-> silent truncation enqueue() falls back to when nothing checks
+-> first, which used to hand CSI-parsing clients a truncated report if
+-> the queue filled partway through one.
+PROC inqroom(n) IS ((INQMAX - 1) - inavail()) >= n
+
 -> reply queued reads while finished-line bytes (or an EOF) are there;
 -> a read gets at most one line - cooked semantics - and a short buffer
 -> gets the rest of the line on its next read
@@ -5730,4 +5759,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b7 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b8 CCON: LTX console handler', 0
