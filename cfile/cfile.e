@@ -71,6 +71,8 @@ MODULE 'intuition/intuition','intuition/screens',
        'dos/datetime','dos/dostags','devices/inputevent','diskfont'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
+      FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
+      CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
       EDMAXL=8192, EDLW=200,    -> editor: line count / line length caps
       CMAXL=4000,    -> console scrollback, lines of 80
       MAXMEM=1500,   -> members cached when going inside one lha archive
@@ -88,6 +90,8 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     esel[2]:ARRAY OF LONG,
     etop[2]:ARRAY OF LONG,        -> first visible entry (scroll)
     efail[2]:ARRAY OF LONG,       -> directory could not be read
+    pfree[2]:ARRAY OF LONG,       -> cached free bytes, -1 = none to show
+    pfreeok[2]:ARRAY OF LONG,     -> 0 = cache stale, ask Info() again
     ppath[2]:ARRAY OF LONG,
     active=0,
     scr=NIL:PTR TO screen,
@@ -469,6 +473,59 @@ PROC markcount(p)
   ENDIF
 ENDPROC n
 
+-> byte total of the marked set (directories count as 0 - their real
+-> size needs a treestat walk, which the border row must not do)
+PROC markbytes(p)
+  DEF i, b, n=0
+  b := p * MAXENT
+  IF ecount[p] > 0
+    FOR i := 0 TO ecount[p] - 1
+      IF emark[b + i] THEN n := n + esize[b + i]
+    ENDFOR
+  ENDIF
+ENDPROC n
+
+-> bytes as a short human string, at most 5 characters so it fits a
+-> narrow column: plain under 1K, then K/M/G with one decimal while
+-> the whole part is a single digit ("937", "9.1K", "123K", "1.4M").
+-> Integer math throughout - the remainder is scaled down before the
+-> multiply so an M or G value cannot overflow a LONG.
+PROC fmtbytes(dst, n)
+  DEF unit, whole, rem, frac, suf
+  IF n < 1024
+    StringF(dst, '\d', n)
+    RETURN
+  ENDIF
+  IF n < 1048576
+    unit := 1024
+    suf := 'K'
+  ELSEIF n < 1073741824
+    unit := 1048576
+    suf := 'M'
+  ELSE
+    unit := 1073741824
+    suf := 'G'
+  ENDIF
+  -> Div/Mul throughout: these are byte counts, and E's / and * are
+  -> the 16-bit operators
+  whole := Div(n, unit)
+  rem := n - Mul(whole, unit)
+  IF whole < 10
+    IF unit = 1024
+      frac := Div(Mul(rem, 10), unit)
+    ELSE
+      -> rem can be just under 1G, so rem * 10 would wrap: scale it
+      -> and the unit down by 1K first, which still leaves 3 digits
+      -> of headroom under the one decimal we print
+      frac := Div(Mul(Div(rem, 1024), 10), Div(unit, 1024))
+    ENDIF
+    IF frac > 9 THEN frac := 9
+    StringF(dst, '\d.\d\s', whole, frac, suf)
+  ELSE
+    StringF(dst, '\d\s', whole, suf)
+  ENDIF
+ENDPROC
+
 -> case-insensitive name compare (AmigaDOS filenames are
 -> case-preserving but case-insensitive)
 PROC nccmp(a, b)
@@ -515,6 +572,11 @@ PROC sortpane(p)
       t := edirs[b + i]
       edirs[b + i] := edirs[b + m]
       edirs[b + m] := t
+      -> the size travels with its name, or the border-row total (and
+      -> any future size column) reads a neighbour's bytes
+      t := esize[b + i]
+      esize[b + i] := esize[b + m]
+      esize[b + m] := t
     ENDIF
   ENDFOR
 ENDPROC
@@ -850,6 +912,7 @@ PROC readvolumes(p)
 ENDPROC
 
 PROC readpane(p)
+  pfreeok[p] := FALSE    -> free space may have changed; re-ask Info()
   IF inarchive(p)
     readarcdir(p)
   ELSEIF involume(p)
@@ -1260,13 +1323,86 @@ PROC paneloc(p, dst)
   ENDIF
 ENDPROC
 
+-> free bytes on the volume a pane sits on, or -1 when there is no
+-> one volume to ask about (the volume list) or the question means
+-> nothing (inside an archive). Info() wants a longword-aligned
+-> InfoData and AllocDosObject has no type for one, so it comes from
+-> New(), which is longword-aligned.
+PROC freebytes(p)
+  DEF id:PTR TO infodata, lock=NIL, n=-1, nfree, bpb
+  -> Info() means a Lock, so on a floppy it can touch the disk; cache
+  -> the answer and only re-ask when readpane marks the pane stale
+  IF pfreeok[p] THEN RETURN pfree[p]
+  pfree[p] := -1
+  pfreeok[p] := TRUE
+  IF inarchive(p) THEN RETURN -1
+  IF EstrLen(ppath[p]) = 0 THEN RETURN -1
+  IF (id := New(SIZEOF infodata)) = NIL THEN RETURN -1
+  IF lock := Lock(ppath[p], SHARED_LOCK)
+    IF Info(lock, id)
+      bpb := id.bytesperblock
+      nfree := id.numblocks - id.numblocksused
+      IF nfree < 0 THEN nfree := 0
+      IF bpb < 1
+        n := -1
+      ELSEIF nfree > Div(2147483647, bpb)
+        n := 2147483647    -> past a LONG of bytes; fmtbytes says 1.9G
+      ELSE
+        n := Mul(nfree, bpb)
+      ENDIF
+    ENDIF
+    UnLock(lock)
+  ENDIF
+  Dispose(id)
+  pfree[p] := n
+ENDPROC n
+
+-> the border-row status field for one pane: the marked set's count
+-> and bytes while anything is marked, otherwise the volume's free
+-> space. At most 10 characters ("500* 1023K", "1023K free"). The
+-> '*' is the same glyph the pane puts in front of a marked name.
+PROC panefield(p, dst)
+  DEF nm, sz[12]:STRING, fb
+  StrCopy(dst, '')
+  IF (nm := markcount(p)) > 0
+    fmtbytes(sz, markbytes(p))
+    StringF(dst, '\d* \s', nm, sz)
+    RETURN
+  ENDIF
+  IF (fb := freebytes(p)) >= 0
+    fmtbytes(sz, fb)
+    StringF(dst, '\s free', sz)
+  ENDIF
+ENDPROC
+
 PROC drawpaths()
-  DEF p, full[620]:STRING, s[200]:STRING, l, x, j
+  DEF p, full[620]:STRING, s[200]:STRING, fld[20]:STRING,
+      l, x, j, fw, fx, hend, slot
   frow(5)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   FOR p := 0 TO 1
-    j := (IF p = 0 THEN panewl ELSE panewr) - 6    -> label room
+    x := IF p = 0 THEN 3 ELSE divcol + 4
+    hend := IF p = 0 THEN divcol - 1 ELSE ncols - 2
+    -> The status field lives in a FIXED slot at the right of the pane
+    -> half, so its width never steals path columns: whatever the count
+    -> or byte total, the path keeps the same room and does not reflow
+    -> as marks come and go. The slot is reserved whenever a field can
+    -> appear at all - i.e. not in the volume list, where there is no
+    -> free space to show and nothing can be marked. The path then owns
+    -> everything up to one clear column before the slot.
+    panefield(p, fld)
+    fw := EstrLen(fld)
+    IF involume(p)
+      slot := 0
+    ELSE
+      slot := FLDW
+    ENDIF
+    -> the slot's right edge is fixed at hend-1; its content is right-
+    -> aligned within it so the last digit always lands in the same cell
+    fx := hend - fw
+    j := hend - slot - 1 - x - 1
+    IF j < 1 THEN j := 1
     paneloc(p, full)
     l := EstrLen(full)
     IF l > j
@@ -1274,17 +1410,23 @@ PROC drawpaths()
     ELSE
       StrCopy(s, full)
     ENDIF
-    x := IF p = 0 THEN 3 ELSE divcol + 4
     Move(rp, x0 + (x * cw), bordy + baseline)
     Text(rp, ' ', 1)
     Text(rp, s, EstrLen(s))
     Text(rp, ' ', 1)
+    IF fw > 0
+      -> one space left of the field carves it out of the dash rail,
+      -> the way the path's own leading/trailing spaces do
+      Move(rp, x0 + ((fx - 1) * cw), bordy + baseline)
+      Text(rp, ' ', 1)
+      Text(rp, fld, fw)
+    ENDIF
   ENDFOR
   SetBPen(rp, 0)
 ENDPROC
 
 PROC drawrow(p, r)
-  DEF idx, x, y, s, l, pw
+  DEF idx, x, y, s, l, pw, i, mk, sz[12]:STRING, fw, nw
   x := panex(p)
   y := panetop + (r * ch)
   pw := Mul(panew(p), cw)
@@ -1302,30 +1444,52 @@ PROC drawrow(p, r)
     RETURN
   ENDIF
   IF idx >= ecount[p] THEN RETURN
-  s := enames[(p * MAXENT) + idx]
+  i := (p * MAXENT) + idx
+  mk := emark[i]
+  s := enames[i]
   l := EstrLen(s)
-  IF l > (panew(p) - (IF emark[(p * MAXENT) + idx] THEN 1 ELSE 0))
-    l := panew(p) - (IF emark[(p * MAXENT) + idx] THEN 1 ELSE 0)
+  -> the name gives up the size column's cells (and the '*' cell if
+  -> marked); the volume list has no size column, so names run full
+  IF involume(p)
+    nw := panew(p) - (IF mk THEN 1 ELSE 0)
+  ELSE
+    nw := panew(p) - CSZW - 1 - (IF mk THEN 1 ELSE 0)
   ENDIF
+  IF nw < 1 THEN nw := 1
+  IF l > nw THEN l := nw
   IF (p = active) AND (idx = esel[p])
     -> the bar keeps the entry's type colour: blue text for a
     -> directory, grey for a file (unless the fallback screen left
     -> dirpen = txtpen, which would vanish into the bar)
     SetAPen(rp, txtpen)
     RectFill(rp, x, y, x + pw - 1, y + ch - 1)
-    IF edirs[(p * MAXENT) + idx] AND (dirpen <> txtpen)
+    IF edirs[i] AND (dirpen <> txtpen)
       SetAPen(rp, dirpen)
     ELSE
       SetAPen(rp, 0)
     ENDIF
     SetBPen(rp, txtpen)
   ELSE
-    SetAPen(rp, IF edirs[(p * MAXENT) + idx] THEN dirpen ELSE txtpen)
+    SetAPen(rp, IF edirs[i] THEN dirpen ELSE txtpen)
     SetBPen(rp, 0)
   ENDIF
   Move(rp, x, y + baseline)
-  IF emark[(p * MAXENT) + idx] THEN Text(rp, '*', 1)
+  IF mk THEN Text(rp, '*', 1)
   Text(rp, s, l)
+  -> the size column, right-aligned at the pane edge: a file's bytes,
+  -> "<DIR>" for a directory not yet measured, its walked size once
+  -> '=' has measured it. Same pens as the name, so the selection bar
+  -> inverts it too.
+  IF involume(p) = FALSE
+    IF edirs[i] AND (esize[i] = 0)
+      StrCopy(sz, '<DIR>')
+    ELSE
+      fmtbytes(sz, esize[i])
+    ENDIF
+    fw := EstrLen(sz)
+    Move(rp, x + pw - Mul(fw, cw), y + baseline)
+    Text(rp, sz, fw)
+  ENDIF
   SetBPen(rp, 0)
 ENDPROC
 
@@ -4802,6 +4966,34 @@ PROC togglemark()
   ELSE
     drawrow(p, esel[p] - etop[p])
   ENDIF
+  drawpaths()    -> the marked count and bytes live on the border row
+ENDPROC
+
+-> '=': measure the selected real directory with treestat (the same
+-> walk the progress bar pre-counts with) and drop its byte total into
+-> esize, so the size column shows it in place of "<DIR>" and a marked
+-> dir now weighs into the border-row total. On demand only - walking
+-> every directory on entry would freeze CFile on a real drive. The
+-> figure lasts until the pane is re-read (which resets dirs to <DIR>).
+PROC sizedir()
+  DEF p, i, path[CPATHLEN]:STRING
+  p := active
+  IF involume(p) THEN RETURN
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  IF inarchive(p)
+    showmsg('directory sizing works on real directories only')
+    RETURN
+  ENDIF
+  i := (p * MAXENT) + esel[p]
+  IF edirs[i] = 0 THEN RETURN    -> a file already shows its size
+  buildfull(path, ppath[p], enames[i])
+  showmsg('measuring - please wait')
+  statbytes := 0
+  statfiles := 0
+  treestat(path, 0)
+  esize[i] := statbytes
+  clearmsg()    -> restores the paths row (marked total now includes it)
+  drawrow(p, esel[p] - etop[p])
 ENDPROC
 
 -> extract one file member of pane p's archive into T:CFile-x, path
@@ -5135,7 +5327,7 @@ PROC helpscreen()
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   y := 0
-  helptext('CFile 0.3b1', y)
+  helptext('CFile 0.3b2', y)
   helptext('Tab ........ switch pane', y + 2)
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 3)
   helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
@@ -5146,15 +5338,16 @@ PROC helpscreen()
   helptext('u .......... unpack archive(s), marks work', y + 9)
   helptext('p .......... pack into an archive (.lha/.lzx/.zip)', y + 10)
   helptext('Space ...... mark/unmark (ops take the marks if any)', y + 11)
-  helptext('c / C ...... copy to the other pane (C overwrites)', y + 12)
-  helptext('m / M ...... move to the other pane (M overwrites)', y + 13)
-  helptext('r .......... rename (marks: one at a time)', y + 14)
-  helptext('n .......... new file in the editor (name/ = dir)', y + 15)
-  helptext('Del / D .... delete, directories and all (asks first)', y + 16)
-  helptext(': .......... run a shell command here', y + 17)
-  helptext('? / Help ... this help', y + 18)
-  helptext('Esc ........ quit (asks first)', y + 19)
-  helptext('press any key', y + 21)
+  helptext('= .......... measure the selected directory (byte size)', y + 12)
+  helptext('c / C ...... copy to the other pane (C overwrites)', y + 13)
+  helptext('m / M ...... move to the other pane (M overwrites)', y + 14)
+  helptext('r .......... rename (marks: one at a time)', y + 15)
+  helptext('n .......... new file in the editor (name/ = dir)', y + 16)
+  helptext('Del / D .... delete, directories and all (asks first)', y + 17)
+  helptext(': .......... run a shell command here', y + 18)
+  helptext('? / Help ... this help', y + 19)
+  helptext('Esc ........ quit (asks first)', y + 20)
+  helptext('press any key', y + 22)
   waitkey()
   drawall()
 ENDPROC
@@ -5205,6 +5398,8 @@ PROC eventloop()
         dodelete()
       ELSEIF code = 32     -> Space: mark for a bulk copy/move/delete
         togglemark()
+      ELSEIF code = "="    -> measure the selected directory's size
+        sizedir()
       ELSEIF code = ":"    -> a shell command in the active directory
         docommand()
       ELSEIF (code = "u") OR (code = "U")
@@ -5358,4 +5553,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.3b1 (20.7.26) E build',0
+version: CHAR '$VER: CFile 0.3b2 (21.7.26) E build',0

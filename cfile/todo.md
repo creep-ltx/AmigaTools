@@ -4,6 +4,39 @@ What a file manager should have that CFile does not, roughly in the
 order the friction hits a daily driver. Keys marked (?) are
 suggestions, not decided.
 
+## Roadmap
+
+- **0.3b2 — sizes** (done, boot-tested 21.7.26): size column, `=` dir
+  sizing, free-space + marked totals on the border row.
+- **0.3b3 — deferred archive writes**: batch every archive edit and
+  commit once on leaving the archive / quitting, instead of re-streaming
+  the whole archive through lha per change. `ARCWRITE DIRECT|ONEXIT`
+  config key (default ONEXIT). Build the escape hatch (the config key,
+  inert) first, then dirty-flags on the member cache, deferred delete,
+  deferred edit/add, then the commit points + abort. Do this BEFORE lzx:
+  convert the write layer while lha is the only format in it, so lzx
+  drops into a layer already batched (and lzx's doubtful member-delete
+  may collapse into "omit on repack").
+- **0.3b4 — lzx inside**: listing parser + the four command shapes into
+  the batched layer; capture lzx's real output to a file and parse
+  against that, like lha got.
+
+## 0.3b2 — sizes (done)
+
+`fmtbytes` renders a byte count in <=5 chars ("937", "9.1K", "123K",
+"1.4M", "1.9G"). The border row carries a fixed-width status slot per
+pane: free space normally, the marked set's count + bytes while anything
+is marked. Each pane row shows a right-aligned size column — a file's
+bytes, "<DIR>" for a directory until `=` walks it (treestat) and drops
+the real total in, which then also weighs into the marked-set total.
+
+The sizes had been dead data since 0.1: `esize` was populated by readdir
+and arcadd but never displayed, and `sortpane` swapped names and
+dir-flags but NOT sizes — so the first thing to read `esize` (the border
+total) showed every file a neighbour's bytes. Fixed by swapping esize in
+sortpane too; it is now sort-tracked, so the size column and a future
+sort-by-size can rely on it.
+
 ## 0.3b1 — inside archives (done)
 
 `Right`/`Enter` on an lha archive goes inside it and the pane works
@@ -27,19 +60,14 @@ Four LhA 2.15 behaviours cost boot tests and are worth remembering:
   skips a member that already exists. Paths survive only through `-r`
   recursion of a directory, and replacing means delete-then-add.
 
-Follow-ups:
+Follow-ups (lzx/zip and batching are now the b4/b3 roadmap above):
 
-- [ ] **lzx / zip inside** — the architecture is format-agnostic apart
-      from the listing parser and four command shapes; each tool's
-      list format and per-member add/delete want the same dump-driven
-      verification lha got. lzx's member delete is the doubtful one.
-- [ ] **Batch the repacking** — every single change re-streams the
-      whole archive through lha. Fine at Amiga sizes, but editing
-      three members repacks three times; a "commit on exit" would
-      collapse that into one.
 - [ ] **Per-byte progress inside a file** — the bar ticks once per
       file, so one big member is a single jump. lha prints a
       `(done/total)` byte counter that could drive it finer.
+- [ ] **Archive dir sizing** — `=` refuses inside an archive (treestat
+      walks the real FS only), but a member subtree's size is a cheap
+      sum of amsz under the prefix. Could fill the column there too.
 
 ## 0.3 candidates — "fast in the hand"
 
@@ -60,10 +88,9 @@ Follow-ups:
       "Icons"). Without it, moved drawers and tools silently lose
       their icons. The most Amiga-specific gap.
 - [ ] **`s` sort options** — by name/size/date, reversed; dirs stay
-      first. (Long deferred.)
-- [ ] **Free space + marked totals** — bytes free on the volume and
-      the byte total of the marked set, in the border row. Info()
-      is cheap.
+      first. Size is now sort-tracked in sortpane, so sort-by-size is
+      just another entbefore tier. (Long deferred.)
+- [x] **Free space + marked totals** — done in 0.3b2, border row.
 - [ ] **`KEYMAP` config key** — e.g. `KEYMAP s` for a Swedish
       keymap when started without a Startup-Sequence. `C:` is a
       standard boot assign (present even bootless, unlike ENV:/T:),
@@ -78,11 +105,11 @@ Follow-ups:
 - [ ] **Comment editing** — the `i` window shows the FileNote but
       cannot edit it, though it already edits protection bits live.
       A natural extension of that window.
-- [ ] **Directory size on demand** — `i` on a directory byte-counts
-      it; treestat() already does exactly this walk for the
-      progress bar.
-- [ ] **Size/date columns** — the panes show names only; a toggle
-      for a size or date column could ride along with `s` sorting.
+- [x] **Directory size on demand** — done in 0.3b2 as `=` (fills the
+      size column via treestat), not the `i` window.
+- [~] **Size/date columns** — size column shipped in 0.3b2 (always on,
+      right-aligned). A date column is still open; would ride along
+      with `s` sorting.
 
 ## Bigger, later
 

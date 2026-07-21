@@ -25,6 +25,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live |
 | `Space` | mark/unmark the entry (and step down) |
+| `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
@@ -153,8 +154,12 @@ CFile opens its own 8-colour screen (like Workbench, made public as
 `CFILE`): grey background, black text, blue directories, black
 selection bar that keeps the entry's type colour. Each pane's path
 lives in the frame's border row; prompts and messages take that row
-over between guillemets and give it back afterwards. The volume list
-shows volumes first, assigns below them. Viewing ANSI art switches
+over between guillemets and give it back afterwards. Every row shows
+a size in its own right-hand column — a file's bytes, `<DIR>` for a
+directory until `=` measures it — and the border row shows the
+volume's free space, or, while anything is marked, the marked set's
+count and total. The volume list shows volumes first, assigns below
+them. Viewing ANSI art switches
 the palette to the classic ANSI colours and restores it on exit. If
 the screen cannot be opened, CFile falls back to a borderless window
 on the public screen without its own palette.
@@ -188,7 +193,9 @@ including new files from `n`, archive unpacking singly and in bulk,
 `:` commands, running executables, the live console with scrollback,
 and the config file end to end — custom fonts (a 7×7 and an 8-pixel
 MicroKnight, plus Topaz/8), live reload from an in-CFile edit, and
-`SAVEDIRS` preserving hand edits. The pack verb, the prompt-line
+`SAVEDIRS` preserving hand edits. The size column, `=` directory
+measuring, and the border row's free-space and marked totals were
+confirmed on the same install. The pack verb, the prompt-line
 `Shift` jumps and the `ENV:`/`T:` bootstrap have had the least
 testing.
 

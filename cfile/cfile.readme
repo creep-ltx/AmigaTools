@@ -33,6 +33,9 @@ KEYS
   i            info window: size, date, comment, protection bits -
                h s p a r w e d toggle the bits live
   Space        mark/unmark the entry (and step down)
+  =            measure the selected directory: its size replaces
+               "<DIR>" in the size column, and a measured directory
+               then counts towards the marked total
   c / C        copy the selection or marked set to the other pane
                (C overwrites collisions without asking)
   m / M        move likewise (same volume renames, across volumes
@@ -165,11 +168,14 @@ DISPLAY
   as CFILE): grey background, black text, blue directories, and a
   black selection bar that keeps the entry's type colour. Each
   pane's path lives in the frame's border row; prompts and messages
-  take that row over and give it back afterwards. The volume list
-  shows volumes first, assigns below them. Viewing ANSI art switches
-  the palette to the classic ANSI colours and restores it on exit.
-  If the screen cannot be opened, CFile falls back to a borderless
-  window on the public screen.
+  take that row over and give it back afterwards. Each row carries a
+  size in its own column - a file's bytes, "<DIR>" for a directory
+  until = measures it - and the border row shows the volume's free
+  space, or, while anything is marked, the marked set's count and
+  total. The volume list shows volumes first, assigns below them.
+  Viewing ANSI art switches the palette to the classic ANSI colours
+  and restores it on exit. If the screen cannot be opened, CFile falls
+  back to a borderless window on the public screen.
 
 BUILDING
 
