@@ -3493,32 +3493,69 @@ ENDPROC
 -> model), client cells COME BACK (they are).
 PROC eraseedit()
   DEF y, r, r1, x0, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j,
-      cc, n, ext
-  -> audit B1 (harness-verified, edanchortest.e): the paint extent is
-  -> TAKEN into locals and the fields cleared HERE, above both guards,
-  -> because a guard that returns early must still leave "there is no
-  -> editor paint on screen" behind it. The old code cleared them at
-  -> the BOTTOM, so either return left edlast/edext describing a paint
-  -> made at a DIFFERENT anchor - and drawedit's oldl > l loop then
-  -> zeroed that many model cells measured from the NEW anchor, which
-  -> is client text, not editor text. Exactly the theft pattern b9
-  -> closed, walking back in through the ancx >= cols guard added
-  -> after it. Harness: a cols-wide write parks ancx = cols (legal
-  -> pending wrap), the user types, Enter bails this proc, and the
-  -> commit's anchor lands a row down - five typed characters cost
-  -> five cells of whatever was already on that row.
-  -> NOT simply "zero the fields at the top": the erase loop below
-  -> reads the count, so zeroing first would skip the erase on the
-  -> normal path (the harness's scenario C guards that mistake).
+      cc, n, ax0, ay0
+  -> audit B1 (harness-verified, edanchortest.e): edlast is TAKEN into
+  -> a local and the field cleared HERE, above both guards, because a
+  -> guard that returns early must still leave "there is no editor
+  -> paint on screen" behind it. Clearing at the BOTTOM meant either
+  -> return left edlast describing a paint made at a DIFFERENT anchor,
+  -> and drawedit's oldl > l loop then zeroed that many model cells
+  -> measured from the NEW anchor - client text, not editor text.
+  -> Exactly the theft pattern b9 closed, walking back in through the
+  -> ancx >= cols guard added after it. A cols-wide write parks
+  -> ancx = cols (legal pending wrap), the user types, Enter bails
+  -> this proc, and the commit's anchor lands a row down: the typed
+  -> characters cost that many cells of whatever was on that row.
+  ->
+  -> edext is deliberately NOT cleared here, and that distinction was
+  -> paid for (b4 boot test, 21.7.26). The two fields do different
+  -> jobs: edlast feeds the mirror-zero loop, which WRITES the model -
+  -> that is the whole of B1 - while edext feeds drawedit's tail
+  -> cleanup, which only calls drawmodelcells, repainting FROM the
+  -> model and unable to corrupt it. Clearing both fixed B1 and also
+  -> disabled that cleanup (it only runs when oldext > newext), which
+  -> was what erased the old blip's pixels on this path: the screen
+  -> filled with stale cursor blocks. An A/B pair differing only in
+  -> this proc proved the regression, and the harness proved edlast
+  -> alone fixes B1 just as completely. Clearing edext was over-reach.
+  -> NOT "zero at the top" either: the erase loop below reads the
+  -> count, so zeroing first would skip the erase on the normal path
+  -> (the harness's scenario C guards that mistake).
   n := curcon.edlast
-  ext := curcon.edext
   curcon.edlast := 0
-  curcon.edext := 0
   IF curcon.win = NIL THEN RETURN
-  IF curcon.ancx >= curcon.cols THEN RETURN -> inverted RectFill = wild writes
+  -> the THIRD B1 attempt, and the one that stuck ("normalise", 1.2b6,
+  -> telemetry-confirmed on hardware 21.7.26 across four window
+  -> geometries incl. a narrower column count - see todo.md). The
+  -> edlast-only clearing above fixed the model theft, but the old
+  -> guard here - RETURN whenever ancx >= cols - still skipped this
+  -> proc's ENTIRE body, pixels included, on every commit that lands on
+  -> the pending-wrap anchor. drawedit's own mirror loop treats
+  -> ancx = cols as "0 cells on the anchor row, roll to the next" (H4's
+  -> comment) and paints there - so this proc bailing was erasing
+  -> NOTHING for paint that WAS made. That was the actual source of the
+  -> stale cursor blocks; edext's lifecycle (tried and disproved above)
+  -> was never it.
+  -> ancx is clamped to curcon.cols everywhere it is set (csidispatch,
+  -> the resize clamps) and never exceeds it, so ancx >= cols means
+  -> ancx = cols exactly. Normalise instead of bailing: the start cell
+  -> becomes row ancy+1, col 0 - drawedit's own wrap target - and the
+  -> rest of the proc runs its full body against that cell. This also
+  -> retires the guard's original job: an unnormalised ancx = cols fed
+  -> to the no-model RectFill below would left>right invert it (the
+  -> "wild writes" the old comment named); ax0 is never cols, so
+  -> RectFill never sees that shape.
+  ax0 := curcon.ancx
+  ay0 := curcon.ancy
+  r1 := edlastrow(curcon.edext)
+  IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
+  IF ax0 >= curcon.cols
+    ax0 := 0
+    ay0 := ay0 + 1
+  ENDIF
   IF curcon.sb
-    cc := curcon.ancx
-    r := curcon.ancy
+    cc := ax0
+    r := ay0
     FOR j := 0 TO n - 1
       IF r <= (curcon.rows - 1)
         m := visrow(r)
@@ -3534,18 +3571,14 @@ PROC eraseedit()
         r := r + 1
       ENDIF
     ENDFOR
-    r1 := edlastrow(ext)
-    IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
-    FOR r := curcon.ancy TO r1
+    FOR r := ay0 TO r1
       drawmodelrow(r)
     ENDFOR
   ELSE
     -> no model: nothing to restore from - the old full clear
-    r1 := edlastrow(ext)
-    IF r1 > (curcon.rows - 1) THEN r1 := curcon.rows - 1
-    x0 := curcon.ancx
+    x0 := ax0
     SetAPen(curcon.rp, 0)
-    FOR r := curcon.ancy TO r1
+    FOR r := ay0 TO r1
       y := curcon.topy + Mul(r, curcon.ch)
       RectFill(curcon.rp, curcon.left + Mul(x0, curcon.cw), y,
                curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
@@ -3553,8 +3586,9 @@ PROC eraseedit()
     ENDFOR
     SetAPen(curcon.rp, curcon.deffg)
   ENDIF
-ENDPROC                         -> (edlast/edext were cleared at the
-                                -> top - see the B1 note there)
+  curcon.edext := 0             -> edlast was cleared at the top (see
+ENDPROC                         -> the B1 note); edext keeps its
+                                -> original lifecycle on purpose
 
 -> repaint cells x0..x1 of view row r from the model - drawmodelrow's
 -> bounded sibling, for the b9 drawedit tail cleanup
@@ -5649,4 +5683,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b3 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b6 CCON: LTX console handler', 0

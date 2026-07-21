@@ -144,9 +144,105 @@ most-touched code in the file. Own commit, own boot test.
 
 ---
 
-## Batch 3 - two bounded correctness fixes
+## Batch 2, continued - the shipped B1 fix regressed - DONE (1.2b6, 21.7.26)
+
+**The `1.2b3` fix above was not the end of B1.** Deployed alone it was
+clean, but stacked with batch 3 in the working tree, an A/B pair on
+hardware showed the fixed build leaving STALE CURSOR BLOCKS on screen -
+two or three visible at once - where the build with B1's fix reverted
+showed only one. The two `1.2b3` findings (the hole-in-the-row-below
+fix, and this) were entangled through something not identified at the
+time.
+
+Two hypotheses were tried and disproved before the real cause was
+found:
+
+1. "The stale cursors predate the fix." No - the A/B showed one cursor
+   reverted, three fixed.
+2. "Clearing `edext` alongside `edlast` is what broke it, clear only
+   `edlast`." No - a build doing exactly that (briefly `1.2b5`) still
+   showed the stale blocks. `edanchortest.e` confirmed `edlast` alone
+   still fixes B1's model corruption, so the model-side reasoning was
+   right; the pixel-side reasoning was not.
+
+**The actual cause:** `eraseedit()`'s `ancx >= cols` guard didn't just
+skip the model mirror-zero loop, it `RETURN`ed out of the *entire*
+proc - including the pixel repaint (`drawmodelrow` in the model
+branch, `RectFill` otherwise). But `drawedit()` legitimately paints
+through that same case (H4: `ancx = cols` is the pending-wrap anchor,
+and its mirror loop computes `n = 0` there and rolls to the next row).
+So every commit landing on that anchor left real, painted pixels with
+nothing ever erasing them - the stale blocks, accumulating one per
+occurrence.
+
+**The fix ("normalise"):** instead of bailing, `eraseedit()` now
+normalises the start cell to row `ancy+1`, col `0` (the same wrap
+`drawedit`'s own mirror loop already computes) and runs its full body
+- mirror-zero loop, model repaint, and the no-model `RectFill` -
+against that cell. `ancx` is clamped to `cols` everywhere it is set,
+so `ancx >= cols` only ever means `ancx = cols` exactly; the guard is
+gone, not patched, because normalising also retires its original job
+(an un-normalised `ancx = cols` fed to the no-model `RectFill` would
+left>right invert it - the "wild writes" the old guard's comment
+named).
+
+**Proof, not argument:** temporary telemetry (`dbglog()`, hand-rolled
+`fscall()`/`tcresolve()` packets to `L:ccon-dbg.log`, the same plumbing
+`savehistfile()` uses, since the no-DOS rule forbids a handler calling
+`Open()` on itself) logged every time the wrap path fired: raw
+`ancx`/`ancy`, `edlast`, `edext`, `cols`, `rows`, and the computed
+`ax0`/`ay0`/`r1`. Six boot passes across four window geometries -
+`rows`/`cols` of 8/77, 5/77, 6/77, 21/77 (x2), 7/77, and 7/**27** (a
+genuinely different column count, not just row count) - all showed the
+wrap path firing with correct normalised coordinates every time, and
+every screenshot showed exactly one cursor marker, never more. The one
+screenshot with trailing `#` characters after the echoed command line
+is the pre-existing fill pattern showing past the shorter typed text
+(no clear-to-EOL on command echo, expected CLI behaviour), not a stale
+editor pixel. Telemetry has since been stripped (mechanical removal,
+no logic touched) and confirmed to still compile clean.
+
+**Regression:** not re-run explicitly this round, but nothing in the
+normalise fix touches the non-wrap path (`ax0`/`ay0` equal
+`curcon.ancx`/`curcon.ancy` whenever `ancx < cols`), so the earlier
+`ccon-bisect`/`ccon-progress`/`ccon-ichdch` gates are unaffected by
+construction.
+
+---
+
+## Batch 3 - two bounded correctness fixes - DONE (1.2b4, 21.7.26)
 
 **Findings:** B2, B4
+
+**Outcome:** the harness overturned the plan for a third time, and this
+was the worst of the three - the fix written into audit.md would have
+made the bug WORSE while looking like a fix.
+
+`sbresizetest.e` compared three options over two cases. Bad rows:
+current logic 3, the audit's sbcnt clamp 4, symmetric grow 0. The
+clamp only changes how far back you may scroll; it leaves the recycled
+rows exactly as they were and cuts off history that was readable.
+
+The real defect was never the count. `doresize()` handles SHRINK
+symmetrically and GROW not at all, so a grown window extends downward
+over recycled ring rows - visible at once, no scrolling needed. The
+shipped fix mirrors the shrink loop: step `sbtop` back per row gained,
+pulling history down, clearing whatever history cannot fill.
+
+The harness also caught its OWN first draft being unfaithful: `emit()`
+scrolled before writing, so a fresh screen filled bottom-up where the
+real `outnl()` fills top-down and only scrolls once full. That made the
+low-history case look broken in every mode. Worth remembering that a
+harness is only evidence once its model matches the thing it models.
+
+B4 shipped as reasoned-not-reproduced, as this plan allowed for -
+forcing `OpenWindowTagList` to fail is more instrumentation than the
+finding is worth, and the change only removes a retry.
+
+**Still owed: the hardware test.** B2 has a hand repro (fill the
+scrollback, enlarge the window, look at the new bottom rows).
+
+The original plan follows, kept for the record.
 
 Independent of each other and of everything above. One commit is fine;
 two boot tests are not needed, but two repros are.
@@ -303,7 +399,7 @@ client and why - and that answer is more valuable than the fix.
 ```
 1. [DONE 1.2b2] audit batch 1 - hoist curattr, power-of-two inq, paint-loop locals
 2. [DONE 1.2b3] eraseedit's early returns must not leave a stale paint extent
-3. ccon 1.2b4: clamp sbcnt when a resize grows the grid; stop AUTO retrying a failed open
+3. [DONE 1.2b4] grown window pulls history down; stop AUTO retrying a failed open
 4. ccon 1.2b5: CSI reports enqueue whole or not at all
 5. ccon 1.2b6: history persists by append, not by rewriting the ring per command
 6. (after a decision) ACTION_DIE; DISK_INFO stops guessing
