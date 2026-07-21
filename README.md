@@ -15,6 +15,8 @@ A collection of small tools for AmigaOS.
 | [cterm](cterm/) | Terminal — a real AmigaDOS shell in a full-screen art-framed screen: a borderless window handed to the console handler of your choice (`CON:`, `CCON:`, `KCON:`, …) via the `WINDOW` option, plus a `FROM` startup script for aliases. Shell, line editing, raw mode, More and Ed are all the OS's own. Named CShell before 0.3. |
 | [ccon](ccon/) | `CCON:` — a console handler, the CON:/KingCON class: a mounted DOS handler speaking the packet protocol, hosting a real shell (`NewShell CCON:`) with its own line editor, history, break forwarding, raw mode, and a CSI renderer good enough for Ed and More. Working toward output scrollback. |
 | [ls](ls/) | Unix-style directory lister — bundled `-la` flags, `.info` files hidden like dotfiles, hsparwed long format with filenotes, human-readable sizes, sorts, recursion, patterns, and multi-column output sized by asking the console (colors included, redirect-safe). In both Amiga E and 68k assembly. |
+| [cp](cp/) | Unix-style copy with pattern support, recursive directory copy, and collision handling. In both Amiga E and 68k assembly. |
+| [mkdir](mkdir/) | Unix-style make-directory command with `-p` parent creation. In both Amiga E and 68k assembly. |
 
 Each tool lives in its own subdirectory with its own README covering
 usage, how it works, and how to build it. Prebuilt binaries are
