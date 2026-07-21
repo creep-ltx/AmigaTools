@@ -510,13 +510,49 @@ rather than re-wrapping, in both builds). B7's cooked-mode fix stands.
   `redraw()` is leaving remnants in the raw path. This is the
   tractable half and the place to start.
 
-**Fix: not designed.** Needs its own investigation - first, whether
-this Ed asks for size events at all (does `evmask` carry the
-`IECLASS_SIZEWINDOW` bit when it is active?), and second, why the
-enlarge clear leaves fragments. Do it with telemetry, not by reading:
-this is a pixel problem and the reflow harness models data, not glass.
+**ROOT CAUSE FOUND (22.7.26), telemetry-confirmed.** `doresize()` NEVER
+RUNS for Ed. The main loop's window-port drain was skipped whole for a
+raw client with the chain on and an evmask
+(`IF (ihon = FALSE) OR (c.evmask = 0)`), and `doresize()`'s only caller
+is `IDCMP_NEWSIZE` inside that drain - so a resize of Ed was never
+seen. A one-line telemetry at `doresize()`'s top logged 20 `rawmode=0`
+entries across cooked-shell resizes and ZERO for Ed's resizes. That
+single fact explains BOTH symptoms at once: CCON never repaints
+(problem 2), AND the `IECLASS_SIZEWINDOW` report - emitted at the end
+of `doresize()`, the class-12 report Ed asks for with `CSI 12{` - is
+never sent (problem 1). It also explains why the b9/b10a A/B was
+identical: the reflow lives in `doresize()`, which never ran for Ed.
+The M8 (0.18) claim that "Ed re-draws itself to the new size" was
+therefore NEVER TRUE - it was never exercised.
 
-**Status: open - new finding, own investigation, not started.**
+**A FIX WAS ATTEMPTED (1.2b15) AND REVERTED.** Draining the port always
+(with `parked` suppressing only the key/mouse/menu classes) made
+`doresize()` run for Ed - confirmed, the log then showed `rawmode=1`
+entries, and the resize repaint worked. But it made Ed WORSE:
+
+- With the `IECLASS_SIZEWINDOW` report enabled (its first-ever
+  delivery), Ed's input parser desynced - garbage in Ed's command
+  line ("blue ARexx commands"), an unclosable window. The report goes
+  as 8-bit CSI (`$9B`); whether Ed accepts that vs 7-bit `ESC[` is the
+  same client-specific split that bit the b42 arrow keys.
+- With the report DISABLED (1.2b15b, repaint only), the desync
+  REMAINED: arrow keys still brought up Ed's command line, and Ed's
+  edit area stayed stuck at the old size (it never learns it grew). So
+  `doresize()` merely RUNNING for Ed disrupts it, even sending Ed
+  nothing - the interaction is deeper than the report.
+
+Reverted to 1.2b14: shipping an Ed input regression to fix cosmetic
+stale pixels is the wrong trade, and untangling it needs Ed's actual
+raw-mode resize protocol, not more blind boot tests.
+
+**Status: open - root cause understood, a real fix needs dedicated
+work on the raw-client resize protocol (which report shape Ed accepts,
+whether to reflow raw content at all, how Ed re-measures). NOT a
+quick fix, and the current cosmetic-only impact (stale pixels on a raw
+client's resize) does not justify the risk of another Ed regression.
+The telemetry (`dbglog` + a line at doresize's top) and the 1.2b15
+drain change are recorded here and in git (reverted) for whoever picks
+this up.**
 
 ---
 

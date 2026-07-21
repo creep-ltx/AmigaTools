@@ -575,10 +575,18 @@ CCON's - the `doresize()` clear + `redraw()` does not bring the
 newly-exposed area up clean in the raw path. Problem 2 is the
 tractable half and the place to start.
 
-**Needs its own investigation, with telemetry** (a pixel problem; the
-reflow harness models data, not glass). First questions: does this Ed
-carry the `IECLASS_SIZEWINDOW` bit in `evmask` when active, and why
-does the enlarge clear leave fragments. Not started.
+**Investigated 22.7.26 - root cause found, fix attempted and reverted.
+See audit.md B8 for the full account.** In brief: `doresize()` never
+ran for Ed (the window-port drain was parked whole for a raw client
+with an evmask, and `doresize`'s only caller is `IDCMP_NEWSIZE` inside
+it) - telemetry-confirmed, zero raw-mode `doresize` entries across an
+Ed resize. Making it run (1.2b15) repainted correctly but disrupted Ed:
+the size report desynced Ed's parser, and even with the report
+disabled, `doresize` merely running left Ed's arrow keys broken and its
+edit area stuck at the old size. Reverted to 1.2b14. A real fix needs
+dedicated work on the raw-client resize protocol (Ed's own
+raw-mode behaviour), not a quick patch; the cosmetic-only impact does
+not justify another Ed regression. Left open, now understood.
 
 ---
 
