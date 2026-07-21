@@ -470,6 +470,7 @@ ENDPROC
 -> leave the archive: clear the mode, forget the cache. The caller
 -> restores ppath and reselects the .lha in its real parent.
 PROC leavearchive(p)
+  arccommit(p)    -> flush deferred edits while the cache still exists
   freearccache(p)
   SetStr(arcpath[p], 0)
   SetStr(arcsub[p], 0)
@@ -726,6 +727,11 @@ ENDPROC
 PROC loadarchive(p, arcfile)
   DEF cmd[340]:STRING, res, buf:PTR TO CHAR, n, i=0, j, l, st=0,
       line[340]:STRING, nfld=-1, dcol, sz, fh, nm[300]:STRING
+  -> a rebuild from disk would wipe the deferred flags, so any pending
+  -> edits are committed first. Only fires on a rebuild WHILE inside the
+  -> archive (an immediate write verb in ONEXIT mode); on entry the pane
+  -> is not yet inarchive, and nothing is pending.
+  IF inarchive(p) AND arcwrite THEN arccommit(p)
   freearccache(p)
   amem[p] := New(MAXMEM * 4)
   amsz[p] := New(MAXMEM * 4)
@@ -2650,6 +2656,82 @@ PROC arcdeltree(p, prefix)
   DeleteFile('T:CFile-out')
 ENDPROC ok
 
+-> ARCWRITE ONEXIT: flag the cache members a delete would remove, so
+-> the archive is left untouched until commit. A file matches by exact
+-> stored name; a directory matches everything under it (the same
+-> prefix test arcdeltree uses, so an empty "dir/" entry is caught too).
+-> Returns how many members were newly flagged.
+PROC arcflagdel(p, member, isdir)
+  DEF a:PTR TO LONG, st:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl,
+      m:PTR TO CHAR, n=0
+  a := amem[p]
+  st := amst[p]
+  IF amcnt[p] = 0 THEN RETURN 0
+  IF isdir
+    StrCopy(pfx, member)
+    StrAdd(pfx, '/')
+    pl := StrLen(pfx)
+    FOR k := 0 TO amcnt[p] - 1
+      IF ncprefix(a[k], pfx, pl)
+        IF st[k] <> MST_DEL THEN n++
+        st[k] := MST_DEL
+      ENDIF
+    ENDFOR
+  ELSE
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF nccmp(m, member) = 0
+        IF st[k] <> MST_DEL THEN n++
+        st[k] := MST_DEL
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC n
+
+-> commit a pane's deferred archive edits: the one batched LhA delete
+-> the whole session's flagged members collapse into. Runs only in
+-> ARCWRITE ONEXIT and only when something is pending; the caller (leave
+-> or quit) invokes it while the cache still exists. Batches like
+-> arcdeltree - lha takes several filespecs per call. So far only
+-> deletes are deferred; adds/edits join here as the model grows.
+PROC arccommit(p)
+  DEF a:PTR TO LONG, st:PTR TO LONG, k, cmd[700]:STRING, base[360]:STRING,
+      m:PTR TO CHAR, baselen, any=FALSE
+  IF inarchive(p) = FALSE THEN RETURN
+  IF arcwrite = FALSE THEN RETURN
+  IF amst[p] = NIL THEN RETURN
+  a := amem[p]
+  st := amst[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      IF st[k] = MST_DEL THEN any := TRUE
+    ENDFOR
+  ENDIF
+  IF any = FALSE THEN RETURN
+  -> a border-row note, not the centred bar: the commit can fire on the
+  -> way out of the archive (partial redraw) or at quit (screen closing),
+  -> neither of which erases a centred overlay cleanly. lha rewrites the
+  -> archive once for the whole batch.
+  promptrow('writing changes to the archive')
+  StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
+  StrCopy(cmd, base)
+  baselen := EstrLen(cmd)
+  FOR k := 0 TO amcnt[p] - 1
+    IF st[k] = MST_DEL
+      m := a[k]
+      IF (EstrLen(cmd) + StrLen(m)) > 600
+        arcrunprog(NIL, cmd)
+        StrCopy(cmd, base)
+      ENDIF
+      StrAdd(cmd, ' "')
+      StrAdd(cmd, m)
+      StrAdd(cmd, '"')
+    ENDIF
+  ENDFOR
+  IF EstrLen(cmd) > baselen THEN arcrunprog(NIL, cmd)
+  DeleteFile('T:CFile-out')
+ENDPROC
+
 -> c/m when the ACTIVE pane is inside an archive: extract the selected
 -> file(s) to the other pane. move = also delete the member afterwards.
 PROC arcxfer_out(p, q, ismove, force)
@@ -3073,6 +3155,28 @@ PROC arcdelete(p)
   k := waitvanilla()
   IF (k <> "y") AND (k <> "Y")
     drawpaths()
+    RETURN
+  ENDIF
+  IF arcwrite
+    -> ONEXIT: flag the members, leave the archive alone. They drop out
+    -> of the pane at once (readarcdir hides MST_DEL) and the one batched
+    -> lha delete runs when the archive is left or CFile quits.
+    FOR i := 0 TO ecount[p] - 1
+      pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+      IF pick
+        arcmember(member, arcsub[p], enames[b + i])
+        arcflagdel(p, member, edirs[b + i])
+        ndel := ndel + 1
+      ENDIF
+    ENDFOR
+    readpane(p)    -> re-filter the cache; no reload, the flags must live
+    drawpaths()
+    drawpane(p)
+    IF ndel > 0
+      StringF(mb, '\d entr\s removed (on exit)', ndel,
+              IF ndel = 1 THEN 'y' ELSE 'ies')
+      showmsg(mb)
+    ENDIF
     RETURN
   ENDIF
   FOR i := 0 TO ecount[p] - 1
@@ -5496,6 +5600,8 @@ PROC main() HANDLE
   openui()
   drawall()
   eventloop()
+  arccommit(0)    -> flush any pane still inside a modified archive
+  arccommit(1)
   closeui()
   saveconfig()
   dropassigns()
