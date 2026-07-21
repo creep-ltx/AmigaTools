@@ -506,7 +506,34 @@ explained by this. Ed owns the screen in raw mode and redraws itself
 on resize, so `CON:`'s Ed-side restore may have been Ed redrawing, not
 `CON:` reflowing. If Ed redraws under `CON:` but not under `CCON:`,
 that is a SECOND finding about the class-12 resize report, and fixing
-the ring will not address it.
+the ring will not address it. **This became B8 - see below.**
+
+---
+
+## Batch 8 (new, unscheduled) - B8, raw-mode (Ed) resize
+
+**Finding:** B8, found boot testing after B7 (21.7.26) - see audit.md.
+
+Resizing a raw client (Ed) clips its content and loses the tail, and
+growing back leaves stale pixel fragments from the old wide layout.
+
+**Confirmed NOT a B7 regression by A/B on hardware:** 1.2b9 (no
+reflow) and 1.2b10a (reflow) behave identically in raw mode. So the
+reflow's effect is invisible there and B7 is untouched by this. It is
+pre-existing raw-mode behaviour, first surfaced now because this was
+the session's first raw-client resize.
+
+Two separable problems: (1) the client's own content is not re-laid-
+out, which is largely the client's job on a size event and may be
+unfixable from CCON; (2) the enlarge leaves stale pixels, which IS
+CCON's - the `doresize()` clear + `redraw()` does not bring the
+newly-exposed area up clean in the raw path. Problem 2 is the
+tractable half and the place to start.
+
+**Needs its own investigation, with telemetry** (a pixel problem; the
+reflow harness models data, not glass). First questions: does this Ed
+carry the `IECLASS_SIZEWINDOW` bit in `evmask` when active, and why
+does the enlarge clear leave fragments. Not started.
 
 ---
 

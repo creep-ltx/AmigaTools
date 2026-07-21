@@ -26,6 +26,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | P5 | open - batch 5 |
 | B5, B6 | open - batch 6, decision first |
 | B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
+| B8 | open - new finding 21.7.26 (raw-mode/Ed resize clips + stale pixels; NOT a B7 regression, proved by A/B) |
 
 The findings below are kept as written at audit time, including for
 the ones now fixed - the reasoning is the record of WHY the change was
@@ -419,6 +420,61 @@ soft-wrap continuation (`sw`, one byte per row against three existing
 planes of sbmax*cols). With that, `reflowring()` can rejoin logical
 lines and re-wrap them at any width. visrow/sarow/ssrow, selvidx,
 redraw, screenscroll and drawmrow were all left untouched.
+
+---
+
+### B8 - resizing a raw-mode client (Ed) clips its content and leaves stale pixels
+
+**Where:** `doresize()`, the raw path - `curcon.rawmode = TRUE`, no
+alternate screen (Ed does not use `?47h`, unlike More).
+
+**Found:** boot testing after B7, 21.7.26. NOT the original audit, and
+NOT a B7 regression - see below.
+
+**Trigger:** open Ed (or any raw client that owns the screen and does
+not re-render on a size event), type a line that wraps, resize the
+window.
+
+**Symptoms, two distinct ones:**
+
+1. The client's content is CLIPPED to the new width and the tail is
+   lost - the wrapped continuation does not re-wrap and does not come
+   back on grow.
+2. Growing the window back leaves STALE PIXEL FRAGMENTS from the old
+   wide layout scattered in the newly-revealed area (`w`, `d`, `l r`,
+   `u` in the repro), which a later click only partly clears.
+
+**This is NOT B7, and NOT a B7 regression - proved by A/B on
+hardware.** The same Ed session, the same resize, run under 1.2b9 (no
+reflow at all) and 1.2b10a (the shipped reflow), behaves IDENTICALLY:
+same clipping on shrink, same stale fragments on grow, tail
+unrecoverable in both. So the reflow neither causes nor cures this -
+in raw mode its rewrap never becomes visible (the shrunk view clips
+rather than re-wrapping, in both builds). B7's cooked-mode fix stands.
+
+**Why the two problems are separate:**
+
+- Problem 1 is largely the CLIENT's: a raw client positions its own
+  screen and only re-lays-it-out if it handles `IECLASS_SIZEWINDOW`.
+  This Ed apparently does not, so nothing re-wraps its text. CCON
+  cannot re-wrap it either, because in raw mode the ring holds a
+  screen the client drew, not a transcript of logical lines - the
+  reflow's premise (soft-wrap flags marking continuations) does not
+  hold for content the client positioned itself. Whether CCON should
+  even reflow in raw mode is an open question; the evidence says its
+  effect is currently invisible there anyway.
+- Problem 2 IS CCON's: after a resize the newly-exposed area should
+  come up clean and it does not fully. The `doresize()` clear +
+  `redraw()` is leaving remnants in the raw path. This is the
+  tractable half and the place to start.
+
+**Fix: not designed.** Needs its own investigation - first, whether
+this Ed asks for size events at all (does `evmask` carry the
+`IECLASS_SIZEWINDOW` bit when it is active?), and second, why the
+enlarge clear leaves fragments. Do it with telemetry, not by reading:
+this is a pixel problem and the reflow harness models data, not glass.
+
+**Status: open - new finding, own investigation, not started.**
 
 ---
 
