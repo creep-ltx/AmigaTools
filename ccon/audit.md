@@ -20,11 +20,12 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | Finding | State |
 |---|---|
 | P1, P2, P4, H1, H2, H5 | **fixed in 1.2b2** (batch 1, boot-tested 21.7.26) |
-| B1, H4 | **fixed in 1.2b3** (batch 2, harness + A/B hardware proof 21.7.26) |
+| B1, H4 | **fixed in 1.2b6** (batch 2, harness + A/B hardware proof, corrected after a 1.2b3 regression - see B1) |
 | B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
-| B3 | open - batch 4 |
+| B3 | open - batch 4, in progress |
 | P5 | open - batch 5 |
 | B5, B6 | open - batch 6, decision first |
+| B7 | open - new finding 21.7.26, needs a decision (structural, not bounded) |
 
 The findings below are kept as written at audit time, including for
 the ones now fixed - the reasoning is the record of WHY the change was
@@ -89,17 +90,44 @@ bottom-of-screen shell case - reachable via `CSI H` positioning, a
 full-screen client's restored transcript, or a prompt sitting
 mid-screen.
 
-**Status: FIXED in 1.2b3, confirmed on hardware.** Harness
-(`edanchortest.e`, throwaway) proved the model corruption and pinned
-the precondition; an A/B pair of binaries differing ONLY in this proc
-showed the gap appear and disappear in FS-UAE. Damage width always
-equals the length of the typed line.
+**Status, CORRECTED (21.7.26): FIXED in 1.2b6, not 1.2b3.** The 1.2b3
+fix below was real - harness (`edanchortest.e`) proved the model
+corruption and pinned the precondition; an A/B pair differing ONLY in
+this proc showed the gap appear and disappear in FS-UAE, damage width
+always equal to the typed line's length - but it was not the end of
+the story. Deployed alongside batch 3, a further A/B pair showed the
+"fixed" build leaving STALE CURSOR BLOCKS on screen, two or three
+visible at once, where the reverted build showed only one.
 
-**Fix as applied:** take the extent into locals and clear the fields
-ABOVE both guards. Note it is NOT "zero the fields at the top" - the
-erase loop reads the count, so zeroing first would skip the erase on
-the normal path (the harness's scenario C exists to catch exactly that
-mistake, and did).
+Two hypotheses were tried and disproved: that the stale cursors
+predated the fix (no - the A/B showed one reverted, three fixed), and
+that clearing `edext` alongside `edlast` was the cause (no - a build
+clearing `edlast` only, briefly `1.2b5`, still showed the blocks).
+
+**The actual cause:** the `ancx >= cols` guard did not just skip the
+model reset, it `RETURN`ed out of the WHOLE proc - including the pixel
+repaint (`drawmodelrow` / `RectFill`). But `drawedit()` legitimately
+paints through that same case (H4, below: `ancx = cols` is the
+pending-wrap anchor), so every commit landing there left real, painted
+pixels with nothing ever erasing them.
+
+**Fix as applied (1.2b6):** the extent-into-locals fix below stands
+for the model side. For the pixel side, `eraseedit()` no longer bails
+on `ancx >= cols` - since `ancx` is clamped to `cols` everywhere it is
+set, that condition only ever means `ancx = cols` exactly, so the
+start cell is normalised to row `ancy+1`, col `0` (the same wrap
+`drawedit`'s own mirror loop already computes) and the proc runs its
+full body - mirror-zero loop, model repaint, `RectFill` - against that
+cell instead. Confirmed with temporary telemetry across six boot
+passes and four window geometries (including a narrower column count):
+the wrap path fires with correct normalised coordinates every time,
+and every screenshot shows exactly one cursor, never more.
+
+**Fix as first applied (1.2b3, the model-corruption half only):** take
+the extent into locals and clear the fields ABOVE both guards. Note it
+is NOT "zero the fields at the top" - the erase loop reads the count,
+so zeroing first would skip the erase on the normal path (the
+harness's scenario C exists to catch exactly that mistake, and did).
 
 ---
 
@@ -234,6 +262,57 @@ client like More will then `SetWindowTitles` and draw into.
 rather than guess. Guessing is defensible for the packets where the
 wrong answer is merely wrong; it is not defensible for the one that
 hands out a drawable window.
+
+---
+
+### B7 - width-shrink permanently deletes ring content beyond the new column count
+
+**Where:** `doresize()`, ccon-handler.e:1851-1881 (the `curcon.cols <>
+oc` reallocation block).
+
+**Found:** exploratory boot testing, not the original systematic audit
+(21.7.26).
+
+Every row of the scrollback ring is reallocated at the new column
+stride whenever the window's WIDTH changes. Only `Min(oc, curcon.cols)`
+bytes per row are copied from the old buffer into the new one; the old
+buffer is then `Dispose()`d in full, in the same breath.
+
+**Trigger:** type or receive a line wider than the CURRENT window, then
+shrink the window narrower than that line.
+
+**Consequence:** every character past the new column count is not
+clipped from the display, it is destroyed - the byte is never copied,
+and the buffer holding it is freed immediately after. This runs over
+EVERY row in the ring, not only the visible ones, so scrollback history
+wider than the new width is truncated too. Growing the window back
+afterward cannot recover any of it, because nothing is left to
+recover. Reported live: a long line typed in Ed vanished past the
+border on shrink and did not return on grow.
+
+`todo.md` (M8, 0.18) documents "no reflow (family behaviour)" as the
+intended trade-off, matching stock `CON:`'s clip-not-rewrap resize
+behaviour - but that note reads as accepting VISUAL clipping, not
+silent, permanent data loss on every shrink. Whether the destructive
+version was a deliberate call or an unexamined side effect of the
+fixed-stride ring is not established.
+
+**Fix:** not decided - this is a structural question, not a bounded
+correctness fix. Candidates:
+
+- Accept the loss (status quo) but make it VISIBLE clipping instead of
+  silent deletion - e.g. keep a wider-than-current backing store for
+  history rows so a later grow can recover them, only truncating what
+  the live view actually needs to render.
+- Track a "logical" (widest-ever-typed) width per row separate from
+  the "physical" (current window) width, so a shrink only affects
+  rendering, not storage - larger memory cost, and a real change to
+  the ring's fixed-stride design.
+- Do nothing beyond documenting it clearly as expected, if that turns
+  out to be the decision - needs confirming whether stock `CON:`
+  itself loses data on shrink too, or only ever clips the view.
+
+**Status: open - needs a decision before a fix, not unlike B5/B6.**
 
 ---
 

@@ -379,6 +379,35 @@ client and why - and that answer is more valuable than the fix.
 
 ---
 
+## Batch 7 (new, unscheduled) - B7, width-shrink destroys ring content
+
+**Finding:** B7, found in exploratory boot testing 21.7.26, not the
+original systematic audit - see audit.md.
+
+Not a bounded correctness fix like B2-B4: `doresize()`'s width-change
+path reallocates every ring row at the new column stride and copies
+only `Min(old_cols, new_cols)` bytes before disposing the old buffer,
+so shrinking a window narrower than a line permanently deletes
+everything past the new width - not just from the display, from
+memory. Growing back afterward cannot recover it. Live-reported: a
+long line typed in Ed vanished on shrink and did not return on grow.
+
+`todo.md` (M8, 0.18) calls this "no reflow (family behaviour)",
+matching stock `CON:`'s clip-not-rewrap resize - but that reads like
+it meant visual clipping, not silent permanent data loss on every
+shrink. Not established whether the destructive version was deliberate
+or an unexamined side effect of the fixed-stride ring.
+
+**This wants a decision, same shape as B5/B6, before it wants code.**
+Candidates run from "make the loss visible instead of silent" (clip
+only what the live view needs, keep history rows at their original
+width) to "track a logical width per row separate from the physical
+window width" (bigger memory cost, a real change to the ring's
+fixed-stride design) to "confirm stock CON: does the same thing and
+document this as accepted." No fix attempted yet.
+
+---
+
 ## Not in scope, deliberately
 
 - **`tcscancmd()` (:3163)** - dead but documented as deliberately
