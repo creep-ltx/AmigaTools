@@ -23,7 +23,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | B1, H4 | **fixed in 1.2b6** (batch 2, harness + A/B hardware proof, corrected after a 1.2b3 regression - see B1) |
 | B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
 | B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
-| P5 | open - batch 5 |
+| P5 | **fixed in 1.2b11** (append not full rewrite; hardware-verified on the on-disk file 22.7.26) |
 | B5, B6 | open - batch 6, decision first |
 | B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
 | B8 | open - new finding 21.7.26 (raw-mode/Ed resize clips + stale pixels; NOT a B7 regression, proved by A/B) |
@@ -569,17 +569,38 @@ The reasoning for moving off last-window-close (todo.md:1474) is
 right; the implementation is a full-ring rewrite where an append would
 do.
 
-**Fix, cheapest first:**
+**Fix as applied (1.2b11): append, no persistent handle.** Each commit
+now `FINDUPDATE` (open without truncating) -> `SEEK` to end -> `WRITE`
+the one new line -> `END`. Four packets regardless of history length,
+and no truncate-and-rewrite-every-block. `histremember()` returns
+whether it actually appended (not a dedup'd repeat) so the file tracks
+the ring, and `histfilelines` counts the file so the append path trims
+with a full `savehistfile()` once the file reaches 2x the ring cap -
+bounding it to `[0, 2*HISTMAX)` lines and paying the rewrite only once
+every HISTMAX commits. The first write on a fresh system goes through
+`FINDOUTPUT` (reliable create) rather than trusting `FINDUPDATE`'s
+create-on-missing.
 
-- keep the file open (`FINDUPDATE` + seek to end), write only the new
-  line
-- or: set a dirty flag and flush from the existing `timer.device` tick
-  a few seconds later, so a burst of commands costs one write
+The persistent-handle option (keep the file open across commits) was
+rejected: it is shared state to release on every teardown path
+(`conclose`, and `ACTION_DIE` once B5 exists), and the per-commit open
+is cheap next to the block rewrite it saves. The dirty-flag + timer
+option was rejected too - it reintroduces the crash-loss window that
+todo.md:1474 deliberately moved away from.
 
-**Related, worth a comment at minimum:** `fscall()` (:4786) has no
+**Status: FIXED in 1.2b11, hardware-verified 22.7.26.** The on-disk
+`L:ccon-history` was inspected directly after a real session: it grew
+by append with new commands at the end in order, zero consecutive
+duplicate lines (dedup gate held across a whole session), no
+corruption, and reloaded cleanly across a reboot. The trim-at-2x path
+is the existing `savehistfile()` on a counter, verified by
+construction.
+
+**Still worth a comment at minimum (NOT done here):** `fscall()` has no
 timeout on `WaitPort(fsport)`. A wedged or spinning-up filesystem
 freezes every console this process serves - including the one that
 would display the error. This is on the Tab path too, not just Enter.
+Left open as its own small item.
 
 ---
 

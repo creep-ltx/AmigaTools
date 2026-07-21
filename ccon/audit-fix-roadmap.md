@@ -334,13 +334,33 @@ reads through. Own commit.
 
 ---
 
-## Batch 5 - `savehistfile()` restructure (P5)
+## Batch 5 - `savehistfile()` restructure (P5) - DONE (1.2b11, 22.7.26)
 
 **Finding:** P5, plus the `fscall()` timeout note
 
-The largest change here and the one with the most design freedom, so
-it goes last among the fixes. Two candidate shapes, in order of
-preference:
+**Outcome: append per commit, no persistent handle, trim on wrap.**
+Option A's append shape, but WITHOUT the persistent handle - each
+commit opens `FINDUPDATE`, seeks to end, writes its one line, closes
+(four packets, no block rewrite). `histremember()` now returns whether
+it actually appended so the file gates on real additions, and a
+`histfilelines` counter triggers a full `savehistfile()` rewrite once
+the file reaches 2x the ring cap, bounding it to `[0, 2*HISTMAX)`. The
+persistent handle was rejected precisely because of the teardown
+obligation named below; the dirty-flag+timer option was rejected for
+reintroducing the crash-loss window todo.md:1474 moved away from.
+
+**Verified on the on-disk file** (the advantage of L: being a host
+directory): after a real session `L:ccon-history` grew by append,
+newest last, in order, with zero consecutive duplicates and no
+corruption, and reloaded across a reboot. The trim path is the
+existing rewrite on a counter, verified by construction.
+
+**The `fscall()` timeout note was NOT done** - left as its own small
+open item (a comment at minimum; a real timeout needs a second timer
+request and is separate work).
+
+The original plan follows, kept for the record. Two candidate shapes,
+in order of preference:
 
 **Option A - append only.** Keep the ring in memory as now, but on
 commit write ONE line: `FINDUPDATE` (or keep a handle open across
