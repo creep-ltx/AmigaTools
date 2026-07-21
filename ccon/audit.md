@@ -24,7 +24,8 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
 | B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
 | P5 | **fixed in 1.2b11** (append not full rewrite; hardware-verified on the on-disk file 22.7.26) |
-| B5, B6 | open - batch 6, decision first |
+| B5 | open - batch 6, decision first |
+| B6 | **fixed in 1.2b12** (DISK_INFO fails rather than guessing; telemetry proved the fallback never fires - 22.7.26) |
 | B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
 | B8 | open - new finding 21.7.26 (raw-mode/Ed resize clips + stale pixels; NOT a B7 regression, proved by A/B) |
 
@@ -270,10 +271,30 @@ For `WAIT_CHAR`/`SCREEN_MODE` that is a harmless wrong answer. For
 pointer for a console the caller has no relationship with, which a
 client like More will then `SetWindowTitles` and draw into.
 
-**Fix:** fail `DISK_INFO` (`DOSFALSE`, `ERROR_OBJECT_NOT_FOUND`)
-rather than guess. Guessing is defensible for the packets where the
-wrong answer is merely wrong; it is not defensible for the one that
-hands out a drawable window.
+**Fix as applied (1.2b12):** `conbysender()` gained a `guess` flag.
+`DISK_INFO` passes `FALSE` and gets `NIL` -> `ERROR_OBJECT_NOT_FOUND`
+instead of the list head; the other four callers
+(`WAIT_CHAR`/`SCREEN_MODE`/`CHANGE_SIGNAL` and the `*`/`CONSOLE:` open,
+where attaching to the active console is the intended behaviour) pass
+`TRUE` and keep the guess.
+
+**De-risked with telemetry before the change, per the roadmap.** A
+throwaway 1.2b11 build logged every fallback to `L:ccon-dbg.log` with
+the packet type, the live console count, and the sender task name.
+Across More, Ed and shell probing in ONE and TWO windows, the
+list-head fallback NEVER fired - not one line - so the real lookups
+resolve every client that actually sends these packets. The audit's
+worry ("the fallback exists because some client did not resolve any
+other way") did not materialise for the tested clients, and the
+single-console case the finding did not consider (where the head guess
+IS the right console) never arose either. So failing `DISK_INFO` costs
+nothing observed and is strictly safer if an untested client ever
+reaches it.
+
+**Status: FIXED in 1.2b12, telemetry-de-risked 22.7.26.** A confirming
+boot round (More retitles its window, Ed's menu strip works, both in
+two windows) is the only thing outstanding, and the telemetry already
+showed those paths never touch the changed fallback.
 
 ---
 

@@ -398,18 +398,35 @@ if anything downstream gets strange.
 
 ---
 
-## Batch 6 - policy decisions (B5, B6)
+## Batch 6 - policy decisions (B5, B6) - B6 DONE (1.2b12, 22.7.26), B5 open
 
 **Findings:** B5, B6
 
 Both are behaviour changes rather than bug fixes, so they want a
 decision before they want code.
 
-**B5 - `ACTION_DIE`.** Refuse while `conlist` is non-NIL, otherwise
-tear down (remove the input handler, close input/timer/clipboard,
-free `ihring`/`ihis`/`fhstub`) and exit. Mostly a development-quality
-improvement: it makes mount/unmount cycles on the test machine clean.
-Worth doing, low urgency.
+**B5 - `ACTION_DIE`. STILL OPEN.** Refuse while `conlist` is non-NIL,
+otherwise tear down (remove the input handler, close
+input/timer/clipboard, free `ihring`/`ihis`/`fhstub`) and exit. Mostly
+a development-quality improvement: it makes mount/unmount cycles on the
+test machine clean. Worth doing, low urgency. Turns an immortal
+process mortal, so the teardown order (input.device chain first) has
+to be exactly right - that is the whole of the work.
+
+**B6 - `DISK_INFO` fallback. DONE (1.2b12).** `conbysender()` gained a
+`guess` flag; `DISK_INFO` passes FALSE and fails
+(`ERROR_OBJECT_NOT_FOUND`) instead of returning the list head, the
+other four callers keep the guess.
+
+The instrument-first approach below was followed exactly. A throwaway
+1.2b11 build logged every list-head fallback to `L:ccon-dbg.log` with
+the packet type, the console count and the sender task name. Across
+More, Ed and shell probing in one and two windows, it NEVER FIRED -
+the real lookups resolved every client - so the change was free, and
+the single-console case the finding overlooked (head guess = correct
+console) never arose either. Telemetry then stripped.
+
+The original plan follows, kept for the record.
 
 **B6 - `DISK_INFO` fallback.** Change `conbysender()`'s list-head
 guess to a failure for `DISK_INFO` specifically, leaving the guess in
