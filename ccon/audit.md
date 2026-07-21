@@ -25,7 +25,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
 | P5 | open - batch 5 |
 | B5, B6 | open - batch 6, decision first |
-| B7 | **fixed in 1.2b10** (true reflow, CON: parity - harness + pixel-identical round trip 21.7.26) |
+| B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
 
 The findings below are kept as written at audit time, including for
 the ones now fixed - the reasoning is the record of WHY the change was
@@ -379,9 +379,10 @@ behaviour). If Ed redraws under `CON:` but not under `CCON:`, there is
 a SECOND finding about the class-12 resize report `todo.md` M8 says Ed
 asks for - worth a separate check, and not covered by fixing the ring.
 
-**Status: FIXED in 1.2b10** (level 2, true reflow - CON: parity),
-staged 1.2b9 (the wrap plane) -> reflowtest.e (the algorithm on data)
--> 1.2b10 (wired into doresize).
+**Status: FIXED in 1.2b10, gadget regression fixed in 1.2b10a** (level
+2, true reflow - CON: parity), staged 1.2b9 (the wrap plane) ->
+reflowtest.e (the algorithm on data) -> 1.2b10 (wired into doresize)
+-> 1.2b10a (the paint-in-doresize gadget fix).
 
 **Hardware proof, 21.7.26.** `ccon-b7` under CCON, wide -> shrunk ->
 grown back. At the shrunk width the ruler re-wraps to `..90....:..10`
@@ -391,6 +392,24 @@ seen doing in its own run. Grown back, the text region of the before
 and after screenshots is PIXEL-IDENTICAL: 0 differing pixels across
 406220, once aligned for a 1px vertical offset (the window was regrown
 to 720px against the original 699). Not "looks right" - bit-for-bit.
+
+**A gadget regression, found and fixed (1.2b10a).** The 1.2b10 reflow
+put `eraseedit()` at the top of `doresize()` for its model side effect
+(clearing the edit line's mirrored cells so they do not reflow as
+client text). But `eraseedit` also PAINTS, and by then Intuition has
+resized the window while `curcon.rows/cols/topy` are still the old
+geometry - so its `drawmodelrow`/`RectFill` ran at old coordinates
+into the new smaller window, over the border where the sizing gadget
+lives, and it was never redrawn. A/B on hardware: gadget present on
+b9, gone on b10. Fixed with `dropeditmirror()` - the model clearing
+with none of the painting, which was pure waste anyway since
+`doresize` clears and redraws right after.
+
+**Regression gates re-run under 1.2b10a and clean:** `ccon-bisect`
+(five cases), `ccon-progress`, `ccon-ichdch` - the b8 theft-pattern
+tests, the direct gate on the `eraseedit`/`drawedit` paths stage 3
+disturbed. All match their printed expectations, no missing text or
+artefacts, gadget intact.
 
 **How it was done without rewriting the ring.** The audit first
 called this "a rewrite of the ring's representation". That was wrong,

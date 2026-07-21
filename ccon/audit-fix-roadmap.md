@@ -411,7 +411,7 @@ client and why - and that answer is more valuable than the fix.
 
 ---
 
-## Batch 7 - B7, width-shrink destroys ring content - DONE (1.2b10, 21.7.26)
+## Batch 7 - B7, width-shrink destroys ring content - DONE (1.2b10a, 21.7.26)
 
 **Finding:** B7, found in exploratory boot testing 21.7.26, not the
 original systematic audit - see audit.md.
@@ -491,6 +491,15 @@ is reflow and not preservation. Grown back, the text region is
 PIXEL-IDENTICAL to the original - 0 differing pixels across 406220,
 once aligned for a 1px offset from the window being regrown slightly
 taller.
+
+**One regression on the way, fixed (1.2b10a).** 1.2b10 called
+`eraseedit()` at the top of `doresize()`, which PAINTS at the old
+geometry into the already-resized window and wiped the sizing gadget
+on every shrink (A/B: present on b9, gone on b10). `dropeditmirror()`
+does the model clearing without the paint. gadget confirmed back on
+hardware, and the b8 theft-pattern gates (`ccon-bisect`,
+`ccon-progress`, `ccon-ichdch`) re-run clean under 1.2b10a - no
+missing text, no artefacts, gadget intact.
 
 **Separate, still open:** whether the original Ed repro is fully
 explained by this. Ed owns the screen in raw mode and redraws itself

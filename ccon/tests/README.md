@@ -35,6 +35,25 @@ Written for audit finding B1 (fixed in 1.2b3). Re-run it if anything
 in `eraseedit()` or `drawedit()` is ever touched again - it either
 says the numbers still line up, or it says you just broke something.
 
+## reflowtest.e - runs on Linux
+
+Recreates the scrollback ring and the resize reflow over fake data,
+so the wide->narrow->wide round trip can be proved without booting.
+
+```
+ecompile reflowtest.e reflowtest
+vamos reflowtest
+```
+
+Seven checks with its own verdict: the round trip keeps the text, line
+boundaries survive a narrow pass, a grow re-joins a wrapped line,
+full-width rows stay separate lines (a hard newline is not a wrap),
+ring overflow keeps the NEWEST content, the cursor stays in the grid,
+and the edit anchor lands after its prompt. Written for B7 (fixed in
+1.2b10). Re-run it if `reflowring()` or the `sw` wrap plane is
+touched - it caught four defects during development, including a
+destination row not cleared on ring wraparound.
+
 ## ccon-b1, ccon-b1-fill, ccon-b1-off - run on the Amiga
 
 The same bug, on real hardware. Copy all three into `S:` on the Amiga
@@ -70,12 +89,31 @@ wide the window is.
 `ccon-b1-fill` contains raw escape bytes and is marked `binary` in
 `.gitattributes` so the bytes stay exact.
 
-## The older console tests - run on the Amiga
+## ccon-b2, ccon-b7 - run on the Amiga with Execute
 
-Same idea, written earlier for other fixes. Copy into `S:` and run
-with `Type`, e.g. `Type S:ccon-bisect`. Each one prints what it
-expects on the line above what it actually did, so a pass is just
-"the two lines match".
+Two more `Execute` scripts, same shape as ccon-b1 (they start with `;`
+and drive a `Type` of their own `-fill` companion).
+
+- **ccon-b2** - `Execute S:ccon-b2`, then drag the window TALLER.
+  Written for B2 (grown window pulling history down, 1.2b7). The new
+  bottom rows should continue the numbered sequence in order, not show
+  old rows out of order.
+- **ccon-b7** - `Execute S:ccon-b7`, then shrink the window NARROWER
+  than the text and grow it back. Written for B7 (reflow on resize,
+  1.2b10). The ruler and `B7-END` marker must survive the round trip;
+  they re-wrap mid-token at the narrow width and come back intact on
+  grow. Run it under stock `CON:` too - that is the parity target.
+
+## The older console tests - run on the Amiga with Type, NOT Execute
+
+Same idea, written earlier for other fixes. These are RAW-BYTE files
+(they start with the escape sequences themselves, e.g. `t1 ...`), so
+run them with `Type`, e.g. `Type S:ccon-bisect` - NOT `Execute`, which
+makes the shell try to run the first bytes as a command and answer
+`Unknown command`. (The `ccon-b*` scripts above are the opposite: they
+start with `;` and want `Execute`.) Each one prints what it expects on
+the line above what it actually did, so a pass is just "the two lines
+match".
 
 - **ccon-bisect** - five overprint cases (carriage return, cursor
   moves, insert, delete). This is the main regression check for the
