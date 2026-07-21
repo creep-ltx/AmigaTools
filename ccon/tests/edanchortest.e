@@ -153,8 +153,22 @@ PROC eraseedit()
   -> reads the count, so zeroing it first would skip the erase on the
   -> normal path. Scenario C exists to catch exactly that mistake.
   n := edlast
-  IF fixb1
+  -> fixb1 = 1  clear BOTH fields. Fixes B1, but SHIPPED A REGRESSION:
+  ->            clearing edext also disables drawedit's tail cleanup
+  ->            (it only runs when oldext > newext), which was what
+  ->            erased the old blip's pixels on this path. Boot test
+  ->            21.7.26 showed stale cursor blocks left on screen; an
+  ->            A/B pair differing only in this proc proved it.
+  -> fixb1 = 2  clear ONLY edlast. edlast feeds the mirror-zero loop,
+  ->            which WRITES the model - that is the whole of B1.
+  ->            edext feeds the tail cleanup, which only calls
+  ->            drawmodelcells: it repaints FROM the model and cannot
+  ->            corrupt it, so a stale edext costs a misplaced repaint
+  ->            at worst. Clearing it was never needed for B1.
+  IF fixb1 >= 1
     edlast := 0
+  ENDIF
+  IF fixb1 = 1
     edext := 0
   ENDIF
   IF ancx >= COLS                 -> the B1 guard
@@ -426,41 +440,48 @@ PROC scenarioC(fix)
 ENDPROC leftovers
 
 PROC main()
-  DEF a1, a2, b1v, b2v, c1, c2
+  DEF a1, a2, a3, b1v, b2v, b3v, c1, c2, c3
   WriteF('edanchortest - audit B1 (stale edlast across a moved anchor)\n')
   WriteF('grid \dx\d, rows 0-5 pre-filled with client output\n\n', COLS, ROWS)
 
   WriteF('--- A: prompt at row 0, so the commit anchor lands on a row\n')
   WriteF('       that still holds client output (row 2) ---\n')
-  a1 := scenario(FALSE, 0, 'current')
-  a2 := scenario(TRUE,  0, 'fixed  ')
+  a1 := scenario(0, 0, 'current')
+  a2 := scenario(1, 0, 'clear2 ')
+  a3 := scenario(2, 0, 'edlast ')
 
   WriteF('\n--- B: prompt at row 5, so the commit anchor lands on a\n')
   WriteF('       BLANK row below the content (row 7) ---\n')
-  b1v := scenario(FALSE, 5, 'current')
-  b2v := scenario(TRUE,  5, 'fixed  ')
+  b1v := scenario(0, 5, 'current')
+  b2v := scenario(1, 5, 'clear2 ')
+  b3v := scenario(2, 5, 'edlast ')
 
   WriteF('\n--- C: normal anchor - the fix must not break the erase ---\n')
-  c1 := scenarioC(FALSE)
-  c2 := scenarioC(TRUE)
+  c1 := scenarioC(0)
+  c2 := scenarioC(1)
+  c3 := scenarioC(2)
 
   WriteF('\n--- model after A/current, for the record ---\n')
-  scenario(FALSE, 0, 'replay ')
+  scenario(0, 0, 'replay ')
   dumpmodel('')
 
   WriteF('\n---------------------------------------------\n')
-  IF (a1 > a2) AND (b1v = b2v) AND (c1 = 0) AND (c2 = 0)
-    WriteF('B1 REPRODUCED, precondition pinned, fix does not regress:\n')
-    WriteF('  A  destroys \d cells when the post-commit anchor lands on a\n', a1 - a2)
-    WriteF('     row holding content; B harmless when that row is blank.\n')
-    WriteF('     So a cols-wide write is NECESSARY but NOT SUFFICIENT -\n')
-    WriteF('     the audit text overstated the trigger and needs correcting.\n')
-    WriteF('  C  normal anchor still erases its mirror under the fix.\n')
-  ELSEIF c2 > 0
-    WriteF('FIX IS WRONG: it breaks the normal erase path (C left \d cells)\n', c2)
-  ELSEIF a1 > a2
-    WriteF('B1 reproduced in A; B or C unexpected - re-read the scenarios\n')
+  WriteF('A cells destroyed: current=\d clear-both=\d edlast-only=\d\n',
+         a1, a2, a3)
+  WriteF('B (blank row below): current=\d clear-both=\d edlast-only=\d\n',
+         b1v, b2v, b3v)
+  WriteF('C mirror left behind: current=\d clear-both=\d edlast-only=\d\n',
+         c1, c2, c3)
+  IF (a1 > 0) AND (a3 = 0) AND (c3 = 0)
+    WriteF('\nCLEARING edlast ALONE FIXES B1 - same result as clearing\n')
+    WriteF('both (\d destroyed -> 0), and the normal erase path is\n', a1)
+    WriteF('still intact. edext never had to be touched: it only feeds\n')
+    WriteF('drawmodelcells, which repaints FROM the model and cannot\n')
+    WriteF('corrupt it. Clearing it was over-reach, and it cost the\n')
+    WriteF('blip cleanup that the 21.7.26 boot test caught.\n')
+  ELSEIF a3 > 0
+    WriteF('\nedlast-only does NOT fix B1 (\d destroyed) - think again\n', a3)
   ELSE
-    WriteF('B1 NOT reproduced - downgrade the finding\n')
+    WriteF('\ninconclusive - re-read the scenarios\n')
   ENDIF
 ENDPROC
