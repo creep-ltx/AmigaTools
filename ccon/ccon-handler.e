@@ -2099,11 +2099,12 @@ PROC doresize()
   -> reflow reads it. drawedit() mirrors the edit line into the ring,
   -> so without this the reflow would carry those cells as if they were
   -> client text and drawedit() would then paint the line AGAIN at the
-  -> new anchor - the same text twice. eraseedit() is exactly "undo the
-  -> editor's paint", and it belongs with tcclose()/altdrop()/clearsel()
-  -> above: all four undo an overlay at the OLD geometry. The line is
-  -> repainted from ebuf at the end of this proc.
-  eraseedit()
+  -> new anchor - the same text twice. MODEL-ONLY (dropeditmirror, not
+  -> eraseedit): the first 1.2b10 used eraseedit() here and its PAINT
+  -> ran at the old geometry into the already-shrunk window, wiping the
+  -> sizing gadget. The line is repainted from ebuf at the end of this
+  -> proc, so no paint is owed here anyway.
+  dropeditmirror()
   oc := curcon.cols
   orows := curcon.rows          -> audit B2: the grow block below needs
   gridcalc()                    -> to know how many rows were gained
@@ -3967,6 +3968,52 @@ PROC eraseedit()
   curcon.edext := 0             -> edlast was cleared at the top (see
 ENDPROC                         -> the B1 note); edext keeps its
                                 -> original lifecycle on purpose
+
+-> B7 (1.2b10a): eraseedit's MODEL clearing WITHOUT its painting - the
+-> mirror-zero loop and the field resets, nothing drawn. doresize()
+-> needs the edit line's mirrored cells gone from the ring before the
+-> reflow reads it (or those cells reflow as client text and drawedit
+-> then paints the line a second time), but it must NOT paint here:
+-> at the top of doresize() Intuition has already resized the window
+-> while curcon.rows/cols/topy are STILL the old geometry, so
+-> eraseedit's drawmodelrow/RectFill painted at old coordinates into
+-> the new, smaller window - over the border where the sizing gadget
+-> lives, and the gadget was never redrawn (b10 dropped it on every
+-> shrink; b9 kept it). The paint was pure waste anyway: doresize
+-> clears the whole inner window and redraw()s immediately after.
+-> Model-only, so it is geometry-agnostic and safe to run before
+-> gridcalc(). No-model consoles have nothing mirrored, so nothing to
+-> do.
+PROC dropeditmirror()
+  DEF r, j, cc, n, ax0, ay0, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR
+  n := curcon.edlast
+  curcon.edlast := 0
+  curcon.edext := 0
+  IF curcon.sb = NIL THEN RETURN
+  ax0 := curcon.ancx
+  ay0 := curcon.ancy
+  IF ax0 >= curcon.cols            -> the pending-wrap normalise, as in
+    ax0 := 0                       -> eraseedit - roll to the next row
+    ay0 := ay0 + 1
+  ENDIF
+  cc := ax0
+  r := ay0
+  FOR j := 0 TO n - 1
+    IF r <= (curcon.rows - 1)
+      m := visrow(r)
+      a := sarow(r)
+      stp := ssrow(r)
+      m[cc] := 0
+      a[cc] := 0
+      stp[cc] := 0
+    ENDIF
+    cc := cc + 1
+    IF cc >= curcon.cols
+      cc := 0
+      r := r + 1
+    ENDIF
+  ENDFOR
+ENDPROC
 
 -> repaint cells x0..x1 of view row r from the model - drawmodelrow's
 -> bounded sibling, for the b9 drawedit tail cleanup
@@ -6085,4 +6132,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b10 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b10a CCON: LTX console handler', 0
