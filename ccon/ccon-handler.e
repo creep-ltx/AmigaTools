@@ -358,7 +358,22 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fhtask=NIL,
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
-    ihmap[36]:ARRAY OF CHAR     -> MapRawKey result bytes
+    ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
+    -> B7 reflow scratch: the write cursor and destination planes the
+    -> emit helpers share. Globals because E has no closures and the
+    -> helpers are separate procs; safe because this runs once per
+    -> resize, never from a paint or packet path, and never re-enters.
+    rfdr=0, rfdc=0, rftot=0,    -> dest row (LINEAR, may pass sbmax),
+    rfcols=0,                   -> column, rows emitted, dest stride
+    rfm=NIL:PTR TO CHAR,        -> destination planes under construction
+    rfa=NIL:PTR TO CHAR,
+    rfs=NIL:PTR TO CHAR,
+    rfw=NIL:PTR TO CHAR,
+    -> the two positions carried through: [0] output cursor, [1] edit
+    -> anchor. Source side is a ring row + column, destination side a
+    -> LINEAR dest row + column (converted to a screen row at the end).
+    rftr[2]:ARRAY OF LONG, rftc[2]:ARRAY OF LONG,
+    rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
@@ -1846,18 +1861,232 @@ PROC closewin()
   curcon.evmask := 0
 ENDPROC
 
+-> ---------- B7: reflow the ring on a width change ----------
+-> Algorithm developed and proved on data first (tests/reflowtest.e,
+-> seven cases incl. the wide->narrow->wide round trip that stock CON:
+-> passes and CCON used to fail). Read that file before changing any
+-> of this; four separate defects were caught there rather than here.
+
+-> map a LINEAR dest row onto the ring. Not a mask: sbmax is a runtime
+-> LINES=n value, not a power of two.
+PROC rfslot(n)
+  DEF i
+  i := n
+  WHILE i >= curcon.sbmax
+    i := i - curcon.sbmax
+  ENDWHILE
+ENDPROC i
+
+-> move to a fresh dest row, CLEARING it. cont = 1 marks a soft wrap.
+-> The clear matters: when the reflow outgrows the ring, rfdr wraps
+-> onto slots still holding the oldest content, and a logical line
+-> that emits no cells (the blank row a cursor sits on) would leave
+-> that stale content showing through as a phantom row.
+PROC rfnewrow(cont)
+  DEF s, j, p:PTR TO CHAR, q:PTR TO CHAR, t:PTR TO CHAR, o
+  rfdr := rfdr + 1
+  rfdc := 0
+  rftot := rfdr + 1
+  s := rfslot(rfdr)
+  rfw[s] := cont
+  o := Mul(s, rfcols)
+  p := rfm + o
+  q := rfa + o
+  t := rfs + o
+  FOR j := 0 TO rfcols - 1
+    p[j] := 0
+    q[j] := 0
+    t[j] := 0
+  ENDFOR
+ENDPROC
+
+-> one cell, all three planes, wrapping at the new width
+PROC rfemit(c, at, sy)
+  DEF s, o
+  IF rfdc >= rfcols THEN rfnewrow(1)
+  s := rfslot(rfdr)
+  o := Mul(s, rfcols) + rfdc
+  rfm[o] := c
+  rfa[o] := at
+  rfs[o] := sy
+  rfdc := rfdc + 1
+ENDPROC
+
+-> content length of source ring row i at the OLD stride. Trailing
+-> never-written cells (0) do not count; an explicit space does - it
+-> was written and carries attributes.
+PROC rfrowlen(i, ocols)
+  DEF j, n, p:PTR TO CHAR
+  p := curcon.sb + Mul(i, ocols)
+  n := 0
+  FOR j := 0 TO ocols - 1
+    IF p[j] <> 0 THEN n := j + 1
+  ENDFOR
+ENDPROC n
+
+-> note where a tracked position landed, for each slot naming (sr, col)
+PROC rfmark(sr, col)
+  DEF k
+  FOR k := 0 TO 1
+    IF (rftr[k] = sr) AND (rftc[k] = col)
+      rfdw[k] := rfdr
+      rfdc2[k] := rfdc
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> THE REFLOW. Walk the live source rows oldest -> newest, rejoin each
+-> run of continuation rows into one logical line, re-emit it wrapping
+-> at the new width, hard-break at line ends. Returns FALSE if the new
+-> planes could not be allocated, leaving the old ring untouched so the
+-> caller can degrade exactly as the old code did.
+-> ocols/orows are the geometry BEFORE gridcalc(); curcon.cols/.rows
+-> are already the new ones by the time this runs.
+PROC reflowring(ocols, orows)
+  DEF nsb:PTR TO CHAR, nsa:PTR TO CHAR, nss:PTR TO CHAR, nsw:PTR TO CHAR,
+      i, j, k, sr, n, first, total, last, started, o,
+      m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, swp:PTR TO CHAR
+  nsb := New(Mul(curcon.sbmax, curcon.cols))
+  nsa := New(Mul(curcon.sbmax, curcon.cols))
+  nss := New(Mul(curcon.sbmax, curcon.cols))
+  nsw := New(curcon.sbmax)
+  IF (nsb = NIL) OR (nsa = NIL) OR (nss = NIL) OR (nsw = NIL)
+    IF nsb THEN Dispose(nsb)
+    IF nsa THEN Dispose(nsa)
+    IF nss THEN Dispose(nss)
+    IF nsw THEN Dispose(nsw)
+    RETURN FALSE
+  ENDIF
+  rfm := nsb
+  rfa := nsa
+  rfs := nss
+  rfw := nsw
+  rfcols := curcon.cols
+  swp := curcon.sw              -> TYPED: curcon.sw is a bare object
+  rfdr := 0                     -> member, so indexing it directly
+                                -> would stride by 4, not by 1
+  rfdc := 0
+  rftot := 1
+  FOR k := 0 TO 1
+    rfdw[k] := 0
+    rfdc2[k] := 0
+  ENDFOR
+  rfw[0] := 0
+  -> the two positions to carry, as SOURCE ring row + column
+  rftr[0] := curcon.sbtop + curcon.cy
+  WHILE rftr[0] >= curcon.sbmax
+    rftr[0] := rftr[0] - curcon.sbmax
+  ENDWHILE
+  rftc[0] := curcon.cx
+  rftr[1] := curcon.sbtop + curcon.ancy
+  WHILE rftr[1] >= curcon.sbmax
+    rftr[1] := rftr[1] - curcon.sbmax
+  ENDWHILE
+  rftc[1] := curcon.ancx
+  -> source range: history, then visible rows up to the last one
+  -> holding anything. Trailing blank screen is not transcript, and
+  -> emitting it burns a dest row each and pushes content into history
+  -> (reflowtest case G). Uses the OLD row count.
+  last := curcon.cy
+  FOR i := 0 TO orows - 1
+    sr := curcon.sbtop + i
+    WHILE sr >= curcon.sbmax
+      sr := sr - curcon.sbmax
+    ENDWHILE
+    IF rfrowlen(sr, ocols) > 0
+      IF i > last THEN last := i
+    ENDIF
+  ENDFOR
+  IF last > (orows - 1) THEN last := orows - 1
+  first := curcon.sbtop - curcon.sbcnt
+  WHILE first < 0
+    first := first + curcon.sbmax
+  ENDWHILE
+  total := curcon.sbcnt + last + 1
+  started := FALSE
+  FOR i := 0 TO total - 1
+    sr := first + i
+    WHILE sr >= curcon.sbmax
+      sr := sr - curcon.sbmax
+    ENDWHILE
+    IF swp[sr] = 0                  -> starts a new logical line
+      IF started THEN rfnewrow(0)
+      started := TRUE
+    ENDIF
+    n := rfrowlen(sr, ocols)
+    rfmark(sr, 0)
+    o := Mul(sr, ocols)
+    m := curcon.sb + o
+    a := curcon.sa + o
+    stp := curcon.ss + o
+    FOR j := 0 TO n - 1
+      rfemit(m[j], a[j], stp[j])
+      rfmark(sr, j + 1)
+    ENDFOR
+    -> a position past this row's content lands just after what it did
+    -> emit; it cannot resolve to a cell that never existed
+    FOR k := 0 TO 1
+      IF (rftr[k] = sr) AND (rftc[k] > n)
+        rfdw[k] := rfdr
+        rfdc2[k] := rfdc
+      ENDIF
+    ENDFOR
+  ENDFOR
+  Dispose(curcon.sb)
+  Dispose(curcon.sa)
+  Dispose(curcon.ss)
+  Dispose(curcon.sw)
+  curcon.sb := nsb
+  curcon.sa := nsa
+  curcon.ss := nss
+  curcon.sw := nsw
+  -> the newest `rows` dest rows are the screen; the rest is history,
+  -> capped by what the ring can still hold behind it
+  IF rftot < curcon.rows THEN rftot := curcon.rows
+  k := rftot - curcon.rows
+  curcon.sbtop := rfslot(k)
+  curcon.sbcnt := k
+  IF curcon.sbcnt > (curcon.sbmax - curcon.rows)
+    curcon.sbcnt := curcon.sbmax - curcon.rows
+  ENDIF
+  IF curcon.sbcnt < 0 THEN curcon.sbcnt := 0
+  -> both tracked positions are LINEAR dest rows; k is the linear row
+  -> the screen now starts at, so screen row = linear - k
+  curcon.cy := rfdw[0] - k
+  curcon.cx := rfdc2[0]
+  curcon.ancy := rfdw[1] - k
+  curcon.ancx := rfdc2[1]
+  IF curcon.cy < 0 THEN curcon.cy := 0
+  IF curcon.cy > (curcon.rows - 1) THEN curcon.cy := curcon.rows - 1
+  IF curcon.ancy < 0 THEN curcon.ancy := 0
+  IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
+  IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols
+  IF curcon.ancx > curcon.cols THEN curcon.ancx := curcon.cols
+  rfm := NIL                        -> do not leave the scratch pointing
+  rfa := NIL                        -> at live planes
+  rfs := NIL
+  rfw := NIL
+ENDPROC TRUE
+
 -> M8: the window has a new size (the gadget, or a borrowed
 -> window's owner resized). The grid is recomputed and the
--> scrollback model follows: the ring is cols-stride, so a width
--> change reallocates it and row-copies the old content - rows
--> stay rows, no reflow, same as the rest of the console family.
--> A height loss scrolls the tail into history; everything
+-> scrollback model follows.
+-> B7 (1.2b10): a WIDTH change now RE-WRAPS the transcript instead of
+-> row-copying it. The old code copied Min(oldcols,newcols) bytes per
+-> row and disposed the old buffer, which did not merely clip the view
+-> - it DESTROYED every character past the new width, permanently, for
+-> every row in the ring. Growing back could not recover it, because
+-> nothing was left to recover. The claim that this matched "the rest
+-> of the console family" was tested against stock CON: on 21.7.26 and
+-> is false: CON: holds logical lines and re-wraps them per resize,
+-> losing nothing (ccon-b7, and see audit.md B7).
+-> A height loss still scrolls the tail into history; everything
 -> repaints from the model, and a raw-events client that asked
 -> for class 12 (Ed does, CSI 12{) gets the report and
 -> re-measures itself.
 PROC doresize()
-  DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, nss:PTR TO CHAR, r, n,
-      evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k
+  DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
+      reflowed
   IF curcon.win = NIL THEN RETURN
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
@@ -1865,18 +2094,22 @@ PROC doresize()
   curcon.selon := FALSE                -> a drag dies with the old grid
   curcon.cursx := -1                   -> a full repaint follows anyway
   curcon.viewoff := 0
+  reflowed := FALSE
+  -> B7: take the editor's mirrored cells OUT of the model before the
+  -> reflow reads it. drawedit() mirrors the edit line into the ring,
+  -> so without this the reflow would carry those cells as if they were
+  -> client text and drawedit() would then paint the line AGAIN at the
+  -> new anchor - the same text twice. eraseedit() is exactly "undo the
+  -> editor's paint", and it belongs with tcclose()/altdrop()/clearsel()
+  -> above: all four undo an overlay at the OLD geometry. The line is
+  -> repainted from ebuf at the end of this proc.
+  eraseedit()
   oc := curcon.cols
   orows := curcon.rows          -> audit B2: the grow block below needs
   gridcalc()                    -> to know how many rows were gained
   IF curcon.sb
     IF curcon.cols <> oc
-      nsb := New(Mul(curcon.sbmax, curcon.cols))
-      nsa := New(Mul(curcon.sbmax, curcon.cols))
-      nss := New(Mul(curcon.sbmax, curcon.cols))
-      IF (nsb = NIL) OR (nsa = NIL) OR (nss = NIL)
-        IF nsb THEN Dispose(nsb)
-        IF nsa THEN Dispose(nsa)
-        IF nss THEN Dispose(nss)
+      IF reflowring(oc, orows) = FALSE
         Dispose(curcon.sb)             -> degraded: the console runs on
         Dispose(curcon.sa)             -> without scrollback rather than
         Dispose(curcon.ss)             -> rendering through a wrong-
@@ -1886,21 +2119,20 @@ PROC doresize()
         curcon.ss := NIL
         curcon.sw := NIL               -> all four or none (B7)
       ELSE
-        n := Min(oc, curcon.cols)
-        FOR r := 0 TO curcon.sbmax - 1
-          CopyMem(curcon.sb + Mul(r, oc), nsb + Mul(r, curcon.cols), n)
-          CopyMem(curcon.sa + Mul(r, oc), nsa + Mul(r, curcon.cols), n)
-          CopyMem(curcon.ss + Mul(r, oc), nss + Mul(r, curcon.cols), n)
-        ENDFOR
-        Dispose(curcon.sb)
-        Dispose(curcon.sa)
-        Dispose(curcon.ss)
-        curcon.sb := nsb
-        curcon.sa := nsa
-        curcon.ss := nss
+        -> reflowring() has already re-derived sbtop, sbcnt, the cursor
+        -> AND the anchor against the new geometry - including any
+        -> height change, since it lays the transcript out from
+        -> scratch. The height blocks below must therefore not run:
+        -> they would scroll a cursor that is already where it belongs.
+        reflowed := TRUE
       ENDIF
     ENDIF
   ENDIF
+  -> everything from here to the anchor clamps is the NON-reflow path:
+  -> the height-only resize, and the degraded no-model console. A
+  -> reflow has already laid the transcript out against the new
+  -> geometry and placed the cursor and anchor inside it.
+  IF reflowed = FALSE
   IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols  -> cols itself = pending wrap, legal
   WHILE curcon.cy > (curcon.rows - 1)         -> height shrank: the rows above the
     curcon.sbtop := curcon.sbtop + 1                     -> cursor scroll into history
@@ -1944,6 +2176,7 @@ PROC doresize()
   ENDIF
   IF curcon.ancx > (curcon.cols - 1) THEN curcon.ancx := curcon.cols - 1
   IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
+  ENDIF                                -> (reflowed = FALSE)
   SetAPen(curcon.rp, 0)                -> clear the inner window (margins
   RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,  -> included), then
            curcon.win.width - curcon.win.borderright - 1,    -> repaint from the
@@ -2009,14 +2242,16 @@ ENDPROC curcon.ss + Mul(i, curcon.cols)
 
 -> B7: the soft-wrap plane's accessors. Indexed by ring ROW like the
 -> three cell planes, but one byte per row rather than per cell.
--> wrapf(r) = "screen row r continues the row above it", i.e. the row
--> break above r came from outchr/render hitting the right margin, not
--> from a real newline. doresize()'s reflow pass is the only reader:
+-> A set flag means "this row continues the row above it", i.e. the row
+-> break above it came from outchr/render hitting the right margin, not
+-> from a real newline. reflowring() is the only reader, and it reads
+-> the plane directly through a typed pointer because it walks RING
+-> rows rather than screen rows:
 -> a run of rows [first, first+1, ...] where every row after the first
 -> has the flag set IS one logical line, and can be re-wrapped at any
 -> width. Nothing else in the console needs to know.
--> Safe when scrollback is off (sw = NIL): setwrapf does nothing and
--> wrapf answers 0, so a no-model console behaves exactly as before.
+-> Safe when scrollback is off (sw = NIL): setwrapf and dropwrapf
+-> do nothing, so a no-model console behaves exactly as before.
 PROC swrow(r)
   DEF i
   i := curcon.sbtop + r
@@ -2030,13 +2265,6 @@ PROC setwrapf(r, v)
   p := swrow(r)
   p[0] := v
 ENDPROC
-
-PROC wrapf(r)
-  DEF p:PTR TO CHAR
-  IF curcon.sw = NIL THEN RETURN 0
-  IF (r < 0) OR (r > (curcon.rows - 1)) THEN RETURN 0
-  p := swrow(r)
-ENDPROC p[0]
 
 -> B7: drop the continuation flag across a row range. The CSI region
 -> operations (L/M/S/T insert/delete/scroll rows, @/P shift cells,
@@ -5857,4 +6085,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b9 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b10 CCON: LTX console handler', 0
