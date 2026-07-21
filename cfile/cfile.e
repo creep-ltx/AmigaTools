@@ -1817,8 +1817,11 @@ ENDPROC
 -> the pane switches to archive mode rooted at the archive; ppath[p]
 -> stays put (the archive's own directory), ready for the exit.
 PROC enterarchive(p, fpath)
+  DEF stageroot[CPATHLEN]:STRING
   IF loadarchive(p, fpath)
     StrCopy(arcpath[p], fpath)
+    arcstage(p, stageroot)    -> clear any staging a crash left behind
+    arcwipe(stageroot)
     SetStr(arcsub[p], 0)
     esel[p] := 0
     etop[p] := 0
@@ -2465,6 +2468,21 @@ PROC firstcomp(dst, path:PTR TO CHAR)
   StrCopy(dst, path, i)
 ENDPROC
 
+-> the deferred-write staging root: a scratch directory in the archive's
+-> OWN directory. T: is normally RAM:T, so accumulating a session's
+-> edits there would eat memory a machine with little fast RAM does not
+-> have; the archive's volume is where the commit writes anyway. The
+-> name carries the pane number, so the same archive open in both panes
+-> stages to two separate trees. Writes dst = "<archive's dir>/CFile-stgN".
+PROC arcstage(p, dst)
+  DEF a:PTR TO CHAR, dl
+  a := arcpath[p]
+  dl := PathPart(a) - a    -> length of the directory part
+  StrCopy(dst, a, dl)
+  AddPart(dst, IF p = 0 THEN 'CFile-stg0' ELSE 'CFile-stg1', CPATHLEN - 4)
+  SetStr(dst, StrLen(dst))
+ENDPROC
+
 -> wipe a scratch tree without disturbing the delete-run failure count
 PROC arcwipe(dir)
   DEF savg
@@ -2656,10 +2674,26 @@ PROC arcdeltree(p, prefix)
   DeleteFile('T:CFile-out')
 ENDPROC ok
 
+-> drop a member's staged content when a not-yet-committed add is
+-> deleted, so the commit's add pass does not put it back. Files go
+-> with DeleteFile, an empty staged directory with arcwipe.
+PROC arcunstage(p, member:PTR TO CHAR)
+  DEF stageroot[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, l
+  arcstage(p, stageroot)
+  StrCopy(sfile, stageroot)
+  AddPart(sfile, member, CPATHLEN - 4)
+  SetStr(sfile, StrLen(sfile))
+  l := EstrLen(sfile)
+  IF (l > 0) AND (sfile[l - 1] = "/") THEN SetStr(sfile, l - 1)
+  IF pathtype(sfile) = 2 THEN arcwipe(sfile) ELSE DeleteFile(sfile)
+ENDPROC
+
 -> ARCWRITE ONEXIT: flag the cache members a delete would remove, so
 -> the archive is left untouched until commit. A file matches by exact
 -> stored name; a directory matches everything under it (the same
 -> prefix test arcdeltree uses, so an empty "dir/" entry is caught too).
+-> A member still only STAGED (added this session, not yet committed) is
+-> un-staged instead - its file leaves the tree and the flag hides it.
 -> Returns how many members were newly flagged.
 PROC arcflagdel(p, member, isdir)
   DEF a:PTR TO LONG, st:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl,
@@ -2673,6 +2707,7 @@ PROC arcflagdel(p, member, isdir)
     pl := StrLen(pfx)
     FOR k := 0 TO amcnt[p] - 1
       IF ncprefix(a[k], pfx, pl)
+        IF st[k] = MST_ADD THEN arcunstage(p, a[k])
         IF st[k] <> MST_DEL THEN n++
         st[k] := MST_DEL
       ENDIF
@@ -2681,6 +2716,7 @@ PROC arcflagdel(p, member, isdir)
     FOR k := 0 TO amcnt[p] - 1
       m := a[k]
       IF nccmp(m, member) = 0
+        IF st[k] = MST_ADD THEN arcunstage(p, m)
         IF st[k] <> MST_DEL THEN n++
         st[k] := MST_DEL
       ENDIF
@@ -2694,9 +2730,46 @@ ENDPROC n
 -> or quit) invokes it while the cache still exists. Batches like
 -> arcdeltree - lha takes several filespecs per call. So far only
 -> deletes are deferred; adds/edits join here as the model grows.
+-> the add pass of a commit: every top-level entry of the staging tree
+-> goes into one lha -r -e add, CWD = the staging root so the stored
+-> paths are tree-relative (the only add form that keeps a subdirectory
+-> prefix). -e stores an explicitly-made empty directory. Batched like
+-> the delete pass; the shared lock is held across the run, which is
+-> safe - lha only reads the tree, it writes the archive elsewhere.
+PROC arcaddstaged(p, stageroot)
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, cmd[700]:STRING,
+      base[360]:STRING, baselen, more
+  IF (lock := Lock(stageroot, SHARED_LOCK)) = NIL THEN RETURN
+  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL
+    UnLock(lock)
+    RETURN
+  ENDIF
+  StringF(base, 'lha -M -r -e a "\s"', arcpath[p])
+  StrCopy(cmd, base)
+  baselen := EstrLen(cmd)
+  IF Examine(lock, fib)
+    more := ExNext(lock, fib)
+    WHILE more
+      IF (EstrLen(cmd) + StrLen(fib.filename)) > 600
+        arcrunprog(stageroot, cmd)
+        StrCopy(cmd, base)
+      ENDIF
+      StrAdd(cmd, ' "')
+      StrAdd(cmd, fib.filename)
+      StrAdd(cmd, '"')
+      more := ExNext(lock, fib)
+    ENDWHILE
+  ENDIF
+  FreeDosObject(DOS_FIB, fib)
+  UnLock(lock)
+  IF EstrLen(cmd) > baselen THEN arcrunprog(stageroot, cmd)
+  DeleteFile('T:CFile-out')
+ENDPROC
+
 PROC arccommit(p)
   DEF a:PTR TO LONG, st:PTR TO LONG, k, cmd[700]:STRING, base[360]:STRING,
-      m:PTR TO CHAR, baselen, any=FALSE
+      m:PTR TO CHAR, baselen, hasdel=FALSE, hasadd,
+      stageroot[CPATHLEN]:STRING
   IF inarchive(p) = FALSE THEN RETURN
   IF arcwrite = FALSE THEN RETURN
   IF amst[p] = NIL THEN RETURN
@@ -2704,31 +2777,41 @@ PROC arccommit(p)
   st := amst[p]
   IF amcnt[p] > 0
     FOR k := 0 TO amcnt[p] - 1
-      IF st[k] = MST_DEL THEN any := TRUE
+      IF st[k] = MST_DEL THEN hasdel := TRUE
     ENDFOR
   ENDIF
-  IF any = FALSE THEN RETURN
+  arcstage(p, stageroot)
+  hasadd := pathtype(stageroot) = 2    -> a staging tree was built
+  IF (hasdel = FALSE) AND (hasadd = FALSE) THEN RETURN
   -> a border-row note, not the centred bar: the commit can fire on the
   -> way out of the archive (partial redraw) or at quit (screen closing),
-  -> neither of which erases a centred overlay cleanly. lha rewrites the
-  -> archive once for the whole batch.
+  -> neither of which erases a centred overlay cleanly.
   promptrow('writing changes to the archive')
-  StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
-  StrCopy(cmd, base)
-  baselen := EstrLen(cmd)
-  FOR k := 0 TO amcnt[p] - 1
-    IF st[k] = MST_DEL
-      m := a[k]
-      IF (EstrLen(cmd) + StrLen(m)) > 600
-        arcrunprog(NIL, cmd)
-        StrCopy(cmd, base)
+  -> delete pass FIRST, so a replaced or edited member is gone before its
+  -> new version is added (lha add skips a member already present). lha
+  -> rewrites the archive once per pass.
+  IF hasdel
+    StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
+    StrCopy(cmd, base)
+    baselen := EstrLen(cmd)
+    FOR k := 0 TO amcnt[p] - 1
+      IF st[k] = MST_DEL
+        m := a[k]
+        IF (EstrLen(cmd) + StrLen(m)) > 600
+          arcrunprog(NIL, cmd)
+          StrCopy(cmd, base)
+        ENDIF
+        StrAdd(cmd, ' "')
+        StrAdd(cmd, m)
+        StrAdd(cmd, '"')
       ENDIF
-      StrAdd(cmd, ' "')
-      StrAdd(cmd, m)
-      StrAdd(cmd, '"')
-    ENDIF
-  ENDFOR
-  IF EstrLen(cmd) > baselen THEN arcrunprog(NIL, cmd)
+    ENDFOR
+    IF EstrLen(cmd) > baselen THEN arcrunprog(NIL, cmd)
+  ENDIF
+  IF hasadd
+    arcaddstaged(p, stageroot)
+    arcwipe(stageroot)
+  ENDIF
   DeleteFile('T:CFile-out')
 ENDPROC
 
@@ -5293,10 +5376,54 @@ ENDPROC
 -> n: a name ending in "/" makes a directory; anything else opens
 -> the editor on a NEW file - which only exists once it is saved
 -> n inside an archive: a trailing "/" makes an empty directory member
--> (lha -e stores it), any other name opens the editor on a new file
--> that is added only if it is saved. Both land at the pane's current
--> location and are stored through the same scratch-mirror + -r add the
--> copy-in path uses.
+-> ARCWRITE ONEXIT new: stage the file or empty directory into the
+-> beside-the-archive tree and add a MST_ADD cache member so it shows at
+-> once - no lha runs until the archive is committed. `member` is the
+-> full stored path; a directory gets a trailing slash, the way lha
+-> stores one. The staging tree is NOT wiped here - it accumulates until
+-> commit.
+PROC arcnewdefer(p, name, member, wantdir)
+  DEF st:PTR TO LONG, stageroot[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING,
+      mem2[CPATHLEN]:STRING, lock, r, sz=0, fib:PTR TO fileinfoblock
+  arcstage(p, stageroot)
+  StrCopy(sfile, stageroot)
+  AddPart(sfile, member, CPATHLEN - 4)
+  SetStr(sfile, StrLen(sfile))
+  makepath(sfile)    -> parent dirs, the staging root itself included
+  IF wantdir
+    IF (lock := CreateDir(sfile)) = NIL
+      showmsg('cannot make the folder - is the archive disk writable?')
+      RETURN
+    ENDIF
+    UnLock(lock)
+    StrCopy(mem2, member)
+    StrAdd(mem2, '/')    -> a stored empty-dir member carries a slash
+    arcadd(p, mem2, 0)
+  ELSE
+    drawpaths()
+    r := editfile(sfile, name)    -> the file exists only if saved
+    IF r <> 1
+      DeleteFile(sfile)
+      drawall()
+      RETURN
+    ENDIF
+    IF lock := Lock(sfile, SHARED_LOCK)
+      IF fib := AllocDosObject(DOS_FIB, NIL)
+        IF Examine(lock, fib) THEN sz := fib.size
+        FreeDosObject(DOS_FIB, fib)
+      ENDIF
+      UnLock(lock)
+    ENDIF
+    arcadd(p, member, sz)
+  ENDIF
+  -> mark the slot arcadd just appended as a pending add
+  st := amst[p]
+  IF amcnt[p] > 0 THEN st[amcnt[p] - 1] := MST_ADD
+  StrCopy(prevname, name)
+  refreshall()
+  selectbyname(p)
+ENDPROC
+
 PROC arcnew(p)
   DEF tname[40]:STRING, s:PTR TO CHAR, i, l, b, wantdir=FALSE, r, exists=FALSE,
       member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
@@ -5338,6 +5465,10 @@ PROC arcnew(p)
     RETURN
   ENDIF
   arcmember(member, arcsub[p], tname)
+  IF arcwrite
+    arcnewdefer(p, tname, member, wantdir)
+    RETURN
+  ENDIF
   IF EstrLen(arcsub[p]) > 0
     firstcomp(topname, arcsub[p])
   ELSE
