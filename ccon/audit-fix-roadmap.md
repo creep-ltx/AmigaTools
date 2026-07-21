@@ -411,7 +411,7 @@ client and why - and that answer is more valuable than the fix.
 
 ---
 
-## Batch 7 (new, unscheduled) - B7, width-shrink destroys ring content
+## Batch 7 - B7, width-shrink destroys ring content - DONE (1.2b10, 21.7.26)
 
 **Finding:** B7, found in exploratory boot testing 21.7.26, not the
 original systematic audit - see audit.md.
@@ -452,6 +452,45 @@ Two honest levels, detailed in audit.md:
 
 Doing nothing is now the weakest option - it can no longer be
 justified as matching the family.
+
+**Outcome: fixed as level 2 (true reflow), in three stages so a bisect
+could name any regression.**
+
+1. `1.2b9` - the `sw` wrap plane: one byte per ring row, set at the
+   two margin-wrap sites, cleared by real newlines, dropped
+   conservatively across the CSI region ops and the alt-screen
+   restore. Nothing read it, so it was a no-behaviour-change commit by
+   construction (`wrapf` compiling as UNREFERENCED was the check).
+2. `reflowtest.e` - the algorithm proved on data under vamos before it
+   went near the handler. Seven cases. It caught four things: a wrong
+   EXPECTATION of mine, a harness that did not scroll (the same
+   unfaithfulness sbresizetest.e hit), an `AND 15` mask on a
+   non-power-of-two ring writing out of bounds underneath passing
+   checks, and a real algorithm bug - a destination row not cleared on
+   ring wraparound, which showed the oldest line reappearing at the
+   BOTTOM of the window. Extending it to track the ANCHOR then forced
+   a fifth fix: the source range was emitting blank rows below the
+   cursor as empty logical lines, pushing real content into history.
+3. `1.2b10` - wired into `doresize()`. Two things the harness forced
+   into the real code: `eraseedit()` now runs at the top of
+   `doresize()` alongside tcclose/altdrop/clearsel (all four undo an
+   overlay at the OLD geometry - without it the reflow carries the
+   edit line's mirrored cells as client text and drawedit then paints
+   the line a second time), and the cursor and anchor are carried
+   THROUGH the reflow as tracked positions rather than clamped after.
+
+**The audit's "rewrite of the ring's representation" was wrong** -
+that estimate is what made level 2 look expensive. The grid stays
+exactly as it is; the only thing missing was per-row knowledge of
+whether a break was a soft wrap. visrow/sarow/ssrow, selvidx, redraw,
+screenscroll and drawmrow were never touched.
+
+**Hardware proof:** `ccon-b7`, wide -> shrunk -> grown. The shrunk
+state re-wraps mid-token (`..90....:..10` / `0`, `B7-EN` / `D`), which
+is reflow and not preservation. Grown back, the text region is
+PIXEL-IDENTICAL to the original - 0 differing pixels across 406220,
+once aligned for a 1px offset from the window being regrown slightly
+taller.
 
 **Separate, still open:** whether the original Ed repro is fully
 explained by this. Ed owns the screen in raw mode and redraws itself
