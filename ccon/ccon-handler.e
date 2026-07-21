@@ -220,6 +220,18 @@ OBJECT console
   ss                            -> v1.1: the style plane - bit0 italic,
                                 -> bit1 underline, bit2 inverse; third
                                 -> byte per cell, what LINES pays for
+  sw                            -> B7: the SOFT-WRAP plane - ONE BYTE
+                                -> PER RING ROW (not per cell), 1 = this
+                                -> row continues the row above it rather
+                                -> than starting a new logical line.
+                                -> The model stores finished SCREEN rows
+                                -> and outchr's auto-wrap called the same
+                                -> outnl() a real newline does, so a
+                                -> wrapped row and a newline-terminated
+                                -> one were indistinguishable - which is
+                                -> why a resize could not re-wrap and
+                                -> just truncated instead. Allocated
+                                -> with sb/sa/ss, all four or none.
   sbtop                         -> ring index of the top visible row
   sbcnt                         -> history lines above the screen
   sbmax                         -> v1.1: model lines THIS console keeps
@@ -1647,13 +1659,17 @@ PROC openwin()
   curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
   curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
   curcon.ss := New(Mul(curcon.sbmax, curcon.cols))
-  IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL)
+  curcon.sw := New(curcon.sbmax)   -> B7: one byte per ROW, not per cell
+  IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL) OR
+     (curcon.sw = NIL)
     IF curcon.sb THEN Dispose(curcon.sb)
     IF curcon.sa THEN Dispose(curcon.sa)
     IF curcon.ss THEN Dispose(curcon.ss)
+    IF curcon.sw THEN Dispose(curcon.sw)
     curcon.sb := NIL
     curcon.sa := NIL
     curcon.ss := NIL
+    curcon.sw := NIL
   ENDIF
   curcon.sbtop := 0
   curcon.sbcnt := 0
@@ -1820,6 +1836,10 @@ PROC closewin()
     Dispose(curcon.ss)
     curcon.ss := NIL
   ENDIF
+  IF curcon.sw
+    Dispose(curcon.sw)
+    curcon.sw := NIL
+  ENDIF
   altdrop()                     -> the snapshot dies with the window
   curcon.eofpend := FALSE
   curcon.rawmode := FALSE
@@ -1860,9 +1880,11 @@ PROC doresize()
         Dispose(curcon.sb)             -> degraded: the console runs on
         Dispose(curcon.sa)             -> without scrollback rather than
         Dispose(curcon.ss)             -> rendering through a wrong-
-        curcon.sb := NIL               -> stride model
+        Dispose(curcon.sw)             -> stride model
+        curcon.sb := NIL
         curcon.sa := NIL
         curcon.ss := NIL
+        curcon.sw := NIL               -> all four or none (B7)
       ELSE
         n := Min(oc, curcon.cols)
         FOR r := 0 TO curcon.sbmax - 1
@@ -1985,6 +2007,55 @@ PROC ssrow(r)
   IF i >= curcon.sbmax THEN i := i - curcon.sbmax
 ENDPROC curcon.ss + Mul(i, curcon.cols)
 
+-> B7: the soft-wrap plane's accessors. Indexed by ring ROW like the
+-> three cell planes, but one byte per row rather than per cell.
+-> wrapf(r) = "screen row r continues the row above it", i.e. the row
+-> break above r came from outchr/render hitting the right margin, not
+-> from a real newline. doresize()'s reflow pass is the only reader:
+-> a run of rows [first, first+1, ...] where every row after the first
+-> has the flag set IS one logical line, and can be re-wrapped at any
+-> width. Nothing else in the console needs to know.
+-> Safe when scrollback is off (sw = NIL): setwrapf does nothing and
+-> wrapf answers 0, so a no-model console behaves exactly as before.
+PROC swrow(r)
+  DEF i
+  i := curcon.sbtop + r
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
+ENDPROC curcon.sw + i
+
+PROC setwrapf(r, v)
+  DEF p:PTR TO CHAR
+  IF curcon.sw = NIL THEN RETURN
+  IF (r < 0) OR (r > (curcon.rows - 1)) THEN RETURN
+  p := swrow(r)
+  p[0] := v
+ENDPROC
+
+PROC wrapf(r)
+  DEF p:PTR TO CHAR
+  IF curcon.sw = NIL THEN RETURN 0
+  IF (r < 0) OR (r > (curcon.rows - 1)) THEN RETURN 0
+  p := swrow(r)
+ENDPROC p[0]
+
+-> B7: drop the continuation flag across a row range. The CSI region
+-> operations (L/M/S/T insert/delete/scroll rows, @/P shift cells,
+-> J/K erase) all move or overwrite row CONTENT without moving the
+-> logical-line structure that produced it, so any flag they leave
+-> behind describes a join that is no longer true. Clearing is the
+-> conservative answer and deliberately so: it can never invent a
+-> WRONG join, it only costs re-wrapping on rows a full-screen client
+-> scribbled - which fall back to today's clip-on-resize behaviour.
+-> Those clients redraw themselves on resize anyway, which is why
+-> this is the cheap side of the trade.
+PROC dropwrapf(r0, r1)
+  DEF r
+  IF curcon.sw = NIL THEN RETURN
+  FOR r := r0 TO r1
+    setwrapf(r, 0)
+  ENDFOR
+ENDPROC
+
 -> the pen SGR state draws with right now. On an ANSI screen
 -> (WBPENS) bold lifts the 8 base colours to the bright pens; on
 -> any other screen bold+explicit-3x goes through the
@@ -2039,6 +2110,7 @@ PROC clearrow(r)
     a[i] := 0
     stp[i] := 0
   ENDFOR
+  setwrapf(r, 0)                -> B7: an empty row continues nothing
 ENDPROC
 
 -> paint one MODEL ring row (by ring index) at pixel row y, in
@@ -2880,6 +2952,12 @@ PROC altrestore()
     CopyMem(curcon.alta + Mul(r, curcon.cols), sarow(r), curcon.cols)
     CopyMem(curcon.alts + Mul(r, curcon.cols), ssrow(r), curcon.cols)
   ENDFOR
+  -> B7: the snapshot predates the wrap plane and carries no flags of
+  -> its own, so whatever sits in sw now describes the RAW session's
+  -> rows, not the restored transcript's. Drop them rather than
+  -> restore a wrong join - the restored rows fall back to
+  -> clip-on-resize, which is what they did before B7 anyway.
+  dropwrapf(0, curcon.rows - 1)
   curcon.cx := curcon.altcx
   curcon.cy := curcon.altcy
   curcon.ancx := curcon.altancx
@@ -2927,11 +3005,24 @@ PROC outnl()
     screenscroll()
     curcon.cy := curcon.rows - 1
   ENDIF
+  setwrapf(curcon.cy, 0)        -> B7: a real newline STARTS a logical
+ENDPROC                         -> line - the row below is not a
+                                -> continuation of the row above
+
+-> B7: outnl's twin for the AUTO-WRAP case - identical mechanics, but
+-> the row landed on is marked as continuing the row above, which is
+-> the whole distinction doresize()'s reflow needs and the model had
+-> no way to express before. Called from the two places that wrap on
+-> the right margin (outchr, and render's printable-run loop); every
+-> other outnl() caller is a genuine newline and must stay outnl().
+PROC outwrapnl()
+  outnl()
+  setwrapf(curcon.cy, 1)
 ENDPROC
 
 PROC outchr(c)
   DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
-  IF curcon.cx >= curcon.cols THEN outnl()
+  IF curcon.cx >= curcon.cols THEN outwrapnl()  -> B7: margin wrap, not a newline
   b[0] := c
   setpens()
   setsoft(curcon.cursty)
@@ -3130,7 +3221,7 @@ ENDPROC
 
 PROC erasebelow()
   DEF r
-  eraseeol()
+  eraseeol()                    -> (clears cy+1's flag itself, B7)
   IF curcon.cy < (curcon.rows - 1)
     SetAPen(curcon.rp, 0)
     RectFill(curcon.rp, curcon.left, curcon.topy + Mul(curcon.cy + 1, curcon.ch),
@@ -3162,6 +3253,7 @@ PROC inslines(n)
     FOR r := curcon.cy TO curcon.cy + n - 1
       clearrow(r)
     ENDFOR
+    dropwrapf(curcon.cy, curcon.rows - 1)   -> B7
   ENDIF
 ENDPROC
 
@@ -3181,6 +3273,7 @@ PROC dellines(n)
     FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
     ENDFOR
+    dropwrapf(curcon.cy, curcon.rows - 1)   -> B7
   ENDIF
 ENDPROC
 
@@ -3203,6 +3296,7 @@ PROC scrollup(n)
     FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
     ENDFOR
+    dropwrapf(0, curcon.rows - 1)           -> B7
   ENDIF
 ENDPROC
 
@@ -3222,6 +3316,7 @@ PROC scrolldown(n)
     FOR r := 0 TO n - 1
       clearrow(r)
     ENDFOR
+    dropwrapf(0, curcon.rows - 1)           -> B7
   ENDIF
 ENDPROC
 
@@ -3251,6 +3346,7 @@ PROC inschars(n)
       a[j] := 0
       stp[j] := 0
     ENDFOR
+    setwrapf(curcon.cy + 1, 0)  -> B7: the row tail shifted off
     idx := curcon.sbtop + curcon.cy
     IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
     drawmrow(idx, y)
@@ -3281,7 +3377,8 @@ PROC delchars(n)
       a[j] := 0
       stp[j] := 0
     ENDFOR
-    idx := curcon.sbtop + curcon.cy
+    setwrapf(curcon.cy + 1, 0)  -> B7: the row no longer fills to the
+    idx := curcon.sbtop + curcon.cy         -> margin
     IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
     drawmrow(idx, y)
   ELSE
@@ -3336,7 +3433,8 @@ PROC eraseeol()
       a[j] := 0
       stp[j] := 0
     ENDFOR
-  ENDIF
+    setwrapf(curcon.cy + 1, 0)  -> B7: this row no longer reaches the
+  ENDIF                         -> margin, so nothing continues it
 ENDPROC
 
 -> the 0.1 CTerm renderer's CSI discipline, transplanted and grown
@@ -3475,7 +3573,7 @@ PROC render(buf, len)
       at := curattr()
       sty := curcon.cursty
       WHILE run > 0
-        IF curcon.cx >= curcon.cols THEN outnl()
+        IF curcon.cx >= curcon.cols THEN outwrapnl()  -> B7: margin wrap, not a newline
         fit := curcon.cols - curcon.cx
         IF fit > run THEN fit := run
         setpens()
@@ -5759,4 +5857,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b8 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b9 CCON: LTX console handler', 0
