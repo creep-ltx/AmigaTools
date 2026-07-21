@@ -24,7 +24,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 | B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
 | B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
 | P5 | **fixed in 1.2b11** (append not full rewrite; hardware-verified on the on-disk file 22.7.26) |
-| B5 | open - batch 6, decision first |
+| B5 | **fixed in 1.2b13** (ACTION_DIE teardown; hardware-verified with ccdie - clean tear-down, fresh re-mount, busy-refuse - 22.7.26) |
 | B6 | **fixed in 1.2b12** (DISK_INFO fails rather than guessing; telemetry proved the fallback never fires - 22.7.26) |
 | B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
 | B8 | open - new finding 21.7.26 (raw-mode/Ed resize clips + stale pixels; NOT a B7 regression, proved by A/B) |
@@ -252,9 +252,30 @@ immortal by design), but a mount/unmount cycle during development
 leaves the previous chain handler installed. That is a
 development-time hazard on the machine doing the boot tests.
 
-**Fix:** a `CASE ACTION_DIE` that refuses (`DOSFALSE`) while
-`conlist` is non-NIL, and otherwise removes the handler, closes the
-devices and exits.
+**Fix as applied (1.2b13):** a `CASE ACTION_DIE` that refuses
+(`DOSFALSE`, `ERROR_OBJECT_IN_USE`) while `conlist` is non-NIL;
+otherwise clears the DeviceNode's `dn_Task` (so DOS re-mounts a fresh
+handler on the next open), replies `DOSTRUE`, and sets `dieing` to end
+`main()`'s loop - now `WHILE dieing = FALSE`. `killhandler()` then
+releases only the EXEC resources E's exit does not track:
+`IND_REMHANDLER` first (before E frees `ihis`/`ihring` under a live
+interrupt), close the three devices, delete the IO requests and message
+ports, close keymap, free both signals. The `New()`/`String()` memory
+rides E's list and is freed by `CLEANUPALL`/`FREEBUFFERS` when `main()`
+returns - freeing it here too would double-free.
+
+**Status: FIXED in 1.2b13, hardware-verified 22.7.26.** Tested with
+`ccdie` (tests/ccdie.e), which sends `ACTION_DIE` since no stock
+command does. An idle CCON: handler (port `$400F9B94`) with its input
+handler installed replied `DOSTRUE` and tore down with NO guru;
+re-opening CCON: started a genuinely NEW process (port `$400F9C24` -
+the changed port proves the old one actually died and DOS re-mounted
+fresh), which rendered `list` and echoed keys correctly (the input
+chain was cleanly removed and reinstalled). A second `ccdie` with a
+window open was refused with `res2 = 202` (`ERROR_OBJECT_IN_USE`),
+verifying the busy guard. This also confirmed the reasoning that E
+re-initializes globals on re-entry and DOS reuses the seglist - the
+one part that could not be checked from Linux.
 
 ---
 

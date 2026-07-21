@@ -398,20 +398,28 @@ if anything downstream gets strange.
 
 ---
 
-## Batch 6 - policy decisions (B5, B6) - B6 DONE (1.2b12, 22.7.26), B5 open
+## Batch 6 - policy decisions (B5, B6) - BOTH DONE (22.7.26)
 
 **Findings:** B5, B6
 
 Both are behaviour changes rather than bug fixes, so they want a
 decision before they want code.
 
-**B5 - `ACTION_DIE`. STILL OPEN.** Refuse while `conlist` is non-NIL,
-otherwise tear down (remove the input handler, close
-input/timer/clipboard, free `ihring`/`ihis`/`fhstub`) and exit. Mostly
-a development-quality improvement: it makes mount/unmount cycles on the
-test machine clean. Worth doing, low urgency. Turns an immortal
-process mortal, so the teardown order (input.device chain first) has
-to be exactly right - that is the whole of the work.
+**B5 - `ACTION_DIE`. DONE (1.2b13).** Refuses (`ERROR_OBJECT_IN_USE`)
+while `conlist` is non-NIL; otherwise clears `dn_Task`, replies
+`DOSTRUE`, ends the loop, and `killhandler()` releases the exec
+resources (input.device handler FIRST, then devices/ports/library/
+signals) while E's exit frees the New/String memory.
+
+Hardware-verified with `ccdie` (tests/ccdie.e), which sends the packet
+since no stock command does: the idle handler tore down with no guru,
+re-opening CCON: started a NEW process (the handler port changed,
+proving the old one died and DOS re-mounted fresh), keys echoed
+correctly (input chain cleanly removed + reinstalled), and a second
+`ccdie` with a window open was refused with `ERROR_OBJECT_IN_USE`. The
+untested risks from the commit message (E re-initialises globals on
+re-entry, DOS reuses the seglist, CLEANUPALL runs cleanly for this
+handler) all held.
 
 **B6 - `DISK_INFO` fallback. DONE (1.2b12).** `conbysender()` gained a
 `guess` flag; `DISK_INFO` passes FALSE and fails
