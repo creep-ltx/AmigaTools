@@ -1,0 +1,10 @@
+[1;1H[JCCON B7 - does a shrink DESTROY text, or only hide it?
+
+Ruler and marker below are each exactly 100 columns wide.
+Shrink this window narrower than the text, then grow it back.
+
+....:...10....:...20....:...30....:...40....:...50....:...60....:...70....:...80....:...90....:..100
+B7-START--------------------------------------------------------------------------------------B7-END
+
+FIXED / like stock CON:  -> B7-END and ..100 come back on grow
+BROKEN                   -> they stay cut off at the shrunk width

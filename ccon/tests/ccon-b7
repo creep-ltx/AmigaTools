@@ -1,0 +1,20 @@
+; CCON audit B7 - does a width shrink DESTROY text, or only hide it?
+;
+; Run:    Execute S:ccon-b7
+; Then:   drag the window NARROWER than the text (well under 100 cols)
+; Then:   drag it WIDE again
+;
+;   FIXED / like stock CON: -> the ruler's ..100 and the marker's
+;                              B7-END come back when you grow
+;   BROKEN                  -> they stay cut off at the shrunk width,
+;                              byte-identical to the shrunk state
+;
+; Run this under stock CON: too (NewShell CON:) and compare - that is
+; the whole point. Ed was the original repro, but Ed REDRAWS ITSELF on
+; resize, so an Ed test cannot tell "the console kept the data" apart
+; from "the client re-sent it". The Shell does not redraw on resize,
+; so whatever comes back here came from the console's own buffer.
+;
+; The ruler and the marker line are each exactly 100 columns, so the
+; column where truncation bit is readable straight off the screen.
+Type S:ccon-b7-fill
