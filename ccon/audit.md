@@ -21,7 +21,7 @@ Scope: `ccon-handler.e`, the whole file. Cross-checked against
 |---|---|
 | P1, P2, P4, H1, H2, H5 | **fixed in 1.2b2** (batch 1, boot-tested 21.7.26) |
 | B1, H4 | **fixed in 1.2b3** (batch 2, harness + A/B hardware proof 21.7.26) |
-| B2, B4 | open - batch 3 |
+| B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
 | B3 | open - batch 4 |
 | P5 | open - batch 5 |
 | B5, B6 | open - batch 6, decision first |
@@ -114,19 +114,39 @@ The ring invariant is `sbcnt <= sbmax - rows`. `screenscroll()`
 
 **Trigger:** fill the scrollback, then enlarge the window.
 
-**Consequence:** `scrollview()` clamps `viewoff` to a now-too-large
-`sbcnt`; `redraw()`'s `idx := sbtop - viewoff + r` wraps into ring rows
-the enlarged visible grid has already overwritten. Scrolling to the far
-end shows duplicated or stale rows. Cosmetic, but it looks like model
-corruption and will be reported as such.
+**Consequence, CORRECTED (21.7.26).** The diagnosis above is right that
+the invariant breaks, but it named the wrong symptom AND proposed a fix
+that measurably makes things worse. Both were caught by the harness
+(`sbresizetest.e`), and the correction matters more than the original
+finding did.
 
-**Fix:** after `gridcalc()` in `doresize()`:
+The real defect is not the count: it is that `doresize()` handles
+SHRINK symmetrically - advancing `sbtop`, pushing the rows above the
+cursor into history - and handles GROW **not at all**. So the visible
+window simply extends DOWNWARD over ring rows that have already been
+recycled. Enlarging a window with a full scrollback shows ancient lines,
+out of order, in the newly exposed rows. That is visible immediately at
+`viewoff = 0`, without scrolling anywhere.
 
-```
-IF curcon.sbcnt > (curcon.sbmax - curcon.rows)
-  curcon.sbcnt := curcon.sbmax - curcon.rows
-ENDIF
-```
+**The clamp this section originally proposed is NOT a fix.** Measured
+over the harness's two cases, bad rows: current logic 3, clamp 4,
+symmetric grow 0. The clamp only changes how far back you may scroll,
+leaves the recycled rows untouched, and cuts off history that WAS
+readable - worse than doing nothing.
+
+**Fix as applied (1.2b7):** the mirror of the shrink loop. For each row
+gained, step `sbtop` back one and drop `sbcnt` by one, pulling history
+down into the new space, with `cy`/`ancy` following it; rows history
+cannot fill are genuinely new and get cleared so they show blank rather
+than recycled text. This keeps `sbcnt <= sbmax - rows` for free, which
+is what the clamp was reaching for by the wrong route.
+
+**Status: FIXED in 1.2b7.** Harness-verified, and hardware-confirmed
+21.7.26: `ccon-b2`/`ccon-b2-fill` (`ccon/tests/`) write 60 numbered
+rows, deliberately more than any tested window height. A 5-row window
+showing rows 57-60 grown to 30 rows showed 32-60 - dead sequential,
+nothing repeated or reordered, exactly the pulled-down history the fix
+predicts.
 
 ---
 
@@ -170,8 +190,11 @@ write/read/wait; and in the `ihon = FALSE` fallback,
 the title fills with `[no chain] [no chain] [no chain]...` up to
 `wtitlebase`'s 84-char cap.
 
-**Fix:** clear `autopend` (or set a separate `autofailed`) on the
-failure path so a windowless AUTO console stops retrying.
+**Fix as applied (1.2b7):** clear `autopend` on `openwin()`'s failure
+return, so one attempt is all a console gets. Reasoned, not
+reproduced - forcing `OpenWindowTagList` to fail on demand is more
+instrumentation than the finding is worth, and the change only removes
+a retry.
 
 ---
 

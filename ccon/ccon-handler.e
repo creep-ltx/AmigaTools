@@ -1542,7 +1542,20 @@ PROC openwin()
        TAG_DONE, NIL])
     IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   ENDIF
-  IF curcon.win = NIL THEN RETURN
+  IF curcon.win = NIL
+    -> audit B4: the open FAILED. autopend is cleared at the far end
+    -> of this proc, past this return, so an AUTO console used to
+    -> retry openwin() on every single packet that reached
+    -> ensurewin() - a fresh LockPubScreen/OpenWindowTagList pair per
+    -> write, read and wait, forever. Worse, in the ihon = FALSE
+    -> fallback each attempt ran StrAdd(wtitlebase, ' [no chain]')
+    -> again, so the title silently filled with repeats up to its
+    -> 84-char cap. One attempt is enough: a console whose window
+    -> cannot be opened stays windowless, and dowrite already answers
+    -> ERROR_NO_FREE_STORE for that case.
+    curcon.autopend := FALSE
+    RETURN
+  ENDIF
   curcon.rp := curcon.win.rport
   IF curcon.fwin = FALSE
     -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont
@@ -1824,7 +1837,7 @@ ENDPROC
 -> re-measures itself.
 PROC doresize()
   DEF oc, nsb:PTR TO CHAR, nsa:PTR TO CHAR, nss:PTR TO CHAR, r, n,
-      evb[8]:ARRAY OF LONG, e:PTR TO ihev
+      evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k
   IF curcon.win = NIL THEN RETURN
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
@@ -1833,7 +1846,8 @@ PROC doresize()
   curcon.cursx := -1                   -> a full repaint follows anyway
   curcon.viewoff := 0
   oc := curcon.cols
-  gridcalc()
+  orows := curcon.rows          -> audit B2: the grow block below needs
+  gridcalc()                    -> to know how many rows were gained
   IF curcon.sb
     IF curcon.cols <> oc
       nsb := New(Mul(curcon.sbmax, curcon.cols))
@@ -1873,6 +1887,39 @@ PROC doresize()
     curcon.cy := curcon.cy - 1
     IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1
   ENDWHILE
+  -> audit B2 (harness-verified, sbresizetest.e): height GREW - pull
+  -> history DOWN into the new rows, the exact mirror of the shrink
+  -> loop above. Growing used to do nothing at all, so the visible
+  -> window just extended downward over ring rows the screen had
+  -> already recycled: enlarge a window with a full scrollback and the
+  -> new bottom rows showed ancient lines out of order.
+  -> The audit first proposed clamping sbcnt to sbmax - rows instead.
+  -> The harness rejected it: that only changes how far back you may
+  -> scroll, leaves the recycled rows exactly as they were, and cuts
+  -> off history that WAS readable - measurably worse than doing
+  -> nothing. Stepping sbtop back is what actually repairs the view,
+  -> and it keeps sbcnt <= sbmax - rows for free, which is what the
+  -> clamp was reaching for.
+  -> Mutually exclusive with the shrink loop: growing cannot leave
+  -> cy past the last row, so only one of the two ever runs.
+  k := curcon.rows - orows
+  IF k > 0
+    WHILE (k > 0) AND (curcon.sbcnt > 0)
+      curcon.sbtop := curcon.sbtop - 1
+      IF curcon.sbtop < 0 THEN curcon.sbtop := curcon.sbmax - 1
+      curcon.sbcnt := curcon.sbcnt - 1
+      curcon.cy := curcon.cy + 1        -> the content moved down with
+      curcon.ancy := curcon.ancy + 1    -> the rows pulled in above it
+      k := k - 1
+    ENDWHILE
+    -> whatever history could not fill is genuinely new space at the
+    -> BOTTOM; clear it so it shows blank instead of recycled text
+    IF curcon.sb
+      FOR r := curcon.rows - k TO curcon.rows - 1
+        clearrow(r)
+      ENDFOR
+    ENDIF
+  ENDIF
   IF curcon.ancx > (curcon.cols - 1) THEN curcon.ancx := curcon.cols - 1
   IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
   SetAPen(curcon.rp, 0)                -> clear the inner window (margins
@@ -5683,4 +5730,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b6 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b7 CCON: LTX console handler', 0

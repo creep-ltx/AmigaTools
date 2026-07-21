@@ -210,7 +210,7 @@ construction.
 
 ---
 
-## Batch 3 - two bounded correctness fixes - DONE (1.2b4, 21.7.26)
+## Batch 3 - two bounded correctness fixes - DONE (1.2b7, 21.7.26)
 
 **Findings:** B2, B4
 
@@ -239,8 +239,14 @@ B4 shipped as reasoned-not-reproduced, as this plan allowed for -
 forcing `OpenWindowTagList` to fail is more instrumentation than the
 finding is worth, and the change only removes a retry.
 
-**Still owed: the hardware test.** B2 has a hand repro (fill the
-scrollback, enlarge the window, look at the new bottom rows).
+**Hardware test, done (21.7.26).** `ccon-b2`/`ccon-b2-fill`
+(`ccon/tests/`) write 60 numbered rows - deliberately more than any
+window height tested holds, so the ring is guaranteed to carry more
+history than one screen. A 5-row window showing rows 57-60, grown to
+30 rows, showed 32-60: dead sequential, nothing repeated or reordered.
+That is exactly the pulled-down history the fix predicts, not the
+recycled-ring garbage the bug produced. Two screenshots, before and
+after the grow, same window, same boot.
 
 The original plan follows, kept for the record.
 

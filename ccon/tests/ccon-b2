@@ -1,0 +1,21 @@
+; CCON audit B2 - doresize() does nothing on GROW, so an enlarged
+; window extends downward over scrollback ring rows it has already
+; recycled
+;
+; Run:    Execute S:ccon-b2
+; Then:   drag the window's bottom-right corner to make it TALLER
+;         (more rows - width doesn't matter)
+; Then:   look at the NEW rows exposed at the bottom
+;
+;   BROKEN -> the new rows show old numbers out of order, or repeats
+;             of numbers already visible further up
+;   FIXED  -> the new rows continue the numbered sequence in order,
+;             or are blank once you have grown past all 60 of them
+;
+; 60 rows is deliberately more than any CCON window used in testing
+; holds at once, so the ring is guaranteed to hold more history than
+; one screen - the precondition doresize()'s grow block needs.
+;
+; No undo script needed: NewShell CCON: (or close/reopen the window)
+; clears it.
+Type S:ccon-b2-fill
