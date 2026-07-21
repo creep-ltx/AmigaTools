@@ -42,6 +42,19 @@ DEF ring[480]:ARRAY OF CHAR,    -> the char plane, row-major at `cols`
     dr, dc,                     -> dest write cursor (dr is LINEAR)
     dcur,                       -> dest linear row the cursor landed on
     srccur,                     -> source ring row holding the cursor
+    -> TRACKED POSITIONS. cx/cy (the output cursor) and ancx/ancy (the
+    -> edit-line anchor) are both positions IN THE TEXT, and both have
+    -> to come out of a reflow pointing at the same character they went
+    -> in pointing at - the anchor especially, because drawedit()
+    -> repaints the edit line there and its mirrored cells are in the
+    -> ring being reflowed. Get the anchor wrong and the edit line is
+    -> painted somewhere other than where its own mirror landed. Slot
+    -> 0 = cursor, slot 1 = anchor.
+    trow[2]:ARRAY OF LONG,      -> source ring row of each tracked pos
+    tcol[2]:ARRAY OF LONG,      -> and its column
+    drw[2]:ARRAY OF LONG,       -> where the reflow put it: dest LINEAR
+    dcl[2]:ARRAY OF LONG,       -> row, and column
+    lastx,                      -> column the last emitpartial stopped at
     fails
 
 -> ---------- ring helpers, transcribed from ccon-handler.e ----------
@@ -124,7 +137,7 @@ ENDPROC n
 -> newest SBMAX - which is what the real doresize() will do, and why
 -> this harness models it the same way instead of over-allocating.
 PROC reflow(ncols)
-  DEF i, total, first, sr, j, n, started, k
+  DEF i, total, first, sr, j, n, started, k, last
   FOR i := 0 TO CELLS - 1
     dring[i] := 0
   ENDFOR
@@ -135,11 +148,30 @@ PROC reflow(ncols)
   dc := 0
   dtotal := 1
   dcur := 0
+  drw[0] := 0
+  dcl[0] := 0
+  drw[1] := 0
+  dcl[1] := 0
   first := sbtop - sbcnt
   WHILE first < 0
     first := first + SBMAX
   ENDWHILE
-  total := sbcnt + rows
+  -> Source range: history, then the visible rows UP TO THE LAST ONE
+  -> THAT HOLDS ANYTHING - not blindly all `rows` of them. Blank rows
+  -> below the cursor are unused screen, not transcript, and emitting
+  -> them as empty logical lines burns a dest row each and pushes real
+  -> content up into history. Case G caught exactly that: a two-line
+  -> screen in a five-row window put its anchor three rows too high.
+  -> Content BELOW the cursor is still honoured (a full-screen client
+  -> can leave some), hence last-non-empty rather than just cy.
+  last := cy
+  FOR i := 0 TO rows - 1
+    sr := ridx(i)
+    IF rowlen(sr) > 0
+      IF i > last THEN last := i
+    ENDIF
+  ENDFOR
+  total := sbcnt + last + 1
   started := FALSE
   FOR i := 0 TO total - 1
     sr := first + i
@@ -153,9 +185,32 @@ PROC reflow(ncols)
     ENDIF
     IF sr = srccur THEN dcur := dr
     n := rowlen(sr)
+    -> a tracked position sitting ON this row, at or before its
+    -> content, resolves as the cell it names is emitted
+    FOR k := 0 TO 1
+      IF (trow[k] = sr) AND (tcol[k] = 0)
+        drw[k] := dr
+        dcl[k] := dc
+      ENDIF
+    ENDFOR
     FOR j := 0 TO n - 1
       demit(ring[Mul(sr, MAXCOLS) + j], ncols)
       IF sr = srccur THEN dcur := dr
+      FOR k := 0 TO 1
+        IF (trow[k] = sr) AND (tcol[k] = (j + 1))
+          drw[k] := dr          -> resolves to the cell AFTER the one
+          dcl[k] := dc          -> just written, which is what a cursor
+        ENDIF                   -> "at column j+1" means
+      ENDFOR
+    ENDFOR
+    -> a position PAST this row's content (cx beyond the last written
+    -> cell, or an anchor parked on the margin) lands just after what
+    -> the row did emit - it cannot resolve to a cell that never was
+    FOR k := 0 TO 1
+      IF (trow[k] = sr) AND (tcol[k] > n)
+        drw[k] := dr
+        dcl[k] := dc
+      ENDIF
     ENDFOR
   ENDFOR
   -> adopt the result
@@ -180,6 +235,17 @@ PROC reflow(ncols)
   IF cy < 0 THEN cy := 0
   IF cy > (rows - 1) THEN cy := rows - 1
   srccur := ridx(cy)
+  -> both tracked positions are dest LINEAR rows; k is the linear row
+  -> the visible screen now starts at, so screen row = linear - k. A
+  -> position that reflowed into history clamps onto the top row
+  -> rather than going negative and indexing outside the grid.
+  FOR i := 0 TO 1
+    trow[i] := drw[i] - k
+    IF trow[i] < 0 THEN trow[i] := 0
+    IF trow[i] > (rows - 1) THEN trow[i] := rows - 1
+    tcol[i] := dcl[i]
+    IF tcol[i] > ncols THEN tcol[i] := ncols   -> = pending wrap, legal
+  ENDFOR
 ENDPROC
 
 -> ---------- scaffolding ----------
@@ -228,6 +294,29 @@ PROC emitline(s:PTR TO CHAR)
   srccur := ridx(cy)
 ENDPROC
 
+-> like emitline but with NO trailing newline - a prompt. Leaves the
+-> cursor parked mid-row, which is where reanchor() takes the anchor
+-> from, and is the state B1's whole saga lived in.
+PROC emitpartial(s:PTR TO CHAR)
+  DEF i, l, x, idx
+  l := StrLen(s)
+  x := 0
+  FOR i := 0 TO l - 1
+    IF x >= cols
+      advrow(1)
+      x := 0
+    ENDIF
+    idx := ridx(cy)
+    ring[Mul(idx, MAXCOLS) + x] := s[i]
+    x := x + 1
+  ENDFOR
+  srccur := ridx(cy)
+  lastx := x                    -> the column the cursor stopped at
+ENDPROC
+
+-> the output cursor's column after the last emitpartial
+PROC cx() IS lastx
+
 PROC resetring(c, rw)
   DEF i
   FOR i := 0 TO CELLS - 1
@@ -242,6 +331,16 @@ PROC resetring(c, rw)
   sbcnt := 0
   cy := 0
   srccur := 0
+  lastx := 0
+  -> park both tracked slots on a row that cannot match any source row
+  -> (E does NOT zero global DEF arrays - they start as garbage, and a
+  -> stale slot would resolve against whatever row it happened to name)
+  FOR i := 0 TO 1
+    trow[i] := -1
+    tcol[i] := 0
+    drw[i] := 0
+    dcl[i] := 0
+  ENDFOR
 ENDPROC
 
 -> the visible screen plus its history, as one string with '/' between
@@ -415,6 +514,34 @@ PROC main()
     WriteF('    FAIL cy \d outside 0..\d\n', cy, rows - 1)
     fails := fails + 1
   ENDIF
+
+  -> ---- G: THE ANCHOR. The risk flagged before stage 3, and the one
+  -> B1 spent three attempts proving is unforgiving. A prompt that
+  -> ends mid-row parks the anchor there; after a reflow the anchor
+  -> must still name the cell straight after the prompt text, because
+  -> drawedit() repaints the edit line from it and the edit line's own
+  -> mirrored cells were in the ring that just moved.
+  WriteF('\n--- G: the edit anchor lands after its prompt, not adrift ---\n')
+  resetring(20, 5)
+  emitline('line one')
+  -> a prompt with NO trailing newline: cursor and anchor both sit
+  -> just past it, which is what reanchor() records
+  emitpartial('1.Ram Disk:> ')
+  trow[1] := srccur
+  tcol[1] := cx()
+  WriteF('    at 20: anchor row=\d col=\d\n', trow[1] - sbtop, tcol[1])
+  reflow(6)
+  WriteF('    at  6: anchor row=\d col=\d\n', trow[1], tcol[1])
+  -> the prompt is 13 chars; at width 6 it occupies rows of 6,6,1 so
+  -> the anchor belongs at column 1 of the prompt's third row
+  IF tcol[1] = 1
+    WriteF('    ok   anchor column follows the re-wrapped prompt\n')
+  ELSE
+    WriteF('    FAIL anchor column \d, expected 1\n', tcol[1])
+    fails := fails + 1
+  ENDIF
+  snapshot(b)
+  WriteF('    rows: \s\n', b)
 
   WriteF('\n---------------------------------------------\n')
   IF fails = 0
