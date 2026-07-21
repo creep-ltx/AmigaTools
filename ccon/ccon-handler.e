@@ -5673,27 +5673,56 @@ ENDPROC
 -> arg1 on every WRITE/READ/END that follows, exactly as fh.args
 -> carries the console pointer for OUR clients in dofind() above.
 
--> add a line to the shared ring: newest last, consecutive repeats
--> collapse to one. Shared by live Enter-commits and by loading
--> L:ccon-history at startup - one dedupe rule for both.
--> audit P5: returns TRUE when it ACTUALLY appended, FALSE when the
--> line was empty or a consecutive duplicate. The commit path gates
--> the file append on this - append when a new entry landed in the
--> ring, skip when the ring did not change, so the file and the ring
--> never drift apart.
+-> add a line to the shared ring: newest last, and a command is stored
+-> at most ONCE - re-running it MOVES the single copy to the newest
+-> position (zsh HIST_IGNORE_ALL_DUPS), so `ls` + Up reaches it in one
+-> press instead of walking past ten identical `ls -1 c:` from ten
+-> interleaved test runs. Shared by live Enter-commits and by loading
+-> L:ccon-history at startup - one rule for both, so a file that
+-> accumulated dups (the append path cannot rewrite an old line)
+-> loads back DEDUPED regardless, and a trim/close rewrites it clean.
+-> Harness: tests/histdeduptest.e (six cases incl. dedup across a
+-> wrapped ring) - keep the ring math there identical to this.
+-> audit P5: returns TRUE when the line landed at the newest position
+-> (a genuinely new command, OR one moved there), FALSE when it was
+-> empty or ALREADY the newest. The commit path gates the file append
+-> on this: append the new copy (a move leaves a harmless older dup in
+-> the file, cleaned on the next load or trim), skip when nothing moved.
 PROC histremember(s:PTR TO CHAR)
-  DEF dup
+  DEF avail, i, slot, found
   IF StrLen(s) = 0 THEN RETURN FALSE
-  dup := FALSE
-  IF ghtotal > 0
-    IF StrCmp(ghist[Mod(ghtotal - 1, HISTMAX)], s) THEN dup := TRUE
+  avail := Min(ghtotal, HISTMAX)
+  -> already the newest? nothing changes (the old consecutive-dup case)
+  IF avail > 0
+    IF StrCmp(ghist[Mod(ghtotal - 1, HISTMAX)], s) THEN RETURN FALSE
   ENDIF
-  IF dup = FALSE
-    StrCopy(ghist[Mod(ghtotal, HISTMAX)], s)
-    ghtotal := ghtotal + 1
-    RETURN TRUE
+  -> does an OLDER copy exist? find its logical index (0 = oldest ..
+  -> avail-1 = newest; the newest was just handled, so scan to avail-2)
+  found := -1
+  i := 0
+  WHILE i < (avail - 1)
+    slot := Mod(ghtotal - avail + i, HISTMAX)
+    IF StrCmp(ghist[slot], s)
+      found := i
+      i := avail                    -> break
+    ELSE
+      i := i + 1
+    ENDIF
+  ENDWHILE
+  IF found >= 0
+    -> move-to-end: shift the newer entries DOWN over the dup, closing
+    -> the hole (forward copy, each dest below its src, no overlap),
+    -> then step ghtotal back so the append and slot mapping use the
+    -> reduced count. Entries keep their ghtotal-relative slots.
+    FOR i := found TO avail - 2
+      StrCopy(ghist[Mod(ghtotal - avail + i, HISTMAX)],
+              ghist[Mod(ghtotal - avail + i + 1, HISTMAX)])
+    ENDFOR
+    ghtotal := ghtotal - 1
   ENDIF
-ENDPROC FALSE
+  StrCopy(ghist[Mod(ghtotal, HISTMAX)], s)
+  ghtotal := ghtotal + 1
+ENDPROC TRUE
 
 -> read L:ccon-history (oldest line first) into the shared ring. A
 -> missing file is not an error - first run ever, or S: not yet
@@ -6331,4 +6360,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b13 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b14 CCON: LTX console handler', 0
