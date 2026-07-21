@@ -424,19 +424,41 @@ everything past the new width - not just from the display, from
 memory. Growing back afterward cannot recover it. Live-reported: a
 long line typed in Ed vanished on shrink and did not return on grow.
 
-`todo.md` (M8, 0.18) calls this "no reflow (family behaviour)",
-matching stock `CON:`'s clip-not-rewrap resize - but that reads like
-it meant visual clipping, not silent permanent data loss on every
-shrink. Not established whether the destructive version was deliberate
-or an unexamined side effect of the fixed-stride ring.
+**Mechanism confirmed 21.7.26** with `ccon-b7`/`ccon-b7-fill`, which
+take Ed out of the loop entirely: a 100-column ruler echoed into a
+plain Shell (no client redraw on resize), shrunk and grown back.
+`CCON:` stays truncated, stock `CON:` restores completely. The cause
+is CCON's own ring storage, not a client-notification problem.
+
+**`todo.md` (M8, 0.18)'s "rows stay rows, no reflow - family
+behaviour" is wrong in both halves.** Stock `CON:` REFLOWS - at the
+shrunk width its marker line spans three rows and a sentence re-wraps
+mid-word - so it holds LOGICAL LINES and re-wraps them per resize, and
+it loses nothing. CCON has no logical-line concept at all: `render()`
+wraps as it writes and the ring stores finished SCREEN rows, so the
+wrap position is baked in and cannot be recomputed.
 
 **This wants a decision, same shape as B5/B6, before it wants code.**
-Candidates run from "make the loss visible instead of silent" (clip
-only what the live view needs, keep history rows at their original
-width) to "track a logical width per row separate from the physical
-window width" (bigger memory cost, a real change to the ring's
-fixed-stride design) to "confirm stock CON: does the same thing and
-document this as accepted." No fix attempted yet.
+Two honest levels, detailed in audit.md:
+
+1. **Non-destructive storage (cheaper).** Allocate the new stride as
+   `Max(old, new)` (or carry a logical width per row) so a shrink only
+   affects rendering and a grow restores. Shrink clips rather than
+   reflows - not CON:-identical, but the data loss is gone.
+2. **True reflow (CON: parity, structural).** Store logical lines and
+   re-wrap on resize. A rewrite of the ring's representation, not a
+   patch to `doresize()`; touches scrollback indexing, selection
+   coordinates and the `edlastrow()` math.
+
+Doing nothing is now the weakest option - it can no longer be
+justified as matching the family.
+
+**Separate, still open:** whether the original Ed repro is fully
+explained by this. Ed owns the screen in raw mode and redraws itself
+on resize, so `CON:`'s Ed-side restore may have been Ed redrawing, not
+`CON:` reflowing. If Ed redraws under `CON:` but not under `CCON:`,
+that is a SECOND finding about the class-12 resize report, and fixing
+the ring will not address it.
 
 ---
 

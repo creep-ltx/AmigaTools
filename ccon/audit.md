@@ -303,27 +303,83 @@ border on shrink and did not return on grow.
 
 `todo.md` (M8, 0.18) documents "no reflow (family behaviour)" as the
 intended trade-off, matching stock `CON:`'s clip-not-rewrap resize
-behaviour - but that note reads as accepting VISUAL clipping, not
-silent, permanent data loss on every shrink. Whether the destructive
-version was a deliberate call or an unexamined side effect of the
-fixed-stride ring is not established.
+behaviour.
 
-**Fix:** not decided - this is a structural question, not a bounded
-correctness fix. Candidates:
+**That defence is FALSIFIED (21.7.26), by direct A/B on hardware.**
+The same long line typed into Ed, the same shrink, the same grow, run
+once under stock `CON:` and once under `CCON:`:
 
-- Accept the loss (status quo) but make it VISIBLE clipping instead of
-  silent deletion - e.g. keep a wider-than-current backing store for
-  history rows so a later grow can recover them, only truncating what
-  the live view actually needs to render.
-- Track a "logical" (widest-ever-typed) width per row separate from
-  the "physical" (current window) width, so a shrink only affects
-  rendering, not storage - larger memory cost, and a real change to
-  the ring's fixed-stride design.
-- Do nothing beyond documenting it clearly as expected, if that turns
-  out to be the decision - needs confirming whether stock `CON:`
-  itself loses data on shrink too, or only ever clips the view.
+- **stock `CON:`** - shrink clips the line to the new width; growing
+  back **restores the full text**.
+- **`CCON:`** - shrink clips; growing back shows the text still
+  truncated, byte-identical to the shrunk state
+  (`This is a test of CCON's ability to` / `multiple lines and have
+  the window r`). The characters are gone, not merely unrendered.
 
-**Status: open - needs a decision before a fix, not unlike B5/B6.**
+So stock `CON:` clips the VIEW and keeps the DATA. "Family behaviour"
+describes the visual result and not the storage behaviour, and it is
+the storage behaviour that differs. Whether CCON's destructive version
+was a deliberate call or an unexamined side effect of the fixed-stride
+ring is still not established, but it is no longer defensible as
+matching the family.
+
+**MECHANISM CONFIRMED (21.7.26), Ed taken out of the loop.**
+`ccon-b7`/`ccon-b7-fill` (`ccon/tests/`) echo a 100-column ruler and
+marker into a plain Shell, which does NOT redraw on resize - so
+whatever survives a shrink/grow came from the console's own buffer,
+not from a client re-sending it. Run under both consoles:
+
+- **`CCON:`** - shrunk to ~40 columns and grown back, the ruler still
+  stops at `30....:..` and the marker at `B7-START------------------`.
+  Destroyed. The rows that DID survive are the ones already shorter
+  than the shrunk width (`.80....:...90....:..100`, and the wrapped
+  `-----------B7-END` tail) - exactly the per-row truncation signature
+  this finding predicts.
+- **stock `CON:`** - shrunk and grown back **fully restored**,
+  identical to the original.
+
+So the cause is CCON's own ring storage, as written here. Not a
+client-notification problem.
+
+**And stock `CON:` does MORE than keep the data - it REFLOWS.** At the
+shrunk width its marker line spans THREE rows, and
+`-> B7-END and ..100 come back on grow` re-wraps mid-word into
+`B7-END an` / `d ..100 come back on grow`. That is a console holding
+LOGICAL LINES and re-wrapping them to the current width, then
+re-wrapping again on grow. `todo.md` M8's "rows stay rows, no reflow -
+family behaviour" is therefore wrong in both halves: the family
+reflows, and it does not lose data.
+
+CCON has no logical-line concept at all - `render()` wraps as it
+writes and the ring stores finished SCREEN rows, so the wrap position
+is baked in at write time and cannot be recomputed later.
+
+**Fix:** still a decision, now an informed one. Two honest levels:
+
+- **Non-destructive storage (cheaper).** Keep ring rows at their
+  original width - allocate the new stride as `Max(old, new)`, or keep
+  a separate logical-width per row - so a shrink only affects what is
+  RENDERED and a later grow restores. Result: shrink clips (no
+  reflow), grow restores everything. Not CON:-identical, but the data
+  loss is gone, which is the part that bites.
+- **True reflow (CON: parity, structural).** Store logical lines and
+  re-wrap on every resize. This is a real rewrite of the ring's
+  representation, not a patch to `doresize()`, and it interacts with
+  scrollback indexing, selection coordinates and `edlastrow()` math
+  throughout.
+
+Doing nothing is now the weakest option: it is no longer defensible as
+"what the family does", because the family demonstrably does better.
+
+**Still open, SEPARATELY:** the original Ed repro is not fully
+explained by this. Ed is a raw-mode client that owns the screen and
+re-draws itself on resize, so under `CON:` its restore may have been
+Ed redrawing rather than `CON:` reflowing (reflow is a cooked-mode
+behaviour). If Ed redraws under `CON:` but not under `CCON:`, there is
+a SECOND finding about the class-12 resize report `todo.md` M8 says Ed
+asks for - worth a separate check, and not covered by fixing the ring.
+
+**Status: open - mechanism settled, fix level not chosen.**
 
 ---
 
