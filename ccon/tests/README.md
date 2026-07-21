@@ -9,6 +9,32 @@
 Two kinds. One runs on Linux and proves the logic; the others run on
 the Amiga and prove the real thing.
 
+## ccdie.e - runs on the Amiga, tests B5 (ACTION_DIE teardown)
+
+A tiny program that sends an `ACTION_DIE` packet to CCON:'s handler,
+because no stock AmigaOS command does. Build with `ecompile ccdie.e
+ccdie`, copy `ccdie` into `C:`.
+
+B5 makes the handler tear down cleanly (remove its input.device
+handler, close its devices, exit) on unmount, instead of running
+forever with a stale chain handler. To test:
+
+1. Boot, `Version L:ccon-handler` -> confirm the build.
+2. `NewShell CCON:` - this starts CCON:'s handler process and installs
+   its input.device handler. Type a bit, then CLOSE the window
+   (`EndCLI` or the close gadget). The process keeps running idle with
+   its handler still installed - the leak B5 fixes.
+3. From your boot AmigaShell (NOT a CCON: window), run `ccdie`.
+   - `DOSTRUE ... tearing down` = it agreed to die.
+   - `DOSFALSE ... refused` = a CCON: window is still open; close it.
+4. Confirm no guru, then `NewShell CCON:` again - a fresh handler
+   should start and keys should echo correctly. A crash, or keys
+   misbehaving, means the teardown was wrong.
+
+SAVE AN FS-UAE STATE before step 3: a teardown bug can hang the
+machine (reset recovers). Fallback build: `Copy L:ccon-handler-1.2b12
+L:ccon-handler` (before B5), then reboot.
+
 ## edanchortest.e - runs on Linux
 
 A small standalone program that recreates the console's edit-line
