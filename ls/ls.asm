@@ -421,7 +421,7 @@ usage:  lea     usagestr(pc),a0
 ; so a console that never answers costs 0.5s, not a hang.
 ;----------------------------------------------------------------------
 termwidth:
-        movem.l d2-d4,-(sp)
+        movem.l d2-d5,-(sp)
         move.l  infh,d1
         moveq   #1,d2
         jsr     _LVOSetMode(a6)
@@ -437,6 +437,7 @@ termwidth:
         move.l  d0,(a0)+
         move.l  d0,(a0)
         moveq   #0,d4                   ; parameter index
+        moveq   #0,d5                   ; gotesc: previous byte was ESC
         move.l  infh,d1
         move.l  #500000,d2
         jsr     _LVOWaitForChar(a6)
@@ -447,13 +448,24 @@ termwidth:
         moveq   #1,d3
         jsr     _LVORead(a6)
         cmp.l   #1,d0
-        bne.s   .out
+        bne     .out
         moveq   #0,d3
         move.b  bytebuf,d3
-        cmp.w   #$9b,d3                 ; report start: reset
+        tst.l   d5                      ; previous byte was ESC?
+        beq.s   .noesc
+        moveq   #0,d5                   ; consume it
+        cmp.w   #'[',d3                 ; ESC [ : 7-bit CSI introducer
+        bne     .more
+        moveq   #0,d4
+        bra     .more
+.noesc: cmp.w   #27,d3                  ; ESC: maybe a 7-bit CSI
+        bne.s   .not27
+        moveq   #1,d5
+        bra     .more
+.not27: cmp.w   #$9b,d3                 ; 8-bit CSI: report start, reset
         bne.s   .n1
         moveq   #0,d4
-        bra.s   .more
+        bra     .more
 .n1:    cmp.w   #'0',d3
         blo.s   .n2
         cmp.w   #'9',d3
@@ -494,7 +506,7 @@ termwidth:
         ble.s   .set
         move.l  #600,d0
 .set:   move.l  d0,twidth
-.r:     movem.l (sp)+,d2-d4
+.r:     movem.l (sp)+,d2-d5
         rts
 
 ;----------------------------------------------------------------------
@@ -1615,7 +1627,7 @@ exit_wb:
 ;----------------------------------------------------------------------
 ; data
 ;----------------------------------------------------------------------
-verstr:      dc.b '$VER: ls 0.1 (17.7.26) asm build',0
+verstr:      dc.b '$VER: ls 0.2 (20.7.26) asm build',0
 dosname:     dc.b 'dos.library',0
 nullstr:     dc.b 0
 pfx:         dc.b 'ls: ',0
@@ -1638,7 +1650,7 @@ csireq:      dc.b $9b,'0 q'
 ; prottab: bit, letter, 1 = set-means-lit (h/s/p/a), 0 = clear (rwed)
 prottab:     dc.b 7,'h',1, 6,'s',1, 5,'p',1, 4,'a',1
              dc.b 3,'r',0, 2,'w',0, 1,'e',0, 0,'d',0
-usagestr:    dc.b 'ls 0.1 -- Unix-style directory lister',10
+usagestr:    dc.b 'ls 0.2 -- Unix-style directory lister',10
              dc.b 'usage: ls [-1ahlrRSt] [path | pattern ...]',10
              dc.b '  -l  long listing (protection, size, date, filenote)',10
              dc.b '  -a  show .info files and hidden (h-bit) entries',10

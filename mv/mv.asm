@@ -1,6 +1,6 @@
 ;----------------------------------------------------------------------
 ; mv.asm -- Unix-style move for AmigaDOS, 68000 assembly.
-; Usage: mv FROM/A/M TO/A [OVERWRITE] [BACKUP]
+; usage: mv [-fb] FROM ... TO
 ;
 ; Same behaviour as mv.e (see that file for the full design notes):
 ;   - Rename() first, per file: on AmigaDOS that's already a full move
@@ -10,20 +10,21 @@
 ;   - FROM takes multiple names and/or AmigaDOS patterns (MatchFirst/
 ;     MatchNext); with several files or a pattern, TO must be an
 ;     existing directory.
-;   - Existing targets are skipped by default; everything not moved
-;     is listed at the end (return code 5). OVERWRITE deletes and
-;     replaces the target; BACKUP renames it to <name>.mvbak first
-;     and refuses the file if that name is taken (rc 10) -- unless
-;     OVERWRITE is also given, which sanctions replacing the stale
-;     .mvbak. All of it guarded by proving the source exists and is
-;     a different object (SameLock), so a self-move can never delete
+;   - Flags are bundled Unix-style (-f, -b, -fb); the last path is TO,
+;     everything before it a source. Existing targets are skipped by
+;     default; everything not moved is listed at the end (return code
+;     5). -f deletes and replaces the target; -b renames it to
+;     <name>.mvbak first and refuses the file if that name is taken
+;     (rc 10) -- unless -f is also given, which sanctions replacing the
+;     stale .mvbak. All of it guarded by proving the source exists and
+;     is a different object (SameLock), so a self-move can never delete
 ;     the only copy.
 ;   - Ctrl-C is honoured between files and between copy chunks; a
 ;     break or failed copy removes the partial target file.
 ;   - Per-file errors are reported and the batch continues. Return
 ;     code: 0 clean, 5 skips, 10 errors, 20 break.
 ;
-; Assemble:  vasmm68k_mot -Fhunkexe -nosym -o mv mv.asm
+; Assemble:  vasmm68k_mot -Fhunkexe -nosym -o mv-asm mv.asm
 ;
 ; Register conventions: a6 = dos.library base throughout, d7 = worst
 ; return code so far (setrc keeps the max). Library calls only trash
@@ -94,6 +95,8 @@ ap_Buf           = 280
 
 BUFSIZE = 32768
 PATHLEN = 512
+MAXARGS = 32
+MEMF_CLEAR = $10000
 
 ; the matched source path and its FileInfoBlock live inside the anchor
 srcpath = anchor+ap_Buf
@@ -103,6 +106,17 @@ srcfib  = anchor+ap_Info
 
 start:  movem.l d2-d7/a2-a6,-(sp)
         moveq   #RETURN_OK,d7
+
+; --- copy the command line FIRST: a0/d0 are only valid at entry
+        move.l  d0,d1
+        cmp.l   #511,d1
+        bls.s   .lenok
+        move.l  #511,d1
+.lenok: lea     cmdbuf,a1
+        bra.s   .cin
+.ccp:   move.b  (a0)+,(a1)+
+.cin:   dbra    d1,.ccp
+        clr.b   (a1)
 
 ; --- CLI or Workbench? A WB-launched process has pr_CLI = 0 and must
 ; --- collect (and later reply) its startup message or WB hangs.
@@ -130,26 +144,39 @@ start:  movem.l d2-d7/a2-a6,-(sp)
 .gotdos:
         move.l  d0,a6
 
-; --- ReadArgs('FROM/A/M,TO/A,OVERWRITE/S', argarr, 0)
-        lea     template(pc),a0
+; --- parse the command line: bundled -f/-b flags, the last path is
+; --- TO, everything before it a source
+        bsr     parseargs
+        tst.b   usagefl                 ; `mv ?`: usage printed, rc 0
+        bne     finish
+        tst.b   badflag
+        beq.s   .argok
+        lea     msg_badflag(pc),a0
         move.l  a0,d1
-        lea     argarr,a0
-        move.l  a0,d2
-        moveq   #0,d3
-        jsr     _LVOReadArgs(a6)
-        move.l  d0,rdargs
-        bne.s   .argsok
-        jsr     _LVOIoErr(a6)
-        move.l  d0,d1
-        lea     mvname(pc),a0
-        move.l  a0,d2
-        jsr     _LVOPrintFault(a6)
-        moveq   #RETURN_ERROR,d7
+        jsr     _LVOPutStr(a6)
+        moveq   #RETURN_ERROR,d0
+        bsr     setrc
         bra     finish
-.argsok:
+.argok:
+        move.l  npaths,d0
+        cmp.l   #2,d0
+        bge.s   .haveargs
+        lea     msg_usage(pc),a0        ; need at least FROM and TO
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        moveq   #RETURN_ERROR,d0
+        bsr     setrc
+        bra     finish
+.haveargs:
+        move.l  npaths,d0               ; gto = pathtab[npaths-1]
+        subq.l  #1,d0
+        move.l  d0,nsrc                 ; nsrc sources precede TO
+        lsl.l   #2,d0
+        lea     pathtab,a0
+        move.l  0(a0,d0.l),gto
 
 ; --- is TO an existing directory?
-        move.l  argarr+4,d1
+        move.l  gto,d1
         moveq   #ACCESS_READ,d2
         jsr     _LVOLock(a6)
         move.l  d0,d6
@@ -166,25 +193,27 @@ start:  movem.l d2-d7/a2-a6,-(sp)
         jsr     _LVOUnLock(a6)
 .nodir:
 
-; --- count sources (d5) and detect wildcards (d6); with several
-; --- files or a pattern, TO must be that existing directory
-        moveq   #0,d5
-        moveq   #0,d6
-        move.l  argarr,a2
-.cnt:   move.l  (a2)+,d0
-        beq.s   .cdone
-        addq.l  #1,d5
-        move.l  d0,d1
+; --- detect wildcards among the sources; with several files or a
+; --- pattern, TO must be that existing directory
+        moveq   #0,d6                   ; wild
+        moveq   #0,d4                   ; source index
+.cnt:   cmp.l   nsrc,d4
+        bge.s   .cdone
+        move.l  d4,d0
+        lsl.l   #2,d0
+        lea     pathtab,a0
+        move.l  0(a0,d0.l),d1
         move.l  #patbuf,d2
         move.l  #1024,d3
         jsr     _LVOParsePatternNoCase(a6)
         tst.l   d0                      ; jsr leaves stale flags!
-        ble.s   .cnt                    ; 0 = plain, -1 = err (surfaces later)
+        ble.s   .cnext
         moveq   #1,d6
+.cnext: addq.l  #1,d4
         bra.s   .cnt
 .cdone: tst.l   d6
         bne.s   .ismulti
-        cmp.l   #1,d5
+        cmp.l   #1,nsrc
         bls.s   .single
 .ismulti:
         tst.b   toisdir
@@ -196,16 +225,18 @@ start:  movem.l d2-d7/a2-a6,-(sp)
         bsr     setrc
         bra.s   finish
 
-; --- run every FROM argument
+; --- run every source (pathtab[0..nsrc-1]); srcidx lives in memory
+; --- so it survives dosource/moveone
 .single:
-        move.l  argarr,fromptr
+        clr.l   srcidx
 srcloop:
-        move.l  fromptr,a0
-        move.l  (a0)+,d0
-        move.l  a0,fromptr
-        tst.l   d0
-        beq.s   alldone
-        move.l  d0,curspec
+        move.l  srcidx,d0
+        cmp.l   nsrc,d0
+        bge.s   alldone
+        lsl.l   #2,d0
+        lea     pathtab,a0
+        move.l  0(a0,d0.l),curspec
+        addq.l  #1,srcidx
         bsr     dosource
         tst.b   brkflag
         beq.s   srcloop
@@ -259,7 +290,7 @@ dosource:
 ; moveone: move the currently matched srcpath to TO
 ;----------------------------------------------------------------------
 moveone:
-        move.l  argarr+4,a0             ; rebuild target: TO ...
+        move.l  gto,a0                  ; rebuild target: TO ...
         lea     gtarget,a1
         move.w  #PATHLEN-2,d0
 .cp:    move.b  (a0)+,(a1)+
@@ -313,9 +344,9 @@ moveone:
         tst.l   gfib+fib_DirEntryType
         bgt     .ovdir
 .notdir:
-        tst.l   argarr+12               ; BACKUP given?
+        tst.b   backup                  ; -b given?
         bne.s   .dobak
-        tst.l   argarr+8                ; OVERWRITE given?
+        tst.b   force                   ; -f given?
         bne.s   .dodel
         lea     srcpath,a3              ; neither: record the skip
         bra     addskip
@@ -347,8 +378,8 @@ moveone:
         beq.s   .bakfree
         move.l  d0,d1
         jsr     _LVOUnLock(a6)
-        tst.l   argarr+8                ; BACKUP OVERWRITE: sanctioned
-        beq.s   .bakclash               ; to replace a stale .mvbak
+        tst.b   force                   ; -bf: sanctioned to replace
+        beq.s   .bakclash               ; a stale .mvbak
         move.l  #gbak,d1
         jsr     _LVODeleteFile(a6)
         tst.l   d0
@@ -699,6 +730,161 @@ freeskips:
         rts
 
 ;----------------------------------------------------------------------
+; parseargs: tokenize cmdbuf (whitespace-separated, double quotes
+; group, `*` escapes inside quotes -- AmigaDOS rules). `-x` bundles
+; set flags, a lone `?` prints usage, the rest fill pathtab.
+;----------------------------------------------------------------------
+parseargs:
+        movem.l d2-d6/a2-a3,-(sp)
+        lea     cmdbuf,a2
+.skipws:
+        move.b  (a2),d0
+        beq     .done
+        cmp.b   #32,d0
+        bhi.s   .token
+        addq.l  #1,a2
+        bra.s   .skipws
+
+.token: lea     tokbuf,a3
+        moveq   #0,d3                   ; token length
+        moveq   #0,d4                   ; in-quotes flag
+.tk:    move.b  (a2),d0
+        beq.s   .tkend
+        tst.b   d4
+        beq.s   .plain
+        cmp.b   #'"',d0                 ; closing quote
+        bne.s   .q1
+        moveq   #0,d4
+        addq.l  #1,a2
+        bra.s   .tknext
+.q1:    cmp.b   #'*',d0                 ; escape inside quotes
+        bne.s   .store
+        addq.l  #1,a2
+        move.b  (a2),d0
+        beq.s   .tkend
+        cmp.b   #'n',d0
+        beq.s   .esc10
+        cmp.b   #'N',d0
+        beq.s   .esc10
+        cmp.b   #'e',d0
+        beq.s   .esc27
+        cmp.b   #'E',d0
+        bne.s   .store
+.esc27: moveq   #27,d0
+        bra.s   .store
+.esc10: moveq   #10,d0
+        bra.s   .store
+.plain: cmp.b   #32,d0
+        bls.s   .tkend
+        cmp.b   #'"',d0                 ; opening quote
+        bne.s   .store
+        moveq   #1,d4
+        addq.l  #1,a2
+        bra.s   .tknext
+.store: move.b  d0,(a3)+
+        addq.l  #1,a2
+        addq.l  #1,d3
+.tknext:
+        cmp.l   #PATHLEN-1,d3
+        blt.s   .tk
+.tkend: clr.b   (a3)
+        tst.l   d3
+        beq     .skipws
+
+        lea     tokbuf,a0               ; classify the token
+        move.b  (a0),d0
+        cmp.b   #'-',d0
+        bne.s   .notflag
+        cmp.l   #1,d3
+        bls.s   .aspath                 ; a lone "-" is a path
+        bsr     setflags
+        tst.b   badflag
+        bne.s   .done
+        bra     .skipws
+.notflag:
+        cmp.b   #'?',d0
+        bne.s   .aspath
+        cmp.l   #1,d3
+        bne.s   .aspath
+        bsr     usage
+        st      usagefl
+        bra.s   .done
+.aspath:
+        cmp.l   #MAXARGS,npaths
+        bge     .skipws
+        move.l  #PATHLEN,d0
+        bsr     xalloc
+        tst.l   d0
+        beq.s   .nomem
+        move.l  d0,a1
+        move.l  npaths,d1
+        lsl.l   #2,d1
+        lea     pathtab,a0
+        move.l  a1,0(a0,d1.l)
+        addq.l  #1,npaths
+        lea     tokbuf,a0
+        move.l  #PATHLEN,d0
+        bsr     strcpyc
+        bra     .skipws
+.nomem: bsr     outofmem
+.done:  movem.l (sp)+,d2-d6/a2-a3
+        rts
+
+; setflags: apply a "-xy" bundle from tokbuf; unknown -> badflag
+setflags:
+        lea     tokbuf+1,a0
+.fl:    move.b  (a0)+,d0
+        beq.s   .fr
+        cmp.b   #'f',d0
+        bne.s   .f1
+        st      force
+        bra.s   .fl
+.f1:    cmp.b   #'b',d0
+        bne.s   .f2
+        st      backup
+        bra.s   .fl
+.f2:    st      badflag
+.fr:    rts
+
+usage:  lea     usagestr(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        rts
+
+outofmem:
+        lea     msg_nomem(pc),a0
+        move.l  a0,d1
+        jsr     _LVOPutStr(a6)
+        moveq   #RETURN_ERROR,d0
+        bra     setrc
+
+; strcpyc: copy a0 -> a1, at most d0 bytes including the NUL
+strcpyc:
+        subq.l  #1,d0
+.c:     beq.s   .term
+        move.b  (a0)+,(a1)+
+        beq.s   .r
+        subq.l  #1,d0
+        bra.s   .c
+.term:  clr.b   (a1)
+.r:     rts
+
+; xalloc: d0 = size -> d0 = cleared memory or 0
+xalloc: move.l  a6,a5
+        move.l  4.w,a6
+        move.l  #MEMF_CLEAR,d1
+        jsr     _LVOAllocMem(a6)
+        move.l  a5,a6
+        rts
+
+; xfree: a1 = ptr, d0 = size
+xfree:  move.l  a6,a5
+        move.l  4.w,a6
+        jsr     _LVOFreeMem(a6)
+        move.l  a5,a6
+        rts
+
+;----------------------------------------------------------------------
 ; centralised cleanup
 ;----------------------------------------------------------------------
 exit:   move.l  fhout,d1                ; defensive: every path closes
@@ -715,9 +901,16 @@ exit:   move.l  fhout,d1                ; defensive: every path closes
         move.l  #BUFSIZE,d0
         jsr     _LVOFreeMem(a6)
         move.l  a5,a6
-.nobuf: move.l  rdargs,d1
-        beq.s   exit_nodos
-        jsr     _LVOFreeArgs(a6)
+.nobuf:                                 ; free the parsed path strings
+        move.l  npaths,d6
+        bra.s   .pin
+.pfree: move.l  d6,d0
+        lsl.l   #2,d0
+        lea     pathtab,a0
+        move.l  0(a0,d0.l),a1
+        move.l  #PATHLEN,d0
+        bsr     xfree
+.pin:   dbra    d6,.pfree
 
 exit_nodos:
         move.l  4.w,a6
@@ -737,9 +930,8 @@ exit_wb:
         movem.l (sp)+,d2-d7/a2-a6
         rts
 
-verstr:      dc.b '$VER: mv 0.3 (14.7.26) asm build',0
+verstr:      dc.b '$VER: mv 0.4 (20.7.26) asm build',0
 dosname:     dc.b 'dos.library',0
-template:    dc.b 'FROM/A/M,TO/A,OVERWRITE/S,BACKUP/S',0
 mvname:      dc.b 'mv',0
 pfx:         dc.b 'mv: ',0
 colsp:       dc.b ': ',0
@@ -758,24 +950,40 @@ msg_bak1:    dc.b ': not moved, ',0
 msg_bak2:    dc.b ' already exists',10,0
 msg_cbak:    dc.b 'mv: cannot back up ',0
 msg_break:   dc.b '***Break: mv',10,0
+msg_badflag: dc.b 'mv: unknown option (mv ? for usage)',10,0
+msg_nomem:   dc.b 'mv: out of memory',10,0
+msg_usage:   dc.b 'usage: mv [-fb] FROM ... TO',10,0
+usagestr:    dc.b 'mv 0.4 -- Unix-style move',10
+             dc.b 'usage: mv [-fb] FROM ... TO',10
+             dc.b '  -f  force: replace an existing target',10
+             dc.b '  -b  back up an existing target as <name>.mvbak first',10,0
+        even
 
         section mem,bss
 
 dosbase:  ds.l 1
-rdargs:   ds.l 1
-argarr:   ds.l 4
 wbmsg:    ds.l 1
 bufptr:   ds.l 1
 fhin:     ds.l 1
 fhout:    ds.l 1
-fromptr:  ds.l 1
 curspec:  ds.l 1
 skiphead: ds.l 1
 skiptail: ds.l 1
+npaths:   ds.l 1
+nsrc:     ds.l 1
+gto:      ds.l 1
+srcidx:   ds.l 1
+pathtab:  ds.l MAXARGS
 gfib:     ds.b fib_SIZEOF               ; Examine() needs long alignment;
 anchor:   ds.b 280+PATHLEN              ; all-ds.l above guarantees it,
-gtarget:  ds.b PATHLEN+4                ; and the ds.b sizes stay
-gbak:     ds.b PATHLEN+12               ; long-multiples down to here
+gtarget:  ds.b PATHLEN+4                ; and every ds.b size is a
+gbak:     ds.b PATHLEN+12               ; long multiple down to here
 patbuf:   ds.b 1024
+cmdbuf:   ds.b 512
+tokbuf:   ds.b 512
 toisdir:  ds.b 1
+force:    ds.b 1
+backup:   ds.b 1
 brkflag:  ds.b 1
+usagefl:  ds.b 1
+badflag:  ds.b 1
