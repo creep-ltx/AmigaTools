@@ -328,6 +328,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     ghist[HISTMAX]:ARRAY OF LONG, -> the ring: E-string ptrs
     ghtotal=0,                  -> running count (Mod HISTMAX for slot)
     ghistloaded=FALSE,           -> disk load attempted once
+    -> audit P5: L:ccon-history is APPENDED to per commit now, not
+    -> rewritten whole each Enter. This tracks the file's line count so
+    -> the append path can trigger a full rewrite (savehistfile, which
+    -> truncates back to the ring) once the file grows to twice the
+    -> ring cap - otherwise an append-only file grows without bound
+    -> while the in-memory ring stays capped at HISTMAX.
+    histfilelines=0,
     -> M6: the input.device chain - ONE per process, by design (the
     -> M10 decision: N chain handlers is the wrong shape)
     ihgd[2]:ARRAY OF LONG,      -> glue data: [E's A4][{ihchain}]
@@ -4752,12 +4759,15 @@ PROC dovanilla(code, qual)
     ENDFOR
     enqueue(10)
     IF l > 0
-      histremember(curcon.ebuf)  -> shared ring (Theme B)
-      -> flush to disk on every command, not just last-window-close -
-      -> a reset/crash mid-session must not cost the whole session
-      -> (his catch: closing every window was the only save point,
-      -> so an unclean reboot lost everything since the last close)
-      savehistfile()
+      -> shared ring (Theme B), then persist to disk on every command,
+      -> not just last-window-close - a reset/crash mid-session must
+      -> not cost the whole session (his catch: closing every window
+      -> was the only save point, so an unclean reboot lost everything
+      -> since the last close). audit P5: persist now APPENDS the one
+      -> new line rather than rewriting the whole ring each Enter, and
+      -> only when histremember actually added it (not a dedup'd
+      -> repeat), so the file tracks the ring.
+      IF histremember(curcon.ebuf) THEN histpersist(curcon.ebuf)
     ENDIF
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
@@ -5554,9 +5564,14 @@ ENDPROC
 -> add a line to the shared ring: newest last, consecutive repeats
 -> collapse to one. Shared by live Enter-commits and by loading
 -> L:ccon-history at startup - one dedupe rule for both.
+-> audit P5: returns TRUE when it ACTUALLY appended, FALSE when the
+-> line was empty or a consecutive duplicate. The commit path gates
+-> the file append on this - append when a new entry landed in the
+-> ring, skip when the ring did not change, so the file and the ring
+-> never drift apart.
 PROC histremember(s:PTR TO CHAR)
   DEF dup
-  IF StrLen(s) = 0 THEN RETURN
+  IF StrLen(s) = 0 THEN RETURN FALSE
   dup := FALSE
   IF ghtotal > 0
     IF StrCmp(ghist[Mod(ghtotal - 1, HISTMAX)], s) THEN dup := TRUE
@@ -5564,8 +5579,9 @@ PROC histremember(s:PTR TO CHAR)
   IF dup = FALSE
     StrCopy(ghist[Mod(ghtotal, HISTMAX)], s)
     ghtotal := ghtotal + 1
+    RETURN TRUE
   ENDIF
-ENDPROC
+ENDPROC FALSE
 
 -> read L:ccon-history (oldest line first) into the shared ring. A
 -> missing file is not an error - first run ever, or S: not yet
@@ -5597,13 +5613,17 @@ PROC loadhistfile()
   ENDIF
   id := fh.args
   lp := 0
+  histfilelines := 0            -> audit P5: count the file as we read
   n := fscall(fsp, ACTION_READ, id, buf, 255)
   WHILE n > 0
     FOR i := 0 TO n - 1
       c := buf[i]
       IF c = 10
         line[lp] := 0
-        IF lp > 0 THEN histremember(line)
+        IF lp > 0
+          histremember(line)
+          histfilelines := histfilelines + 1
+        ENDIF
         lp := 0
       ELSEIF lp < LINEMAX - 1
         line[lp] := c
@@ -5615,6 +5635,7 @@ PROC loadhistfile()
   IF lp > 0
     line[lp] := 0
     histremember(line)
+    histfilelines := histfilelines + 1
   ENDIF
   fscall(fsp, ACTION_END, id, 0, 0)
   Dispose(fh)
@@ -5672,6 +5693,72 @@ PROC savehistfile()
   IF bp > 0 THEN fscall(fsp, ACTION_WRITE, id, buf, bp)
   fscall(fsp, ACTION_END, id, 0, 0)
   Dispose(fh)
+  histfilelines := avail        -> audit P5: the file now holds exactly
+ENDPROC                         -> what the ring did, so the append
+                                -> path can count from here
+
+-> audit P5: append ONE committed line to L:ccon-history instead of
+-> rewriting the whole ring every Enter. FINDUPDATE opens (or creates)
+-> without truncating, SEEK to the end, WRITE the line, END - four
+-> packets regardless of history length, and no truncate-and-rewrite
+-> of every block, which is the cost savehistfile pays on a slow
+-> device. NO persistent handle is kept: that would be shared state to
+-> release on every teardown path (conclose, and ACTION_DIE once it
+-> exists), and the per-commit open is cheap next to the write it
+-> saves. Best-effort, exactly like savehistfile - a failure leaves
+-> the ring intact and the next commit tries again.
+PROC histappend(s:PTR TO CHAR)
+  DEF fh:PTR TO filehandle, res, fsp:PTR TO mp, id,
+      buf[LINEMAX + 1]:ARRAY OF CHAR, l
+  IF tcresolve('L:') = FALSE THEN RETURN
+  fsp := curcon.fsdirport
+  fh := New(SIZEOF filehandle)
+  IF fh = NIL
+    tcfreelock()
+    RETURN
+  ENDIF
+  res := fscall(fsp, ACTION_FINDUPDATE, Shr(fh, 2), curcon.fsdirlock,
+                tcbstr('ccon-history'))
+  tcfreelock()
+  IF res = 0
+    Dispose(fh)
+    RETURN
+  ENDIF
+  id := fh.args
+  fscall(fsp, ACTION_SEEK, id, 0, OFFSET_END)
+  l := 0
+  WHILE (s[l] <> 0) AND (l < LINEMAX)
+    buf[l] := s[l]
+    l++
+  ENDWHILE
+  buf[l] := 10
+  l++
+  fscall(fsp, ACTION_WRITE, id, buf, l)
+  fscall(fsp, ACTION_END, id, 0, 0)
+  Dispose(fh)
+  histfilelines := histfilelines + 1
+ENDPROC
+
+-> audit P5: persist ONE committed line. Three cases:
+-> - histfilelines = 0: no file yet (fresh system, or loadhistfile
+->   found none). Go through savehistfile's FINDOUTPUT, which reliably
+->   CREATES the file - not FINDUPDATE, whose create-on-missing is
+->   standard but the kind of filesystem detail this project has been
+->   burned by. The ring holds one entry here, so it is a trivial
+->   write.
+-> - file has grown to twice the ring cap: rewrite it whole, which
+->   truncates back to <= HISTMAX and resets the count.
+-> - otherwise: the common path, a single append.
+-> The file therefore stays bounded in [0, 2*HISTMAX) lines while
+-> paying a full rewrite only once every HISTMAX commits.
+PROC histpersist(s:PTR TO CHAR)
+  IF histfilelines = 0
+    savehistfile()
+  ELSEIF histfilelines >= Mul(2, HISTMAX)
+    savehistfile()
+  ELSE
+    histappend(s)
+  ENDIF
 ENDPROC
 
 -> is name already a candidate? (case-folded) - only matters once a
@@ -6132,4 +6219,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b10a CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b11 CCON: LTX console handler', 0
