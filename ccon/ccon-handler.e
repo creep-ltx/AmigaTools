@@ -706,8 +706,20 @@ ENDPROC NIL
 -> its CLI's StandardInput filehandle carries our console pointer in
 -> fh_Args - the routing the packet protocol always wanted (commands
 -> run inside the CLI process on AmigaDOS, so More and Ed resolve
--> this way too). Fallbacks: the active window, then the list head.
-PROC conbysender(pkt:PTR TO dospacket)
+-> this way too). Fallback: the active window.
+-> audit B6: the OLD last-resort fallback was the LIST HEAD - an
+-> arbitrary console when the three real lookups all missed. Harmless
+-> for WAIT_CHAR/SCREEN_MODE/CHANGE_SIGNAL (a wrong answer is merely
+-> wrong) but wrong for DISK_INFO, which hands back the console's
+-> WINDOW pointer that a client (More) then draws into: a stranger's
+-> window. `guess` gates that last resort - DISK_INFO passes FALSE and
+-> gets NIL (-> ERROR_OBJECT_NOT_FOUND) rather than a wrong window;
+-> the others pass TRUE and keep the head guess. Telemetry (a throwaway
+-> 1.2b11 build, L:ccon-dbg.log) proved the list-head path never fired
+-> at all across More/Ed/shell in one and two windows - the real
+-> lookups always resolved - so failing DISK_INFO costs nothing
+-> observed and is strictly safer if an untested client ever hits it.
+PROC conbysender(pkt:PTR TO dospacket, guess)
   DEF sender:PTR TO mp, t:PTR TO tc, proc:PTR TO process,
       cli:PTR TO commandlineinterface, fh:PTR TO filehandle,
       c, ib:PTR TO intuitionbase, p:PTR TO console
@@ -738,6 +750,8 @@ PROC conbysender(pkt:PTR TO dospacket)
   ib := intuitionbase
   c := conbywin(ib.activewindow)
   IF c THEN RETURN c
+  IF guess = FALSE THEN RETURN NIL   -> B6: DISK_INFO must not hand a
+                                     -> stranger's window to a guess
 ENDPROC conlist
 
 -> everything a console owns goes back to the heap (the window
@@ -936,7 +950,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
     ENDIF
   CASE ACTION_WAIT_CHAR
-    c := conbysender(pkt)       -> no handle rides this packet
+    c := conbysender(pkt, TRUE)       -> no handle rides this packet
     IF c = NIL
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
       RETURN
@@ -956,7 +970,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       rearmtimer()              -> no-op while another head is armed
     ENDIF
   CASE ACTION_SCREEN_MODE
-    c := conbysender(pkt)       -> no handle here either
+    c := conbysender(pkt, TRUE)       -> no handle here either
     IF c = NIL
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
       RETURN
@@ -987,7 +1001,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     ReplyPkt(pkt, DOSTRUE, 0)
   CASE ACTION_CHANGE_SIGNAL
-    c := conbysender(pkt)
+    c := conbysender(pkt, TRUE)
     IF c = NIL
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
       RETURN
@@ -998,7 +1012,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     IF pkt.arg2 THEN curcon.breaktask := pkt.arg2
     ReplyPkt(pkt, DOSTRUE, old)
   CASE ACTION_DISK_INFO
-    c := conbysender(pkt)       -> which window? the sender's console
+    c := conbysender(pkt, FALSE)  -> B6: no list-head guess
     IF c = NIL                  -> (More's retitle, Ed's menu strip
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
       RETURN                    -> both hang off this pointer)
@@ -1377,7 +1391,7 @@ PROC dofind(pkt:PTR TO dospacket)
     att := TRUE
   ENDIF
   IF att
-    c := conbysender(pkt)
+    c := conbysender(pkt, TRUE)
     IF c = NIL
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
       RETURN
@@ -6219,4 +6233,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b11 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b12 CCON: LTX console handler', 0
