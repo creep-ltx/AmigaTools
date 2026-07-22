@@ -138,7 +138,28 @@ _Original finding:_
 - **Test:** Copy a deep (10+ level) folder into an archive; confirm no
   corruption on a low-stack shell.
 
-### [ ] 5. Move-out from an archive bypasses the deferred (ONEXIT) model
+### [x] 5. Move-out from an archive bypasses the deferred (ONEXIT) model
+
+**Fixed (Option A — move-out defers under ONEXIT).** Per the intent call: with
+`ARCWRITE ONEXIT`, everything that changes the archive happens on exit, and that
+now includes a move-out's deletion. In `arcxfer_out`, the immediate
+`arcdeltree`/`arcdelmember` (and the early `loadarchive` reload) now run only in
+DIRECT mode; under ONEXIT the moved-out member is flagged `MST_DEL` via
+`arcflagdel` exactly like `Del`, the border shows `modified`, and `arccommit`
+writes the deletion on leave/quit (a folder move-out takes the rebuild path
+there automatically). The extract-to-the-other-pane still happens immediately —
+only the archive removal defers. Message reads "N files moved out (on exit)".
+Compiles clean, staged to FS-UAE.
+
+Nuance (consistent with the model): since the deletion defers, choosing
+**(d)iscard** on leave cancels it, so a discarded move-out becomes a copy — the
+extracted files are already in the other pane, only the archive change is undone.
+
+Pre-existing limitation, unchanged: moving out a member that was *added this
+session but not yet committed* still fails at the lha extract (it is not in the
+on-disk archive yet). Separate issue if it ever matters.
+
+_Original finding:_
 
 - **Where:** `arcxfer_out` `cfile.e:3487`, `3550`, reload at `3565`.
 - **Symptom:** A move-out deletes the member immediately (via

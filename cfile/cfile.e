@@ -3474,7 +3474,7 @@ PROC arcxfer_out(p, q, ismove, force)
   DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, t, k, stop=FALSE,
-      ndone=0, deld=FALSE, doit, total=0
+      ndone=0, deld=FALSE, deferred=FALSE, doit, total=0
   IF involume(q) OR efail[q]
     showmsg('the other pane needs a directory to receive the files')
     RETURN
@@ -3520,8 +3520,15 @@ PROC arcxfer_out(p, q, ismove, force)
           IF copytree(sfile, dfile, 0)
             ndone := ndone + 1
             IF ismove
-              arcdeltree(p, member)
-              deld := TRUE
+              -> ONEXIT: flag for deletion at commit, like Del does; DIRECT:
+              -> remove it from the archive now
+              IF arcwrite
+                arcflagdel(p, member, TRUE)
+                deferred := TRUE
+              ELSE
+                arcdeltree(p, member)
+                deld := TRUE
+              ENDIF
             ENDIF
           ELSE
             stop := TRUE
@@ -3583,8 +3590,14 @@ PROC arcxfer_out(p, q, ismove, force)
           ELSEIF copyfile(sfile, dfile)
             ndone := ndone + 1
             IF ismove
-              arcdelmember(arcpath[p], member)
-              deld := TRUE
+              -> ONEXIT: defer the removal to commit; DIRECT: remove now
+              IF arcwrite
+                arcflagdel(p, member, FALSE)
+                deferred := TRUE
+              ELSE
+                arcdelmember(arcpath[p], member)
+                deld := TRUE
+              ENDIF
             ENDIF
           ELSE
             stop := TRUE
@@ -3598,11 +3611,19 @@ PROC arcxfer_out(p, q, ismove, force)
   progbyfile := FALSE
   progbybytes := FALSE
   arcwipe('T:CFile-x')
-  IF deld THEN loadarchive(p, arcpath[p])    -> cache lost some members
+  -> DIRECT move dropped members from the on-disk archive: reload the cache.
+  -> A deferred (ONEXIT) move only flagged them - refreshall re-filters the
+  -> cache and the flags must survive, so it must NOT reload.
+  IF deld THEN loadarchive(p, arcpath[p])
   refreshall()
   IF ndone > 0
-    StringF(mb, '\d file\s \s', ndone, IF ndone = 1 THEN '' ELSE 's',
-            IF ismove THEN 'moved out' ELSE 'copied out')
+    IF deferred
+      StringF(mb, '\d file\s moved out (on exit)', ndone,
+              IF ndone = 1 THEN '' ELSE 's')
+    ELSE
+      StringF(mb, '\d file\s \s', ndone, IF ndone = 1 THEN '' ELSE 's',
+              IF ismove THEN 'moved out' ELSE 'copied out')
+    ENDIF
     showmsg(mb)
   ENDIF
 ENDPROC
