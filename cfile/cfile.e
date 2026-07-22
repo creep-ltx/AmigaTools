@@ -73,7 +73,9 @@ MODULE 'intuition/intuition','intuition/screens',
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
       FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
       CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
-      EDMAXL=8192, EDLW=200,    -> editor: line count / line length caps
+      EDMAXL=8192, EDLINIT=120,    -> editor: line count cap, initial
+                                   -> per-line buffer (lines grow on demand,
+                                   -> so there is no line-length limit)
       CMAXL=4000,    -> console scrollback, lines of 80
       MAXMEM=1500,   -> members cached when going inside one lha archive
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
@@ -4983,12 +4985,35 @@ PROC edfree()
   ednum := 0
 ENDPROC
 
--> insert one character at the cursor (no redraw; caller batches)
+-> make sure line `idx` can hold `need` characters, growing its buffer
+-> (allocate a bigger String, copy the content over, swap it in) when the
+-> current one is too small. Doubling keeps a run of inserts from
+-> reallocating on every keystroke. FALSE only when the bigger String
+-> could not be allocated - the caller then leaves the line unchanged.
+-> The copy uses the line's current EstrLen, so callers must keep that in
+-> step with the content (edload SetStr's per character while filling).
+PROC edgrow(idx, need)
+  DEF cur:PTR TO CHAR, ns, mx
+  cur := edl[idx]
+  mx := StrMax(cur)
+  IF mx >= need THEN RETURN TRUE
+  IF mx < EDLINIT THEN mx := EDLINIT
+  REPEAT
+    mx := mx + mx
+  UNTIL mx >= need
+  IF (ns := String(mx)) = NIL THEN RETURN FALSE
+  StrCopy(ns, cur)
+  DisposeLink(cur)
+  edl[idx] := ns
+ENDPROC TRUE
+
+-> insert one character at the cursor (no redraw; caller batches). Grows
+-> the line if it is full; FALSE only on an allocation failure.
 PROC edinsch(c)
   DEF s:PTR TO CHAR, l, i
-  s := edl[edcur]
   l := EstrLen(edl[edcur])
-  IF l >= EDLW THEN RETURN FALSE
+  IF edgrow(edcur, l + 1) = FALSE THEN RETURN FALSE
+  s := edl[edcur]    -> re-fetch: edgrow may have moved the buffer
   FOR i := l TO edcol + 1 STEP -1
     s[i] := s[i - 1]
   ENDFOR
@@ -4997,8 +5022,9 @@ PROC edinsch(c)
   edcol := edcol + 1
 ENDPROC TRUE
 
--> load for editing: LF splits, CR dropped, tabs to spaces (8-stops),
--> lines capped at 200 characters. -1 = failed (message shown).
+-> load for editing: LF splits, CR dropped, tabs to spaces (8-stops).
+-> Lines grow to any length; only the line COUNT (8192) and whole-file
+-> size (512KB) are capped. -1 = failed (message shown).
 PROC edload(path)
   DEF fh, buf=NIL, n, size=-1, i, c, col, s, ok=TRUE,
       lock, fib:PTR TO fileinfoblock, bp:PTR TO CHAR, ln:PTR TO CHAR
@@ -5043,47 +5069,54 @@ PROC edload(path)
     n := 0
   ENDIF
   bp := buf
-  IF (s := String(EDLW)) = NIL THEN ok := FALSE
+  IF (s := String(EDLINIT)) = NIL THEN ok := FALSE
   IF ok
     edl[0] := s
     ednum := 1
-    ln := s
     col := 0
     i := 0
     WHILE (i < n) AND ok
       c := bp[i]
       IF c = 10
-        SetStr(edl[ednum - 1], col)
         IF ednum >= EDMAXL
           showmsg('too many lines to edit (8192 cap)')
           ok := FALSE
-        ELSEIF (s := String(EDLW)) = NIL
+        ELSEIF (s := String(EDLINIT)) = NIL
           showmsg('not enough memory')
           ok := FALSE
         ELSE
           edl[ednum] := s
           ednum := ednum + 1
-          ln := s
           col := 0
         ENDIF
       ELSEIF c = 13
         -> dropped: Amiga text is LF
       ELSEIF c = 9
+        -> tab to the next 8-stop, the line growing as needed
         REPEAT
-          IF col < EDLW
+          IF edgrow(ednum - 1, col + 1) = FALSE
+            showmsg('not enough memory')
+            ok := FALSE
+          ELSE
+            ln := edl[ednum - 1]
             ln[col] := 32
             col := col + 1
+            SetStr(edl[ednum - 1], col)    -> keep EstrLen live for edgrow
           ENDIF
-        UNTIL (Mod(col, 8) = 0) OR (col >= EDLW)
+        UNTIL (Mod(col, 8) = 0) OR (ok = FALSE)
       ELSE
-        IF col < EDLW
+        IF edgrow(ednum - 1, col + 1) = FALSE
+          showmsg('not enough memory')
+          ok := FALSE
+        ELSE
+          ln := edl[ednum - 1]
           ln[col] := c
           col := col + 1
+          SetStr(edl[ednum - 1], col)
         ENDIF
       ENDIF
       i := i + 1
     ENDWHILE
-    IF ok THEN SetStr(edl[ednum - 1], col)
   ENDIF
   IF buf THEN Dispose(buf)
   IF ok = FALSE THEN edfree()
@@ -5147,7 +5180,9 @@ PROC editfile(path, name)
         ENDIF
       ELSEIF code = 13    -> split the line at the cursor
         IF ednum < EDMAXL
-          IF (nl := String(EDLW)) <> NIL
+          l := EstrLen(edl[edcur]) - edcol    -> the tail after the cursor
+          IF l < EDLINIT THEN l := EDLINIT
+          IF (nl := String(l)) <> NIL
             s := edl[edcur]
             StrCopy(nl, s + edcol)
             SetStr(edl[edcur], edcol)
@@ -5175,9 +5210,9 @@ PROC editfile(path, name)
           edtouch(name)
           IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
         ELSEIF edcur > 0
-          -> join with the line above when the result fits
+          -> join with the line above, growing it to hold both
           l := EstrLen(edl[edcur - 1])
-          IF (l + EstrLen(edl[edcur])) <= EDLW
+          IF edgrow(edcur - 1, l + EstrLen(edl[edcur]))
             edcol := l
             StrAdd(edl[edcur - 1], edl[edcur])
             DisposeLink(edl[edcur])
@@ -5202,7 +5237,7 @@ PROC editfile(path, name)
           edtouch(name)
           IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
         ELSEIF edcur < (ednum - 1)
-          IF (l + EstrLen(edl[edcur + 1])) <= EDLW
+          IF edgrow(edcur, l + EstrLen(edl[edcur + 1]))
             StrAdd(edl[edcur], edl[edcur + 1])
             DisposeLink(edl[edcur + 1])
             FOR i := edcur + 1 TO ednum - 2
@@ -5214,10 +5249,10 @@ PROC editfile(path, name)
             edpage()
           ENDIF
         ENDIF
-      ELSEIF code = 9    -> tab: spaces to the next 8-stop
+      ELSEIF code = 9    -> tab: spaces to the next 8-stop (grows the line)
         REPEAT
-          IF edinsch(32) = FALSE THEN edcol := edcol    -> line full
-        UNTIL (Mod(edcol, 8) = 0) OR (EstrLen(edl[edcur]) >= EDLW)
+          r := edinsch(32)
+        UNTIL (r = FALSE) OR (Mod(edcol, 8) = 0)
         edtouch(name)
         IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
       ELSEIF (code >= 32) AND (code <= 255)
