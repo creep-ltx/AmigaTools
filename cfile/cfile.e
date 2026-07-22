@@ -6100,7 +6100,8 @@ ENDPROC
 -> are only reordered (pointers), never freed, so the saved arrays can
 -> put everything back on exit. Selection jumps to the first match.
 PROC filterapply(p, snames:PTR TO LONG, sdirs:PTR TO CHAR, ssize:PTR TO LONG,
-                 smark:PTR TO CHAR, fsrc:PTR TO LONG, fullcount, filt:PTR TO CHAR)
+                 smark:PTR TO CHAR, sdate:PTR TO LONG, fsrc:PTR TO LONG,
+                 fullcount, filt:PTR TO CHAR)
   DEF b, i, j=0
   b := p * MAXENT
   FOR i := 0 TO fullcount - 1
@@ -6109,6 +6110,8 @@ PROC filterapply(p, snames:PTR TO LONG, sdirs:PTR TO CHAR, ssize:PTR TO LONG,
       edirs[b + j] := sdirs[i]
       esize[b + j] := ssize[i]
       emark[b + j] := smark[i]
+      edate[b + j] := sdate[i]    -> the date must travel too, or the date
+                                  -> column (when sorted by date) misaligns
       fsrc[j] := i    -> which saved entry this visible row came from
       j++
     ENDIF
@@ -6125,7 +6128,7 @@ ENDPROC
 -> snapshotted and put back untouched - marks and order survive.
 PROC dofilter()
   DEF p, b, i, fullcount, origsel, esc=FALSE, done=FALSE, class, code, l,
-      snames=NIL:PTR TO LONG, ssize=NIL:PTR TO LONG,
+      snames=NIL:PTR TO LONG, ssize=NIL:PTR TO LONG, sdate=NIL:PTR TO LONG,
       sdirs=NIL:PTR TO CHAR, smark=NIL:PTR TO CHAR, fsrc=NIL:PTR TO LONG,
       filt[42]:STRING, keepname[110]:STRING
   p := active
@@ -6135,13 +6138,15 @@ PROC dofilter()
   origsel := esel[p]
   snames := New(MAXENT * 4)
   ssize := New(MAXENT * 4)
+  sdate := New(MAXENT * 4)
   sdirs := New(MAXENT)
   smark := New(MAXENT)
   fsrc := New(MAXENT * 4)
-  IF (snames = NIL) OR (ssize = NIL) OR (sdirs = NIL) OR (smark = NIL) OR
-     (fsrc = NIL)
+  IF (snames = NIL) OR (ssize = NIL) OR (sdate = NIL) OR (sdirs = NIL) OR
+     (smark = NIL) OR (fsrc = NIL)
     IF snames THEN Dispose(snames)
     IF ssize THEN Dispose(ssize)
+    IF sdate THEN Dispose(sdate)
     IF sdirs THEN Dispose(sdirs)
     IF smark THEN Dispose(smark)
     IF fsrc THEN Dispose(fsrc)
@@ -6150,6 +6155,7 @@ PROC dofilter()
   FOR i := 0 TO fullcount - 1
     snames[i] := enames[b + i]
     ssize[i] := esize[b + i]
+    sdate[i] := edate[b + i]
     sdirs[i] := edirs[b + i]
     smark[i] := emark[b + i]
     fsrc[i] := i    -> identity until the first filter compacts the view
@@ -6186,7 +6192,7 @@ PROC dofilter()
         l := EstrLen(filt)
         IF l > 0
           SetStr(filt, l - 1)
-          filterapply(p, snames, sdirs, ssize, smark, fsrc, fullcount, filt)
+          filterapply(p, snames, sdirs, ssize, smark, sdate, fsrc, fullcount, filt)
           drawpane(p)
           drawinput('/', filt, EstrLen(filt), 40)
         ENDIF
@@ -6195,7 +6201,7 @@ PROC dofilter()
         IF l < 40
           filt[l] := code
           SetStr(filt, l + 1)
-          filterapply(p, snames, sdirs, ssize, smark, fsrc, fullcount, filt)
+          filterapply(p, snames, sdirs, ssize, smark, sdate, fsrc, fullcount, filt)
           drawpane(p)
           drawinput('/', filt, EstrLen(filt), 40)
         ENDIF
@@ -6224,12 +6230,14 @@ PROC dofilter()
   FOR i := 0 TO fullcount - 1
     enames[b + i] := snames[i]
     esize[b + i] := ssize[i]
+    edate[b + i] := sdate[i]
     edirs[b + i] := sdirs[i]
     emark[b + i] := smark[i]
   ENDFOR
   ecount[p] := fullcount
   Dispose(snames)
   Dispose(ssize)
+  Dispose(sdate)
   Dispose(sdirs)
   Dispose(smark)
   Dispose(fsrc)

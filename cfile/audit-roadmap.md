@@ -60,7 +60,16 @@ length) per keystroke, but that is bounded by the 512KB file cap.)
 
 ## Low
 
-### [ ] 2. `/` filter misaligns the date column (visual)
+### [x] 2. `/` filter misaligns the date column (visual)
+
+**Fixed.** `edate` now travels through the filter like the other columns: a
+new `sdate` snapshot array in `dofilter` (allocated, NIL-checked, filled,
+restored, disposed alongside the rest), threaded into `filterapply` as a new
+parameter which assigns `edate[b+j] := sdate[i]`. Compiles clean (E-VO, no
+errors). Staged to FS-UAE. Root-cause cleanup (item 8) still open — this is the
+third open-coded entry-move that had to be fixed by hand.
+
+_Original finding:_
 
 - **Where:** `dofilter` snapshot `cfile.e:6093-6095` omits `edate`;
   `filterapply` `cfile.e:6067-6084` never assigns `edate[b+j]`.
