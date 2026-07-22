@@ -135,6 +135,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     progbybytes=FALSE,   -> bar advances by each lha member's byte total
                          -> (parsed from its "(done/total)"), for the
                          -> archive copy/move bar - big members weigh more
+    proglzx=0,           -> lzx byte bar: 1 = add ("Adding (<size>)"),
+                         -> 2 = extract ("( <run> / <total> )"); overrides the
+                         -> lha marker parse in arcrunprog
     statbytes=0, statfiles=0,    -> pre-scan totals for the progress bar
     gfails=0,    -> entries a delete run could not remove
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
@@ -3188,7 +3191,64 @@ PROC arcrunprog(dir, cmd)
     WHILE n > 0
       FOR i := 0 TO n - 1
         c := buf[i]
-        IF progbybytes
+        IF proglzx = 1
+          -> lzx ADD: each file prints "Adding (<size>)" - progadd its size
+          -> when the ")" closes. States 4..10 spell out "Adding (".
+          IF st = 10                   -> collecting the size digits
+            IF (c >= "0") AND (c <= "9")
+              curtot := Mul(curtot, 10) + (c - "0")
+            ELSEIF c = ")"
+              progadd(curtot)
+              st := 0
+            ENDIF
+          ELSEIF st = 9                -> after "Adding", seek the "("
+            IF c = "("
+              curtot := 0
+              st := 10
+            ENDIF
+          ELSEIF (st = 8) AND (c = "g")
+            st := 9
+          ELSEIF (st = 7) AND (c = "n")
+            st := 8
+          ELSEIF (st = 6) AND (c = "i")
+            st := 7
+          ELSEIF (st = 5) AND (c = "d")
+            st := 6
+          ELSEIF (st = 4) AND (c = "d")
+            st := 5
+          ELSEIF c = "A"
+            st := 4
+          ELSE
+            st := 0
+          ENDIF
+        ELSEIF proglzx = 2
+          -> lzx EXTRACT: each file starts "( <run> / <total> )" with run 0;
+          -> progadd the total once, at that start (run = 0), so the many
+          -> "( x / total )" redraws and the "( total ) Extracted OK:" line
+          -> (no "/") don't double-count. prevtotal holds the running count.
+          IF st = 12                   -> after "/", collect the total
+            IF (c >= "0") AND (c <= "9")
+              curtot := Mul(curtot, 10) + (c - "0")
+            ELSEIF c = ")"
+              IF prevtotal = 0 THEN progadd(curtot)
+              st := 0
+            ENDIF
+          ELSEIF st = 11               -> before "/", collect the running count
+            IF (c >= "0") AND (c <= "9")
+              prevtotal := Mul(prevtotal, 10) + (c - "0")
+            ELSEIF c = "/"
+              curtot := 0
+              st := 12
+            ELSEIF c = ")"
+              st := 0
+            ENDIF
+          ELSEIF c = "("
+            prevtotal := 0
+            st := 11
+          ELSE
+            st := 0
+          ENDIF
+        ELSEIF progbybytes
           -> match "ing:" for a new file, then read its "(...  /  total)":
           -> on each new file the PREVIOUS one is done, so its total is
           -> added; the last file's total is added when the pipe closes.
@@ -3714,7 +3774,11 @@ PROC arcxfer_out(p, q, ismove, force)
     ENDIF
   ENDFOR
   progbyfile := TRUE     -> suppress copyfile's own byte ticks
-  progbybytes := TRUE    -> arcrunprog drives the bar from lha's totals
+  IF islzx(p)
+    proglzx := 2         -> lzx extract: arcrunprog reads "( n / total )"
+  ELSE
+    progbybytes := TRUE  -> lha: arcrunprog reads "...ing: (.../total)"
+  ENDIF
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
@@ -3835,6 +3899,7 @@ PROC arcxfer_out(p, q, ismove, force)
   progoff()
   progbyfile := FALSE
   progbybytes := FALSE
+  proglzx := 0
   arcwipe('T:CFile-x')
   -> DIRECT move dropped members from the on-disk archive: reload the cache.
   -> A deferred (ONEXIT) move only flagged them - refreshall re-filters the
@@ -3979,7 +4044,11 @@ PROC arcxfer_in(p, q, ismove, force)
   ENDFOR
   total := statbytes
   progbyfile := TRUE
-  progbybytes := TRUE
+  IF islzx(q)
+    proglzx := 1         -> lzx add: arcrunprog reads "Adding (<size>)"
+  ELSE
+    progbybytes := TRUE
+  ENDIF
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
@@ -4092,6 +4161,7 @@ PROC arcxfer_in(p, q, ismove, force)
   progoff()
   progbyfile := FALSE
   progbybytes := FALSE
+  proglzx := 0
   arcwipe('T:CFile-a')
   IF added THEN loadarchive(q, arcpath[q])    -> cache gained members
   refreshall()
