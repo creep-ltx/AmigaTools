@@ -107,6 +107,8 @@ you are, archive path and all. The archive is listed once on entry
 and the panes are filtered from that listing, so moving around
 inside costs nothing.
 
+![Inside AmigaOS-3.2.3.lha copying marked members out — the border shows the archive path and the byte-weighted progress bar](archive_progress_bar.png)
+
 Most verbs work in there:
 
 | Key | Inside an archive |
