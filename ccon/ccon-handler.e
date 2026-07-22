@@ -385,6 +385,15 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> LINEAR dest row + column (converted to a screen row at the end).
     rftr[2]:ARRAY OF LONG, rftc[2]:ARRAY OF LONG,
     rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG,
+    -> v1.2 double buffering: a SHARED offscreen back-buffer. Grown to
+    -> the largest window that ever needs it; the handler renders ONE
+    -> console at a time, so one shared buffer is safe (each bufbegin..
+    -> bufend is a complete transaction). NIL bbmap = no buffer, draw
+    -> direct. bufoff is a kill switch for a future open option.
+    bbmap=NIL:PTR TO bitmap,     -> the back-buffer bitmap (exec alloc)
+    bbrp=NIL:PTR TO rastport,    -> a RastPort over it (E-heap, lazy)
+    bbw=0, bbh=0, bbdepth=0,     -> current buffer size (grow-only)
+    bufoff=FALSE,                -> TRUE = force direct drawing
     -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
     -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
     -> DOS re-mounts a fresh handler on the next open). ihdevopen tracks
@@ -704,6 +713,10 @@ PROC killhandler()
   IF fsport                     -> the tab-completion reply port
     DeleteMsgPort(fsport)
     fsport := NIL
+  ENDIF
+  IF bbmap                      -> the double-buffer bitmap (AllocBitMap,
+    FreeBitMap(bbmap)           -> an exec resource E does not track; bbrp
+    bbmap := NIL                -> is New()'d and rides E's list)
   ENDIF
 ENDPROC
 
@@ -1184,7 +1197,7 @@ ENDPROC
 -> one ACTION_WRITE, for the dispatcher and for the parked-write
 -> flush after a selection drag ends
 PROC dowrite(pkt:PTR TO dospacket)
-  DEF sender:PTR TO mp, len
+  DEF sender:PTR TO mp, len, buffered
   ensurewin()                   -> an AUTO window appears on first
   IF curcon.win = NIL                  -> output; no window at all = the
     ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)  -> write cannot land
@@ -1199,13 +1212,22 @@ PROC dowrite(pkt:PTR TO dospacket)
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
+  -> v1.2 double buffering: the client's output (render) is the flicker-
+  -> prone path - a multi-row page (More) drawn straight to the window
+  -> sweeps row by row. Wrap it: render into the shared back-buffer, then
+  -> one blit. The cursor/edit-line draws stay OUTSIDE the wrap (direct),
+  -> so they never pay a blit and the buffer only carries the transcript.
   IF curcon.rawmode
     curserase()                 -> raw: the app owns the screen, no blip
+    buffered := bufbegin(curcon)
     render(pkt.arg2, len)       -> - but the console owns the block
+    IF buffered THEN bufend(curcon)
     cursdraw()                  -> cursor (Ed's only position marker)
   ELSE
     eraseedit()
+    buffered := bufbegin(curcon)
     render(pkt.arg2, len)
+    IF buffered THEN bufend(curcon)
     reanchor()
     drawedit()
   ENDIF
@@ -3207,6 +3229,94 @@ PROC pastehintshow(l)
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
   curcon.pastehintrow := row
+ENDPROC
+
+-> ---------- v1.2 double buffering ----------
+-> A flicker-prone paint (output render, full redraw) is wrapped
+-> bufbegin(c)..bufend(c): the window's inner area is blitted INTO the
+-> shared buffer, the draws land in the buffer, then it is blitted back
+-> OUT in one go - so a multi-row update (More paging) appears atomically
+-> instead of sweeping. The copy-IN matters: it means an INCREMENTAL draw
+-> into the buffer still blits the correct full window back, never stale
+-> buffer bytes. Interactive draws (edit line, cursor, selection) are NOT
+-> wrapped - they don't flicker and stay direct. Degrades like the ring:
+-> if the bitmap will not allocate, bufbegin returns FALSE and the caller
+-> draws straight to the window exactly as before.
+
+-> grow-only: make the shared bitmap at least as big/deep as c's window.
+-> FALSE = no usable buffer (caller draws direct).
+PROC bufensure(c:PTR TO console)
+  DEF w, h, d, bm:PTR TO bitmap
+  IF bufoff THEN RETURN FALSE
+  IF c.win = NIL THEN RETURN FALSE
+  IF c.fwin THEN RETURN FALSE          -> borrowed window: its owner may draw
+  bm := c.win.rport.bitmap
+  IF bm = NIL THEN RETURN FALSE
+  IF bbrp = NIL
+    bbrp := New(SIZEOF rastport)        -> the RastPort struct, once (E-heap)
+    IF bbrp = NIL THEN RETURN FALSE
+  ENDIF
+  w := c.win.width
+  h := c.win.height
+  d := bm.depth
+  IF (bbmap <> NIL) AND (bbw >= w) AND (bbh >= h) AND (bbdepth >= d)
+    RETURN TRUE                         -> current buffer already fits
+  ENDIF
+  IF w < bbw THEN w := bbw              -> grow-only, no realloc thrash
+  IF h < bbh THEN h := bbh
+  IF d < bbdepth THEN d := bbdepth
+  IF bbmap THEN FreeBitMap(bbmap)
+  bbmap := AllocBitMap(w, h, d, 0, bm)  -> friend = window's bitmap
+  IF bbmap = NIL
+    bbw := 0; bbh := 0; bbdepth := 0
+    RETURN FALSE
+  ENDIF
+  bbw := w; bbh := h; bbdepth := d
+  InitRastPort(bbrp)
+  bbrp.bitmap := bbmap
+ENDPROC TRUE
+
+-> begin a buffered paint: copy the window's inner area into the buffer,
+-> point c.rp at the buffer, match the font. TRUE = buffering active (the
+-> caller must pair it with bufend); FALSE = no buffer, draw direct.
+PROC bufbegin(c:PTR TO console)
+  DEF il, it, iw, ih
+  IF bufensure(c) = FALSE THEN RETURN FALSE
+  il := c.win.borderleft
+  it := c.win.bordertop
+  iw := c.win.width - c.win.borderright - il
+  ih := c.win.height - c.win.borderbottom - it
+  IF (iw <= 0) OR (ih <= 0) THEN RETURN FALSE
+  -> copy-in reads the RAW screen bitmap (no layer), so the source is
+  -> SCREEN coordinates - the window's on-screen position plus the border
+  -> inset - NOT the window-relative (il,it) the RastPort-based copy-out
+  -> below uses. Getting this wrong read the screen's top-left (the title
+  -> bars) and tiled "CON:" down the window (1.2b19).
+  BltBitMap(c.win.rport.bitmap, c.win.leftedge + il, c.win.topedge + it,
+            bbmap, il, it, iw, ih, $C0, $FF, NIL)
+  c.rp := bbrp
+  -> start each buffered render in the SAME state openwin gives the window
+  -> rport: font, default pens. bbrp PERSISTS across writes (the window
+  -> rport gets reset by drawedit/openwin, bbrp does not), so without this
+  -> a scroll before any setpens() - More's first page-down - fills the
+  -> newly-exposed row with the STALE BgPen left black by the previous
+  -> page's inverse status line (clearrow zeroes only the model, not the
+  -> pixels), leaving a black trail. Match the window: deffg on 0.
+  IF c.tf THEN SetFont(bbrp, c.tf)
+  SetAPen(bbrp, c.deffg)
+  SetBPen(bbrp, 0)
+ENDPROC TRUE
+
+-> end a buffered paint: restore c.rp to the window and blit the buffer's
+-> inner area back onto the window in one atomic operation.
+PROC bufend(c:PTR TO console)
+  DEF il, it, iw, ih
+  c.rp := c.win.rport
+  il := c.win.borderleft
+  it := c.win.bordertop
+  iw := c.win.width - c.win.borderright - il
+  ih := c.win.height - c.win.borderbottom - it
+  BltBitMapRastPort(bbmap, il, it, c.win.rport, il, it, iw, ih, $C0)
 ENDPROC
 
 -> redraw the whole grid from the model at the current view offset;
@@ -6473,4 +6583,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b18 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b21 CCON: LTX console handler', 0
