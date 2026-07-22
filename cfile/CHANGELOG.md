@@ -2,6 +2,24 @@
 
 A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
+## 0.3.2 (2026-07-23)
+
+Going inside an archive now works for lzx as well as lha — the same
+browse, view and edit-in-place model, the same deferred writes, extended
+to a second format.
+
+**Inside lzx archives.** `Right`/`Enter` on an `.lzx` goes inside it and
+the pane behaves like a directory, just as it does for lha: view or edit a
+member, copy and move files and whole folders both out and in, rename,
+delete, and make new files or empty directories. Edits are held while you
+browse — the border shows `modified` and leaving (or quitting) commits the
+session with the usual `(s)ave`/`(d)iscard`/`(c)ancel` prompt. All
+confirmed against LZX 1.21.
+
+lzx fits the deferred model more neatly than lha: because LZX can remove a
+stored directory member directly, a folder delete needs no archive
+rebuild. The progress bar now fills for lzx extract and add too.
+
 ## 0.3.1 (2026-07-22)
 
 A code-audit pass over 0.3: one data-loss fix, a consistency fix for the
