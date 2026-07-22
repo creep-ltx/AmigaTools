@@ -41,15 +41,17 @@ inline-asm warnings are unchanged. Binary 77860 -> 77956, +96 bytes -
 the eight H3 disposes; B9 is roughly neutral (a NEW call traded for
 stack setup). Non-ASCII sweep clean.
 
-**Boot test passed (22.7.26):** `NewShell CCON:`, `ls -l c:` ~10 times,
-scrolled back through the full history. Window opened (openwin runs with
-the stack textattr - font loaded, grid measured, text rendered), and
-scrollback read cleanly through the `sb`/`sa`/`ss` model planes for
-every row - the direct evidence that B9's storage-class change and the
-planes around H3 are intact. The one path not exercised is window CLOSE
-(where condispose runs), but H3 is guarded no-ops today (planes NIL from
-closewin), so its only failure mode would be a double-free the guards
-prevent.
+**Boot test NOT yet valid for A - CORRECTED.** The 22.7.26 session ran
+`NewShell CCON:`, `ls -l c:` ~10 times, scrolled back - and came up
+fine - but the binary in `L:` at that moment was still 1.2b14: the
+1.2b15 build was compiled into the repo and never deployed (a
+compile-to-repo step mistaken for a deploy). So that run exercised the
+OLD code, not Batch A. Batch A is committed but was UNTESTED on
+hardware until it was folded into the 1.2b16 deploy alongside Batch B.
+Its changes are behaviourally invisible (B9 a per-open leak, H3 guarded
+no-ops today, H6 a comment), so the 1.2b16 boot test validates A too:
+window open exercises B9's stack textattr, window close exercises H3's
+condispose, and clean scrollback confirms the planes.
 
 The plan as written follows, kept for the record.
 
@@ -92,9 +94,50 @@ storage-class change that either compiles correct or does not compile.
 
 ---
 
-## Batch B - the per-keystroke history walk - P3
+## Batch B - the per-keystroke history walk - P3 - DONE + BOOT-GREEN (1.2b16, 22.7.26)
 
 **Finding:** P3 (RE-OPENED - audit.md wrote it, it was never applied).
+
+**Outcome:** both halves landed in 1.2b16, across five procs and one
+new helper. A single `histslot(idx)` (one Mod, seed-only) replaces the
+per-entry `Mod`; the four hot access paths then hand-step the ring slot
+(`slot-1` older / `slot+1` newer, manual wrap) so no loop pays a DIVS
+per entry. `sgfind` and `srfind` also gained the early `RETURN` at the
+first match (the old `sghost=NIL`/`got=FALSE` guard iterated the rest).
+`histmatches`/`histload` now take the ring SLOT, not the logical index,
+so the Up/Down walk can hand-step them too - the only two callers, both
+in dorawkey's RK_UP/RK_DOWN.
+
+**Two hazards handled, both this-file-specific:**
+- **E's `AND` does not short-circuit** (the todo.md:63 lesson). The walk
+  conditions `(idx < avail) AND histmatches(...)` and `(idx >= 0) AND
+  histmatches(...)` evaluate `histmatches(slot)` even on the boundary
+  iteration where the bound has failed. The hand-stepped wrap keeps
+  `slot` in `[0, HISTMAX)` there, and the Up seed uses `0` rather than
+  `histslot(avail)` (which is `Mod(-1,...)` when the ring is not full).
+  So the new code never forms a negative Mod - it strictly REMOVES the
+  class the old code only survived by the empty-filter fast path and by
+  the discarded result of a `ghist[-1]` wild read.
+- **Off-by-one showing the wrong recalled line** - the risk the plan
+  named. Proven not present: a Python enumeration cross-checked every
+  hand-stepped slot against `Mod(ghtotal-1-idx, HISTMAX)` for ghtotal
+  across not-yet-wrapped / exactly-full / multiply-wrapped regimes and
+  BOTH walk boundaries - 0 mismatches, 0 out-of-range slots. (The
+  roadmap suggested an E harness; a Python check is strictly more
+  conclusive for pure integer arithmetic and enumerates all cases, so
+  it was used instead. The E-side integration - compiles, recall still
+  works - is the boot test.)
+
+**Compiled clean (LARGE):** UNREFERENCED byte-identical to baseline (no
+new dangling local; `got` fully removed from srfind), +80 bytes.
+
+**Boot test PASSED (22.7.26).** All three recall paths P3 rewrote were
+exercised in a live CCON: shell against the real `L:ccon-history`: ghost
+suggestions appear, Up/Down history walk works (plain and prefix-
+filtered), Ctrl+R search works - recall unchanged, no wrong entries, no
+off-by-one. The Python slot-sequence proof held on hardware.
+
+The plan as written follows, kept for the record.
 
 The single highest-value item here: it is on the hottest interactive
 path (`drawedit` -> `sgfind` every keystroke, `srfind` every keystroke
@@ -239,6 +282,59 @@ mishandled abandoned-packet reply is its own class of guru. Own commit,
 own boot test, own bisect file if pursued.
 
 ---
+
+## Batch E - the runaway-client freeze - B12 - CLOSED, NOT A CCON BUG (22.7.26)
+
+**Finding:** B12 (new, 22.7.26) - RESOLVED as misattributed. Full account
+and the chase: audit2.md B12.
+
+**Outcome:** the investigation below ran, and the decisive test settled
+it the way this project keeps relearning to run FIRST: the EXACT command
+that froze CCON (`ls -R Amiga: >file`) was run under ViNCEd and froze
+ViNCEd identically (mouse dead, hard shutdown). Console-independent ->
+NOT a CCON bug. Root cause is `ls` corrupting the shared heap
+(ls/BUGS.md B1: name-corruption + infinite `-R` self-recursion). The
+input-chain hypothesis was plausible and WRONG; one ViNCEd run beat it.
+Fix lives in the ls project - the `-R` self-recursion is guarded in ls
+0.3 (deployed to `C:ls`, awaiting an Amiga boot test); the underlying
+heap corruption stays open there, needs a harness. No CCON change - a
+console cannot defend a no-memory-protection OS from a heap-scribbling
+client, and ViNCEd could not either. Nothing to do here.
+
+The investigation plan follows, kept for the record - it assumed a CCON
+bug and was superseded by the ViNCEd repro.
+
+**This is not a code batch yet - it is a diagnosis batch.** The freezing
+instruction is not located, and B12 is precisely the kind of bug that
+punishes a guessed fix (a hard lock on a machine with unsaved state).
+The mouse-dead symptom already narrows it to a TRUE hard lock
+(input.device blocked), not CPU starvation - so the search is: input
+chain blocking/spinning, a held `Forbid`/`Disable`, or main-loop
+fairness starving the input drain under a WRITE flood.
+
+**Order of work:**
+1. **Reproduce SAFELY.** Do not run `ls -R DH0:` full-speed on a live
+   machine again - it hard-locks. Use a BOUNDED but heavy writer (a
+   script that `type`s a large file, or a fixed big loop) so the box can
+   still be read, or throttle. Confirm CCON degrades/freezes while
+   ViNCEd does not on the identical input - the differential is the
+   whole lead.
+2. **Telemetry, the house way** (dbglog to `L:ccon-dbg.log`, same
+   plumbing as the FONT hunt and the B8 root-cause): does the main loop
+   service input while client packets are pending? Is `ihdrop` climbing
+   (ring dropping, input.device alive) or is the chain blocking? Does any
+   `Forbid`/`Disable` get entered in the render/scroll path and not
+   promptly left under load? One boot should answer one of these.
+3. Only THEN a fix, and its own commit + its own boot test.
+
+**Interaction with the trigger:** fixing `ls -R` (ls/BUGS.md B1) removes
+THIS particular trigger, but NOT the bug - any runaway writer still
+freezes CCON until B12 itself is fixed. Fix ls to stop the immediate
+pain; keep B12 open as the real robustness gap.
+
+**Risk:** the investigation is low-risk if reproduced bounded/throttled;
+a fix touches the packet/input core and is moderate-to-high. No blind
+changes.
 
 ## Not scheduled
 

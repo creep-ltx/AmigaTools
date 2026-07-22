@@ -31,6 +31,7 @@ specified in audit.md, both never applied.
 
 | Finding | Kind | Reachable | State |
 |---|---|---|---|
+| B12 | freeze | any runaway/unbounded-output client | open - HARD LOCK, mechanism not yet located (22.7.26) |
 | P3 | perf | every keystroke | **re-opened** - written in audit.md, never implemented |
 | B9 | leak | every window open | open |
 | B11 | robustness | crafted/buggy clipboard | open |
@@ -137,6 +138,122 @@ entry asked for the comment and it was not added; add it.
 ---
 
 ## 2. Bugs
+
+### B12 - a client that never stops writing HARD-FREEZES the whole machine
+
+**Where:** the output/write path - `dowrite()` :1153, `render()`, and
+whatever the main loop does (or fails to do) between client packets.
+The exact freezing instruction is NOT yet located; this entry records
+what is known and what is ruled out, not a mechanism dressed as one.
+
+**Found:** 22.7.26, running `ls -R DH0:` under CCON. `ls -R` has its own
+infinite-loop bug (ls/BUGS.md B1) that makes it emit output forever with
+BOUNDED memory. That is the trigger, not the cause: any client that
+produces unbounded output - a runaway program, a `type` on an enormous
+file, a stuck loop - is the same input to CCON.
+
+**Symptom:** after a while of the flood, the WHOLE machine freezes -
+**mouse dead, no guru, nothing responds.** Not slow: dead. Only recovery
+is a reset.
+
+**This is CCON's, proved the cheapest way (the ViNCEd/stock-CON:
+comparison this project keeps re-learning to run FIRST):** the SAME
+`ls -R DH0:`, the SAME infinite output, under **ViNCEd does NOT freeze
+the machine** - it loops visibly and stays alive (it even let the output
+be redirected to a file). Same client, same flood, different console,
+different outcome. So the freeze is something CCON does under sustained
+output that ViNCEd does not.
+
+**What is ruled OUT (so the next person does not re-check them):**
+- **CCON leaking memory per write.** `dowrite()` and `render()` allocate
+  NOTHING per write; the scrollback ring is a fixed New() at window
+  open and is written in place. Verified by read.
+- **The client OOMing the box.** `ls -R`'s loop re-lists the same
+  directory with a FIXED-length path (`cmenu/`, never `cmenu//`), so its
+  own memory is bounded - it does not exhaust RAM. If it did, ViNCEd
+  would freeze too. It does not.
+- **CCON RENDERING the flood (ruled out 22.7.26, the key update).** A
+  second run sent `ls -R`'s output to a FILE (`>Amiga:...`) instead of
+  the window - CCON was idle, rendering nothing - and it STILL hard-
+  froze (mouse dead, hard shutdown required). So the freeze is not in the
+  render/scroll/per-write path at all. The earlier "per-write cycle
+  chokes" hypothesis is dead.
+
+**REVISED leading hypothesis (22.7.26), still a hypothesis:** `ls` is
+provably CORRUPTING THE HEAP (ls/BUGS.md B1: the blank-name pattern is
+progressive and systematic - 18/14/10/6 blanks across successive
+re-listings in the CCON capture, a textbook heap-overwrite signature).
+The one thing CCON does even while idle is run its **input.device chain
+handler** on every input event (including mouse moves); its structures
+(`ihring`, the chain hookup) live in the shared system heap. So: `ls`'s
+overwrite clobbers those structures -> the next mouse move runs the
+corrupted handler IN input.device's context -> it faults/spins there ->
+input.device dies -> mouse frozen, whole machine dead, no guru. This
+fits all symptoms AND explains the ViNCEd differential: ViNCEd installs
+no input.device chain handler, so the same `ls` corruption has no fatal
+target there. If correct, the ROOT is ls's heap bug and CCON's chain is
+collateral - but a console whose in-heap structures are a fatal target
+for any heap-scribbling client is still a hardening concern.
+
+**DECISIVE TEST RUN (22.7.26) - REFUTES a CCON bug.** The EXACT command
+that froze CCON (`ls -R Amiga: >file`) was run under ViNCEd: it FROZE
+ViNCEd identically - mouse dead, Ctrl+C dead, hard shutdown. Same client,
+same target, BOTH consoles hard-lock. The freeze is CONSOLE-INDEPENDENT:
+`ls` corrupts the shared heap (ls/BUGS.md B1) badly enough to take down a
+machine with no memory protection, whichever console hosts the shell. The
+input-chain hypothesis below is REFUTED (ViNCEd installs no chain handler
+yet died the same). The earlier "CCON freezes, ViNCEd survives" was a
+TARGET difference - the `Amiga:` tree corrupts fast, the `DH0:` ViNCEd
+run was stopped before it got there - not a console difference.
+Everything from here to the Status line is the chase as it stood BEFORE
+this test, kept as the record; it assumed a CCON bug and is superseded.
+
+**What the symptom CONSTRAINS (mouse dead, not just unresponsive):** a
+mouse that stops moving means **input.device itself is blocked**, i.e. a
+true HARD LOCK, not task-level CPU starvation. A CCON main task merely
+pinned rendering forever would leave the mouse alive (input.device is a
+higher-priority task/interrupt path) and would at worst make CCON
+unresponsive while the pointer still moved. Mouse-dead therefore points
+at one of:
+- **the input chain (`ihchain`/`ihdrain`), which runs IN input.device's
+  task**, blocking or spinning. The ring is documented to DROP when full
+  (`ihdrop`), which SHOULD keep input.device alive - so if this is the
+  cause, either the drop path is not actually reached under this load,
+  or the main loop starves the drain while it services a packet flood,
+  and something downstream blocks input.device rather than dropping.
+- **a `Forbid()`/`Disable()` held too long or across a loop** somewhere
+  reachable from the write/scroll path (the list is Forbid-bracketed on
+  mutation, and the design explicitly relies on Forbid holding off
+  input.device's task - a Forbid that is entered and not promptly left
+  under flood would freeze exactly like this).
+- **main-loop fairness**: if the loop drains ALL pending client packets
+  in a tight inner loop without ever servicing the input signal, input
+  backs up; combined with either of the above this is the freeze.
+
+**Reachable:** needs SUSTAINED / unbounded output, so not the everyday
+case (normal commands finish and the machine is fine - the user's
+repeated `ls -a c:` never froze). But any runaway client reaches it, and
+the consequence is the worst in either audit: a dead machine, unsaved
+work in every other program lost. High severity, narrower trigger.
+
+**Next step is TELEMETRY, not a blind fix** (the house rule, and this is
+exactly the kind of bug that punishes guessing). Instrument, under a
+deliberately-throttled or bounded flood so the box can still be read:
+whether the main loop ever services input while WRITE packets are
+pending; whether `ihring` is dropping (`ihdrop` climbing) or the chain
+is blocking; whether any `Forbid`/`Disable` nests or is left set across
+`render`/`screenscroll`. ViNCEd is the working oracle - the fix target
+is whatever CCON does differently under an endless writer. Do NOT
+reproduce it full-speed on a machine with unsaved state; it hard-locks.
+
+**Status: CLOSED - NOT a CCON bug (22.7.26).** The ViNCEd repro (top of
+this entry) proves it console-independent: root cause is ls/BUGS.md B1
+(heap corruption + infinite `-R` recursion). There is no reasonable CCON
+fix - any app that scribbles the shared heap can freeze an AmigaOS box,
+and ViNCEd defends no better. Lesson re-paid (see amigatools-workflow):
+run the cheap client-vs-console comparison BEFORE theorising about the
+console's internals - the input-chain theory was plausible, careful, and
+wrong, and one ViNCEd run beat it. The fix lives in the `ls` project.
 
 ### B9 - `openwin()` leaks a `NEW ta` on every window open
 

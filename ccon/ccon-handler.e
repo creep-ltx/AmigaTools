@@ -4435,39 +4435,42 @@ ENDPROC
 
 -> newest match at index >= from whose line CONTAINS the fragment;
 -> TRUE = found (ebuf/cpos/sridx updated), FALSE = kept as it was
+-> audit2 P3: same treatment as sgfind - one seed Mod (histslot) then a
+-> hand-stepped slot, and RETURN at the first hit from `from` onward
+-> instead of a `got = FALSE` guard iterating the rest. Runs per
+-> keystroke while Ctrl+R search is open.
 PROC srfind(from)
-  DEF avail, idx, h:PTR TO CHAR, fl, hl, i, j, ok, f:PTR TO CHAR,
-      got
+  DEF avail, idx, h:PTR TO CHAR, fl, hl, i, j, ok, f:PTR TO CHAR, slot
   fl := StrLen(curcon.srbuf)
   IF fl = 0 THEN RETURN FALSE
   f := curcon.srbuf
-  got := FALSE
   avail := Min(ghtotal, HISTMAX)
   IF from < 0 THEN from := 0
+  slot := histslot(from)               -> seed at the starting index
   FOR idx := from TO avail - 1
-    IF got = FALSE
-      h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
-      hl := StrLen(h)
-      i := 0
-      WHILE (got = FALSE) AND (i <= (hl - fl))
-        ok := TRUE
-        FOR j := 0 TO fl - 1
-          IF tcfold(h[i + j]) <> tcfold(f[j]) THEN ok := FALSE
-        ENDFOR
-        IF ok
-          got := TRUE
-          curcon.sridx := idx
-          StrCopy(curcon.ebuf, h)
-          WHILE StrLen(curcon.ebuf) > edcap()
-            SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
-          ENDWHILE
-          curcon.cpos := StrLen(curcon.ebuf)
-        ENDIF
-        i++
-      ENDWHILE
-    ENDIF
+    h := ghist[slot]
+    hl := StrLen(h)
+    i := 0
+    WHILE i <= (hl - fl)
+      ok := TRUE
+      FOR j := 0 TO fl - 1
+        IF tcfold(h[i + j]) <> tcfold(f[j]) THEN ok := FALSE
+      ENDFOR
+      IF ok
+        curcon.sridx := idx
+        StrCopy(curcon.ebuf, h)
+        WHILE StrLen(curcon.ebuf) > edcap()
+          SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
+        ENDWHILE
+        curcon.cpos := StrLen(curcon.ebuf)
+        RETURN TRUE                    -> first match from `from` wins
+      ENDIF
+      i++
+    ENDWHILE
+    slot := slot - 1
+    IF slot < 0 THEN slot := HISTMAX - 1
   ENDFOR
-ENDPROC got
+ENDPROC FALSE
 
 PROC srenter()
   IF curcon.srbuf = NIL THEN RETURN
@@ -4706,24 +4709,34 @@ ENDPROC -1
 
 -> newest history entry strictly longer than ebuf that ebuf
 -> prefixes, case-folded; result in curcon.sghost
+-> audit2 P3: this runs from drawedit() on EVERY keystroke at line-end.
+-> Two costs removed: the per-entry Mod (a DIVS on a non-power-of-two
+-> HISTMAX) is now ONE seed Mod (histslot) plus a hand-stepped slot
+-> walking oldest by one per iteration; and the loop RETURNs at the
+-> first (newest) hit instead of running all `avail` entries with a
+-> now-useless `sghost = NIL` guard inside it.
 PROC sgfind()
-  DEF l, avail, idx, h:PTR TO CHAR, i, ok, s:PTR TO CHAR
+  DEF l, avail, idx, h:PTR TO CHAR, i, ok, s:PTR TO CHAR, slot
   curcon.sghost := NIL
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF l = 0 THEN RETURN
   avail := Min(ghtotal, HISTMAX)
+  slot := histslot(0)                  -> newest live slot
   FOR idx := 0 TO avail - 1
-    IF curcon.sghost = NIL
-      h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
-      IF StrLen(h) > l
-        ok := TRUE
-        FOR i := 0 TO l - 1
-          IF tcfold(h[i]) <> tcfold(s[i]) THEN ok := FALSE
-        ENDFOR
-        IF ok THEN curcon.sghost := h
+    h := ghist[slot]
+    IF StrLen(h) > l
+      ok := TRUE
+      FOR i := 0 TO l - 1
+        IF tcfold(h[i]) <> tcfold(s[i]) THEN ok := FALSE
+      ENDFOR
+      IF ok
+        curcon.sghost := h
+        RETURN                         -> first match wins, stop walking
       ENDIF
     ENDIF
+    slot := slot - 1                   -> one step older, manual wrap -
+    IF slot < 0 THEN slot := HISTMAX - 1  -> no DIVS in the hot loop
   ENDFOR
 ENDPROC
 
@@ -4761,24 +4774,37 @@ PROC sgword()
   curcon.cpos := l
 ENDPROC
 
--> does history entry idx (0 = newest) start with pfx, case-folded?
--> an empty pfx matches everything - the plain, unfiltered Up/Down
--> walk (an empty prompt) is just this with a no-op filter, not a
--> separate code path.
-PROC histmatches(idx, pfx:PTR TO CHAR)
+-> audit2 P3: ring slot of logical history index idx (0 = newest,
+-> avail-1 = oldest). ONE DIVS, used only to SEED a walk - the
+-> per-keystroke loops (sgfind/srfind) and the Up/Down walk then step
+-> the slot by hand (slot-1 with a manual wrap for older, slot+1 for
+-> newer), so no hot loop pays a division per entry. Callers keep idx
+-> in [0, avail-1], where ghtotal-1-idx is >= 0; idx = avail (Up,
+-> already at the oldest) would make Mod(-1,...) - the todo.md:63
+-> negative-Mod guru class - so that one caller guards the seed and the
+-> hand-stepped wrap keeps every in-loop slot in [0, HISTMAX) anyway.
+PROC histslot(idx) IS Mod(ghtotal - 1 - idx, HISTMAX)
+
+-> does the history entry at ring slot `slot` start with pfx,
+-> case-folded? an empty pfx matches everything - the plain,
+-> unfiltered Up/Down walk (an empty prompt) is just this with a no-op
+-> filter, not a separate code path. audit2 P3: takes the ring slot
+-> now, not the logical index, so the walk can hand-step it DIVS-free.
+PROC histmatches(slot, pfx:PTR TO CHAR)
   DEF h:PTR TO CHAR, pl, i
   pl := StrLen(pfx)
   IF pl = 0 THEN RETURN TRUE
-  h := ghist[Mod(ghtotal - 1 - idx, HISTMAX)]
+  h := ghist[slot]
   IF StrLen(h) < pl THEN RETURN FALSE
   FOR i := 0 TO pl - 1
     IF tcfold(h[i]) <> tcfold(pfx[i]) THEN RETURN FALSE
   ENDFOR
 ENDPROC TRUE
 
--> put history entry idx (0 = newest) into ebuf, cut to fit
-PROC histload(idx)
-  StrCopy(curcon.ebuf, ghist[Mod(ghtotal - 1 - idx, HISTMAX)])
+-> put the history entry at ring slot `slot` into ebuf, cut to fit
+-> (audit2 P3: ring slot, not logical index - see histmatches)
+PROC histload(slot)
+  StrCopy(curcon.ebuf, ghist[slot])
   WHILE StrLen(curcon.ebuf) > edcap()
     SetStr(curcon.ebuf, StrLen(curcon.ebuf) - 1)
   ENDWHILE
@@ -5076,7 +5102,7 @@ ENDPROC TRUE
 -> know when to run the keymap instead); the legacy IDCMP path
 -> ignores the result - vanilla bytes arrive as their own events there
 PROC dorawkey(code, qual)
-  DEF s:PTR TO CHAR, l, avail, sh, idx
+  DEF s:PTR TO CHAR, l, avail, sh, idx, slot
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   -> Tab can arrive as a RAW key when the keymap has no vanilla
   -> mapping for its shifted form: dispatch it to completion too
@@ -5197,26 +5223,41 @@ PROC dorawkey(code, qual)
     IF avail > HISTMAX THEN avail := HISTMAX
     IF curcon.hpos = -1 THEN StrCopy(curcon.stash, curcon.ebuf)  -> the half-typed line / filter
     idx := curcon.hpos + 1
-    WHILE (idx < avail) AND (histmatches(idx, curcon.stash) = FALSE)
+    -> audit2 P3: hand-step the ring slot with idx (older = slot-1) so
+    -> histmatches pays no per-entry DIVS. E's AND does NOT short-
+    -> circuit, so histmatches(slot) is evaluated even on the iteration
+    -> where idx has reached avail - seed a valid in-range slot there
+    -> (0) rather than histslot(avail), which would be Mod(-1,...) when
+    -> the ring is not yet full; its result is discarded anyway.
+    slot := IF idx < avail THEN histslot(idx) ELSE 0
+    WHILE (idx < avail) AND (histmatches(slot, curcon.stash) = FALSE)
       idx++
+      slot := slot - 1
+      IF slot < 0 THEN slot := HISTMAX - 1
     ENDWHILE
     IF idx < avail
       curcon.hpos := idx
-      histload(curcon.hpos)
+      histload(slot)
       curcon.cpos := StrLen(curcon.ebuf)
       drawedit()
     ENDIF
   ELSEIF code = RK_DOWN
     IF curcon.hpos >= 0
       idx := curcon.hpos - 1
-      WHILE (idx >= 0) AND (histmatches(idx, curcon.stash) = FALSE)
+      -> newer = slot+1; histslot(-1) is Mod(ghtotal,HISTMAX), in range
+      -> and non-negative, so the seed is safe at idx = -1 (the "back to
+      -> the half-typed line" boundary) - no guard needed this side.
+      slot := histslot(idx)
+      WHILE (idx >= 0) AND (histmatches(slot, curcon.stash) = FALSE)
         idx--
+        slot := slot + 1
+        IF slot >= HISTMAX THEN slot := 0
       ENDWHILE
       curcon.hpos := idx
       IF curcon.hpos = -1
         StrCopy(curcon.ebuf, curcon.stash)    -> back to the half-typed line
       ELSE
-        histload(curcon.hpos)
+        histload(slot)
       ENDIF
       curcon.cpos := StrLen(curcon.ebuf)
       drawedit()
@@ -6379,4 +6420,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b15 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b16 CCON: LTX console handler', 0
