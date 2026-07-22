@@ -394,6 +394,11 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     bbrp=NIL:PTR TO rastport,    -> a RastPort over it (E-heap, lazy)
     bbw=0, bbh=0, bbdepth=0,     -> current buffer size (grow-only)
     bbactive=NIL:PTR TO console, -> the console accumulating in the buffer
+    bbpage=FALSE,                -> the accumulation is a ^L page: hold the
+                                 -> flush past the per-drain point until the
+                                 -> client READs (page done) - a full-screen
+                                 -> repaint sent as many round-tripped writes
+                                 -> then shows in ONE blit (instant More)
     bufoff=FALSE,                -> TRUE = force direct drawing
     -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
     -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
@@ -586,9 +591,10 @@ PROC main()
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
     UNTIL msg = NIL
-    bufflush()                    -> double buffering: every write this
-                                  -> drain accumulated is now shown in ONE
-                                  -> blit - a multi-write page flips atomically
+    -> double buffering: show what this drain accumulated - UNLESS it is a
+    -> held ^L page (bbpage), which waits for the client's READ so the whole
+    -> repaint, sent as many round-tripped writes, shows in ONE blit.
+    IF bbpage = FALSE THEN bufflush()
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
     -> drain every console's window port - UNLESS that console's
@@ -1070,6 +1076,12 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    -> instant-page: flush a held ^L page only when the read will BLOCK
+    -> (nothing queued = the page is done and More waits for a key). A read
+    -> WITH data queued is More consuming a CSI report (window size, cursor
+    -> pos) MID-page - flushing then showed the page early and the rest
+    -> drew per-write (top-to-bottom fill, slow on a deep WB screen).
+    IF inavail() = 0 THEN bufflush()
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -1088,6 +1100,7 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     curcon := c
     ensurewin()
+    IF inavail() = 0 THEN bufflush()  -> as READ: only when it will wait
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
     -> let timer.device answer (input arrival wakes all waiters)
@@ -1964,7 +1977,10 @@ PROC closewin()
   -> buffer, drop it (do NOT flush - the window is going away). Prevents
   -> a later bufflush/bufopen touching a freed console (a client can send
   -> its output then ACTION_END inside one packet drain).
-  IF bbactive = curcon THEN bbactive := NIL
+  IF bbactive = curcon
+    bbactive := NIL
+    bbpage := FALSE
+  ENDIF
   IF curcon.win = NIL
     -> a windowless console (an AUTO whose open failed) can still
     -> hold parked packets - they MUST be replied before the console
@@ -2276,6 +2292,9 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed
   IF curcon.win = NIL THEN RETURN
+  bufflush()                    -> show any held ^L page before we resize
+                                -> (else its buffer is a stale size); no-op
+                                -> in the normal case
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
@@ -3321,6 +3340,8 @@ PROC bufopen(c:PTR TO console)
   SetAPen(bbrp, c.deffg)
   SetBPen(bbrp, 0)
   bbactive := c
+  bbpage := FALSE               -> a fresh batch; a ^L in it turns it into
+                                -> a held page (render sets bbpage)
 ENDPROC TRUE
 
 -> show the accumulated buffer: restore direct drawing and blit the
@@ -3332,6 +3353,7 @@ PROC bufflush()
   IF bbactive = NIL THEN RETURN
   c := bbactive
   bbactive := NIL
+  bbpage := FALSE
   IF c.win = NIL THEN RETURN               -> window gone; nothing to show
   c.rp := c.win.rport
   IF bbmap = NIL THEN RETURN
@@ -3713,6 +3735,13 @@ PROC csidispatch(c)
     ENDFOR
   ELSEIF c = "q"
     IF n = 0 THEN sendreport()
+  ELSEIF c = "n"
+    -> DSR: CSI 6n = report cursor position. More asks for it on its FIRST
+    -> page and then READS the answer - unanswered, that read hit an empty
+    -> queue and (instant-page) my "read = page done" flush fired early, so
+    -> the first page drew per-write. Answering it keeps a report in the
+    -> queue at that read, so the page stays held like every other page.
+    IF n = 6 THEN sendcpr()
   ELSEIF c = "{"
     -> SET RAW EVENTS: report the listed IECLASSes on the input
     -> stream (this is how Ed's menus reach it through the console)
@@ -3932,6 +3961,21 @@ ENDPROC
 -> reasoning as rawcsikey(): this rides the same input path a raw
 -> client's own key-reading loop consumes, not the ROM-verified
 -> event-report shape ihreport() uses for a different protocol.
+-> DSR answer to CSI 6n: a Cursor Position Report, CSI row;col R (1-based).
+-> Same input-stream path and 8-bit CSI ($9B) sendreport uses - a
+-> console->app report, read by the client's own input loop.
+PROC sendcpr()
+  DEF b[24]:STRING, i
+  StringF(b, '\d;\d', curcon.cy + 1, curcon.cx + 1)
+  IF inqroom(StrLen(b) + 2) = FALSE THEN RETURN
+  enqueue($9B)
+  FOR i := 0 TO StrLen(b) - 1
+    enqueue(b[i])
+  ENDFOR
+  enqueue("R")
+  inputarrived()
+ENDPROC
+
 PROC sendreport()
   DEF b[24]:STRING, i
   -> the window-bounds report is a console->app report and must use the
@@ -4115,6 +4159,13 @@ PROC render(buf, len)
       ENDIF
       curcon.cx := 0
       curcon.cy := 0
+      -> instant-page: a ^L means a full-screen repaint is starting. HOLD
+      -> the buffer's flush (this clear + the page's many round-tripped
+      -> writes accumulate) until the client READs - then the whole page
+      -> shows in one blit. Only when buffering this console; a program
+      -> that never reads is covered by the READ trigger's absence being
+      -> rare (documented) - the common full-screen clients all read.
+      IF bbactive = curcon THEN bbpage := TRUE
       i := i + 1
     ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
       -> printable run: ASCII and Latin-1; $7F-$9F are controls.
@@ -6628,4 +6679,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b23 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b25 CCON: LTX console handler', 0
