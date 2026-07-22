@@ -46,6 +46,8 @@ ANSI, text), and each verb does the natural thing for the type.
 In every text prompt the cursor walks with `Left`/`Right`, and
 `Shift+Left`/`Shift+Right` jump to the start and end of the line.
 
+![The built-in help screen listing every key](help_screen.png)
+
 ## File operations
 
 Copy and move ask about name collisions per file —
@@ -59,6 +61,8 @@ one. A centered progress bar covers the longer operations, byte-
 accurate: file copies/moves count real bytes, and copying members in
 or out of an archive weighs each by its size (a big member fills the
 bar, a small one barely moves it).
+
+![The byte-weighted progress bar while unpacking an archive; marked files carry their .info sidecars](progress_bar.png)
 
 Deleting is recursive and resilient: a delete-protected entry asks
 `unprotect? (y)es (n)o (a)ll`, an entry that will not go is skipped
@@ -206,6 +210,8 @@ them. Viewing ANSI art switches
 the palette to the classic ANSI colours and restores it on exit. If
 the screen cannot be opened, CFile falls back to a borderless window
 on the public screen without its own palette.
+
+![The i info window over a listing — size, date, comment and the protection bits, with the size column and volume free space in the border row](info_window.png)
 
 ## Files
 
