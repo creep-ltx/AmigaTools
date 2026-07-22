@@ -224,7 +224,22 @@ _Original finding:_
 
 ## Cross-cutting cleanup (not bugs, prevents future ones)
 
-### [ ] 8. A single "copy/move one entry" primitive for the parallel arrays
+### [x] 8. A single "copy/move one entry" primitive for the parallel arrays
+
+**Done.** Three primitives now own the five-field entry list (name, dir, size,
+date, mark), placed right after `addentry`:
+- `swapentry(b, i, j)` — swaps two entries in place; `sortpane` uses it.
+- `snapentry(...)` / `unsnapentry(...)` — copy one entry out to / back from the
+  `/` filter's snapshot arrays; `dofilter`'s save and restore loops and
+  `filterapply` use them.
+
+The four open-coded move loops are gone, so adding a sixth field means editing
+these three helpers, not hunting down each loop (which is how the date column
+came to be dropped in item 2). Behaviour is identical. Compiles clean, staged to
+FS-UAE. Re-test: sort by each key and the `/` filter (incl. date-sort + Space
+mark) to confirm no regression.
+
+_Original rationale:_
 
 - **Rationale:** name/dir/size/date/mark are moved together in `sortpane`
   (`881`), `filterapply` (`6067`), and the filter save/restore (`6115`,

@@ -689,6 +689,52 @@ PROC addentry(p, name, isdir, size, date)
   ecount[p] := i + 1
 ENDPROC
 
+-> Every entry is really five parallel fields - name pointer, is-dir, size,
+-> date and mark - that must move together. These three helpers are the ONE
+-> place that enumerates them, so a listing that reorders or snapshots entries
+-> can never again keep four in step and forget the fifth (the / filter's date
+-> column once was). Add a field here and every mover follows.
+
+-> swap two entries in place within the global arrays (b = p * MAXENT)
+PROC swapentry(b, i, j)
+  DEF t
+  t := enames[b + i]
+  enames[b + i] := enames[b + j]
+  enames[b + j] := t
+  t := edirs[b + i]
+  edirs[b + i] := edirs[b + j]
+  edirs[b + j] := t
+  t := esize[b + i]
+  esize[b + i] := esize[b + j]
+  esize[b + j] := t
+  t := edate[b + i]
+  edate[b + i] := edate[b + j]
+  edate[b + j] := t
+  t := emark[b + i]
+  emark[b + i] := emark[b + j]
+  emark[b + j] := t
+ENDPROC
+
+-> copy the global entry at b+gi out to the snapshot arrays at index si
+PROC snapentry(si, sn:PTR TO LONG, sd:PTR TO CHAR, ss:PTR TO LONG,
+               sdt:PTR TO LONG, sm:PTR TO CHAR, b, gi)
+  sn[si]  := enames[b + gi]
+  sd[si]  := edirs[b + gi]
+  ss[si]  := esize[b + gi]
+  sdt[si] := edate[b + gi]
+  sm[si]  := emark[b + gi]
+ENDPROC
+
+-> copy the snapshot entry at si back into the global slot b+gi
+PROC unsnapentry(si, sn:PTR TO LONG, sd:PTR TO CHAR, ss:PTR TO LONG,
+                 sdt:PTR TO LONG, sm:PTR TO CHAR, b, gi)
+  enames[b + gi] := sn[si]
+  edirs[b + gi]  := sd[si]
+  esize[b + gi]  := ss[si]
+  edate[b + gi]  := sdt[si]
+  emark[b + gi]  := sm[si]
+ENDPROC
+
 -> a fresh listing never keeps marks (they are positional)
 PROC clearmarks(p)
   DEF i
@@ -896,7 +942,7 @@ ENDPROC c < 0
 -> selection sort: n*n/2 compares but only n swaps; fine for one
 -> directory's worth of names
 PROC sortpane(p)
-  DEF i, j, m, b, t
+  DEF i, j, m, b
   IF ecount[p] < 2 THEN RETURN
   b := p * MAXENT
   FOR i := 0 TO ecount[p] - 2
@@ -904,27 +950,9 @@ PROC sortpane(p)
     FOR j := i + 1 TO ecount[p] - 1
       IF entbefore(p, j, m) THEN m := j
     ENDFOR
-    IF m <> i
-      t := enames[b + i]
-      enames[b + i] := enames[b + m]
-      enames[b + m] := t
-      t := edirs[b + i]
-      edirs[b + i] := edirs[b + m]
-      edirs[b + m] := t
-      -> the size travels with its name, or the border-row total (and
-      -> any future size column) reads a neighbour's bytes
-      t := esize[b + i]
-      esize[b + i] := esize[b + m]
-      esize[b + m] := t
-      t := edate[b + i]
-      edate[b + i] := edate[b + m]
-      edate[b + m] := t
-      -> marks are zero during a read, but an in-place re-sort (s) runs
-      -> after marking, so the mark has to travel with its entry too
-      t := emark[b + i]
-      emark[b + i] := emark[b + m]
-      emark[b + m] := t
-    ENDIF
+    -> swapentry carries all five fields, so the size, date and any live
+    -> mark travel with the name instead of reading a neighbour's
+    IF m <> i THEN swapentry(b, i, m)
   ENDFOR
 ENDPROC
 
@@ -6161,12 +6189,9 @@ PROC filterapply(p, snames:PTR TO LONG, sdirs:PTR TO CHAR, ssize:PTR TO LONG,
   b := p * MAXENT
   FOR i := 0 TO fullcount - 1
     IF nchas(snames[i], filt)
-      enames[b + j] := snames[i]
-      edirs[b + j] := sdirs[i]
-      esize[b + j] := ssize[i]
-      emark[b + j] := smark[i]
-      edate[b + j] := sdate[i]    -> the date must travel too, or the date
-                                  -> column (when sorted by date) misaligns
+      -> restore saved entry i into the compacted visible slot j (all five
+      -> fields, so the date column stays in step with the name)
+      unsnapentry(i, snames, sdirs, ssize, sdate, smark, b, j)
       fsrc[j] := i    -> which saved entry this visible row came from
       j++
     ENDIF
@@ -6208,11 +6233,7 @@ PROC dofilter()
     RETURN
   ENDIF
   FOR i := 0 TO fullcount - 1
-    snames[i] := enames[b + i]
-    ssize[i] := esize[b + i]
-    sdate[i] := edate[b + i]
-    sdirs[i] := edirs[b + i]
-    smark[i] := emark[b + i]
+    snapentry(i, snames, sdirs, ssize, sdate, smark, b, i)
     fsrc[i] := i    -> identity until the first filter compacts the view
   ENDFOR
   StrCopy(filt, '')
@@ -6283,11 +6304,7 @@ PROC dofilter()
   ENDWHILE
   -> restore the full listing exactly as it was
   FOR i := 0 TO fullcount - 1
-    enames[b + i] := snames[i]
-    esize[b + i] := ssize[i]
-    edate[b + i] := sdate[i]
-    edirs[b + i] := sdirs[i]
-    emark[b + i] := smark[i]
+    unsnapentry(i, snames, sdirs, ssize, sdate, smark, b, i)
   ENDFOR
   ecount[p] := fullcount
   Dispose(snames)
