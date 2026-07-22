@@ -3088,6 +3088,75 @@ PROC arcdelmember(arcfile, member)
   DeleteFile('T:CFile-out')
 ENDPROC res
 
+-> copy `src` into dst, escaping AmigaDOS pattern metachars with ' so
+-> `lzx d` matches the name literally. LZX 1.21's d globs and has no -Qw, so
+-> a stored name with #?%*()|[]~ (or a literal ') would otherwise over-match
+-> (probe-confirmed). The ' is escaped first as '', so its own escape is not
+-> re-processed. dst must hold up to twice the source length.
+PROC lzxesc(dst, src:PTR TO CHAR)
+  DEF i=0, j=0, c, d:PTR TO CHAR
+  d := dst
+  WHILE c := src[i]
+    IF (c = "'") OR (c = "#") OR (c = "?") OR (c = "%") OR (c = "*") OR
+       (c = "(") OR (c = ")") OR (c = "|") OR (c = "[") OR (c = "]") OR (c = "~")
+      d[j] := "'"
+      j++
+    ENDIF
+    d[j] := c
+    j++
+    i++
+  ENDWHILE
+  SetStr(dst, j)
+ENDPROC
+
+-> delete one member from an lzx archive by its exact stored name (escaped).
+-> runcapture, not arcrunprog: lzx's delete output ("Deleted: x") is not the
+-> lha "...ing:" the progress bar keys on, so the bar just rests.
+PROC lzxdelmember(arcfile, member)
+  DEF cmd[700]:STRING, esc[620]:STRING, res
+  lzxesc(esc, member)
+  StringF(cmd, 'lzx d "\s" "\s"', arcfile, esc)
+  res := runcapture(NIL, cmd, 'T:CFile-out')
+  DeleteFile('T:CFile-out')
+ENDPROC res
+
+-> delete every member under `prefix` (the bare "prefix/" dir entry included)
+-> from pane p's lzx archive, batched, each name escaped. lzx d removes stored
+-> directory members directly (with the trailing slash), so - unlike lha - no
+-> rebuild is needed. Iterates the current cache; the caller reloads it.
+PROC lzxdeltree(p, prefix)
+  DEF a:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl, m:PTR TO CHAR,
+      cmd[700]:STRING, base[360]:STRING, esc[620]:STRING, res, ok=TRUE, baselen
+  StrCopy(pfx, prefix)
+  StrAdd(pfx, '/')
+  pl := StrLen(pfx)
+  StringF(base, 'lzx d "\s"', arcpath[p])
+  StrCopy(cmd, base)
+  baselen := EstrLen(cmd)
+  a := amem[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF ncprefix(m, pfx, pl)
+        lzxesc(esc, m)
+        IF (EstrLen(cmd) + EstrLen(esc)) > 600
+          res := runcapture(NIL, cmd, 'T:CFile-out')
+          IF res = -1 THEN ok := FALSE
+          StrCopy(cmd, base)
+        ENDIF
+        StrAdd(cmd, ' "')
+        StrAdd(cmd, esc)
+        StrAdd(cmd, '"')
+      ENDIF
+    ENDFOR
+  ENDIF
+  IF EstrLen(cmd) > baselen
+    res := runcapture(NIL, cmd, 'T:CFile-out')
+    IF res = -1 THEN ok := FALSE
+  ENDIF
+  DeleteFile('T:CFile-out')
+ENDPROC ok
+
 -> run an lha command asynchronously through a PIPE and drive the
 -> progress bar from its output: LhA prints one line per file, each
 -> ending "...ing:" (Extract/Add/Delet-ing), so every "ing:" that goes
@@ -3235,7 +3304,15 @@ PROC arcextracttree(p, prefix)
   StrAdd(sfile, pfx)
   StrAdd(sfile, '.')
   makepath(sfile)
-  StringF(base, 'lha -M x "\s"', arcpath[p])
+  -> lzx x vs lha -M x (see arcviewsel). Member names go on the command line
+  -> unescaped: extract patterns can only over-match into the T: scratch,
+  -> which is harmless (the literal member always lands, then copytree takes
+  -> exactly the intended subtree).
+  IF arcfmt[p] = TY_LZX
+    StringF(base, 'lzx x "\s"', arcpath[p])
+  ELSE
+    StringF(base, 'lha -M x "\s"', arcpath[p])
+  ENDIF
   StrCopy(cmd, base)
   baselen := EstrLen(cmd)
   a := amem[p]
@@ -3538,6 +3615,10 @@ PROC arccommit(p)
       m:PTR TO CHAR, baselen, hasdel=FALSE, hasadd, needrebuild=FALSE,
       stageroot[CPATHLEN]:STRING
   IF inarchive(p) = FALSE THEN RETURN
+  -> this is the lha deferred-commit. lzx does not defer yet (steps 2-4 write
+  -> immediately), so nothing lzx ever sets a flag here - bail so no lha
+  -> command is aimed at an .lzx. The lzx commit is wired in step 5.
+  IF arcfmt[p] = TY_LZX THEN RETURN
   IF arcwrite = FALSE THEN RETURN
   IF amst[p] = NIL THEN RETURN
   a := amem[p]
@@ -3601,10 +3682,6 @@ PROC arcxfer_out(p, q, ismove, force)
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, t, k, stop=FALSE,
       ndone=0, deld=FALSE, deferred=FALSE, doit, total=0
-  IF islzx(p)
-    arclzxsoon()
-    RETURN
-  ENDIF
   IF involume(q) OR efail[q]
     showmsg('the other pane needs a directory to receive the files')
     RETURN
@@ -3650,9 +3727,13 @@ PROC arcxfer_out(p, q, ismove, force)
           IF copytree(sfile, dfile, 0)
             ndone := ndone + 1
             IF ismove
-              -> ONEXIT: flag for deletion at commit, like Del does; DIRECT:
-              -> remove it from the archive now
-              IF arcwrite
+              -> lzx: remove now (its d deletes dir members too - no defer
+              -> yet, that lands in step 5). lha ONEXIT: flag for the commit
+              -> like Del; lha DIRECT: remove now.
+              IF islzx(p)
+                lzxdeltree(p, member)
+                deld := TRUE
+              ELSEIF arcwrite
                 arcflagdel(p, member, TRUE)
                 deferred := TRUE
               ELSE
@@ -3710,8 +3791,13 @@ PROC arcxfer_out(p, q, ismove, force)
           StrAdd(sfile, member)
           makepath(sfile)
           DeleteFile(sfile)
-          StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member,
-                  'T:CFile-x/')
+          IF islzx(p)
+            StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member,
+                    'T:CFile-x/')
+          ELSE
+            StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member,
+                    'T:CFile-x/')
+          ENDIF
           res := arcrunprog(NIL, cmd)
           DeleteFile('T:CFile-out')
           IF (res = -1) OR (pathtype(sfile) <> 1)
@@ -3720,8 +3806,11 @@ PROC arcxfer_out(p, q, ismove, force)
           ELSEIF copyfile(sfile, dfile)
             ndone := ndone + 1
             IF ismove
-              -> ONEXIT: defer the removal to commit; DIRECT: remove now
-              IF arcwrite
+              -> lzx: remove now; lha ONEXIT: defer to commit; lha DIRECT: now
+              IF islzx(p)
+                lzxdelmember(arcpath[p], member)
+                deld := TRUE
+              ELSEIF arcwrite
                 arcflagdel(p, member, FALSE)
                 deferred := TRUE
               ELSE
