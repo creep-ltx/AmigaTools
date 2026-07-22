@@ -57,7 +57,7 @@
 -> packet port with the window port via Wait(), so WaitPkt is gone.
 
 MODULE 'intuition/intuition','intuition/intuitionbase',
-       'intuition/screens','intuition/imageclass',
+       'intuition/screens',
        'graphics/view','graphics/gfxbase',
        'utility/tagitem',
        'exec/nodes','exec/ports','exec/io','exec/tasks',
@@ -67,14 +67,11 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'devices/clipboard',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
        'keymap','diskfont',
-       -> v1.3 ICONIFY: AppIcon plumbing. 'wb' = workbench.library calls
-       -> (AddAppIconA/RemoveAppIcon) + workbenchbase; 'icon' = icon.library
-       -> (GetDiskObject/GetDefDiskObject/FreeDiskObject) + iconbase;
-       -> 'workbench/workbench' = the diskobject/appmessage structs + the
-       -> WBPROJECT/AMTYPE_APPICON consts. The icon load itself is DOS (it
-       -> reads the .info file) so it rides the fontload helper process;
-       -> AddAppIconA/RemoveAppIcon are exec-level messaging.
-       'wb','icon','workbench/workbench'
+       -> v1.3 ICONIFY: 'wb' = workbench.library (AddAppIconA/RemoveAppIcon) +
+       -> workbenchbase; 'workbench/workbench' = the diskobject/appmessage
+       -> structs + WBTOOL/AMTYPE_APPICON consts. The AppIcon is baked in
+       -> (bicondo), so no icon.library. AddAppIcon/RemoveAppIcon are exec.
+       'wb','workbench/workbench'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -382,13 +379,18 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fhtask=NIL,
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
-    -> v1.3 ICONIFY (Stage 0): AppIcon plumbing. iconobj is the shared
-    -> DiskObject every iconified window's AppIcon renders - loaded ONCE at
-    -> init on the fontload helper process (GetDiskObject is DOS), so the
-    -> no-DOS rule stays whole; a default icon backs a missing file.
-    -> wbport receives the click (AppMessage) back from Workbench.
+    -> v1.3 ICONIFY: AppIcon plumbing. iconobj is the DiskObject every
+    -> iconified window's AppIcon renders - the baked-in bicondo (built at
+    -> init, no file/DOS). wbport receives the click (AppMessage) from Workbench.
     iconok=FALSE,               -> workbench.library + a usable icon both up
-    iconobj=NIL:PTR TO diskobject,
+    iconobj=NIL:PTR TO diskobject,  -> the AppIcon DiskObject (= bicondo, baked in)
+    -> the CCON AppIcon is BAKED INTO the binary (no external CCon.info): his
+    -> 55x23x3 icon extracted from CCon.info, a DiskObject built in code.
+    biconimg:image,             -> normal Image (GadgetRender)
+    biconimg2:image,            -> selected Image (SelectRender, GFLG_GADGHIMAGE)
+    bicondo:diskobject,         -> the DiskObject handed to AddAppIconA
+    bicondat=NIL:PTR TO LONG,   -> static planar data, normal
+    bicondat2=NIL:PTR TO LONG,  -> static planar data, selected
     wbport=NIL:PTR TO mp,       -> AppMessage reply port (in the Wait mask)
     ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
     -> B7 reflow scratch: the write cursor and destination planes the
@@ -534,6 +536,78 @@ PROC main()
   -> the vector address rides as an immediate poked in here, since
   -> a process entry carries no is_Data pointer. Exec-only; if any
   -> step fails, fhok stays FALSE and FONT falls back to OpenFont.
+  -> ICONIFY: build the baked-in CCON AppIcon (his CCon.info, 55x23x3, its
+  -> image data static below). E globals start as GARBAGE, so zero the two
+  -> structs first, then set only the fields AddAppIconA reads. A classic
+  -> Image (GFLG_GADGIMAGE), no external file, no icon.library, no DOS.
+  bicondat := [
+   $00000000, $00000400, $7BFFFFFF, $FFF08400, $2AAEAEAE, $AEB08400, $FFFFFFFF, $FFF7BC00,
+   $55555554, $80002C00, $7FFEA800, $00001C00, $5DD55552, $00002C00, $7F7B8800, $00001400,
+   $55D55510, $00002C00, $7FEA8000, $00000400, $55555500, $00000C00, $6BB88020, $00000400,
+   $55555500, $00000400, $7EA80000, $00000400, $55555000, $00000400, $6B880200, $00000400,
+   $55555000, $00000400, $6A800000, $00000400, $55550000, $00000400, $6A800000, $00000400,
+   $40000000, $00000400, $7FFFFFFF, $FFFFFC00, $00000000, $00000000, $FFFFFFFF, $FFFFF800,
+   $84000000, $00184000, $84000000, $00084000, $2AAAAAA9, $22000000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $BFFFFFFF, $FFFFC000,
+   $AAA55552, $48000000, $00000000, $00000000, $00000000, $00000600, $7BFFFFFF, $FFE73A00,
+   $6AAEAEAE, $AEA73A00, $80000000, $00084200, $15555554, $800AAA00, $3BFEA800, $00551A00,
+   $11555552, $02AAAA00, $3BBB8800, $00551200, $11555510, $22AAAA00, $3BEA8000, $00150200,
+   $15555500, $2AAA8A00, $2BB88020, $04550200, $15555502, $2AAA9200, $3EA80000, $055F8200,
+   $15555002, $AAAA9200, $2B880200, $4577AA00, $15555022, $AAAA9200, $2A800000, $15FFAA00,
+   $1555002A, $AAAAB200, $2A800000, $57FFAA00, $00000000, $00003A00, $00000000, $00000200,
+   $FFFFFFFF, $FFFFFE00
+   ]:LONG
+  bicondat2 := [
+   $00000000, $00000000, $00000000, $00000200, $3DFFFFFF, $FFFBDE00, $3DFFFFFF, $FFFBDE00,
+   $7FFFFFFF, $FFFBDE00, $2AAAAAAA, $40001E00, $3FFF5400, $00001E00, $2EEFAAA9, $00001E00,
+   $3FBFC400, $00001E00, $2AEFAA88, $00001E00, $3FFF4000, $00001E00, $2AAAAA80, $00001E00,
+   $35DC4010, $00001E00, $2AAAAA80, $00001600, $3F540000, $00001E00, $2AAAA800, $00001600,
+   $35C40100, $00000E00, $2AAAA800, $00001600, $35400000, $00000E00, $2AAA8000, $00000600,
+   $35400000, $00000E00, $20000000, $00000600, $3FFFFFFF, $FFFFFE00, $00000000, $00000000,
+   $7FFFFFFF, $FFFFFC00, $7FFFFFFF, $FFFFBC00, $7FFFFFFF, $FFF7BC00, $15555554, $91000000,
+   $40000000, $00003C00, $400F0000, $00003C00, $400F0000, $00003C00, $400F0000, $00003C00,
+   $400F0000, $00003C00, $400F0000, $00003C00, $40000000, $00003C00, $40000000, $00003C00,
+   $40000000, $00003400, $40000000, $00003C00, $40000000, $00003400, $40000000, $00002C00,
+   $40000000, $00003400, $40000000, $00002C00, $40000000, $00002400, $40000000, $00002C00,
+   $5FFFFFFF, $FFFFE400, $5552AAA9, $24000000, $FFFFFFFF, $FFFFFE00, $80000000, $00000200,
+   $80000000, $00000000, $80000000, $00000000, $C0000000, $00042000, $8AAAAAAA, $40054000,
+   $9DFF5400, $002A8000, $88AFAAA9, $01554000, $9DDFC400, $002A8000, $88AFAA88, $11554000,
+   $9DFF4000, $000A8000, $8AAAAA80, $15554000, $95DC4010, $022A8000, $8AAAAA81, $15554800,
+   $9F540000, $02AFC000, $8AAAA801, $55554800, $95C40100, $22BBD000, $8AAAA811, $55554800,
+   $95400000, $0AFFD000, $8AAA8015, $55555800, $95400000, $2BFFD000, $80000000, $00001800,
+   $80000000, $00000000
+   ]:LONG
+  stps := bicondo
+  FOR tmp := 0 TO SIZEOF diskobject - 1 DO stps[tmp] := 0
+  stps := biconimg
+  FOR tmp := 0 TO SIZEOF image - 1 DO stps[tmp] := 0
+  stps := biconimg2
+  FOR tmp := 0 TO SIZEOF image - 1 DO stps[tmp] := 0
+  biconimg.width := 55
+  biconimg.height := 23
+  biconimg.depth := 3
+  biconimg.imagedata := bicondat
+  biconimg.planepick := 7
+  biconimg2.width := 55
+  biconimg2.height := 23
+  biconimg2.depth := 3
+  biconimg2.imagedata := bicondat2
+  biconimg2.planepick := 7
+  bicondo.magic := $E310
+  bicondo.version := 1
+  bicondo.gadget.width := 55
+  bicondo.gadget.height := 23
+  bicondo.gadget.flags := GFLG_GADGIMAGE OR GFLG_GADGHIMAGE  -> two-state icon
+  bicondo.gadget.gadgetrender := biconimg   -> bare = the global image's address
+  bicondo.gadget.selectrender := biconimg2  -> shown while selected/clicked
+  bicondo.gadget.gadgettype := GTYP_BOOLGADGET
+  bicondo.type := WBTOOL
+  bicondo.currentx := NO_ICON_POSITION
+  bicondo.currenty := NO_ICON_POSITION
+  iconobj := bicondo                        -> bare = the baked DiskObject's address
   fhtask := FindTask(NIL)
   fhsigbit := AllocSignal(-1)
   fhstub := New(32)
@@ -745,17 +819,11 @@ PROC killhandler()
     DeleteMsgPort(wbport)
     wbport := NIL
   ENDIF
-  IF iconobj
-    FreeDiskObject(iconobj)
-    iconobj := NIL
-  ENDIF
+  -> iconobj is the baked-in static bicondo, NOT a GetDiskObject allocation:
+  -> do NOT FreeDiskObject it. Nothing to free.
   IF workbenchbase
     CloseLibrary(workbenchbase)
     workbenchbase := NIL
-  ENDIF
-  IF iconbase
-    CloseLibrary(iconbase)
-    iconbase := NIL
   ENDIF
   IF ihsigbit >= 0
     FreeSignal(ihsigbit)
@@ -1756,66 +1824,23 @@ PROC fontload(ta:PTR TO textattr)
   IF f = NIL THEN f := OpenFont(ta)
 ENDPROC f
 
--> ---------- v1.3 ICONIFY: AppIcon plumbing (Stage 0) ----------
--> The icon image is loaded ONCE and shared by every iconified window's
--> AppIcon. GetDiskObject reads the .info file (DOS), so it rides the
--> fontload helper process - the same throwaway-process, own-pr_MsgPort
--> escape the disk-font loader uses, keeping the no-DOS rule whole.
+-> ---------- v1.3 ICONIFY: AppIcon plumbing ----------
+-> The AppIcon is BAKED IN (bicondo, built at handler init) - no file, no
+-> icon.library, no DOS - so there is no icon-load path here at all.
 
--> runs ON THE HELPER process (A4 restored by the poked stub, exactly
--> like fonthelper). A missing DEVS:CCon.info (or no icon.library) falls
--> back to the ROM/ENV default project icon, so an AppIcon always renders.
-PROC iconhelper()
-  DEF p:PTR TO process
-  p := FindTask(NIL)
-  p.windowptr := -1             -> no "please insert volume" boxes
-  iconobj := NIL
-  IF iconbase
-    iconobj := GetDiskObject('DEVS:CCon')   -> appends .info
-    IF iconobj = NIL THEN iconobj := GetDefDiskObject(WBPROJECT)
-  ENDIF
-  Signal(fhtask, fhsig)         -> ALWAYS - the handler is waiting
-ENDPROC
-
--> spawn the helper to fetch the shared AppIcon image, the same one-shot
--> mechanism fontload uses. The stub's proc vector (fhgd[1]) is repointed
--> at iconhelper for this call and restored to fonthelper after - safe
--> because this runs at init, BEFORE any font load, single-threaded.
-PROC iconload()
-  IF fhok = FALSE THEN RETURN
-  fhgd[1] := {iconhelper}
-  SetSignal(0, fhsig)           -> no stale wakeups
-  IF CreateNewProc([NP_ENTRY, fhstub,
-                    NP_NAME, 'ccon-iconload',
-                    NP_STACKSIZE, 16384,
-                    NP_COPYVARS, FALSE,
-                    NP_CURRENTDIR, 0,
-                    NP_INPUT, 0,
-                    NP_OUTPUT, 0,
-                    NP_CLOSEINPUT, FALSE,
-                    NP_CLOSEOUTPUT, FALSE,
-                    TAG_DONE, NIL])
-    Wait(fhsig)
-  ENDIF
-  fhgd[1] := {fonthelper}       -> restore the stub for disk fonts
-ENDPROC
-
--> lazily bring the AppIcon plumbing up: open workbench.library +
--> icon.library (both ROM-resident, pure exec OpenLibrary) and fetch the
--> shared icon once. Lazy - not at handler init - so it runs the first
--> time a window opens, by which point a public screen exists (Workbench
--> is up); an early system-CON: mount pre-Workbench would find no app to
--> take the icon. Returns whether iconify can work. wbport carries the
--> click back and joins the main Wait() mask.
+-> lazily bring the AppIcon plumbing up: open workbench.library (ROM-resident,
+-> pure exec OpenLibrary) and the reply port. The icon (iconobj = bicondo) is
+-> baked in and built at init, so nothing is loaded here. Lazy - not at handler
+-> init - because AddAppIcon needs Workbench up; the first iconify (RightAmiga+I)
+-> only happens with a window on-screen, i.e. Workbench running. wbport carries
+-> the click back and joins the main Wait() mask.
 PROC wbensure()
   IF iconok THEN RETURN TRUE
   IF workbenchbase = NIL THEN workbenchbase := OpenLibrary('workbench.library', 37)
-  IF iconbase = NIL THEN iconbase := OpenLibrary('icon.library', 37)
   IF workbenchbase = NIL THEN RETURN FALSE
   IF wbport = NIL THEN wbport := CreateMsgPort()
   IF wbport = NIL THEN RETURN FALSE
-  IF iconobj = NIL THEN iconload()
-  IF iconobj = NIL THEN RETURN FALSE
+  IF iconobj = NIL THEN RETURN FALSE     -> baked icon missing (never happens)
   iconok := TRUE
 ENDPROC TRUE
 
