@@ -19,10 +19,10 @@ ANSI, text), and each verb does the natural thing for the type.
 | `Tab` | switch the active pane |
 | `Up` / `Down` | move the selection (`Shift` = page, `Ctrl` = first/last) |
 | `/` | filter the pane live — type to narrow to matching names, `Up`/`Down` walk the matches, `Space` marks one, `Enter` keeps the cursor on the match, `Esc` restores the full listing |
-| `Right` | enter the selected directory, volume, or lha archive |
+| `Right` | enter the selected directory, volume, or lha/lzx archive |
 | `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
 | `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
-| `Enter` | open by type: enter a directory or lha archive, view text/ANSI, run an executable (asks first), hex-view the rest |
+| `Enter` | open by type: enter a directory or lha/lzx archive, view text/ANSI, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live, `c` edits the comment |
@@ -99,8 +99,8 @@ paths. `v` on an archive shows its contents listing in the viewer.
 
 ## Inside an archive
 
-`Right` or `Enter` on an lha archive goes **inside** it, and the pane
-behaves like a directory: the tree is listed a level at a time,
+`Right` or `Enter` on an lha or lzx archive goes **inside** it, and the
+pane behaves like a directory: the tree is listed a level at a time,
 `Right` walks into a folder, `Left` comes back up and finally out to
 the real directory the archive sits in. The border row shows where
 you are, archive path and all. The archive is listed once on entry
@@ -128,12 +128,13 @@ quitting) commits the whole session in one pass; a modified archive
 asks first — `(s)ave` writes the changes, `(d)iscard` throws them away,
 `(c)ancel` stays inside. The staging lives on the archive's own volume,
 not in RAM. `ARCWRITE DIRECT` in the config rewrites the archive on
-every edit instead (the old behaviour). Either way the archiver is LhA;
-since it can't remove a stored directory, a folder delete rebuilds the
-archive to drop it — collapsing any duplicate entries in passing.
+every edit instead (the old behaviour). LhA can't remove a stored
+directory, so a folder delete rebuilds the archive to drop it —
+collapsing any duplicate entries in passing; LZX removes directory
+members directly and needs no rebuild.
 
-`p`, `u` and `:` have no meaning on a member and say so. Only lha is
-supported inside for now — lzx and zip still open from outside.
+`p`, `u` and `:` have no meaning on a member and say so. lha and lzx both
+go inside; zip still opens from outside.
 
 ## The console
 
@@ -257,7 +258,9 @@ subdirectories, renaming, deleting, and making new files and empty
 directories — all confirmed against LhA 2.15 on the same install. The
 deferred write model was exercised too: batched commits on leave, the
 save/discard/cancel prompt, and folder deletes rebuilding the archive
-to drop stored directories (and clear duplicates). One known limit:
+to drop stored directories (and clear duplicates). The same verbs were
+run inside lzx archives against LZX 1.21 — LZX removes stored directory
+members directly, so its folder deletes need no rebuild. One known limit:
 FS-UAE directory drives can hold host filenames the Amiga side cannot
 see; CFile reports these as "invisible entries remain" when they block
 a delete.

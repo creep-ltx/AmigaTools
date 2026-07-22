@@ -13,10 +13,93 @@ check, self-maintaining config. See CHANGELOG.md. Path there:
 0.3b1 inside archives -> 0.3b2 sizes -> 0.3b3 deferred writes -> a run of
 backlog polish.
 
-- **0.4 — lzx inside**: listing parser + the four command shapes into the
-  already-batched write layer; capture lzx's real output to a file and
-  parse against that, like lha got. Its command/flag set differs from
-  LhA and is not yet researched — do a dump-driven probe pass first.
+**0.3.1 RELEASED (22.7.26)** — code-audit pass over 0.3: the editor's
+200-char line cap removed (dynamic per-line buffers, no more silent
+truncation), the `/` filter now carries the date column, a `deltree`
+skip-list leak fixed, config read sized to the file, `arcadd` returns its
+slot, the parallel-array entry moves folded into one primitive, and
+`ARCWRITE ONEXIT` now defers an archive move-out too. See CHANGELOG.md.
+
+**0.4 — lzx inside (COMPLETE on main, UNRELEASED)** — browse/view/copy/
+move out+in/Del/new/rename/edit inside `.lzx` archives, with the same
+deferred commit-on-exit as lha, plus the progress bar now ticking for lzx.
+Turned out *simpler* than lha: LZX 1.21's `d` removes a stored directory
+member directly (with the trailing slash), so no rebuild path; `d` globs
+with no `-Qw`, so member names are `'`-escaped. Four probe rounds captured
+lzx's real output first (~/Documents/Amiga/lzxhelp.txt, lzxprobe[/2/3]).
+Docs updated. `$VER`/help not yet bumped, not yet released.
+
+## Post-0.4 — agreed plan (design pinned 23.7.26)
+
+Version numbers get assigned when each release is cut, not now. Groups
+roughly in build order. **Mouse is decided against** — CFile is a keyboard
+program by design (DOpus is for mouse users).
+
+### Navigation
+
+- [ ] **Bookmarks** — `Alt`+`1`..`0` sets a slot to the ACTIVE pane's
+      location, bare `1`..`0` jumps back. 10 slots, real paths only (not a
+      spot inside an archive). Digits are currently unbound; read `Alt`+digit
+      as a raw key + `Alt` qualifier (a plain `Alt`+`1` through the keymap is
+      layout-dependent). Session-only by default; **`SAVEBOOKMARKS ON|OFF`**
+      (default OFF, parallels `SAVEDIRS`) persists the 10 slots to
+      `cfile.config` on quit as `BOOKMARK1`..`BOOKMARK0`, self-maintaining
+      like the other keys (`configensure` appends it to existing configs).
+- [ ] **Go-to-path** — `g` opens a prompt; type a path, the active pane
+      jumps there (Lock it first; error if it won't open).
+- [ ] **Directory history** — back/forward through visited dirs. LOW prio.
+
+### Search
+
+- [ ] **Find file** — recursive name search from the current directory;
+      results as a jump or a synthetic pane.
+- [ ] **Content search** — grep-style text search inside files, results
+      into the console frame.
+
+### Configurable keys + user commands (the big refactor)
+
+- [ ] Rebind the **main verb keys** from the config. The modal prompt keys
+      (`s`/`d`/`c`, `y`/`n`) stay fixed — they are contextual.
+- [ ] **User command keys** — bind a key to a shell command/script run on
+      the selection, with substitution tokens:
+      `{f}` selected entry's name · `{p}` active pane's dir · `{o}` other
+      pane's dir · `{m}` the marked set, space-joined · `{ff}` full path of
+      the selection (dir + name). e.g. `lha a {o}stuff.lha {m}` or
+      `MyViewer {ff}`. Runs through the in-frame console (livecmd). Wants a
+      new config section and turns the eventloop's hardcoded key->verb
+      dispatch into a key->action table.
+
+### Operation safety
+
+- [ ] **Cancel a running op** — `Esc` during a big copy/move/delete/pack/
+      archive aborts. Poll the window IDCMP non-blocking inside the copy /
+      tree / arcrunprog loops. Leaves what is already done and reports
+      "cancelled — N of M" (no rollback; the in-flight file's partial target
+      is cleaned up). Small, high-trust.
+
+### Smooth progress bars (the dream: ALL bars smooth)
+
+- [ ] Copy/EXTRACT can go truly smooth: lha prints `(done/total)` and lzx
+      `( run / total )` PER MEMBER as it works, so add the *delta* of the
+      running count instead of one jump per file. (Regular file-copy already
+      ticks per 16KB.) ADD/pack only prints the final size once
+      (`Adding (N)`), no running counter — so an add bar can smooth BETWEEN
+      files but each file stays one step unless we weight it by our own byte
+      accounting during staging. Supersedes the old "per-byte progress inside
+      a file" follow-up under 0.3b1.
+
+### Comfort / nice, no hurry
+
+- [ ] **Auto-refresh** — StartNotify on the pane dirs so external changes
+      show without F5. FS-UAE dir-drive notification support unverified.
+- [ ] **KEYMAP config** — e.g. `KEYMAP s`; run `C:SetKeyboard` at startup
+      before the window opens (bootless non-US keyboards). Needs a bootless
+      FS-UAE boot test; vamos cannot test it. (Detail under 0.3 candidates.)
+- [ ] **Editor find / replace + goto-line + block copy-paste** — the
+      built-in editor is cursor/insert/split/join only. LOW prio, but yes
+      eventually.
+- [ ] **DOpus-style icon info** — icon type, default tool, tooltypes in the
+      `i` window. (Deferred since 0.1.)
 
 ## 0.3b3 — deferred archive writes (done)
 
@@ -82,9 +165,9 @@ Four LhA 2.15 behaviours cost boot tests and are worth remembering:
 
 Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
-- [ ] **Per-byte progress inside a file** — the bar ticks once per
-      file, so one big member is a single jump. lha prints a
-      `(done/total)` byte counter that could drive it finer.
+- [~] **Per-byte progress inside a file** — folded into "Smooth progress
+      bars" in the Post-0.4 plan (extract can go smooth off lha's
+      `(done/total)` / lzx's `( run / total )`; add can't).
 - [x] **Archive dir sizing** — done. `=` inside an archive sums the
       member sizes under the folder (arcsizeunder over the amsz cache),
       filling the size column instantly, no walk.
@@ -141,17 +224,10 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## Bigger, later
 
-- [ ] **Find file** — recursive name search from the current
-      directory, results as a pane or a jump.
-- [ ] **Text search inside files** — grep-style, results in the
-      console frame.
-- [ ] **Mouse support** — select/mark/double-click-open; the tool
-      is keyboard-driven by design, so this is comfort, not core.
-- [ ] **DOpus-style icon info** — icon type, default tool, tooltypes
-      in the `i` window. (Deferred since 0.1.)
-- [ ] **Configurable user commands** — DOpus-buttons territory:
-      user-defined keys running user-defined commands on the
-      selection. Wants the config file to grow a section.
+Moved up into **Post-0.4 — agreed plan** (near the top): find file, content
+search, configurable keys + user commands, and DOpus-style icon info are all
+captured there with their decisions. **Mouse support is decided against** —
+CFile is a keyboard program by design.
 
 ## Code notes, when a reason appears
 
