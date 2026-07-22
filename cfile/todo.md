@@ -20,20 +20,24 @@ skip-list leak fixed, config read sized to the file, `arcadd` returns its
 slot, the parallel-array entry moves folded into one primitive, and
 `ARCWRITE ONEXIT` now defers an archive move-out too. See CHANGELOG.md.
 
-**0.4 — lzx inside (COMPLETE on main, UNRELEASED)** — browse/view/copy/
+**0.3.2 — lzx inside (COMPLETE on main, UNRELEASED)** — browse/view/copy/
 move out+in/Del/new/rename/edit inside `.lzx` archives, with the same
 deferred commit-on-exit as lha, plus the progress bar now ticking for lzx.
-Turned out *simpler* than lha: LZX 1.21's `d` removes a stored directory
-member directly (with the trailing slash), so no rebuild path; `d` globs
-with no `-Qw`, so member names are `'`-escaped. Four probe rounds captured
-lzx's real output first (~/Documents/Amiga/lzxhelp.txt, lzxprobe[/2/3]).
-Docs updated. `$VER`/help not yet bumped, not yet released.
+A point release, not a `.0`: it is the 0.3 archive system reaching one more
+format, not a new capability. Turned out *simpler* than lha: LZX 1.21's `d`
+removes a stored directory member directly (with the trailing slash), so no
+rebuild path; `d` globs with no `-Qw`, so member names are `'`-escaped. Four
+probe rounds captured lzx's real output first (~/Documents/Amiga/
+lzxhelp.txt, lzxprobe[/2/3]). Docs updated. `$VER`/help not yet bumped, not
+yet released.
 
-## Post-0.4 — agreed plan (design pinned 23.7.26)
+## 0.4 and beyond — agreed plan (design pinned 23.7.26)
 
-Version numbers get assigned when each release is cut, not now. Groups
-roughly in build order. **Mouse is decided against** — CFile is a keyboard
-program by design (DOpus is for mouse users).
+**0.4 is the daily-driver leap** — a genuine new capability class (reach,
+search, extensibility), which is why it earns the `.0` and lzx does not.
+Groups roughly in build order; the exact split into 0.4 / 0.5 / … gets
+decided as each release is cut. **Mouse is decided against** — CFile is a
+keyboard program by design (DOpus is for mouse users).
 
 ### Navigation
 
@@ -166,7 +170,7 @@ Four LhA 2.15 behaviours cost boot tests and are worth remembering:
 Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 - [~] **Per-byte progress inside a file** — folded into "Smooth progress
-      bars" in the Post-0.4 plan (extract can go smooth off lha's
+      bars" in the 0.4-and-beyond plan (extract can go smooth off lha's
       `(done/total)` / lzx's `( run / total )`; add can't).
 - [x] **Archive dir sizing** — done. `=` inside an archive sums the
       member sizes under the folder (arcsizeunder over the amsz cache),
@@ -224,7 +228,7 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## Bigger, later
 
-Moved up into **Post-0.4 — agreed plan** (near the top): find file, content
+Moved up into **0.4 and beyond — agreed plan** (near the top): find file, content
 search, configurable keys + user commands, and DOpus-style icon info are all
 captured there with their decisions. **Mouse support is decided against** —
 CFile is a keyboard program by design.
