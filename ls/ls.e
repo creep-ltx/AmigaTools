@@ -143,7 +143,7 @@ PROC checkbreak()
 ENDPROC
 
 PROC usage()
-  WriteF('ls 0.2 -- Unix-style directory lister\n')
+  WriteF('ls 0.3 -- Unix-style directory lister\n')
   WriteF('usage: ls [-1ahlrRSt] [path | pattern ...]\n')
   WriteF('  -l  long listing (protection, size, date, filenote)\n')
   WriteF('  -a  show .info files and hidden (h-bit) entries\n')
@@ -500,7 +500,14 @@ PROC sortout(head:PTR TO dent, count, isdirlist, path:PTR TO CHAR)
   IF frec AND isdirlist
     FOR i := 0 TO count-1
       e := arr[IF frev THEN count-1-i ELSE i]
-      IF e.isdir
+      -> BUGS.md B1: never queue an EMPTY-named dir. A blank name (the
+      -> name-corruption bug) makes AddPart(path,'') = 'path/', which
+      -> Lock() resolves back to the parent - `-R` then descends into
+      -> the same directory forever and hard-freezes the machine (proved
+      -> console-independent: froze CCON and ViNCEd identically). This
+      -> guard stops the runaway regardless of WHY the name blanked; the
+      -> blanking itself is a separate, still-open bug (needs a harness).
+      IF e.isdir AND (e.name[0] <> 0)
         NEW node
         AstrCopy(node.path, path, PATHLEN)
         AddPart(node.path, e.name, PATHLEN)
@@ -814,4 +821,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.2 (20.7.26) E build',0
+version: CHAR '$VER: ls 0.3 (22.7.26) E build',0
