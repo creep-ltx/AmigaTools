@@ -97,9 +97,9 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       keeps the cursor on the match in the restored full listing, Esc
       restores it. The full listing is snapshotted and put back
       untouched, so marks and sort order survive; no disk re-read.
-- [ ] **Manual rescan** — panes go stale when a shell or Workbench
-      changes a directory behind CFile's back; one key (?) re-reads
-      both panes.
+- [x] **Manual rescan** — done. F5 re-reads both panes (keeping each
+      cursor). Leaving an archive also auto-refreshes both panes, so the
+      other pane picks up the changed archive file's size.
 - [x] **Mark all / none / invert / by pattern** — done. `a`/`A` mark
       all/none, `*` inverts, `+` marks by pattern via
       ParsePatternNoCase/MatchPatternNoCase over the pane. Both a
@@ -133,9 +133,10 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       A natural extension of that window.
 - [x] **Directory size on demand** — done in 0.3b2 as `=` (fills the
       size column via treestat), not the `i` window.
-- [~] **Size/date columns** — size column shipped in 0.3b2 (always on,
-      right-aligned). A date column is still open; would ride along
-      with `s` sorting.
+- [x] **Size/date columns** — done. Size column shipped in 0.3b2; the
+      column now shows a compact date instead (DateToStr, day+month)
+      when sorted by date, so it rides the `s` sort with no extra key
+      or width. A new `edate` field feeds it (see the `s` sort item).
 
 ## Bigger, later
 

@@ -21,6 +21,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `/` | filter the pane live — type to narrow to matching names, `Up`/`Down` walk the matches, `Space` marks one, `Enter` keeps the cursor on the match, `Esc` restores the full listing |
 | `Right` | enter the selected directory, volume, or lha archive |
 | `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
+| `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
 | `Enter` | open by type: enter a directory or lha archive, view text/ANSI, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
@@ -30,7 +31,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `*` | invert the marks |
 | `+` | mark by pattern — a `*.mod` glob or an AmigaDOS `#?.mod` pattern; matches are added to the marked set |
 | `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total |
-| `s` | sort: pick `(n)ame`, `(s)ize` or `(d)ate`, or `(r)everse`; both panes re-sort at once, directories stay first |
+| `s` | sort: pick `(n)ame`, `(s)ize` or `(d)ate`, or `(r)everse`; both panes re-sort at once, directories stay first. Sorting by date shows a compact date in the size column |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
@@ -193,7 +194,8 @@ selection bar that keeps the entry's type colour. Each pane's path
 lives in the frame's border row; prompts and messages take that row
 over between guillemets and give it back afterwards. Every row shows
 a size in its own right-hand column — a file's bytes, `<DIR>` for a
-directory until `=` measures it — and the border row shows the
+directory until `=` measures it, or a compact date when sorted by
+date — and the border row shows the
 volume's free space, or, while anything is marked, the marked set's
 count and total. The volume list shows volumes first, assigns below
 them. Viewing ANSI art switches

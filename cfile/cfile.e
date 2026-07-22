@@ -77,6 +77,7 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
       CMAXL=4000,    -> console scrollback, lines of 80
       MAXMEM=1500,   -> members cached when going inside one lha archive
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
+      RK_F5=$54,    -> re-read both panes
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
       TY_ANSI=6,
@@ -735,6 +736,35 @@ PROC fmtbytes(dst, n)
     StringF(dst, '\d.\d\s', whole, frac, suf)
   ELSE
     StringF(dst, '\d\s', whole, suf)
+  ENDIF
+ENDPROC
+
+-> compact day+month for the size column when sorting by date: DateToStr
+-> gives "DD-Mon-YY"; we drop the dashes, spaces and year to "DDMon" (max
+-> 5 chars, same slot as a size). datekey = days*1440 + minute.
+PROC datestr(datekey, dst)
+  DEF dt:datetime, dbuf[20]:ARRAY OF CHAR, days, i=0, j=0, dash=0
+  StrCopy(dst, '')
+  days := Div(datekey, 1440)
+  dt.stamp.days := days
+  dt.stamp.minute := datekey - Mul(days, 1440)
+  dt.stamp.tick := 0
+  dt.format := FORMAT_DOS
+  dt.flags := 0
+  dt.strday := NIL
+  dt.strdate := dbuf
+  dt.strtime := NIL
+  IF DateToStr(dt)
+    WHILE (dbuf[i] <> 0) AND (dash < 2) AND (j < 8)
+      IF dbuf[i] = "-"
+        dash++
+      ELSEIF dbuf[i] <> 32
+        dst[j] := dbuf[i]
+        j++
+      ENDIF
+      i++
+    ENDWHILE
+    SetStr(dst, j)
   ENDIF
 ENDPROC
 
@@ -1793,19 +1823,23 @@ PROC drawrow(p, r)
   Move(rp, x, y + baseline)
   IF mk THEN Text(rp, '*', 1)
   Text(rp, s, l)
-  -> the size column, right-aligned at the pane edge: a file's bytes,
-  -> "<DIR>" for a directory not yet measured, its walked size once
-  -> '=' has measured it. Same pens as the name, so the selection bar
-  -> inverts it too.
+  -> the right-aligned column: normally a size (a file's bytes, "<DIR>"
+  -> for an unmeasured directory, its walked size once '=' measured it),
+  -> but a compact date when the panes are sorted by date. Same pens as
+  -> the name, so the selection bar inverts it too.
   IF involume(p) = FALSE
-    IF edirs[i] AND (esize[i] = 0)
+    IF sortmode = 2
+      IF edate[i] > 0 THEN datestr(edate[i], sz) ELSE StrCopy(sz, '')
+    ELSEIF edirs[i] AND (esize[i] = 0)
       StrCopy(sz, '<DIR>')
     ELSE
       fmtbytes(sz, esize[i])
     ENDIF
     fw := EstrLen(sz)
-    Move(rp, x + pw - Mul(fw, cw), y + baseline)
-    Text(rp, sz, fw)
+    IF fw > 0
+      Move(rp, x + pw - Mul(fw, cw), y + baseline)
+      Text(rp, sz, fw)
+    ENDIF
   ENDIF
   SetBPen(rp, 0)
 ENDPROC
@@ -1830,6 +1864,28 @@ PROC refreshall()
   readpane(0)
   readpane(1)
   drawall()
+ENDPROC
+
+-> F5: re-read both panes from disk (a shell or Workbench may have
+-> changed a directory behind CFile's back), keeping each cursor on the
+-> entry it was on if that entry is still there.
+PROC rescan()
+  DEF n0[110]:STRING, n1[110]:STRING
+  StrCopy(n0, '')
+  StrCopy(n1, '')
+  IF ecount[0] > 0 THEN StrCopy(n0, enames[esel[0]])
+  IF ecount[1] > 0 THEN StrCopy(n1, enames[MAXENT + esel[1]])
+  readpane(0)
+  readpane(1)
+  drawall()
+  IF EstrLen(n0) > 0
+    StrCopy(prevname, n0)
+    selectbyname(0)
+  ENDIF
+  IF EstrLen(n1) > 0
+    StrCopy(prevname, n1)
+    selectbyname(1)
+  ENDIF
 ENDPROC
 
 -> select the entry named in prevname (if present), centre it, redraw
@@ -2141,7 +2197,7 @@ PROC enterdir()
 ENDPROC
 
 PROC parentdir()
-  DEF p, s:PTR TO CHAR, l, i, cut=-1, colon=-1, start, k
+  DEF p, s:PTR TO CHAR, l, i, cut=-1, colon=-1, start, k, didleave=FALSE
   p := active
   IF inarchive(p)
     IF EstrLen(arcsub[p]) > 0
@@ -2178,11 +2234,18 @@ PROC parentdir()
       ENDIF
       StrCopy(prevname, FilePart(arcpath[p]))
       leavearchive(p)
+      didleave := TRUE
     ENDIF
     esel[p] := 0
     etop[p] := 0
-    readpane(p)
-    drawpaths()
+    IF didleave
+      -> leaving may have committed edits that changed the archive file's
+      -> size, so refresh BOTH panes - the other one may show that file too
+      refreshall()
+    ELSE
+      readpane(p)
+      drawpaths()
+    ENDIF
     selectbyname(p)
     RETURN
   ENDIF
@@ -6603,18 +6666,18 @@ PROC helpscreen()
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 2)
   helptext('/ .......... filter list: type to narrow, Space marks', y + 3)
   helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
-  helptext('Enter ...... open: enter dir, view text, run binary', y + 5)
-  helptext('v .......... view; marks tour with Right/Left', y + 6)
-  helptext('e .......... edit text file (e in the viewer works too)', y + 7)
-  helptext('i .......... file info, edit protection bits', y + 8)
-  helptext('u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)', y + 9)
-  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 10)
-  helptext('a A * + .... mark all / none / invert / by pattern', y + 11)
-  helptext('= / s ...... measure dir size / sort (name/size/date)', y + 12)
-  helptext('c / C ...... copy to the other pane (C overwrites)', y + 13)
-  helptext('m / M ...... move to the other pane (M overwrites)', y + 14)
-  helptext('r .......... rename (marks: one at a time)', y + 15)
-  helptext('n .......... new file in the editor (name/ = dir)', y + 16)
+  helptext('F5 ......... rescan: re-read both panes', y + 5)
+  helptext('Enter ...... open: enter dir, view text, run binary', y + 6)
+  helptext('v .......... view; marks tour with Right/Left', y + 7)
+  helptext('e .......... edit text file (e in the viewer works too)', y + 8)
+  helptext('i .......... file info, edit protection bits', y + 9)
+  helptext('u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)', y + 10)
+  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 11)
+  helptext('a A * + .... mark all / none / invert / by pattern', y + 12)
+  helptext('= / s ...... measure dir size / sort (name/size/date)', y + 13)
+  helptext('c / C ...... copy to the other pane (C overwrites)', y + 14)
+  helptext('m / M ...... move to the other pane (M overwrites)', y + 15)
+  helptext('r / n ...... rename / new file (name/ = dir)', y + 16)
   helptext('Del / D .... delete, directories and all (asks first)', y + 17)
   helptext(': .......... run a shell command here', y + 18)
   helptext('? / Help ... this help', y + 19)
@@ -6716,6 +6779,8 @@ PROC eventloop()
           parentdir()
         ELSEIF code = RK_HELP    -> the Amiga Help key
           helpscreen()
+        ELSEIF code = RK_F5    -> re-read both panes
+          rescan()
         ENDIF
       ENDIF
     ENDIF
