@@ -141,6 +141,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     statbytes=0, statfiles=0,    -> pre-scan totals for the progress bar
     gfails=0,    -> entries a delete run could not remove
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
+    cancelok=FALSE,     -> a cancellable op is running (real copy/move/delete);
+                        -> only then does Esc during it set `abort`
+    abort=FALSE,        -> Esc pressed mid-op: the copy/tree loops bail out
     ccol=0, crow=0, cesc=0, cnum=0,    -> the in-frame console renderer
     cmodel=NIL, cmrow=0,    -> its text model: the scrollback
     cfgleft[300]:STRING, cfgright[300]:STRING,    -> start paths
@@ -2552,8 +2555,21 @@ PROC copyattribs(src, dst)
   FreeDosObject(DOS_FIB, fib)
 ENDPROC
 
+-> non-blocking: drain the window's pending input, and if Esc was pressed
+-> while a cancellable op is running, raise `abort` (other keys are dropped so
+-> nothing queued fires when the op ends). A no-op outside a cancellable op
+-> (cancelok = FALSE), so archive/internal copies are never interrupted.
+PROC checkabort()
+  DEF msg:PTR TO intuimessage
+  IF cancelok = FALSE THEN RETURN FALSE
+  WHILE (msg := GetMsg(win.userport))
+    IF (msg.class = IDCMP_VANILLAKEY) AND (msg.code = 27) THEN abort := TRUE
+    ReplyMsg(msg)
+  ENDWHILE
+ENDPROC abort
+
 PROC copyfile(src, dst)
-  DEF fhs=NIL, fhd=NIL, n, w, ok=TRUE, err=0
+  DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0
   IF (fhs := Open(src, OLDFILE)) = NIL
     faultmsg('cannot read the source')
     RETURN FALSE
@@ -2564,19 +2580,23 @@ PROC copyfile(src, dst)
     RETURN FALSE
   ENDIF
   REPEAT
-    n := Read(fhs, copybuf, CBUFSZ)
-    IF n < 0
+    IF checkabort()    -> Esc mid-copy: stop like an error, dst is cleaned up
       ok := FALSE
-      err := IoErr()
-    ENDIF
-    IF ok
-      IF n > 0
-        w := Write(fhd, copybuf, n)
-        IF w <> n
-          ok := FALSE
-          err := IoErr()
-        ELSE
-          IF progbyfile = FALSE THEN progadd(n)    -> archive bar is by file
+    ELSE
+      n := Read(fhs, copybuf, CBUFSZ)
+      IF n < 0
+        ok := FALSE
+        err := IoErr()
+      ENDIF
+      IF ok
+        IF n > 0
+          w := Write(fhd, copybuf, n)
+          IF w <> n
+            ok := FALSE
+            err := IoErr()
+          ELSE
+            IF progbyfile = FALSE THEN progadd(n)    -> archive bar is by file
+          ENDIF
         ENDIF
       ENDIF
     ENDIF
@@ -2585,7 +2605,7 @@ PROC copyfile(src, dst)
   Close(fhs)
   IF ok = FALSE
     DeleteFile(dst)    -> no partial targets
-    showfault('copy failed', err)
+    IF abort = FALSE THEN showfault('copy failed', err)   -> cancel: no error
     RETURN FALSE
   ENDIF
   copyattribs(src, dst)
@@ -2658,7 +2678,7 @@ PROC treestat(path, depth)
   IF lock := Lock(path, SHARED_LOCK)
     IF Examine(lock, fib)
       more := ExNext(lock, fib)
-      WHILE more
+      WHILE more AND (checkabort() = FALSE)    -> Esc stops the pre-scan too
         statfiles := statfiles + 1
         IF fib.direntrytype > 0
           StrCopy(child, path)
@@ -2782,7 +2802,9 @@ PROC deltree(path, depth, tick)
   ENDIF
   REPEAT
     got := FALSE
-    IF (lock := Lock(path, SHARED_LOCK)) = NIL
+    IF checkabort()
+      abort := TRUE    -> Esc mid-delete: end the loop, leave the rest in place
+    ELSEIF (lock := Lock(path, SHARED_LOCK)) = NIL
       StringF(pm, 'cannot read "\s"', FilePart(path))
       faultmsg(pm)
       giveup := TRUE    -> cannot even scan: give up on this level
@@ -2824,7 +2846,7 @@ PROC deltree(path, depth, tick)
           gfails := gfails + 1
         ENDIF
       ENDIF
-      IF ok = FALSE
+      IF (ok = FALSE) AND (abort = FALSE)
         -> leave it behind and carry on with its siblings
         IF nskip < 16
           IF (skip[nskip] := String(108)) = NIL
@@ -2838,13 +2860,15 @@ PROC deltree(path, depth, tick)
         ENDIF
       ENDIF
     ENDIF
-  UNTIL (got = FALSE) OR giveup
+  UNTIL (got = FALSE) OR giveup OR abort
   -> free every skip slot we actually allocated (nskip is the true count now,
   -> so a give-up no longer leaks them)
   FOR j := 0 TO nskip - 1
     DisposeLink(skip[j])
   ENDFOR
-  IF (nskip > 0) OR giveup
+  IF abort
+    ok := FALSE    -> cancelled: leave this dir and its remaining contents
+  ELSEIF (nskip > 0) OR giveup
     ok := FALSE
     gfails := gfails + 1    -> the directory itself stays behind
   ELSE
@@ -4259,7 +4283,7 @@ ENDPROC
 -> for the progress denominator; (3) transfer it all in one go, the
 -> bar running uninterrupted.
 PROC doxfer(ismove, force)
-  DEF p, q, i, b, s, nmark, nsel=0, r, la, lb, samevol=TRUE,
+  DEF p, q, i, b, s, nmark, nsel=0, r, la, lb, samevol=TRUE, ndone=0,
       anydir=FALSE, showbar=FALSE, haderr=FALSE, free, k,
       tname[110]:STRING, tpath[310]:STRING, mb[130]:STRING,
       fb1[12]:STRING, fb2[12]:STRING,
@@ -4337,6 +4361,8 @@ PROC doxfer(ismove, force)
   -> phase 2: a same-volume move is all Renames - instant, no bar;
   -> everything else gets a byte pre-scan for the denominator
   IF (ismove AND samevol) = FALSE
+    cancelok := TRUE    -> Esc during the pre-scan or the copy cancels the run
+    abort := FALSE
     statbytes := 0
     statfiles := 0
     FOR s := 0 TO nsel - 1
@@ -4349,32 +4375,36 @@ PROC doxfer(ismove, force)
         statbytes := statbytes + esize[b + i]
       ENDIF
     ENDFOR
-    -> free-space check: if the copy won't fit on the target volume, ask
-    -> before starting. Conservative - it does not credit space that an
-    -> overwrite would free - so the user can always say yes.
-    pfreeok[q] := FALSE    -> force a fresh Info() on the target
-    free := freebytes(q)
-    IF (free >= 0) AND (statbytes > free)
-      fmtbytes(fb1, statbytes)
-      fmtbytes(fb2, free)
-      StringF(mb, 'needs \s, \s free - proceed? (y)es (n)o', fb1, fb2)
-      promptrow(mb)
-      k := waitvanilla()
-      IF (k <> "y") AND (k <> "Y")
-        drawpaths()
-        RETURN
+    IF abort = FALSE    -> pre-scan not cancelled
+      -> free-space check: if the copy won't fit on the target volume, ask
+      -> before starting. Conservative - it does not credit space that an
+      -> overwrite would free - so the user can always say yes.
+      pfreeok[q] := FALSE    -> force a fresh Info() on the target
+      free := freebytes(q)
+      IF (free >= 0) AND (statbytes > free)
+        fmtbytes(fb1, statbytes)
+        fmtbytes(fb2, free)
+        StringF(mb, 'needs \s, \s free - proceed? (y)es (n)o', fb1, fb2)
+        promptrow(mb)
+        k := waitvanilla()
+        IF (k <> "y") AND (k <> "Y")
+          cancelok := FALSE
+          drawpaths()
+          RETURN
+        ENDIF
       ENDIF
+      IF anydir OR (nsel > 1) OR (statbytes > 131072) THEN showbar := TRUE
+      IF showbar THEN progshow(statbytes)
     ENDIF
-    IF anydir OR (nsel > 1) OR (statbytes > 131072) THEN showbar := TRUE
-    IF showbar THEN progshow(statbytes)
   ENDIF
-  -> phase 3: transfer, no questions left to ask
+  -> phase 3: transfer, no questions left to ask (Esc stops it)
   FOR s := 0 TO nsel - 1
-    IF haderr = FALSE
+    IF (haderr = FALSE) AND (abort = FALSE)
       i := ridx[s]
       r := transferone(p, q, enames[b + i], rnames[s],
                        edirs[b + i] <> 0, ismove, samevol)
       IF r < 0 THEN haderr := TRUE
+      IF r = 1 THEN ndone := ndone + 1
       -> the icon follows the resolved name (silent, best-effort): its
       -> target overwrites any existing one, the way the file itself did
       IF (haderr = FALSE) AND icons AND (isinfo(enames[b + i]) = FALSE)
@@ -4388,9 +4418,16 @@ PROC doxfer(ismove, force)
       ENDIF
     ENDIF
   ENDFOR
+  cancelok := FALSE
   progoff()
   refreshall()
-  IF haderr THEN remsg()
+  IF abort
+    StringF(mb, 'cancelled - \d of \d done', ndone, nsel)
+    showmsg(mb)
+  ELSEIF haderr
+    remsg()
+  ENDIF
+  abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
 PROC delone(p, i)
@@ -4584,6 +4621,8 @@ PROC dodelete()
     drawpaths()
     RETURN
   ENDIF
+  cancelok := TRUE    -> Esc during the pre-scan or the delete cancels the run
+  abort := FALSE
   -> deletes tick per entry, so pre-count the entries
   statbytes := 0
   statfiles := 0
@@ -4613,20 +4652,26 @@ PROC dodelete()
     FOR i := 0 TO ecount[p] - 1
       -> skip an icon whose file is also marked: it goes as that file's
       -> sidecar, so deleting it again would fault on the missing file
-      IF emark[b + i] AND (infodup(p, b + i) = FALSE) THEN delone(p, b + i)
+      IF emark[b + i] AND (infodup(p, b + i) = FALSE) AND (abort = FALSE)
+        delone(p, b + i)
+      ENDIF
     ENDFOR
   ELSE
     delone(p, b + esel[p])
   ENDIF
+  cancelok := FALSE
   progoff()
   refreshall()
-  IF gfails = 1
+  IF abort
+    showmsg('delete cancelled')
+  ELSEIF gfails = 1
     -> the stored fault text says which entry and why
     remsg()
   ELSEIF gfails > 1
     StringF(mb, '\d entries not deleted - last: \s', gfails, opmsg)
     showmsg(mb)
   ENDIF
+  abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
 -> ---- the info/protect window ---------------------------------------
