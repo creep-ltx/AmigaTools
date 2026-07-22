@@ -300,11 +300,11 @@ OBJECT console
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
-  igad:gadget                   -> v1.3 ICONIFY: this window's title-bar
-                                -> gadget (per-window: a gadget lives in
-                                -> ONE window's list; the Border it renders
-                                -> is shared - see gbord). Passed at open via
-                                -> WA_GADGETS; owned (non-borrowed) windows only
+  appicon:PTR TO appicon        -> v1.3 ICONIFY: this console's desktop
+                                -> AppIcon while iconified (NIL = not
+                                -> iconified). RightAmiga+I zips the window
+                                -> small and drops the icon; clicking it zips
+                                -> back (ZipWindow toggles), AmiExpress-style
   -> byte arrays last (alignment)
   inq[2048]:ARRAY OF CHAR       -> input byte queue (finished lines)
   pscrname[64]:ARRAY OF CHAR    -> SCREENname: a public screen
@@ -390,15 +390,8 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     iconok=FALSE,               -> workbench.library + a usable icon both up
     iconobj=NIL:PTR TO diskobject,
     wbport=NIL:PTR TO mp,       -> AppMessage reply port (in the Wait mask)
-    -> the iconify title-bar gadget's shared rendering + geometry, measured
-    -> ONCE off the public screen (sysiclass, so it tracks screen font/res):
-    -> gsysw/gbarh = one system gadget's size, gicw = our gadget's width.
-    -> gbord/gxy are the Border glyph every window's gadget renders (shared;
-    -> Intuition only reads it). Per-window state is just console.igad.
-    gadok=FALSE,                -> geometry measured, gadget usable
-    gsysw=0, gbarh=0, gicw=0,
-    gbord:border,               -> the shared glyph (a small inset box)
-    gxy[10]:ARRAY OF INT,       -> its 5 XY pairs
+    gzoom[4]:ARRAY OF INT,      -> WA_ZOOM: the small "zipped" geometry
+                                -> [left,top,width,height] RightAmiga+I toggles to
     ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
     -> B7 reflow scratch: the write cursor and destination planes the
     -> emit helpers share. Globals because E has no closures and the
@@ -543,6 +536,10 @@ PROC main()
   -> the vector address rides as an immediate poked in here, since
   -> a process entry carries no is_Data pointer. Exec-only; if any
   -> step fails, fhok stays FALSE and FONT falls back to OpenFont.
+  -> ICONIFY: the small geometry RightAmiga+I zips a window down to (WA_ZOOM).
+  -> A title-bar-only strip at the top-left; the desktop AppIcon is the real
+  -> handle back. (E globals start as garbage - set it before any window opens.)
+  gzoom[0] := 0; gzoom[1] := 0; gzoom[2] := 200; gzoom[3] := 12
   fhtask := FindTask(NIL)
   fhsigbit := AllocSignal(-1)
   fhstub := New(32)
@@ -674,7 +671,6 @@ PROC main()
               IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
               IF class = IDCMP_NEWSIZE THEN doresize()
               IF class = IDCMP_CLOSEWINDOW THEN doclosew()
-              IF class = IDCMP_GADGETUP THEN dogadget(ia)  -> ICONIFY gadget
             ENDIF
           UNTIL im = NIL
         ENDIF
@@ -1815,10 +1811,18 @@ ENDPROC TRUE
 -> - AddAppIconA put it up, Workbench delivered the message to wbport, and
 -> RemoveAppIcon takes it away again. Later stages dispatch on am.userdata
 -> (the console) to un-iconify. Reply ALWAYS.
+-> the desktop AppIcon was double-clicked: bring the hidden window back
+-> (ShowWindow) and take the icon away. Reply ALWAYS.
 PROC doappmsg(am:PTR TO appmessage)
-  -> Stage 2 dispatches on am.userdata (the console) to un-iconify. Reply
-  -> ALWAYS. Dormant until Stage 2 wires AddAppIcon (wbport is not created
-  -> yet), but the drain, the Wait mask and the teardown all stay in place.
+  DEF c:PTR TO console
+  IF am.type = AMTYPE_APPICON
+    c := am.userdata               -> the console we stored at AddAppIcon
+    IF c AND c.appicon
+      IF c.win THEN ZipWindow(c.win)  -> zip back to full size
+      RemoveAppIcon(c.appicon)
+      c.appicon := NIL
+    ENDIF
+  ENDIF
   ReplyMsg(am)
 ENDPROC
 
@@ -1826,72 +1830,23 @@ ENDPROC
 -> flash the window's screen to prove GADGETUP is delivered and routed to
 -> the right console (the drain set curcon to the clicked window's). ia is
 -> the gadget address. Stage 2 iconifies the window here instead.
-PROC dogadget(ia)
-  IF (curcon.win = NIL) OR (ia <> {curcon.igad}) THEN RETURN
-  DisplayBeep(curcon.win.wscreen)
-ENDPROC
-
--> v1.3 ICONIFY (Stage 1): measure the title-bar gadget geometry ONCE off
--> the public screen and build the shared Border glyph. A sysiclass image
--> reports a system gadget's exact size for THIS screen's font/resolution,
--> so our gadget matches depth/zoom instead of guessing pixels. A BOOPSI
--> image's public base IS an Image struct, so width/height read straight
--> off it - no GetAttr needed. Fails soft: gadok stays FALSE, no gadget.
-PROC iconmetrics()
-  DEF scr:PTR TO screen, dri, img:PTR TO image
-  IF gadok THEN RETURN TRUE
-  scr := LockPubScreen(NIL)
-  IF scr = NIL THEN RETURN FALSE
-  dri := GetScreenDrawInfo(scr)
-  IF dri
-    img := NewObjectA(NIL, 'sysiclass',
-                      [SYSIA_WHICH, ZOOMIMAGE, SYSIA_DRAWINFO, dri, TAG_DONE])
-    IF img
-      gsysw := img.width
-      gbarh := img.height
-      DisposeObject(img)
-    ENDIF
-    FreeScreenDrawInfo(scr, dri)
-  ENDIF
-  UnlockPubScreen(NIL, scr)
-  IF (gsysw <= 0) OR (gbarh <= 0) THEN RETURN FALSE
-  gicw := gsysw                 -> our gadget = one system gadget wide
-  -> a small box inset in the gadget (the universal "button" glyph); Stage 1
-  -> just needs it visible and clickable - the real iconify glyph comes later
-  gxy[0] := 3;          gxy[1] := 2
-  gxy[2] := gicw - 4;   gxy[3] := 2
-  gxy[4] := gicw - 4;   gxy[5] := gbarh - 3
-  gxy[6] := 3;          gxy[7] := gbarh - 3
-  gxy[8] := 3;          gxy[9] := 2
-  gbord.leftedge := 0
-  gbord.topedge := 0
-  gbord.frontpen := 1           -> a dark pen; refine from dri.pens later
-  gbord.backpen := 0
-  gbord.drawmode := 0           -> JAM1
-  gbord.count := 5
-  gbord.xy := gxy
-  gbord.nextborder := NIL
-  gadok := TRUE
-ENDPROC TRUE
-
--> fill in this console's per-window gadget from the shared geometry, ready
--> to pass at WA_GADGETS. GACT_TOPBORDER puts it in the title bar,
--> GFLG_RELRIGHT anchors leftedge to the right edge, past the depth+zoom
--> gadgets (2 system widths). A Border render (no GFLG_GADGIMAGE).
-PROC iconsetgad()
-  curcon.igad.nextgadget := NIL
-  curcon.igad.leftedge := -(Mul(2, gsysw) + gicw)
-  curcon.igad.topedge := 0
-  curcon.igad.width := gicw
-  curcon.igad.height := gbarh
-  curcon.igad.flags := GFLG_RELRIGHT
-  curcon.igad.activation := GACT_RELVERIFY OR GACT_TOPBORDER
-  curcon.igad.gadgettype := GTYP_BOOLGADGET
-  curcon.igad.gadgetrender := {gbord}
-  curcon.igad.selectrender := NIL
-  curcon.igad.gadgettext := NIL
-  curcon.igad.gadgetid := 1     -> ICONGADID
-  curcon.igad.userdata := NIL
+-> the iconify gadget was clicked. Intuition hides the window itself; we
+-> drop the AppIcon (your CCon.info) on the desktop so the window can be
+-> brought back by clicking it (doappmsg -> ShowWindow). If the AppIcon
+-> appears on click, the standard gadget's GADGETUP does reach us after all.
+-> TEST: one window at a time via globals; per-console fields come next.
+-> RightAmiga+I: iconify this console. ZipWindow toggles it to the small
+-> WA_ZOOM size (window stays open + valid, so client output keeps rendering)
+-> and an AppIcon (your CCon.info) goes on the desktop. Clicking the icon
+-> (doappmsg) zips it back. Owned windows only; a borrowed frame is not ours.
+-> The AppIcon carries the console pointer as userdata so the click finds it.
+PROC doiconify()
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.fwin THEN RETURN
+  IF curcon.appicon THEN RETURN         -> already iconified
+  IF wbensure() = FALSE THEN RETURN
+  curcon.appicon := AddAppIconA(0, curcon, curcon.wtitlebase, wbport, 0, iconobj, NIL)
+  IF curcon.appicon THEN ZipWindow(curcon.win)
 ENDPROC
 
 PROC openwin()
@@ -1959,14 +1914,10 @@ PROC openwin()
     IF curcon.pwh = -1 THEN curcon.pwh := 200
     IF curcon.pww < 160 THEN curcon.pww := 160
     IF curcon.pwh < 60 THEN curcon.pwh := 60
-    -> ICONIFY (owned windows only): build this window's title-bar gadget
-    -> from the shared geometry and let its click reach our UserPort
-    -> (IDCMP_GADGETUP). iconmetrics locks its own public screen, so it is
-    -> independent of pubscr above and safe when pubscr is NIL.
-    IF iconmetrics()
-      iconsetgad()
-      idc := idc OR IDCMP_GADGETUP
-    ENDIF
+    -> ICONIFY (owned windows only): measure geometry + build the glyph; the
+    -> gadget is AddGadget'd after open. GADGETUP joins the IDCMP so its click
+    -> reaches our UserPort (WA_ICONIFYGADGET was tried and rejected: Intuition
+    -> ate the click and hid the window with no report and no restore).
     curcon.win := OpenWindowTagList(NIL,
       [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
        WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
@@ -1980,8 +1931,8 @@ PROC openwin()
        WA_PUBSCREEN, pubscr,
        WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
        WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
+       WA_ZOOM, gzoom,          -> ICONIFY: the small "zipped" size RightAmiga+I toggles to
        WA_IDCMP, idc,
-       WA_GADGETS, IF gadok THEN {curcon.igad} ELSE NIL,  -> ICONIFY gadget
        TAG_DONE, NIL])
     IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   ENDIF
@@ -2198,6 +2149,11 @@ ENDPROC
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
   DEF i
+  -> ICONIFY: a console closing while iconified must take its AppIcon with it
+  IF curcon.appicon
+    RemoveAppIcon(curcon.appicon)
+    curcon.appicon := NIL
+  ENDIF
   -> double buffering: if this console was accumulating in the shared
   -> buffer, drop it (do NOT flush - the window is going away). Prevents
   -> a later bufflush/bufopen touching a freed console (a client can send
@@ -3039,7 +2995,6 @@ PROC setidcmp()
   ENDIF
   -> ICONIFY: keep the title-bar gadget's report alive across every IDCMP
   -> recompute (owned windows only - a borrowed frame carries no gadget)
-  IF (curcon.fwin = FALSE) AND gadok THEN idc := idc OR IDCMP_GADGETUP
   ModifyIDCMP(curcon.win, idc)
 ENDPROC
 
@@ -5935,6 +5890,10 @@ PROC ihkey(e:PTR TO ihev)
         -> RAMIGA-C re-copies the standing highlight - release
         -> already copied, but the stock muscle memory is free
         IF curcon.sello >= 0 THEN selcopy()
+        RETURN
+      ENDIF
+      IF (ihmap[0] = "i") OR (ihmap[0] = "I")
+        doiconify()               -> RAMIGA-I: window to a desktop AppIcon
         RETURN
       ENDIF
     ENDIF
