@@ -84,6 +84,11 @@ FILE OPERATIONS
   file. Space marks one entry; a / A mark all / none, * inverts, and
   + marks by pattern (a *.mod glob or an AmigaDOS #?.mod pattern).
 
+  Icons ride along: copy, move, delete or rename a file or drawer and
+  its "<name>.info" goes with it, so nothing loses its Workbench icon.
+  Marking a file and its icon both still handles the icon once. Set
+  ICONS OFF in the config to leave icons where they are.
+
 THE EDITOR
 
   e opens a text file in the frame: arrows move the cursor (Shift =
@@ -163,6 +168,7 @@ CONFIGURATION
     RIGHT     RAM:
     SAVEDIRS  ON
     ARCWRITE  ONEXIT
+    ICONS     ON
     FONT      MicroKnight7/7
 
   LEFT/RIGHT are the start paths ("(volumes)" starts a pane in the
@@ -171,7 +177,9 @@ CONFIGURATION
   quit - only those two lines are rewritten, everything else in the
   file passes through verbatim. ARCWRITE chooses when archive edits
   reach the disk: ONEXIT (the default) batches them and commits on
-  leaving the archive, DIRECT rewrites it on every edit. FONT takes
+  leaving the archive, DIRECT rewrites it on every edit. ICONS ON
+  (the default) makes copy/move/delete/rename carry a file's
+  "<name>.info" icon along; OFF leaves icons alone. FONT takes
   any fixed-width disk
   font; "topaz" always means the ROM font, and a font that fails to
   open, is proportional, or leaves less than an 80x18 grid is

@@ -138,6 +138,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
                             -> edits, commit on leave/quit - the default
                             -> since 0.3b3), FALSE = DIRECT (repack per
                             -> edit, the old behaviour).
+    icons=TRUE,             -> ICONS key: TRUE = copy/move/delete/rename
+                            -> take a "<name>.info" sidecar along (default),
+                            -> FALSE = leave icons where they are.
     cfgfont[40]:STRING,     -> FONT key, applied by the grid build
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
@@ -295,6 +298,9 @@ PROC loadconfig()
           ELSEIF StrCmp(key, 'ARCWRITE')
             UpperStr(val)
             arcwrite := StrCmp(val, 'ONEXIT')    -> else DIRECT
+          ELSEIF StrCmp(key, 'ICONS')
+            UpperStr(val)
+            icons := StrCmp(val, 'ON')    -> else OFF
           ELSEIF StrCmp(key, 'FONT')
             StrCopy(cfgfont, val)
           ENDIF
@@ -372,11 +378,15 @@ PROC saveconfig()
   IF n = 0
     StringF(line, '; CFile configuration - LEFT/RIGHT start paths,\n')
     wline(fh, line)
-    StringF(line, '; SAVEDIRS ON|OFF, ARCWRITE DIRECT|ONEXIT, FONT name/size\n')
+    StringF(line, '; SAVEDIRS ON|OFF, ARCWRITE DIRECT|ONEXIT,\n')
+    wline(fh, line)
+    StringF(line, '; ICONS ON|OFF, FONT name/size\n')
     wline(fh, line)
     StringF(line, 'SAVEDIRS ON\n')
     wline(fh, line)
     StringF(line, 'ARCWRITE ONEXIT\n')
+    wline(fh, line)
+    StringF(line, 'ICONS ON\n')
     wline(fh, line)
     IF EstrLen(cfgfont) > 0
       StringF(line, 'FONT \s\n', cfgfont)
@@ -617,6 +627,48 @@ PROC nchas(hay:PTR TO CHAR, needle:PTR TO CHAR)
     IF ok THEN RETURN TRUE
   ENDFOR
 ENDPROC FALSE
+
+-> TRUE if `name` ends in ".info" (case-insensitive) - a Workbench icon
+PROC isinfo(name:PTR TO CHAR)
+  DEF l
+  l := StrLen(name)
+  IF l < 5 THEN RETURN FALSE
+ENDPROC nccmp(name + (l - 5), '.info') = 0
+
+-> the base name behind an icon: "<name>.info" -> "<name>"
+PROC infobase(name:PTR TO CHAR, dst)
+  StrCopy(dst, name, StrLen(name) - 5)
+ENDPROC
+
+-> build the icon sidecar path for `name` in `dir` into dst; TRUE if that
+-> ".info" file actually exists (so an op only bothers when there's one)
+PROC sidecarof(dir, name, dst)
+  DEF nm[120]:STRING
+  StrCopy(nm, name)
+  StrAdd(nm, '.info')
+  buildfull(dst, dir, nm)
+ENDPROC pathtype(dst) = 1
+
+-> TRUE if pane p has a MARKED entry named nm
+PROC nameismarked(p, nm)
+  DEF bb, i
+  bb := p * MAXENT
+  IF ecount[p] > 0
+    FOR i := 0 TO ecount[p] - 1
+      IF emark[bb + i] AND (nccmp(enames[bb + i], nm) = 0) THEN RETURN TRUE
+    ENDFOR
+  ENDIF
+ENDPROC FALSE
+
+-> TRUE if the entry at full index `idx` is an icon whose base file is
+-> ALSO marked: it travels as that file's sidecar, so a bulk op skips it
+-> here to avoid touching it twice. (Only meaningful with marks.)
+PROC infodup(p, idx)
+  DEF base[120]:STRING
+  IF icons = FALSE THEN RETURN FALSE
+  IF isinfo(enames[idx]) = FALSE THEN RETURN FALSE
+  infobase(enames[idx], base)
+ENDPROC nameismarked(p, base)
 
 -> sort order: directories first, then files, alphabetical within each
 PROC entbefore(p, i, j)
@@ -3461,7 +3513,8 @@ ENDPROC
 PROC doxfer(ismove, force)
   DEF p, q, i, b, s, nmark, nsel=0, r, la, lb, samevol=TRUE,
       anydir=FALSE, showbar=FALSE, haderr=FALSE,
-      tname[110]:STRING, tpath[310]:STRING
+      tname[110]:STRING, tpath[310]:STRING,
+      iname[120]:STRING, itname[120]:STRING, isrc[320]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
   IF inarchive(p)
@@ -3497,10 +3550,11 @@ PROC doxfer(ismove, force)
   ENDIF
   IF la THEN UnLock(la)
   IF lb THEN UnLock(lb)
-  -> phase 1: resolve the whole set before touching anything
+  -> phase 1: resolve the whole set before touching anything (an icon
+  -> whose file is also marked is skipped - it travels as the sidecar)
   IF nmark > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[b + i]
+      IF emark[b + i] AND (infodup(p, b + i) = FALSE)
         r := resolveone(p, q, enames[b + i], edirs[b + i] <> 0,
                         force, tname)
         IF r < 0 THEN RETURN    -> refused/Esc: nothing has happened
@@ -3556,6 +3610,17 @@ PROC doxfer(ismove, force)
       r := transferone(p, q, enames[b + i], rnames[s],
                        edirs[b + i] <> 0, ismove, samevol)
       IF r < 0 THEN haderr := TRUE
+      -> the icon follows the resolved name (silent, best-effort): its
+      -> target overwrites any existing one, the way the file itself did
+      IF (haderr = FALSE) AND icons AND (isinfo(enames[b + i]) = FALSE)
+        IF sidecarof(ppath[p], enames[b + i], isrc)
+          StrCopy(iname, enames[b + i])
+          StrAdd(iname, '.info')
+          StrCopy(itname, rnames[s])
+          StrAdd(itname, '.info')
+          transferone(p, q, iname, itname, FALSE, ismove, samevol)
+        ENDIF
+      ENDIF
     ENDIF
   ENDFOR
   progoff()
@@ -3564,7 +3629,7 @@ PROC doxfer(ismove, force)
 ENDPROC
 
 PROC delone(p, i)
-  DEF dpath[310]:STRING, ok, pm[130]:STRING
+  DEF dpath[310]:STRING, ok, pm[130]:STRING, ipath[320]:STRING
   buildfull(dpath, ppath[p], enames[i])
   IF edirs[i]
     ok := deltree(dpath, 0, TRUE)
@@ -3578,6 +3643,11 @@ PROC delone(p, i)
       gfails := gfails + 1
       ok := FALSE
     ENDIF
+  ENDIF
+  -> take the icon along (a drawer's icon is a sibling .info as well);
+  -> best-effort, so a missing or stubborn icon never fails the delete
+  IF ok AND icons AND (isinfo(enames[i]) = FALSE)
+    IF sidecarof(ppath[p], enames[i], ipath) THEN zap(ipath, FALSE)
   ENDIF
 ENDPROC ok
 
@@ -3732,7 +3802,7 @@ PROC dodelete()
   statfiles := 0
   IF nmark > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[b + i]
+      IF emark[b + i] AND (infodup(p, b + i) = FALSE)
         statfiles := statfiles + 1
         IF edirs[b + i]
           buildfull(dpath, ppath[p], enames[b + i])
@@ -3754,7 +3824,9 @@ PROC dodelete()
   unprotall := FALSE
   IF nmark > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[b + i] THEN delone(p, b + i)
+      -> skip an icon whose file is also marked: it goes as that file's
+      -> sidecar, so deleting it again would fault on the missing file
+      IF emark[b + i] AND (infodup(p, b + i) = FALSE) THEN delone(p, b + i)
     ENDFOR
   ELSE
     delone(p, b + esel[p])
@@ -6018,7 +6090,8 @@ ENDPROC
 
 PROC dorename()
   DEF p, i, b, nmark, r, pick, stopped=FALSE, any=FALSE,
-      src2[310]:STRING, dst[310]:STRING, tname[110]:STRING
+      src2[310]:STRING, dst[310]:STRING, tname[110]:STRING,
+      isrc[320]:STRING, idst[320]:STRING, itname[120]:STRING
   p := active
   IF inarchive(p)
     arcrename(p)
@@ -6032,10 +6105,11 @@ PROC dorename()
   b := p * MAXENT
   nmark := markcount(p)
   -> the marked set renames one at a time (his thought); Esc stops
-  -> the rest, an unchanged name skips that one
+  -> the rest, an unchanged name skips that one. An icon whose file is
+  -> also marked is skipped - it is renamed as that file's sidecar.
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
-    IF pick AND (stopped = FALSE)
+    IF pick AND (stopped = FALSE) AND (infodup(p, b + i) = FALSE)
       StrCopy(tname, enames[b + i])
       r := lineinput('rename to: ', tname, 30, TRUE)
       IF r = 0
@@ -6047,6 +6121,15 @@ PROC dorename()
           IF Rename(src2, dst)
             any := TRUE
             StrCopy(prevname, tname)
+            -> the icon follows the new name (best-effort)
+            IF icons AND (isinfo(enames[b + i]) = FALSE)
+              IF sidecarof(ppath[p], enames[b + i], isrc)
+                StrCopy(itname, tname)
+                StrAdd(itname, '.info')
+                buildfull(idst, ppath[p], itname)
+                Rename(isrc, idst)
+              ENDIF
+            ENDIF
           ELSE
             faultmsg('cannot rename')
             stopped := TRUE

@@ -63,6 +63,11 @@ and `v` tours it. `Space` marks one; `a`/`A` mark all/none, `*`
 inverts, and `+` marks by pattern (a `*.mod` glob or AmigaDOS
 `#?.mod`).
 
+Icons ride along: copy, move, delete or rename a file or drawer and
+its `<name>.info` goes with it, so nothing loses its Workbench icon
+(marking a file *and* its icon still handles the icon once). `ICONS
+OFF` in the config leaves icons where they are.
+
 ## The editor
 
 `e` opens a text file in the frame: arrows move the cursor (`Shift` =
@@ -138,6 +143,7 @@ LEFT      SYS:
 RIGHT     RAM:
 SAVEDIRS  ON
 ARCWRITE  ONEXIT
+ICONS     ON
 FONT      MicroKnight7/7
 ```
 
@@ -151,6 +157,8 @@ FONT      MicroKnight7/7
 - `ARCWRITE ONEXIT` — when archive edits reach the disk: `ONEXIT`
   (the default) batches them and commits on leaving the archive,
   `DIRECT` rewrites the archive on every edit.
+- `ICONS ON` — the default; copy/move/delete/rename carry a file's
+  `<name>.info` icon along. `OFF` leaves icons alone.
 - `FONT name/size` — any fixed-width disk font; `topaz` always
   means the ROM font. The whole frame, both panes and the viewer
   re-derive from the font cell, so a small font like a 7×7 gives

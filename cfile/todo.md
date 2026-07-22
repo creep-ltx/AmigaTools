@@ -105,10 +105,11 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       ParsePatternNoCase/MatchPatternNoCase over the pane. Both a
       `*.mod` glob (translated to `#?`) and native AmigaDOS `#?.mod`
       work — the glob alias also helps keyboards that can't type `#`.
-- [ ] **.info sidecars** — copy/move/delete/rename `foo` should
-      offer to take `foo.info` along (a config toggle, DOpus-style
-      "Icons"). Without it, moved drawers and tools silently lose
-      their icons. The most Amiga-specific gap.
+- [x] **.info sidecars** — done. `ICONS ON` (default) makes
+      copy/move/delete/rename carry a file or drawer's `<name>.info`
+      along; a file and its icon both marked is handled once (infodup).
+      `ICONS OFF` restores the old behaviour. Filesystem ops only for
+      now — archive copy/move does not carry sidecars yet.
 - [ ] **`s` sort options** — by name/size/date, reversed; dirs stay
       first. Size is now sort-tracked in sortpane, so sort-by-size is
       just another entbefore tier. (Long deferred.)
