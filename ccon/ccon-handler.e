@@ -420,7 +420,7 @@ PROC main()
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
       stps:PTR TO CHAR, c:PTR TO console, cnext,
-      wp:PTR TO INT, lp:PTR TO LONG, amsg:PTR TO appmessage
+      wp:PTR TO INT, lp:PTR TO LONG, amsg:PTR TO appmessage, parked
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -674,46 +674,47 @@ PROC main()
     UNTIL msg = NIL
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
-    -> drain every console's window port - UNLESS that console's
-    -> client asked for raw event reports (Ed). Disassembling C:Ed
-    -> (18.7.26) showed it never touches this port at all (no
-    -> ModifyIDCMP/GetMsg on our window; the LVO hits that suggested
-    -> it were rexxsyslib collisions - Ed's ARexx machinery). The
-    -> park stays anyway: with the chain on, the only IDCMP class
-    -> left is CLOSEWINDOW, and deferring a close-gadget click while
-    -> a raw-events client (Ed fullscreen) owns the session beats
-    -> tearing the window down under it. Leftovers drain when the
-    -> mask clears (CSI }, cooked reversion, close). A closereq may
-    -> destroy the console inside the walk - the next pointer is
-    -> taken FIRST.
+    -> drain every console's window port. A raw-events client (Ed) takes
+    -> its keys/mouse/menus through the input chain, not here, so those
+    -> classes are suppressed for it (parked, below) - but NEWSIZE and
+    -> CLOSEWINDOW are the console's own frame events and are always acted
+    -> on, so an Ed resize finally runs doresize() (B8). A closereq may
+    -> destroy the console inside the walk - the next pointer is taken FIRST.
     c := conlist
     WHILE c
       cnext := c.next
       IF c.win
         curcon := c
-        IF (ihon = FALSE) OR (c.evmask = 0)
-          REPEAT
-            im := GetMsg(c.win.userport)
-            IF im
-              class := im.class
-              code := im.code
-              qual := im.qualifier
-              mx := im.mousex
-              my := im.mousey
-              ia := im.iaddress
-              secs := im.seconds
-              mics := im.micros
-              ReplyMsg(im)
+        -> B8: ALWAYS drain the UserPort now. A raw-events client (Ed) still
+        -> owns keys/mouse/menus through the chain, so those classes stay
+        -> suppressed (parked) - but the window-FRAME classes, IDCMP_NEWSIZE
+        -> and IDCMP_CLOSEWINDOW, are the console's, and resizing Ed needs
+        -> doresize() to run + send the class-12 report so Ed re-measures.
+        -> (The old whole-port skip is why an Ed resize was never seen.)
+        parked := ihon AND (c.evmask <> 0)
+        REPEAT
+          im := GetMsg(c.win.userport)
+          IF im
+            class := im.class
+            code := im.code
+            qual := im.qualifier
+            mx := im.mousex
+            my := im.mousey
+            ia := im.iaddress
+            secs := im.seconds
+            mics := im.micros
+            ReplyMsg(im)
+            IF parked = FALSE
               IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
               IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
               IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
               IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code, secs, mics)
               IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
-              IF class = IDCMP_NEWSIZE THEN doresize()
-              IF class = IDCMP_CLOSEWINDOW THEN doclosew()
             ENDIF
-          UNTIL im = NIL
-        ENDIF
+            IF class = IDCMP_NEWSIZE THEN doresize()
+            IF class = IDCMP_CLOSEWINDOW THEN doclosew()
+          ENDIF
+        UNTIL im = NIL
         IF c.closereq             -> deferred: never CloseWindow while
           c.closereq := FALSE     -> draining the port it owns
           conclose(c)
