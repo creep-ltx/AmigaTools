@@ -389,7 +389,16 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> the largest window that ever needs it; the handler renders ONE
     -> console at a time, so one shared buffer is safe (bbactive names
     -> the one accumulating; switching flushes the previous). NIL bbmap =
-    -> no buffer, draw direct. bufoff is a kill switch for a future option.
+    -> no buffer, draw direct. bufoff is the kill switch.
+    -> v1.2b26: DEFAULT OFF. Double buffering was never what made More
+    -> flip instead of scroll - that was the ^L=clear+home handling (see
+    -> the byte-12 case in render, and its own comment "never about double
+    -> buffering"). The buffer only added the ATOMIC page-flip polish, and
+    -> it cost a full copy-in/copy-out per write batch - a visible lag on
+    -> ordinary commands (avail). Off = draw direct, like stock CON:: fast
+    -> output, More still clears+homes and paints its page top-to-bottom.
+    -> The machinery stays (bufoff=FALSE re-arms it, now with a model-seed
+    -> copy-in that never reads the screen - the drawer-graphics bug).
     bbmap=NIL:PTR TO bitmap,     -> the back-buffer bitmap (exec alloc)
     bbrp=NIL:PTR TO rastport,    -> a RastPort over it (E-heap, lazy)
     bbw=0, bbh=0, bbdepth=0,     -> current buffer size (grow-only)
@@ -399,7 +408,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
                                  -> client READs (page done) - a full-screen
                                  -> repaint sent as many round-tripped writes
                                  -> then shows in ONE blit (instant More)
-    bufoff=FALSE,                -> TRUE = force direct drawing
+    bufoff=TRUE,                 -> TRUE = force direct drawing (default; see above)
     -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
     -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
     -> DOS re-mounts a fresh handler on the next open). ihdevopen tracks
