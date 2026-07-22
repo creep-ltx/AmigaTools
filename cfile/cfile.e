@@ -245,6 +245,30 @@ PROC dropassigns()
   IF madet THEN AssignLock('T', NIL)
 ENDPROC
 
+-> read an already-open file whole into a New()'d buffer sized to it (via a
+-> seek to the end), so a large hand-edited config is never clipped the way
+-> the old fixed 4KB read would. Returns the buffer - the caller Dispose()s
+-> it - and writes the byte count to cnt. An empty file gives a valid 1-byte
+-> buffer with cnt 0; a real allocation failure gives NIL with cnt -1, so a
+-> caller can tell "empty" from "could not read" and never truncate a file
+-> it failed to slurp.
+PROC slurpfh(fh, cnt:PTR TO LONG)
+  DEF sz, buf=NIL, n=0
+  cnt[0] := 0
+  Seek(fh, 0, OFFSET_END)
+  sz := Seek(fh, 0, OFFSET_BEGINNING)    -> previous pos = size; fh rewound
+  IF sz < 0 THEN sz := 0
+  IF (buf := New(sz + 1)) = NIL
+    cnt[0] := -1
+    RETURN NIL
+  ENDIF
+  IF sz > 0
+    n := Read(fh, buf, sz)
+    IF n < 0 THEN n := 0
+  ENDIF
+  cnt[0] := n
+ENDPROC buf
+
 -> the config lives next to the binary: PROGDIR:cfile.config.
 -> KEY value lines, ';' comments. LEFT/RIGHT start paths ("(volumes)"
 -> = the volume list), SAVEDIRS ON|OFF, FONT name/size (stored and
@@ -256,14 +280,9 @@ PROC loadconfig()
   StrCopy(cfgright, 'RAM:')
   StrCopy(cfgfont, '')
   IF (fh := Open('PROGDIR:cfile.config', OLDFILE)) = NIL THEN RETURN
-  buf := New(4096)
-  IF buf = NIL
-    Close(fh)
-    RETURN
-  ENDIF
-  n := Read(fh, buf, 4095)
+  buf := slurpfh(fh, {n})
   Close(fh)
-  IF n < 0 THEN n := 0
+  IF buf = NIL THEN RETURN
   s := buf
   WHILE i < n
     -> one line
@@ -387,13 +406,13 @@ PROC saveconfig()
       line[300]:STRING, key[20]:STRING, wl=FALSE, wr=FALSE
   IF savedirs = FALSE THEN RETURN
   IF fh := Open('PROGDIR:cfile.config', OLDFILE)
-    buf := New(4096)
-    IF buf
-      n := Read(fh, buf, 4095)
-      IF n < 0 THEN n := 0
-    ENDIF
+    buf := slurpfh(fh, {n})
     Close(fh)
   ENDIF
+  -> the file exists but could not be read (cnt -1: too big to allocate):
+  -> do NOT open it NEWFILE, which would truncate it to just the defaults.
+  -> Leave the original untouched.
+  IF n < 0 THEN RETURN
   IF (fh := Open('PROGDIR:cfile.config', NEWFILE)) = NIL
     IF buf THEN Dispose(buf)
     RETURN
@@ -544,11 +563,7 @@ PROC configensure()
           'FONT', 'Display font name/size.  topaz.font = ROM Topaz 8.']:LONG
   IF fh := Open('PROGDIR:cfile.config', MODE_OLDFILE)
     exists := TRUE
-    buf := New(4096)
-    IF buf
-      n := Read(fh, buf, 4095)
-      IF n < 0 THEN n := 0
-    ENDIF
+    buf := slurpfh(fh, {n})
     Close(fh)
   ENDIF
   IF exists AND (buf = NIL) THEN RETURN    -> could not read; leave it be
@@ -940,18 +955,22 @@ PROC runcapture(dir, cmd, outfile)
 ENDPROC res
 
 -> one member into the pane's archive cache
+-> add one member to the cache; returns its slot index, or -1 if the cache
+-> is full or the name could not be allocated. Callers that then set a
+-> status flag must use the returned slot, not amcnt-1 (which on a failed
+-> add still points at the previous member).
 PROC arcadd(p, name, size)
   DEF a:PTR TO LONG, z:PTR TO LONG, k, s
   k := amcnt[p]
-  IF k >= MAXMEM THEN RETURN
+  IF k >= MAXMEM THEN RETURN -1
   a := amem[p]
   z := amsz[p]
-  IF (s := String(EstrLen(name) + 1)) = NIL THEN RETURN
+  IF (s := String(EstrLen(name) + 1)) = NIL THEN RETURN -1
   StrCopy(s, name)
   a[k] := s
   z[k] := size
   amcnt[p] := k + 1
-ENDPROC
+ENDPROC k
 
 -> a listing separator row: only dashes/equals and spaces, and enough
 -> of them to be the real rule, not a stray line of text
@@ -2856,13 +2875,15 @@ ENDPROC -1
 -> already there (a merge into an existing folder just keeps the old
 -> entry). A directory member is stored with a trailing slash.
 PROC arccacheput(p, member, size, isdir)
-  DEF full[CPATHLEN]:STRING, st:PTR TO LONG
+  DEF full[CPATHLEN]:STRING, st:PTR TO LONG, slot
   StrCopy(full, member)
   IF isdir THEN StrAdd(full, '/')
   IF arccacheslot(p, full) >= 0 THEN RETURN
-  arcadd(p, full, size)
-  st := amst[p]
-  IF amcnt[p] > 0 THEN st[amcnt[p] - 1] := MST_ADD
+  slot := arcadd(p, full, size)
+  IF slot >= 0
+    st := amst[p]
+    st[slot] := MST_ADD
+  ENDIF
 ENDPROC
 
 -> walk a just-staged source tree on disk and add a cache member for
@@ -2870,11 +2891,21 @@ ENDPROC
 -> before the commit. `disk` is the staged directory, `mprefix` its
 -> stored member path (no trailing slash).
 PROC arccachetree(p, disk, mprefix, depth)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, child[CPATHLEN]:STRING,
-      mem[CPATHLEN]:STRING, more
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, child=NIL, mem=NIL, more
   IF depth > 20 THEN RETURN
   IF (lock := Lock(disk, SHARED_LOCK)) = NIL THEN RETURN
   IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL
+    UnLock(lock)
+    RETURN
+  ENDIF
+  -> path buffers from the heap, not the stack: this recurses to depth 20
+  -> and E cannot size its stack for that (as copytree/deltree/treestat do)
+  child := String(CPATHLEN)
+  mem := String(CPATHLEN)
+  IF (child = NIL) OR (mem = NIL)
+    IF child THEN DisposeLink(child)
+    IF mem THEN DisposeLink(mem)
+    FreeDosObject(DOS_FIB, fib)
     UnLock(lock)
     RETURN
   ENDIF
@@ -2896,6 +2927,8 @@ PROC arccachetree(p, disk, mprefix, depth)
       more := ExNext(lock, fib)
     ENDWHILE
   ENDIF
+  DisposeLink(child)
+  DisposeLink(mem)
   FreeDosObject(DOS_FIB, fib)
   UnLock(lock)
 ENDPROC
@@ -3647,8 +3680,8 @@ PROC arcxfer_indefer(p, q, ismove, force)
               IF st[slot] <> MST_ADD THEN st[slot] := MST_REPLACE
               z[slot] := esize[b + i]
             ELSE
-              arcadd(q, member, esize[b + i])
-              st[amcnt[q] - 1] := MST_ADD    -> the fresh slot arcadd added
+              slot := arcadd(q, member, esize[b + i])
+              IF slot >= 0 THEN st[slot] := MST_ADD    -> the fresh slot
             ENDIF
             ndone := ndone + 1
             IF ismove THEN zap(src, FALSE)
@@ -6591,7 +6624,7 @@ ENDPROC
 -> commit.
 PROC arcnewdefer(p, name, member, wantdir)
   DEF st:PTR TO LONG, stageroot[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING,
-      mem2[CPATHLEN]:STRING, lock, r, sz=0, fib:PTR TO fileinfoblock
+      mem2[CPATHLEN]:STRING, lock, r, sz=0, fib:PTR TO fileinfoblock, slot
   arcstage(p, stageroot)
   StrCopy(sfile, stageroot)
   AddPart(sfile, member, CPATHLEN - 4)
@@ -6605,7 +6638,7 @@ PROC arcnewdefer(p, name, member, wantdir)
     UnLock(lock)
     StrCopy(mem2, member)
     StrAdd(mem2, '/')    -> a stored empty-dir member carries a slash
-    arcadd(p, mem2, 0)
+    slot := arcadd(p, mem2, 0)
   ELSE
     drawpaths()
     r := editfile(sfile, name)    -> the file exists only if saved
@@ -6621,11 +6654,13 @@ PROC arcnewdefer(p, name, member, wantdir)
       ENDIF
       UnLock(lock)
     ENDIF
-    arcadd(p, member, sz)
+    slot := arcadd(p, member, sz)
   ENDIF
   -> mark the slot arcadd just appended as a pending add
-  st := amst[p]
-  IF amcnt[p] > 0 THEN st[amcnt[p] - 1] := MST_ADD
+  IF slot >= 0
+    st := amst[p]
+    st[slot] := MST_ADD
+  ENDIF
   StrCopy(prevname, name)
   refreshall()
   selectbyname(p)

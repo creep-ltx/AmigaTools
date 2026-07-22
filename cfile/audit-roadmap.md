@@ -115,7 +115,15 @@ _Original finding:_
 - **Test:** Hard to trigger naturally; a directory with 17+ delete-protected
   files, or inspect via a unit-style harness.
 
-### [ ] 4. Recursion buffer inconsistency (stack pressure)
+### [x] 4. Recursion buffer inconsistency (stack pressure)
+
+**Fixed.** `arccachetree` (the one genuinely recursive archive helper) now takes
+its `child`/`mem` path buffers from the heap via `String(CPATHLEN)` — with the
+alloc-failure and cleanup handling its siblings use — instead of ~600 B/frame of
+stack. (The extract/rebuild helpers named alongside it iterate the flat member
+cache and do not recurse, so they were never at risk.) Compiles clean.
+
+_Original finding:_
 
 - **Where:** `arccachetree` `cfile.e:2870` uses stack `child[CPATHLEN]` /
   `mem[CPATHLEN]`; siblings `copytree`/`deltree`/`treestat` deliberately use
@@ -154,7 +162,14 @@ _Original finding:_
 
 ## Very low / edge
 
-### [ ] 6. `arcadd` cap can mis-flag the previous member
+### [x] 6. `arcadd` cap can mis-flag the previous member
+
+**Fixed.** `arcadd` now returns the new slot index, or `-1` on the `MAXMEM` cap /
+allocation failure. The three callers that stamp a status (`arccacheput`,
+`arcxfer_indefer`, `arcnewdefer`) use the returned slot and only when it is `>= 0`,
+so a failed add can no longer flag the previous member. Compiles clean.
+
+_Original finding:_
 
 - **Where:** callers do `IF amcnt[p] > 0 THEN st[amcnt[p]-1] := MST_ADD` after
   `arcadd` (e.g. `cfile.e:6584`, `3648`, `2862`); `arcadd` bails without
@@ -164,7 +179,17 @@ _Original finding:_
 - **Fix:** Have `arcadd` return the new slot index or `-1`; callers set the
   status only on a real slot. Removes the "trust amcnt-1" assumption everywhere.
 
-### [ ] 7. Config rewrite truncates files > 4 KB
+### [x] 7. Config rewrite truncates files > 4 KB
+
+**Fixed.** New `slurpfh` helper sizes the read to the file (seek-to-end) and reads
+it whole, replacing the fixed `New(4096)`/`Read(...,4095)` in `loadconfig`,
+`saveconfig` and `configensure`. It distinguishes an empty file (valid 1-byte
+buffer, `cnt 0`) from a real allocation failure (`NIL`, `cnt -1`), and
+`saveconfig` now bails on `cnt -1` rather than opening the file `NEWFILE` and
+truncating it to defaults — an unreadable existing config is left untouched.
+Compiles clean.
+
+_Original finding:_
 
 - **Where:** fixed `New(4096)` / `Read(...,4095)` in `loadconfig` (`257`),
   `saveconfig` (`388-390`), `configensure` (`545-547`).
