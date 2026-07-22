@@ -167,6 +167,7 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     amsz[2]:ARRAY OF LONG,     -> New()'d LONG[] of member sizes
     amst[2]:ARRAY OF LONG,     -> New()'d LONG[] of MST_* status per member
     amcnt[2]:ARRAY OF LONG,    -> members cached for the pane
+    arcfmt[2]:ARRAY OF LONG,   -> archive kind of the pane: TY_LHA or TY_LZX
     rc=0
 
 -> the global arrays are NOT zero-initialised (E globals live in the
@@ -182,6 +183,7 @@ PROC initpanes()
     amsz[p] := NIL
     amst[p] := NIL
     amcnt[p] := 0
+    arcfmt[p] := TY_LHA
     ealloc[p] := 0
     ecount[p] := 0
     esel[p] := 0
@@ -1069,9 +1071,130 @@ PROC namefield(dst, line:PTR TO CHAR, nfields)
   SetStr(dst, e)
 ENDPROC
 
+-> ---- lzx listing parser (LZX 1.21 `lzx l`). Its columns are fixed-width
+-> but the Ratio renders "100 %" (a space) or "00.0%", so a token count
+-> like the lha parser breaks. Instead: a member row is any row with an
+-> HH:MM:SS time field (colons can't be in an Amiga filename), the name is
+-> everything after it, and the size is the first integer (Original). This
+-> also skips the merged-group summary row (no time) and the footer total
+-> (past the closing rule). Verified on real `lzx l` captures. --------------
+
+PROC isdig(c)
+ENDPROC (c >= "0") AND (c <= "9")
+
+-> index just past an HH:MM:SS time field in s, or -1 if none. Reads a few
+-> bytes past a short line, which is safe - the caller's line buffer is a
+-> fixed String, NUL-terminated and padded.
+PROC lzxnamestart(s:PTR TO CHAR)
+  DEF i=0
+  WHILE s[i]
+    IF isdig(s[i]) AND isdig(s[i+1]) AND (s[i+2] = ":") AND
+       isdig(s[i+3]) AND isdig(s[i+4]) AND (s[i+5] = ":") AND
+       isdig(s[i+6]) AND isdig(s[i+7])
+      RETURN i + 8
+    ENDIF
+    i++
+  ENDWHILE
+ENDPROC -1
+
+-> the member name of an `lzx l` data row into dst (spaces trimmed both
+-> ends); FALSE if the row carries no time field (header/summary/blank)
+PROC lzxname(dst, line:PTR TO CHAR)
+  DEF ns, i, e
+  ns := lzxnamestart(line)
+  IF ns < 0 THEN RETURN FALSE
+  i := ns
+  WHILE line[i] = 32
+    i++
+  ENDWHILE
+  MidStr(dst, line, i, ALL)
+  e := EstrLen(dst)
+  WHILE (e > 0) AND ((dst[e-1] = 32) OR (dst[e-1] = 9))
+    e--
+  ENDWHILE
+  SetStr(dst, e)
+ENDPROC EstrLen(dst) > 0
+
+-> TRUE if pane p is inside an lzx archive (vs lha) - write verbs branch on
+-> it, and 0.4-step-1 keeps them out of an lzx entirely (view/browse only)
+PROC islzx(p)
+ENDPROC inarchive(p) AND (arcfmt[p] = TY_LZX)
+
+-> 0.4 step 1: browsing and viewing inside lzx work; the write verbs are
+-> wired in later steps. Until then they bow out here, so no lha command is
+-> ever aimed at an lzx archive.
+PROC arclzxsoon()
+  showmsg('inside lzx: browse and view only for now (writing comes later)')
+ENDPROC
+
+-> parse `lha v` output into pane p's cache: find the header, take its field
+-> count before Name, then read data rows (name = everything past those
+-> space-delimited fields) until the closing rule.
+PROC parselha(p, buf:PTR TO CHAR, n)
+  DEF i=0, j, l, st=0, line[340]:STRING, nfld=-1, dcol, sz, nm[300]:STRING
+  WHILE i < n
+    j := i
+    WHILE (j < n) AND (buf[j] <> 10)
+      j++
+    ENDWHILE
+    l := j - i
+    IF l > 338 THEN l := 338
+    StrCopy(line, IF l > 0 THEN buf + i ELSE '', l)
+    i := j + 1
+    IF st = 0
+      dcol := hdrnamefields(line)
+      IF dcol >= 0
+        nfld := dcol
+        st := 1
+      ENDIF
+    ELSEIF st = 1
+      -> the rule under the header comes before any member (skipped); the
+      -> next rule (after members exist) closes the listing.
+      IF issepline(line)
+        IF amcnt[p] > 0 THEN st := 2
+      ELSEIF EstrLen(line) > 0
+        namefield(nm, line, nfld)
+        IF EstrLen(nm) > 0
+          sz := Val(line)    -> first number on the row = original size
+          arcadd(p, nm, sz)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC
+
+-> parse `lzx l` output into pane p's cache: the first rule opens the member
+-> block, the next rule closes it; a member row is one with a time field
+-> (lzxname), size = the first integer. Skips the merged-group summary (no
+-> time) and the footer total (past the closing rule).
+PROC parselzx(p, buf:PTR TO CHAR, n)
+  DEF i=0, j, l, st=0, line[340]:STRING, sz, nm[300]:STRING
+  WHILE i < n
+    j := i
+    WHILE (j < n) AND (buf[j] <> 10)
+      j++
+    ENDWHILE
+    l := j - i
+    IF l > 338 THEN l := 338
+    StrCopy(line, IF l > 0 THEN buf + i ELSE '', l)
+    i := j + 1
+    IF issepline(line)
+      IF st = 0
+        st := 1
+      ELSEIF st = 1
+        st := 2
+      ENDIF
+    ELSEIF st = 1
+      IF lzxname(nm, line)
+        sz := Val(line)
+        arcadd(p, nm, sz)
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC
+
 PROC loadarchive(p, arcfile)
-  DEF cmd[340]:STRING, res, buf:PTR TO CHAR, n, i=0, j, l, st=0,
-      line[340]:STRING, nfld=-1, dcol, sz, fh, nm[300]:STRING
+  DEF cmd[340]:STRING, res, buf=NIL:PTR TO CHAR, n, fh
   -> a rebuild from disk would wipe the deferred flags, so any pending
   -> edits are committed first. Only fires on a rebuild WHILE inside the
   -> archive (an immediate write verb in ONEXIT mode); on entry the pane
@@ -1086,10 +1209,14 @@ PROC loadarchive(p, arcfile)
     RETURN FALSE
   ENDIF
   amcnt[p] := 0
-  -> 'v' (verbose), NOT 'l': LhA 2.15's terse 'l' is a Tm/Sz/Pr/Fn/Del
-  -> flag layout that hides the path; 'v' is the Original/Packed/Ratio/
-  -> Date/Time/Name columns, Name being the full stored path we parse.
-  StringF(cmd, 'lha v "\s"', arcfile)
+  -> lzx: terse `l` (Original/Packed/Ratio/Date/Time/Name, name right after
+  -> the time). lha: `v` (verbose) - LhA's terse `l` is a flag layout that
+  -> hides the path.
+  IF arcfmt[p] = TY_LZX
+    StringF(cmd, 'lzx l "\s"', arcfile)
+  ELSE
+    StringF(cmd, 'lha v "\s"', arcfile)
+  ENDIF
   res := runcapture(NIL, cmd, 'T:CFile-arc')
   IF res = -1
     freearccache(p)
@@ -1108,38 +1235,7 @@ PROC loadarchive(p, arcfile)
     n := 0
   ENDIF
   IF n < 0 THEN n := 0
-  WHILE i < n
-    -> pull one line into `line`
-    j := i
-    WHILE (j < n) AND (buf[j] <> 10)
-      j++
-    ENDWHILE
-    l := j - i
-    IF l > 338 THEN l := 338
-    StrCopy(line, IF l > 0 THEN buf + i ELSE '', l)
-    i := j + 1
-    IF st = 0
-      -> find the header row and take its field count before Name
-      dcol := hdrnamefields(line)
-      IF dcol >= 0
-        nfld := dcol
-        st := 1
-      ENDIF
-    ELSEIF st = 1
-      -> data rows until the closing rule. The rule directly under the
-      -> header comes before any member, so it just gets skipped; the
-      -> next rule (after members exist) closes the listing.
-      IF issepline(line)
-        IF amcnt[p] > 0 THEN st := 2
-      ELSEIF EstrLen(line) > 0
-        namefield(nm, line, nfld)
-        IF EstrLen(nm) > 0
-          sz := Val(line)    -> first number on the row = original size
-          arcadd(p, nm, sz)
-        ENDIF
-      ENDIF
-    ENDIF
-  ENDWHILE
+  IF arcfmt[p] = TY_LZX THEN parselzx(p, buf, n) ELSE parselha(p, buf, n)
   Dispose(buf)
   DeleteFile('T:CFile-arc')
 ENDPROC amcnt[p] > 0
@@ -2191,8 +2287,9 @@ ENDPROC
 -> go inside an lha archive selected in a real directory. On success
 -> the pane switches to archive mode rooted at the archive; ppath[p]
 -> stays put (the archive's own directory), ready for the exit.
-PROC enterarchive(p, fpath)
+PROC enterarchive(p, fpath, fmt)
   DEF stageroot[CPATHLEN]:STRING
+  arcfmt[p] := fmt    -> loadarchive and the write verbs branch on this
   IF loadarchive(p, fpath)
     StrCopy(arcpath[p], fpath)
     arcstage(p, stageroot)    -> clear any staging a crash left behind
@@ -2205,12 +2302,12 @@ PROC enterarchive(p, fpath)
     drawpane(p)
   ELSE
     freearccache(p)
-    showmsg('could not read the archive - is C:lha present?')
+    showmsg(IF fmt = TY_LZX THEN 'could not read the archive - is C:lzx present?' ELSE 'could not read the archive - is C:lha present?')
   ENDIF
 ENDPROC
 
 PROC enterdir()
-  DEF p, i, fpath[CPATHLEN+12]:STRING
+  DEF p, i, ty, fpath[CPATHLEN+12]:STRING
   p := active
   IF efail[p] THEN RETURN
   IF ecount[p] = 0 THEN RETURN
@@ -2227,11 +2324,12 @@ PROC enterdir()
     RETURN
   ENDIF
   IF edirs[i] = 0
-    -> a file in a real directory: Right enters it only if it is an
-    -> lha archive (other types stay files)
+    -> a file in a real directory: Right enters it only if it is an lha or
+    -> lzx archive (other types stay files)
     IF involume(p) = FALSE
       buildfull(fpath, ppath[p], enames[i])
-      IF sniff(fpath) = TY_LHA THEN enterarchive(p, fpath)
+      ty := sniff(fpath)
+      IF (ty = TY_LHA) OR (ty = TY_LZX) THEN enterarchive(p, fpath, ty)
     ENDIF
     RETURN
   ENDIF
@@ -3503,6 +3601,10 @@ PROC arcxfer_out(p, q, ismove, force)
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, t, k, stop=FALSE,
       ndone=0, deld=FALSE, deferred=FALSE, doit, total=0
+  IF islzx(p)
+    arclzxsoon()
+    RETURN
+  ENDIF
   IF involume(q) OR efail[q]
     showmsg('the other pane needs a directory to receive the files')
     RETURN
@@ -3754,6 +3856,10 @@ PROC arcxfer_in(p, q, ismove, force)
       src[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, k, stop=FALSE, ndone=0,
       added=FALSE, doit, replace, total=0
+  IF islzx(q)
+    arclzxsoon()
+    RETURN
+  ENDIF
   IF involume(p) OR efail[p] OR (ecount[p] = 0)
     showmsg('nothing to add from this pane')
     RETURN
@@ -4059,6 +4165,10 @@ PROC arcdelete(p)
   DEF b, nmark, i, pick, k, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       mb[130]:STRING, total=0, ndel=0, hasdir=FALSE, ok,
       stageroot[CPATHLEN]:STRING
+  IF islzx(p)
+    arclzxsoon()
+    RETURN
+  ENDIF
   IF ecount[p] = 0 THEN RETURN
   b := p * MAXENT
   nmark := markcount(p)
@@ -4911,11 +5021,14 @@ PROC arcviewsel(p, sel)
   -> output file". Pre-building the path lets lha just write the file.
   makepath(out)
   DeleteFile(out)           -> no stale target to prompt an overwrite
-  -> -M: no autoshow. LhA auto-DISPLAYS readme/.doc-type files during
-  -> extraction by opening a con: window that waits on 'Press return';
-  -> under our redirected I/O that stalls or fails the extract, so the
-  -> file never lands. -M turns it off and the extract runs clean.
-  StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-v/')
+  -> lha -M: no autoshow (LhA auto-DISPLAYS readme/.doc files via a con:
+  -> "Press return" window that stalls under redirected I/O). lzx has no
+  -> such thing and -M there means merge-groups, so lzx just uses `x`.
+  IF arcfmt[p] = TY_LZX
+    StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-v/')
+  ELSE
+    StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-v/')
+  ENDIF
   res := runcapture(NIL, cmd, 'T:CFile-out')
   DeleteFile('T:CFile-out')
   IF (res = -1) OR (pathtype(out) <> 1)
@@ -5483,6 +5596,10 @@ ENDPROC
 PROC arcedit(p)
   DEF i, nm:PTR TO CHAR, member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING,
       ty, r, res
+  IF islzx(p)
+    arclzxsoon()
+    RETURN
+  ENDIF
   IF ecount[p] = 0 THEN RETURN
   i := (p * MAXENT) + esel[p]
   IF edirs[i]
@@ -6169,10 +6286,10 @@ PROC doopen()
     ENDIF
   ELSEIF ty = TY_ANSI
     viewfile(fpath, enames[i], 2, FALSE)
-  ELSEIF ty = TY_LHA
-    enterarchive(p, fpath)    -> Enter goes inside, like Right
-  ELSEIF (ty = TY_LZX) OR (ty = TY_ZIP)
-    showmsg('lzx/zip: u unpacks it to the other pane, v lists it')
+  ELSEIF (ty = TY_LHA) OR (ty = TY_LZX)
+    enterarchive(p, fpath, ty)    -> Enter goes inside, like Right
+  ELSEIF ty = TY_ZIP
+    showmsg('zip: u unpacks it to the other pane, v lists it')
   ELSE
     viewfile(fpath, enames[i], 1, FALSE)
   ENDIF
@@ -6519,6 +6636,10 @@ PROC arcrename(p)
       oldm[CPATHLEN]:STRING, newm[CPATHLEN]:STRING,
       oldp[CPATHLEN]:STRING, newp[CPATHLEN]:STRING,
       topname[CPATHLEN]:STRING, cmd[700]:STRING, res
+  IF islzx(p)
+    arclzxsoon()
+    RETURN
+  ENDIF
   b := p * MAXENT
   nmark := markcount(p)
   FOR i := 0 TO ecount[p] - 1
@@ -6708,6 +6829,10 @@ PROC arcnew(p)
   DEF tname[40]:STRING, s:PTR TO CHAR, i, l, b, wantdir=FALSE, r, exists=FALSE,
       member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
       cmd[700]:STRING, res, lock
+  IF islzx(p)
+    arclzxsoon()
+    RETURN
+  ENDIF
   StrCopy(tname, '')
   IF lineinput('new (name/ = dir): ', tname, 31, FALSE) = 0
     drawpaths()
