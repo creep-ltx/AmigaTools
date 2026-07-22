@@ -123,8 +123,18 @@ INSIDE AN ARCHIVE
                 new member, added when it is saved
     Del / D     delete members and folders (asks first)
 
-  Writing goes through LhA, so each change rewrites the archive.
-  The progress bar steps once per file for the longer operations.
+  Edits are held until you leave. As you delete, add, edit, copy or
+  move members, the pane updates at once but the archive on disk is
+  left alone and the border row shows "modified". Leaving the archive
+  (or quitting) commits the whole session in one pass; a modified
+  archive asks first - (s)ave writes the changes, (d)iscard throws them
+  away, (c)ancel stays inside. The staging lives on the archive's own
+  volume, not in RAM. Set ARCWRITE DIRECT in the config to rewrite the
+  archive on every edit instead (the old behaviour). Either way the
+  archiver is LhA; because it cannot remove a stored directory, a
+  folder delete rebuilds the archive to drop it - and cleans up any
+  duplicate entries while it is there.
+
   p, u and : have no meaning on a member and say so. Only lha is
   supported inside for now; lzx and zip still open from outside.
 
@@ -144,13 +154,17 @@ CONFIGURATION
     LEFT      SYS:
     RIGHT     RAM:
     SAVEDIRS  ON
+    ARCWRITE  ONEXIT
     FONT      MicroKnight7/7
 
   LEFT/RIGHT are the start paths ("(volumes)" starts a pane in the
   volume list); command-line arguments (cfile [left] [right])
   override them. SAVEDIRS ON writes the current pane paths back on
   quit - only those two lines are rewritten, everything else in the
-  file passes through verbatim. FONT takes any fixed-width disk
+  file passes through verbatim. ARCWRITE chooses when archive edits
+  reach the disk: ONEXIT (the default) batches them and commits on
+  leaving the archive, DIRECT rewrites it on every edit. FONT takes
+  any fixed-width disk
   font; "topaz" always means the ROM font, and a font that fails to
   open, is proportional, or leaves less than an 80x18 grid is
   refused - CFile falls back to Topaz/8. Editing the config in
@@ -207,3 +221,6 @@ VERIFIED BEHAVIOUR
   moving files and whole folders both out and in and across
   subdirectories, renaming, deleting, and making new files and empty
   directories - all confirmed against LhA 2.15 on the same install.
+  The deferred write model was exercised too: batched commits on leave,
+  the save/discard/cancel prompt, and folder deletes rebuilding the
+  archive to drop stored directories (and clear duplicates).

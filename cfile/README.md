@@ -98,9 +98,18 @@ Most verbs work in there:
 | `n` | a name ending in `/` makes a directory inside the archive; anything else opens the editor on a new member, added when saved |
 | `Del` / `D` | delete members and folders (asks first) |
 
-Writing goes through LhA, so each change rewrites the archive; the
-progress bar steps once per file on the longer operations. `p`, `u`
-and `:` have no meaning on a member and say so. Only lha is
+**Edits are held until you leave.** As you delete, add, edit, copy or
+move members the pane updates at once, but the archive on disk is left
+alone and the border row shows `modified`. Leaving the archive (or
+quitting) commits the whole session in one pass; a modified archive
+asks first — `(s)ave` writes the changes, `(d)iscard` throws them away,
+`(c)ancel` stays inside. The staging lives on the archive's own volume,
+not in RAM. `ARCWRITE DIRECT` in the config rewrites the archive on
+every edit instead (the old behaviour). Either way the archiver is LhA;
+since it can't remove a stored directory, a folder delete rebuilds the
+archive to drop it — collapsing any duplicate entries in passing.
+
+`p`, `u` and `:` have no meaning on a member and say so. Only lha is
 supported inside for now — lzx and zip still open from outside.
 
 ## The console
@@ -122,6 +131,7 @@ CFile reads `PROGDIR:cfile.config` (plain text, `;` comments):
 LEFT      SYS:
 RIGHT     RAM:
 SAVEDIRS  ON
+ARCWRITE  ONEXIT
 FONT      MicroKnight7/7
 ```
 
@@ -132,6 +142,9 @@ FONT      MicroKnight7/7
   as the next start's `LEFT`/`RIGHT`. Only those two lines are
   rewritten; comments and every other line pass through verbatim,
   so hand edits (and edits made from inside CFile) survive.
+- `ARCWRITE ONEXIT` — when archive edits reach the disk: `ONEXIT`
+  (the default) batches them and commits on leaving the archive,
+  `DIRECT` rewrites the archive on every edit.
 - `FONT name/size` — any fixed-width disk font; `topaz` always
   means the ROM font. The whole frame, both panes and the viewer
   re-derive from the font cell, so a small font like a 7×7 gives
@@ -203,6 +216,10 @@ Going inside lha archives was exercised the same way: browsing a
 nested archive, viewing members, editing one in place, copying and
 moving files and whole folders both out and in and across
 subdirectories, renaming, deleting, and making new files and empty
-directories — all confirmed against LhA 2.15 on the same install. One known limit: FS-UAE directory drives can hold host
-filenames the Amiga side cannot see; CFile reports these as
-"invisible entries remain" when they block a delete.
+directories — all confirmed against LhA 2.15 on the same install. The
+deferred write model was exercised too: batched commits on leave, the
+save/discard/cancel prompt, and folder deletes rebuilding the archive
+to drop stored directories (and clear duplicates). One known limit:
+FS-UAE directory drives can hold host filenames the Amiga side cannot
+see; CFile reports these as "invisible entries remain" when they block
+a delete.

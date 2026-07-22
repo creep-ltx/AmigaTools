@@ -8,18 +8,38 @@ suggestions, not decided.
 
 - **0.3b2 — sizes** (done, boot-tested 21.7.26): size column, `=` dir
   sizing, free-space + marked totals on the border row.
-- **0.3b3 — deferred archive writes**: batch every archive edit and
-  commit once on leaving the archive / quitting, instead of re-streaming
-  the whole archive through lha per change. `ARCWRITE DIRECT|ONEXIT`
-  config key (default ONEXIT). Build the escape hatch (the config key,
-  inert) first, then dirty-flags on the member cache, deferred delete,
-  deferred edit/add, then the commit points + abort. Do this BEFORE lzx:
-  convert the write layer while lha is the only format in it, so lzx
-  drops into a layer already batched (and lzx's doubtful member-delete
-  may collapse into "omit on repack").
+- **0.3b3 — deferred archive writes** (done, boot-tested 22.7.26):
+  archive edits are staged on the archive's own volume and committed in
+  one pass on leave/quit; `ARCWRITE ONEXIT` (default) / `DIRECT`. A
+  modified archive shows "modified" and asks (s)ave/(d)iscard/(c)ancel on
+  leave. Folder deletes rebuild the archive (LhA cannot remove a stored
+  directory member), which also clears duplicate entries — in both modes.
 - **0.3b4 — lzx inside**: listing parser + the four command shapes into
   the batched layer; capture lzx's real output to a file and parse
   against that, like lha got.
+
+## 0.3b3 — deferred archive writes (done)
+
+Editing inside an lha no longer repacks per change. Delete/new/copy/
+move/edit stage into a scratch tree on the archive's OWN volume (not T:,
+which is normally RAM:T — a machine with little fast RAM would run out),
+flag the cached members, and the pane shows the result live with a
+"modified" tag. Leaving the archive or quitting commits the whole session
+in as few as two LhA runs (one batched delete, one batched add); a
+modified archive asks (s)ave/(d)iscard/(c)ancel first. `ARCWRITE ONEXIT`
+is the default; `DIRECT` keeps the old repack-per-edit path.
+
+The catch that shaped it: **LhA 2.15's `d` cannot remove a stored
+directory (-lhd-) member** by any flag/slash form (probed), and `-r -e a`
+re-adds a duplicate empty-dir member. So a commit that removes a directory
+takes a rebuild path — extract the whole archive to the work tree, prune
+the deleted paths, overlay the staged adds, repack with `-r -e`, swap in
+on success only (a canary file guards against a failed extract clobbering
+the original). The rebuild collapses duplicates for free, and DIRECT-mode
+folder deletes route through it too. Two LhA gotchas found on hardware:
+it auto-appends `.lha` to a suffixless archive name (the temp archive must
+be named `*.lha` or the swap silently no-ops), and empty dirs must be
+pre-built before extract (its NIL:-input can't create output dirs).
 
 ## 0.3b2 — sizes (done)
 
@@ -60,7 +80,7 @@ Four LhA 2.15 behaviours cost boot tests and are worth remembering:
   skips a member that already exists. Paths survive only through `-r`
   recursion of a directory, and replacing means delete-then-add.
 
-Follow-ups (lzx/zip and batching are now the b4/b3 roadmap above):
+Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 - [ ] **Per-byte progress inside a file** — the bar ticks once per
       file, so one big member is a single jump. lha prints a
