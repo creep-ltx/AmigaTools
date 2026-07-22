@@ -390,8 +390,6 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     iconok=FALSE,               -> workbench.library + a usable icon both up
     iconobj=NIL:PTR TO diskobject,
     wbport=NIL:PTR TO mp,       -> AppMessage reply port (in the Wait mask)
-    gzoom[4]:ARRAY OF INT,      -> WA_ZOOM: the small "zipped" geometry
-                                -> [left,top,width,height] RightAmiga+I toggles to
     ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
     -> B7 reflow scratch: the write cursor and destination planes the
     -> emit helpers share. Globals because E has no closures and the
@@ -536,10 +534,6 @@ PROC main()
   -> the vector address rides as an immediate poked in here, since
   -> a process entry carries no is_Data pointer. Exec-only; if any
   -> step fails, fhok stays FALSE and FONT falls back to OpenFont.
-  -> ICONIFY: the small geometry RightAmiga+I zips a window down to (WA_ZOOM).
-  -> A title-bar-only strip at the top-left; the desktop AppIcon is the real
-  -> handle back. (E globals start as garbage - set it before any window opens.)
-  gzoom[0] := 0; gzoom[1] := 0; gzoom[2] := 200; gzoom[3] := 12
   fhtask := FindTask(NIL)
   fhsigbit := AllocSignal(-1)
   fhstub := New(32)
@@ -713,7 +707,7 @@ ENDPROC                         -> exit (CLEANUPALL) frees the New memory
 -> ihis/ihring underneath a still-live handler. CloseDevice before
 -> DeleteIORequest before DeleteMsgPort throughout.
 PROC killhandler()
-  DEF msg:PTR TO mn             -> ICONIFY: draining stray AppMessages
+  DEF msg:PTR TO mn, c:PTR TO console   -> ICONIFY: stray AppMessages + icons
   IF ihon                       -> the chain handler was added
     ihreq.command := IND_REMHANDLER
     ihreq.data := ihis
@@ -736,9 +730,16 @@ PROC killhandler()
     CloseLibrary(keymapbase)
     keymapbase := NIL
   ENDIF
-  -> ICONIFY: tear the AppIcon plumbing down. (Stage 2 RemoveAppIcons every
-  -> still-iconified console first.) Drain+reply any AppMessage already in
-  -> flight before the port dies, then free the icon and close the libraries.
+  -> ICONIFY: RemoveAppIcon every still-iconified console, then drain+reply any
+  -> AppMessage in flight before the port dies, free the icon, close the libs.
+  c := conlist
+  WHILE c
+    IF c.appicon
+      RemoveAppIcon(c.appicon)
+      c.appicon := NIL
+    ENDIF
+    c := c.next
+  ENDWHILE
   IF wbport
     WHILE (msg := GetMsg(wbport)) DO ReplyMsg(msg)
     DeleteMsgPort(wbport)
@@ -1280,6 +1281,18 @@ ENDPROC
 -> flush after a selection drag ends
 PROC dowrite(pkt:PTR TO dospacket)
   DEF sender:PTR TO mp, len
+  -> ICONIFY: while iconified the console is windowless BY CHOICE - park the
+  -> write (blocking the writer) until restore, when flushwq replays it. This
+  -> is distinct from the win=NIL error below (a console that never opened).
+  IF curcon.appicon
+    IF curcon.wqn < WQMAX
+      curcon.wq[curcon.wqn] := pkt
+      curcon.wqn := curcon.wqn + 1
+    ELSE
+      ReplyPkt(pkt, pkt.arg3, 0)   -> overflow (rare): accept + discard output
+    ENDIF
+    RETURN
+  ENDIF
   ensurewin()                   -> an AUTO window appears on first
   IF curcon.win = NIL                  -> output; no window at all = the
     ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)  -> write cannot land
@@ -1809,44 +1822,142 @@ ENDPROC TRUE
 -> a Workbench AppMessage arrived (an AppIcon was double-clicked). STAGE 0:
 -> the only AppIcon is the test one, so a click proves the whole round-trip
 -> - AddAppIconA put it up, Workbench delivered the message to wbport, and
--> RemoveAppIcon takes it away again. Later stages dispatch on am.userdata
--> (the console) to un-iconify. Reply ALWAYS.
--> the desktop AppIcon was double-clicked: bring the hidden window back
--> (ShowWindow) and take the icon away. Reply ALWAYS.
+-> the desktop AppIcon was double-clicked: reopen its console's window,
+-> repainted exactly as it was, and flush any output parked while hidden.
+-> The console pointer rode along as am.userdata. Reply ALWAYS.
 PROC doappmsg(am:PTR TO appmessage)
-  DEF c:PTR TO console
+  DEF c:PTR TO console, oldcur:PTR TO console
   IF am.type = AMTYPE_APPICON
-    c := am.userdata               -> the console we stored at AddAppIcon
+    c := am.userdata
     IF c AND c.appicon
-      IF c.win THEN ZipWindow(c.win)  -> zip back to full size
       RemoveAppIcon(c.appicon)
       c.appicon := NIL
+      oldcur := curcon
+      curcon := c
+      reopenwin()                    -> window back, repainted from the model
+      IF curcon.win THEN flushwq()     -> replay writes parked while hidden
+      curcon := oldcur
     ENDIF
   ENDIF
   ReplyMsg(am)
 ENDPROC
 
--> v1.3 ICONIFY (Stage 1): the title-bar gadget was released. For now just
--> flash the window's screen to prove GADGETUP is delivered and routed to
--> the right console (the drain set curcon to the clicked window's). ia is
--> the gadget address. Stage 2 iconifies the window here instead.
--> the iconify gadget was clicked. Intuition hides the window itself; we
--> drop the AppIcon (your CCon.info) on the desktop so the window can be
--> brought back by clicking it (doappmsg -> ShowWindow). If the AppIcon
--> appears on click, the standard gadget's GADGETUP does reach us after all.
--> TEST: one window at a time via globals; per-console fields come next.
--> RightAmiga+I: iconify this console. ZipWindow toggles it to the small
--> WA_ZOOM size (window stays open + valid, so client output keeps rendering)
--> and an AppIcon (your CCon.info) goes on the desktop. Clicking the icon
--> (doappmsg) zips it back. Owned windows only; a borrowed frame is not ours.
--> The AppIcon carries the console pointer as userdata so the click finds it.
+-> RightAmiga+I: iconify this console. The window TRULY vanishes (closed via
+-> hidewin, which keeps the whole console - model, font, geometry, cursor,
+-> mode) and the CCon.info AppIcon goes on the desktop carrying the console
+-> as userdata. Clicking it (doappmsg) reopens. Owned windows only.
 PROC doiconify()
   IF curcon.win = NIL THEN RETURN
   IF curcon.fwin THEN RETURN
   IF curcon.appicon THEN RETURN         -> already iconified
   IF wbensure() = FALSE THEN RETURN
-  curcon.appicon := AddAppIconA(0, curcon, curcon.wtitlebase, wbport, 0, iconobj, NIL)
-  IF curcon.appicon THEN ZipWindow(curcon.win)
+  curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0, iconobj, NIL)
+  IF curcon.appicon THEN hidewin()      -> only vanish if the icon really went up
+ENDPROC
+
+-> ICONIFY hide: close the window but KEEP the console whole so reopenwin can
+-> restore it exactly. Contrast closewin, which disposes the model - a real
+-> teardown. Owned windows only (a borrowed frame belongs to its owner).
+PROC hidewin()
+  DEF i
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.fwin THEN RETURN
+  curcon.armed := FALSE                  -> chain ignores a windowless console
+  curcon.cursx := -1
+  curcon.selon := FALSE
+  curcon.sello := -1
+  curcon.selhi := -1
+  -> ANSI pens go back to the screen with the window (reopenwin re-obtains)
+  IF curcon.anscm
+    FOR i := 0 TO 7
+      IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
+      curcon.anstab[i] := -1
+    ENDFOR
+    curcon.anscm := NIL
+  ENDIF
+  CloseWindow(curcon.win)
+  curcon.win := NIL
+  curcon.rp := NIL
+ENDPROC
+
+-> ICONIFY restore: reopen the window at its saved geometry and repaint the
+-> kept scrollback. NOT openwin() - that resets the console to a fresh state;
+-> here every console field is preserved and only the window is rebuilt. This
+-> mirrors openwin's window-open/font/pen/metrics setup (font + model are
+-> kept, so they are reused, not reloaded/reallocated). setidcmp fixes idc.
+PROC reopenwin()
+  DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
+      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR
+  IF curcon.win THEN RETURN
+  idc := IDCMP_CLOSEWINDOW
+  IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
+  pubscr := NIL
+  IF curcon.pscrname[0] THEN pubscr := LockPubScreen(curcon.pscrname)
+  curcon.win := OpenWindowTagList(NIL,
+    [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
+     WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
+     WA_DRAGBAR, IF curcon.pnodrag THEN FALSE ELSE TRUE,
+     WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
+     WA_ACTIVATE, TRUE,
+     WA_CLOSEGADGET, curcon.closegad,
+     WA_SIZEGADGET, IF curcon.pnosize THEN FALSE ELSE TRUE,
+     WA_BORDERLESS, curcon.pnoborder,
+     WA_BACKDROP, curcon.pbackdrop,
+     WA_PUBSCREEN, pubscr,
+     WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
+     WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
+     WA_IDCMP, idc,
+     TAG_DONE, NIL])
+  IF pubscr THEN UnlockPubScreen(NIL, pubscr)
+  IF curcon.win = NIL THEN RETURN        -> reopen failed; stays hidden
+  curcon.rp := curcon.win.rport
+  IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
+  curcon.cw := curcon.rp.txwidth
+  curcon.ch := curcon.rp.txheight
+  curcon.baseline := curcon.rp.txbaseline
+  curcon.softmask := AskSoftStyle(curcon.rp)
+  curcon.can16 := FALSE
+  IF curcon.rp.bitmap
+    IF curcon.rp.bitmap.depth >= 4 THEN curcon.can16 := TRUE
+  ENDIF
+  curcon.anscm := NIL
+  FOR i := 0 TO 7
+    curcon.anstab[i] := -1
+  ENDFOR
+  IF curcon.wbpens = FALSE
+    pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
+    pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
+    pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
+    scrn := curcon.win.wscreen
+    IF scrn
+      curcon.anscm := scrn.viewport.colormap
+      IF curcon.anscm
+        FOR i := 0 TO 7
+          v := ObtainBestPenA(curcon.anscm, Mul(pr[i], $11111111),
+                 Mul(pg[i], $11111111), Mul(pb[i], $11111111), NIL)
+          IF v > 15
+            ReleasePen(curcon.anscm, v)
+            v := -1
+          ENDIF
+          curcon.anstab[i] := v
+        ENDFOR
+      ENDIF
+    ENDIF
+  ENDIF
+  gridcalc()
+  -> clear the inner rect and repaint the kept model, cursor, edit line
+  SetAPen(curcon.rp, 0)
+  RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,
+           curcon.win.width - curcon.win.borderright - 1,
+           curcon.win.height - curcon.win.borderbottom - 1)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+  redraw()
+  settitle()
+  IF curcon.rawmode THEN cursdraw() ELSE drawedit()
+  setidcmp()
+  ReportMouse(TRUE, curcon.win)
+  curcon.armed := TRUE
 ENDPROC
 
 PROC openwin()
@@ -1914,10 +2025,6 @@ PROC openwin()
     IF curcon.pwh = -1 THEN curcon.pwh := 200
     IF curcon.pww < 160 THEN curcon.pww := 160
     IF curcon.pwh < 60 THEN curcon.pwh := 60
-    -> ICONIFY (owned windows only): measure geometry + build the glyph; the
-    -> gadget is AddGadget'd after open. GADGETUP joins the IDCMP so its click
-    -> reaches our UserPort (WA_ICONIFYGADGET was tried and rejected: Intuition
-    -> ate the click and hid the window with no report and no restore).
     curcon.win := OpenWindowTagList(NIL,
       [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
        WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
@@ -1931,7 +2038,6 @@ PROC openwin()
        WA_PUBSCREEN, pubscr,
        WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
        WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
-       WA_ZOOM, gzoom,          -> ICONIFY: the small "zipped" size RightAmiga+I toggles to
        WA_IDCMP, idc,
        TAG_DONE, NIL])
     IF pubscr THEN UnlockPubScreen(NIL, pubscr)
@@ -2148,7 +2254,7 @@ ENDPROC
 -> WAIT_CHARs answer FALSE, the model is returned to the heap, and a
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
-  DEF i
+  DEF i, p:PTR TO dospacket
   -> ICONIFY: a console closing while iconified must take its AppIcon with it
   IF curcon.appicon
     RemoveAppIcon(curcon.appicon)
@@ -2177,6 +2283,12 @@ PROC closewin()
     WHILE curcon.rdn > 0
       curcon.rdn := curcon.rdn - 1
       ReplyPkt(curcon.rdq[curcon.rdn], 0, 0)
+    ENDWHILE
+    -> ICONIFY: reply writes parked while iconified, or their senders hang
+    WHILE curcon.wqn > 0
+      curcon.wqn := curcon.wqn - 1
+      p := curcon.wq[curcon.wqn]
+      ReplyPkt(p, p.arg3, 0)
     ENDWHILE
     RETURN
   ENDIF
