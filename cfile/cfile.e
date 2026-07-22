@@ -3446,7 +3446,14 @@ PROC arcaddstaged(p, stageroot)
     UnLock(lock)
     RETURN
   ENDIF
-  StringF(base, 'lha -M -r -e a "\s"', arcpath[p])
+  -> add the staging tree's top-level entries; -r -e keeps the subtree and
+  -> stores empty dirs. Source names go unescaped (they name real staged
+  -> files, so a pattern can only re-match them).
+  IF islzx(p)
+    StringF(base, 'lzx -r -e a "\s"', arcpath[p])
+  ELSE
+    StringF(base, 'lha -M -r -e a "\s"', arcpath[p])
+  ENDIF
   StrCopy(cmd, base)
   baselen := EstrLen(cmd)
   IF Examine(lock, fib)
@@ -3605,24 +3612,24 @@ ENDPROC (l > 0) AND (m[l - 1] = "/")
 
 PROC arccommit(p)
   DEF a:PTR TO LONG, st:PTR TO LONG, k, cmd[700]:STRING, base[360]:STRING,
-      m:PTR TO CHAR, baselen, hasdel=FALSE, hasadd, needrebuild=FALSE,
-      stageroot[CPATHLEN]:STRING
+      m:PTR TO CHAR, esc[620]:STRING, baselen, hasdel=FALSE, hasadd,
+      needrebuild=FALSE, lzx, stageroot[CPATHLEN]:STRING
   IF inarchive(p) = FALSE THEN RETURN
-  -> this is the lha deferred-commit. lzx does not defer yet (steps 2-4 write
-  -> immediately), so nothing lzx ever sets a flag here - bail so no lha
-  -> command is aimed at an .lzx. The lzx commit is wired in step 5.
-  IF arcfmt[p] = TY_LZX THEN RETURN
   IF arcwrite = FALSE THEN RETURN
   IF amst[p] = NIL THEN RETURN
+  lzx := islzx(p)
   a := amem[p]
   st := amst[p]
   IF amcnt[p] > 0
     FOR k := 0 TO amcnt[p] - 1
       -> REPLACE also needs the old member deleted before the add pass
       IF (st[k] = MST_DEL) OR (st[k] = MST_REPLACE) THEN hasdel := TRUE
-      -> a directory member cannot be removed by lha d - that forces the
-      -> rebuild path (extract/prune/repack)
-      IF (st[k] = MST_DEL) AND memberisdir(a[k]) THEN needrebuild := TRUE
+      -> lha d cannot remove a directory member - that forces the rebuild
+      -> path (extract/prune/repack). lzx d removes stored dir members
+      -> directly (trailing slash), so lzx never needs the rebuild.
+      IF (lzx = FALSE) AND (st[k] = MST_DEL) AND memberisdir(a[k])
+        needrebuild := TRUE
+      ENDIF
     ENDFOR
   ENDIF
   arcstage(p, stageroot)
@@ -3633,33 +3640,40 @@ PROC arccommit(p)
   -> neither of which erases a centred overlay cleanly.
   promptrow('writing changes to the archive')
   IF needrebuild
-    -> a dir member is going: rebuild handles deletes, adds and edits all
-    -> at once (and cleans up duplicates), so the fast passes are skipped
+    -> a dir member is going (lha only): rebuild handles deletes, adds and
+    -> edits all at once (and cleans up duplicates), so the passes are skipped
     arcrebuild(p, stageroot)
     IF pathtype(stageroot) = 2 THEN arcwipe(stageroot)
     DeleteFile('T:CFile-out')
     RETURN
   ENDIF
-  -> fast path: only files change. delete pass FIRST, so a replaced or
-  -> edited member is gone before its new version is added (lha add skips
-  -> a member already present). lha rewrites the archive once per pass.
+  -> delete pass FIRST, so a replaced or edited member is gone before its new
+  -> version is added. lzx: escaped `lzx d` (globs, no -Qw), files and dir
+  -> members alike. lha: `lha -M -Qw d`. Each rewrites the archive once.
   IF hasdel
-    StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
+    IF lzx
+      StringF(base, 'lzx d "\s"', arcpath[p])
+    ELSE
+      StringF(base, 'lha -M -Qw d "\s"', arcpath[p])
+    ENDIF
     StrCopy(cmd, base)
     baselen := EstrLen(cmd)
     FOR k := 0 TO amcnt[p] - 1
       IF (st[k] = MST_DEL) OR (st[k] = MST_REPLACE)
         m := a[k]
-        IF (EstrLen(cmd) + StrLen(m)) > 600
-          arcrunprog(NIL, cmd)
+        IF lzx THEN lzxesc(esc, m) ELSE StrCopy(esc, m)
+        IF (EstrLen(cmd) + EstrLen(esc)) > 600
+          IF lzx THEN runcapture(NIL, cmd, 'T:CFile-out') ELSE arcrunprog(NIL, cmd)
           StrCopy(cmd, base)
         ENDIF
         StrAdd(cmd, ' "')
-        StrAdd(cmd, m)
+        StrAdd(cmd, esc)
         StrAdd(cmd, '"')
       ENDIF
     ENDFOR
-    IF EstrLen(cmd) > baselen THEN arcrunprog(NIL, cmd)
+    IF EstrLen(cmd) > baselen
+      IF lzx THEN runcapture(NIL, cmd, 'T:CFile-out') ELSE arcrunprog(NIL, cmd)
+    ENDIF
   ENDIF
   IF hasadd
     arcaddstaged(p, stageroot)
@@ -3720,15 +3734,14 @@ PROC arcxfer_out(p, q, ismove, force)
           IF copytree(sfile, dfile, 0)
             ndone := ndone + 1
             IF ismove
-              -> lzx: remove now (its d deletes dir members too - no defer
-              -> yet, that lands in step 5). lha ONEXIT: flag for the commit
-              -> like Del; lha DIRECT: remove now.
-              IF islzx(p)
-                lzxdeltree(p, member)
-                deld := TRUE
-              ELSEIF arcwrite
+              -> ONEXIT (both): flag for the commit like Del. DIRECT: remove
+              -> now (lzx d deletes dir members; lha uses arcdeltree).
+              IF arcwrite
                 arcflagdel(p, member, TRUE)
                 deferred := TRUE
+              ELSEIF islzx(p)
+                lzxdeltree(p, member)
+                deld := TRUE
               ELSE
                 arcdeltree(p, member)
                 deld := TRUE
@@ -3799,13 +3812,13 @@ PROC arcxfer_out(p, q, ismove, force)
           ELSEIF copyfile(sfile, dfile)
             ndone := ndone + 1
             IF ismove
-              -> lzx: remove now; lha ONEXIT: defer to commit; lha DIRECT: now
-              IF islzx(p)
-                lzxdelmember(arcpath[p], member)
-                deld := TRUE
-              ELSEIF arcwrite
+              -> ONEXIT (both): defer to commit. DIRECT: remove now.
+              IF arcwrite
                 arcflagdel(p, member, FALSE)
                 deferred := TRUE
+              ELSEIF islzx(p)
+                lzxdelmember(arcpath[p], member)
+                deld := TRUE
               ELSE
                 arcdelmember(arcpath[p], member)
                 deld := TRUE
@@ -3942,9 +3955,9 @@ PROC arcxfer_in(p, q, ismove, force)
     showmsg('nothing to add from this pane')
     RETURN
   ENDIF
-  -> lha ONEXIT defers the add (arcxfer_indefer). lha DIRECT and lzx (which
-  -> does not defer yet - that is step 5) add immediately below.
-  IF arcwrite AND (islzx(q) = FALSE)
+  -> ONEXIT (both lha and lzx): defer the add (staged, flagged, committed on
+  -> leave). DIRECT: add immediately below.
+  IF arcwrite
     arcxfer_indefer(p, q, ismove, force)
     RETURN
   ENDIF
@@ -4278,30 +4291,11 @@ PROC arcdelete(p)
     drawpaths()
     RETURN
   ENDIF
-  IF islzx(p)
-    -> lzx: delete now (files by name, folders and all via lzxdeltree - lzx d
-    -> removes stored dir members, so no rebuild). Not deferred yet (step 5).
-    FOR i := 0 TO ecount[p] - 1
-      pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
-      IF pick
-        arcmember(member, arcsub[p], enames[b + i])
-        IF edirs[b + i] THEN lzxdeltree(p, member) ELSE lzxdelmember(arcpath[p], member)
-        ndel := ndel + 1
-      ENDIF
-    ENDFOR
-    loadarchive(p, arcpath[p])
-    refreshall()
-    IF ndel > 0
-      StringF(mb, '\d entr\s deleted from the archive', ndel,
-              IF ndel = 1 THEN 'y' ELSE 'ies')
-      showmsg(mb)
-    ENDIF
-    RETURN
-  ENDIF
   IF arcwrite
-    -> ONEXIT: flag the members, leave the archive alone. They drop out
-    -> of the pane at once (readarcdir hides MST_DEL) and the one batched
-    -> lha delete runs when the archive is left or CFile quits.
+    -> ONEXIT (both lha and lzx): flag the members, leave the archive alone.
+    -> They drop out of the pane at once (readarcdir hides MST_DEL) and the
+    -> one batched delete (lha -Qw d / escaped lzx d) runs at commit, on
+    -> leave or quit.
     FOR i := 0 TO ecount[p] - 1
       pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
       IF pick
@@ -4320,7 +4314,27 @@ PROC arcdelete(p)
     ENDIF
     RETURN
   ENDIF
-  -> DIRECT with a directory in the selection: lha d cannot remove a
+  IF islzx(p)
+    -> DIRECT lzx: delete now (files by name, folders and all via lzxdeltree
+    -> - lzx d removes stored dir members, so no rebuild).
+    FOR i := 0 TO ecount[p] - 1
+      pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+      IF pick
+        arcmember(member, arcsub[p], enames[b + i])
+        IF edirs[b + i] THEN lzxdeltree(p, member) ELSE lzxdelmember(arcpath[p], member)
+        ndel := ndel + 1
+      ENDIF
+    ENDFOR
+    loadarchive(p, arcpath[p])
+    refreshall()
+    IF ndel > 0
+      StringF(mb, '\d entr\s deleted from the archive', ndel,
+              IF ndel = 1 THEN 'y' ELSE 'ies')
+      showmsg(mb)
+    ENDIF
+    RETURN
+  ENDIF
+  -> DIRECT lha with a directory in the selection: lha d cannot remove a
   -> -lhd- member, so a folder delete takes the rebuild path (extract,
   -> prune, repack) - the same one the deferred commit uses. Files-only
   -> deletes stay on the fast lha d path below.
@@ -5665,7 +5679,11 @@ PROC arceditdefer(p, i, nm, member)
     DeleteFile(sfile)
     StrCopy(xdir, stageroot)
     StrAdd(xdir, '/')
-    StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, xdir)
+    IF islzx(p)
+      StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member, xdir)
+    ELSE
+      StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, xdir)
+    ENDIF
     res := runcapture(NIL, cmd, 'T:CFile-out')
     DeleteFile('T:CFile-out')
     IF (res = -1) OR (pathtype(sfile) <> 1)
@@ -5720,9 +5738,9 @@ PROC arcedit(p)
   ENDIF
   nm := enames[i]
   arcmember(member, arcsub[p], nm)
-  -> lha ONEXIT defers the edit; lha DIRECT and lzx (no defer yet) re-add
-  -> immediately through arcextractone/arcreadd, both format-aware.
-  IF arcwrite AND (islzx(p) = FALSE)
+  -> ONEXIT (both): defer the edit (staged, flagged REPLACE, committed on
+  -> leave). DIRECT: re-add immediately through arcextractone/arcreadd.
+  IF arcwrite
     arceditdefer(p, i, nm, member)
     RETURN
   ENDIF
@@ -6988,9 +7006,8 @@ PROC arcnew(p)
     RETURN
   ENDIF
   arcmember(member, arcsub[p], tname)
-  -> lha ONEXIT defers the new entry; lha DIRECT and lzx (no defer yet) add
-  -> it immediately below.
-  IF arcwrite AND (islzx(p) = FALSE)
+  -> ONEXIT (both): defer the new entry. DIRECT: add it immediately below.
+  IF arcwrite
     arcnewdefer(p, tname, member, wantdir)
     RETURN
   ENDIF
