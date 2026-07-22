@@ -27,6 +27,11 @@ FEATURES
 
   - Hosts real AmigaShells: NewShell CCON:
 
+  - Iconify to the Workbench: RightAmiga+I sends a window to a
+    desktop icon and a click brings it back exactly as you left
+    it - scrollback, a half-typed line and all; its own icon is
+    built into the handler. Works over a fullscreen client (Ed) too
+
   - fish-style autosuggestions: history's continuation as grey
     ghost text; Right accepts, Ctrl+Right/Tab take it word by word
 
@@ -70,7 +75,7 @@ FEATURES
 
   - can replace CON:/RAW: system-wide, KingCON style (Assign
     DISMOUNT + Mount FROM the same mountlist) - experimental,
-    see ccon.doc section 14
+    see ccon.doc section 15
 
 
 LIMITATIONS
@@ -84,7 +89,13 @@ LIMITATIONS
 
   - Completion: no quoted words, one menu page of 80
 
-  - SMART/SIMPLE, ALT, ICONIFY not implemented
+  - SMART/SIMPLE and ALT not implemented
+
+  - Resizing a raw-mode fullscreen program's window (Ed) can
+    leave stale pixels and doesn't re-lay-out the program
+
+  - Tab completion and the history file have no filesystem
+    timeout; a wedged or spinning-up disk blocks the window
 
 
 INSTALL
