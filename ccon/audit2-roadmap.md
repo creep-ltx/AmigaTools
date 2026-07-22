@@ -269,9 +269,23 @@ write already meant to be bounded. Neither touches a normal path.
 
 ---
 
-## Batch D - the filesystem-wait timeout - P6
+## Batch D - the filesystem-wait timeout - P6 - COMMENT DONE, FIX PARKED (22.7.26)
 
 **Finding:** P6 (was audit.md's P5 tail, promoted).
+
+**Outcome (his call): level 1 done, level 2 parked.** The hazard comment
+is now at `fscall()` - naming the no-timeout freeze, the three reachable
+paths (Tab/Enter/first-open), the hangs-but-loses-no-data severity, and
+the shape a real fix would take (wait on the reply port AND a timer
+request; the abandoned-packet-replies-late wrinkle). Comment-only, no
+`$VER` bump, binary byte-IDENTICAL to 1.2b17 (verified by md5) - nothing
+to redeploy or re-boot-test. The real timeout (level 2) is deliberately
+PARKED: rare trigger, no data loss, and B5-teardown weight of
+abandoned-packet handling - not worth building until a real slow-mount
+hang is actually seen in use. This closes the audit2 campaign (A/B/C
+shipped + boot-green, B12 closed as not-a-CCON-bug, D documented).
+
+The plan as written follows, kept for the record.
 
 Two levels, and the roadmap should not pretend the big one is cheap:
 

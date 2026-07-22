@@ -135,6 +135,14 @@ a comment at `fscall()` naming the risk, so the next reader does not
 have to rediscover that the primitive can hang the box. audit.md's P5
 entry asked for the comment and it was not added; add it.
 
+**Status: COMMENT ADDED, real fix PARKED (22.7.26, his call).** The
+hazard comment is now at `fscall()` (the freeze, the three reachable
+paths, the hangs-but-no-data-loss severity, the abandoned-packet wrinkle
+a real fix must handle). Comment-only - no `$VER` bump, binary
+byte-identical to 1.2b17. The `timer.device` interleave is deliberately
+not built: rare trigger, no data loss, real complexity - wait until a
+slow-mount hang is actually observed in use.
+
 ---
 
 ## 2. Bugs

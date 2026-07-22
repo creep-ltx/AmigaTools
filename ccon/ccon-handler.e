@@ -5546,7 +5546,22 @@ ENDPROC
 -> (LockDosList/FindDosEntry - semaphores, not packets). Struct
 -> offsets cross-checked against amitools' libstructs.
 
--> one packet round-trip; the reply lands on fsport, never pr_MsgPort
+-> one packet round-trip; the reply lands on fsport, never pr_MsgPort.
+-> audit2 P6 (KNOWN, fix deliberately parked): the WaitPort below has NO
+-> TIMEOUT. If the target filesystem is wedged or slow to spin up (a
+-> floppy waking, a stalled removable/network mount) and never replies,
+-> this blocks the whole handler PROCESS forever - freezing EVERY CCON:
+-> window it serves, not just the one that called, including the one that
+-> would show the error. Reachable on the Tab path (tcscan), the Enter
+-> path (histappend/savehistfile) and first-open (loadhistfile). It hangs
+-> but loses no data, and a wedged FS hangs much of a classic Amiga
+-> anyway, so the current behaviour is left as-is. A real fix waits on
+-> BOTH signals - this reply port AND a timer.device request - and on
+-> timer-first abandons the packet; the wrinkle is that the filesystem
+-> still owns the abandoned packet and may reply LATE into fsport, so
+-> fspkt cannot be reused until that arrives (or the late reply is
+-> drained). B5-teardown weight, its own commit - not worth it until a
+-> real slow-mount hang is actually seen in use.
 PROC fscall(tport:PTR TO mp, act, a1, a2, a3)
   IF tport = NIL THEN RETURN 0
   IF tport = port THEN RETURN 0   -> never send to OURSELVES: deadlock
