@@ -3278,6 +3278,9 @@ PROC bufensure(c:PTR TO console)
   IF bufoff THEN RETURN FALSE
   IF c.win = NIL THEN RETURN FALSE
   IF c.fwin THEN RETURN FALSE          -> borrowed window: its owner may draw
+  IF c.sb = NIL THEN RETURN FALSE      -> no model to seed the buffer from
+                                       -> (redraw() would leave it blank); the
+                                       -> degraded no-ring console draws direct
   bm := c.win.rport.bitmap
   IF bm = NIL THEN RETURN FALSE
   IF bbrp = NIL
@@ -3322,14 +3325,7 @@ PROC bufopen(c:PTR TO console)
   iw := c.win.width - c.win.borderright - il
   ih := c.win.height - c.win.borderbottom - it
   IF (iw <= 0) OR (ih <= 0) THEN RETURN FALSE
-  -> copy-in reads the RAW screen bitmap (no layer), so the source is
-  -> SCREEN coordinates - the window's on-screen position plus the border
-  -> inset - NOT the window-relative (il,it) the RastPort-based copy-out
-  -> uses. Getting this wrong read the screen's top-left (the title bars)
-  -> and tiled "CON:" down the window (1.2b19).
-  BltBitMap(c.win.rport.bitmap, c.win.leftedge + il, c.win.topedge + it,
-            bbmap, il, it, iw, ih, $C0, $FF, NIL)
-  c.rp := bbrp
+  c.rp := bbrp                            -> every draw below targets the buffer
   -> start accumulation in the SAME state openwin gives the window rport:
   -> font, default pens. bbrp PERSISTS (the window rport gets reset by
   -> drawedit/openwin, bbrp does not), so without this a scroll before any
@@ -3337,8 +3333,26 @@ PROC bufopen(c:PTR TO console)
   -> the STALE BgPen left black by the previous page's inverse status line
   -> (clearrow zeroes only the model, not the pixels): a black trail.
   IF c.tf THEN SetFont(bbrp, c.tf)
+  -> SEED the buffer from our MODEL, never from the screen. The 1.2b19
+  -> copy-in read the RAW screen bitmap at the window's on-screen position
+  -> (BltBitMap, no layer), which captured WHATEVER window sat on top of
+  -> ours in the overlap: a Workbench drawer covering the console, then
+  -> sent to back, left its icons baked into the buffer, and bufflush blit
+  -> them into our window once that region became ours - foreign graphics
+  -> stuck in the console. redraw() reconstructs the inner area from the
+  -> scrollback ring instead - OUR content, obscure-proof - exactly the
+  -> repaint doresize() does (clear the inner rect, then redraw from the
+  -> model). The edit-line text rides along: drawedit() mirrors it into the
+  -> ring, so redraw() paints it too; the block cursor / blip is redrawn by
+  -> dowrite's end-of-write cursdraw()/drawedit(), and the batch-start
+  -> curserase()/eraseedit() repaint from the same model - all consistent.
+  -> c is always curcon here (the sole caller), so redraw()'s curcon.rp is
+  -> the bbrp just set. bufensure() has already refused a NIL-model console.
+  SetAPen(bbrp, 0)
+  RectFill(bbrp, il, it, il + iw - 1, it + ih - 1)
   SetAPen(bbrp, c.deffg)
   SetBPen(bbrp, 0)
+  redraw()
   bbactive := c
   bbpage := FALSE               -> a fresh batch; a ^L in it turns it into
                                 -> a held page (render sets bbpage)
