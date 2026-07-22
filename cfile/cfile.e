@@ -7445,44 +7445,104 @@ PROC waitkey()
 ENDPROC
 
 -> a help line on pane row r (skipped when the grid is too short)
-PROC helptext(s, r)
-  IF r >= visrows THEN RETURN
-  Move(rp, x0 + (19 * cw), panetop + (r * ch) + baseline)
-  Text(rp, s, StrLen(s))
-ENDPROC
-
-PROC helpscreen()
-  DEF y
-  drawviewframe(TRUE)    -> closed border + the viewer's footer
+-> one page of the (scrollable) help: visrows lines from `vtop`, centred
+-> over the pane area
+PROC drawhelp(lines:PTR TO LONG, nlines, vtop, hindent)
+  DEF r, ln
   SetAPen(rp, 0)
   RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
            panetop + Mul(visrows, ch) - 1)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  y := 0
-  helptext('CFile 0.3.2', y)
-  helptext('Tab ........ switch pane', y + 1)
-  helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 2)
-  helptext('/ .......... filter list: type to narrow, Space marks', y + 3)
-  helptext('Right/Left . enter dir/lha/lzx archive / parent, vols', y + 4)
-  helptext('F5 ......... rescan: re-read both panes', y + 5)
-  helptext('Enter ...... open: enter dir, view text, run binary', y + 6)
-  helptext('v .......... view; marks tour with Right/Left', y + 7)
-  helptext('e .......... edit text file (e in the viewer works too)', y + 8)
-  helptext('i .......... file info, edit protection bits', y + 9)
-  helptext('u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)', y + 10)
-  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 11)
-  helptext('a A * + .... mark all / none / invert / by pattern', y + 12)
-  helptext('= / s ...... measure dir size / sort (name/size/date)', y + 13)
-  helptext('c / C ...... copy to the other pane (C overwrites)', y + 14)
-  helptext('m / M ...... move to the other pane (M overwrites)', y + 15)
-  helptext('r / n ...... rename / new file (name/ = dir)', y + 16)
-  helptext('Del / D .... delete, directories and all (asks first)', y + 17)
-  helptext(': .......... run a shell command here', y + 18)
-  helptext('? / Help ... this help', y + 19)
-  helptext('Esc ........ quit (asks first)', y + 20)
-  helptext('press any key', y + 22)
-  waitkey()
+  FOR r := 0 TO visrows - 1
+    ln := vtop + r
+    IF ln < nlines
+      Move(rp, x0 + (hindent * cw), panetop + (r * ch) + baseline)
+      Text(rp, lines[ln], StrLen(lines[ln]))
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> ? / Help: the key list, scrollable with Up/Down (Shift = page, Ctrl =
+-> ends) when it is taller than the pane area; any other key returns.
+PROC helpscreen()
+  DEF lines:PTR TO LONG, nlines=0, vtop=0, maxv, nv, hindent, over=FALSE,
+      class, code, qual
+  lines := ['CFile 0.3.2',
+            '',
+            'Tab ........ switch the active pane',
+            'Up/Down .... move (Shift = page, Ctrl = first/last)',
+            'Right/Left . enter dir/lha/lzx archive / parent, volumes',
+            'g .......... go to a typed path',
+            'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
+            '/ .......... filter: type to narrow, Space marks a match',
+            'F5 ......... rescan: re-read both panes from disk',
+            'Enter ...... open: enter dir, view text, run a binary (asks)',
+            'v .......... view text/ANSI/hex; with marks a tour',
+            'e .......... edit a text file (e in the viewer works too)',
+            'i .......... file info; h s p a r w e d toggle protection',
+            'Space ...... mark/unmark (ops take the marks if any)',
+            'a A * + .... mark all / none / invert / by pattern',
+            '= / s ...... measure dir size / sort (name/size/date)',
+            'c / C ...... copy to the other pane (C overwrites)',
+            'm / M ...... move to the other pane (M overwrites)',
+            'r / n ...... rename / new (a trailing / makes a directory)',
+            'Del / D .... delete, directories and all (asks first)',
+            'u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)',
+            ': .......... run a shell command in this directory',
+            '? / Help ... this help',
+            'Esc ........ cancel a running copy/delete, else quit (asks)',
+            '',
+            '-- arrows scroll, any other key returns --',
+            NIL]:LONG
+  WHILE lines[nlines]
+    nlines++
+  ENDWHILE
+  hindent := (ncols - 60) / 2
+  IF hindent < 1 THEN hindent := 1
+  maxv := nlines - visrows
+  IF maxv < 0 THEN maxv := 0
+  drawviewframe(TRUE)    -> closed border + the viewer's footer
+  drawhelp(lines, nlines, vtop, hindent)
+  WHILE over = FALSE
+    class := WaitIMessage(win)
+    code := MsgCode()
+    qual := MsgQualifier()
+    nv := vtop
+    IF class = IDCMP_RAWKEY
+      IF code < $80
+        IF code = RK_UP
+          IF qual AND IEQUALIFIER_CONTROL
+            nv := 0
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            nv := vtop - (visrows - 1)
+          ELSE
+            nv := vtop - 1
+          ENDIF
+        ELSEIF code = RK_DOWN
+          IF qual AND IEQUALIFIER_CONTROL
+            nv := maxv
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            nv := vtop + (visrows - 1)
+          ELSE
+            nv := vtop + 1
+          ENDIF
+        ELSEIF (code >= $60) AND (code <= $67)
+          -> a qualifier key on its own: not an answer, keep the help up
+        ELSE
+          over := TRUE
+        ENDIF
+      ENDIF
+    ELSE
+      over := TRUE    -> a vanilla key returns
+    ENDIF
+    IF nv > maxv THEN nv := maxv
+    IF nv < 0 THEN nv := 0
+    IF (nv <> vtop) AND (over = FALSE)
+      vtop := nv
+      drawhelp(lines, nlines, vtop, hindent)
+    ENDIF
+  ENDWHILE
   drawall()
 ENDPROC
 
