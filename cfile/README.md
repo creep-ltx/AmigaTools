@@ -173,8 +173,13 @@ FONT      MicroKnight7/7
 
 Editing `cfile.config` in CFile's own editor applies it on save:
 the font, grid and frames rebuild live, and a bad value keeps the
-last good setup. Without a config file the panes start in `SYS:`
-and `RAM:`.
+last good setup.
+
+The config looks after itself: on start CFile writes a fresh
+`cfile.config` — every setting with a `;` comment above it — if none
+exists, and appends any setting a newer CFile adds that the file
+doesn't have yet. Your own lines, values and comments are never
+touched, so a new setting just appears; you never add it by hand.
 
 CFile also runs without a Startup-Sequence: if `ENV:` or `T:` is
 missing at start it creates them the standard way (`RAM:Env`,

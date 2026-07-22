@@ -456,6 +456,134 @@ PROC saveconfig()
   IF buf THEN Dispose(buf)
 ENDPROC
 
+-> write one setting block: a ";" explanation, the KEY value, a blank line
+PROC cfgput(fh, comment, key, val)
+  DEF line[300]:STRING
+  StringF(line, '; \s\n', comment)
+  wline(fh, line)
+  StringF(line, '\s \s\n\n', key, val)
+  wline(fh, line)
+ENDPROC
+
+-> the value a key should carry in the file, read from the live settings
+-> (which hold the loaded value, or the default when the key was absent)
+PROC cfgval(key, dst)
+  IF StrCmp(key, 'LEFT')
+    IF EstrLen(cfgleft) = 0 THEN StrCopy(dst, '(volumes)') ELSE StrCopy(dst, cfgleft)
+  ELSEIF StrCmp(key, 'RIGHT')
+    IF EstrLen(cfgright) = 0 THEN StrCopy(dst, '(volumes)') ELSE StrCopy(dst, cfgright)
+  ELSEIF StrCmp(key, 'SAVEDIRS')
+    StrCopy(dst, IF savedirs THEN 'ON' ELSE 'OFF')
+  ELSEIF StrCmp(key, 'ARCWRITE')
+    StrCopy(dst, IF arcwrite THEN 'ONEXIT' ELSE 'DIRECT')
+  ELSEIF StrCmp(key, 'ICONS')
+    StrCopy(dst, IF icons THEN 'ON' ELSE 'OFF')
+  ELSEIF StrCmp(key, 'SORT')
+    IF sortmode = 1
+      StrCopy(dst, 'size')
+    ELSEIF sortmode = 2
+      StrCopy(dst, 'date')
+    ELSE
+      StrCopy(dst, 'name')
+    ENDIF
+    IF sortrev THEN StrAdd(dst, ' rev')
+  ELSEIF StrCmp(key, 'FONT')
+    IF EstrLen(cfgfont) = 0 THEN StrCopy(dst, 'topaz.font') ELSE StrCopy(dst, cfgfont)
+  ELSE
+    StrCopy(dst, '')
+  ENDIF
+ENDPROC
+
+-> TRUE if `key` appears as the first token of a non-comment line in buf
+PROC keypresent(buf:PTR TO CHAR, n, key)
+  DEF i=0, j, l, line[300]:STRING, tok[24]:STRING, sp, found=FALSE
+  WHILE (i < n) AND (found = FALSE)
+    j := i
+    WHILE (j < n) AND (buf[j] <> 10)
+      j++
+    ENDWHILE
+    l := j - i
+    IF l > 298 THEN l := 298
+    StrCopy(line, '')
+    IF l > 0 THEN StrCopy(line, buf + i, l)
+    i := j + 1
+    IF (EstrLen(line) > 0) AND (line[0] <> ";")
+      sp := 0
+      WHILE (sp < EstrLen(line)) AND (line[sp] <> 32)
+        sp++
+      ENDWHILE
+      IF sp > 0
+        StrCopy(tok, line, IF sp > 22 THEN 22 ELSE sp)
+        UpperStr(tok)
+        IF StrCmp(tok, key) THEN found := TRUE
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC found
+
+-> at start-up: create cfile.config with commented defaults if it is
+-> missing, or append any known setting the file does not yet have (so a
+-> setting added in a later CFile just appears, no hand-editing). The
+-> table is the one place a new setting is declared - key + its comment.
+PROC configensure()
+  DEF tab:PTR TO LONG, nk=7, ki, fh, buf=NIL, n=0, exists=FALSE,
+      key:PTR TO CHAR, comment:PTR TO CHAR, val[300]:STRING,
+      anymissing=FALSE, line[80]:STRING
+  tab := ['LEFT', 'Left pane start path.  (volumes) starts in the volume list.',
+          'RIGHT', 'Right pane start path.',
+          'SAVEDIRS', 'Write the pane paths back on quit: ON or OFF.',
+          'ARCWRITE', 'Archive edits to disk: ONEXIT (batch, commit on leave) or DIRECT.',
+          'ICONS', 'Carry a file .info icon along on copy/move/delete/rename: ON or OFF.',
+          'SORT', 'Start-up sort order: name, size or date; add rev to reverse.',
+          'FONT', 'Display font name/size.  topaz.font = ROM Topaz 8.']:LONG
+  IF fh := Open('PROGDIR:cfile.config', MODE_OLDFILE)
+    exists := TRUE
+    buf := New(4096)
+    IF buf
+      n := Read(fh, buf, 4095)
+      IF n < 0 THEN n := 0
+    ENDIF
+    Close(fh)
+  ENDIF
+  IF exists AND (buf = NIL) THEN RETURN    -> could not read; leave it be
+  IF exists = FALSE
+    -> no file: write a fresh one with every block
+    IF fh := Open('PROGDIR:cfile.config', MODE_NEWFILE)
+      StringF(line, '; CFile configuration\n\n')
+      wline(fh, line)
+      FOR ki := 0 TO nk - 1
+        key := tab[ki * 2]
+        comment := tab[(ki * 2) + 1]
+        cfgval(key, val)
+        cfgput(fh, comment, key, val)
+      ENDFOR
+      Close(fh)
+    ENDIF
+    RETURN
+  ENDIF
+  -> the file exists: append any key it is missing
+  FOR ki := 0 TO nk - 1
+    IF keypresent(buf, n, tab[ki * 2]) = FALSE THEN anymissing := TRUE
+  ENDFOR
+  IF anymissing
+    IF fh := Open('PROGDIR:cfile.config', MODE_OLDFILE)
+      Seek(fh, 0, OFFSET_END)
+      StringF(line, '\n')
+      wline(fh, line)
+      FOR ki := 0 TO nk - 1
+        key := tab[ki * 2]
+        comment := tab[(ki * 2) + 1]
+        IF keypresent(buf, n, key) = FALSE
+          cfgval(key, val)
+          cfgput(fh, comment, key, val)
+        ENDIF
+      ENDFOR
+      Close(fh)
+    ENDIF
+  ENDIF
+  Dispose(buf)
+ENDPROC
+
 -> an empty pane path means the pane shows the volume list
 PROC involume(p)
 ENDPROC EstrLen(ppath[p]) = 0
@@ -6601,6 +6729,7 @@ ENDPROC
 PROC main() HANDLE
   ensureassigns()
   loadconfig()
+  configensure()    -> create/complete cfile.config before the args override
   parseargs()
   initpanes()
   readpane(0)
