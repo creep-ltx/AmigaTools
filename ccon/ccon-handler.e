@@ -66,7 +66,15 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'devices/inputevent','devices/timer','devices/input',
        'devices/clipboard',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
-       'keymap','diskfont'
+       'keymap','diskfont',
+       -> v1.3 ICONIFY: AppIcon plumbing. 'wb' = workbench.library calls
+       -> (AddAppIconA/RemoveAppIcon) + workbenchbase; 'icon' = icon.library
+       -> (GetDiskObject/GetDefDiskObject/FreeDiskObject) + iconbase;
+       -> 'workbench/workbench' = the diskobject/appmessage structs + the
+       -> WBPROJECT/AMTYPE_APPICON consts. The icon load itself is DOS (it
+       -> reads the .info file) so it rides the fontload helper process;
+       -> AddAppIconA/RemoveAppIcon are exec-level messaging.
+       'wb','icon','workbench/workbench'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -369,6 +377,16 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fhtask=NIL,
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
+    -> v1.3 ICONIFY (Stage 0): AppIcon plumbing. iconobj is the shared
+    -> DiskObject every iconified window's AppIcon renders - loaded ONCE at
+    -> init on the fontload helper process (GetDiskObject is DOS), so the
+    -> no-DOS rule stays whole; a default icon backs a missing file.
+    -> wbport receives the click (AppMessage) back from Workbench.
+    iconok=FALSE,               -> workbench.library + a usable icon both up
+    iconobj=NIL:PTR TO diskobject,
+    wbport=NIL:PTR TO mp,       -> AppMessage reply port (in the Wait mask)
+    testai=NIL:PTR TO appicon,  -> STAGE-0 SCAFFOLD: a test AppIcon
+    testdone=FALSE,             -> STAGE-0 SCAFFOLD: one-shot test fired
     ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
     -> B7 reflow scratch: the write cursor and destination planes the
     -> emit helpers share. Globals because E has no closures and the
@@ -421,7 +439,7 @@ PROC main()
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
       stps:PTR TO CHAR, c:PTR TO console, cnext,
-      wp:PTR TO INT, lp:PTR TO LONG
+      wp:PTR TO INT, lp:PTR TO LONG, amsg:PTR TO appmessage
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -594,6 +612,7 @@ PROC main()
     ENDWHILE
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
+    IF wbport THEN wsig := wsig OR Shl(1, wbport.sigbit)  -> ICONIFY: AppMessages
     Wait(psig OR wsig)
     -> drain the packet port
     REPEAT
@@ -663,6 +682,13 @@ PROC main()
         ENDIF
       UNTIL msg = NIL
     ENDIF
+    -> ICONIFY: drain Workbench's AppMessages (AppIcon double-clicks)
+    IF wbport
+      REPEAT
+        amsg := GetMsg(wbport)
+        IF amsg THEN doappmsg(amsg)
+      UNTIL amsg = NIL
+    ENDIF
   ENDWHILE
   killhandler()                 -> B5: release exec resources, then E's
 ENDPROC                         -> exit (CLEANUPALL) frees the New memory
@@ -678,6 +704,7 @@ ENDPROC                         -> exit (CLEANUPALL) frees the New memory
 -> ihis/ihring underneath a still-live handler. CloseDevice before
 -> DeleteIORequest before DeleteMsgPort throughout.
 PROC killhandler()
+  DEF msg:PTR TO mn             -> ICONIFY: draining stray AppMessages
   IF ihon                       -> the chain handler was added
     ihreq.command := IND_REMHANDLER
     ihreq.data := ihis
@@ -699,6 +726,30 @@ PROC killhandler()
   IF keymapbase
     CloseLibrary(keymapbase)
     keymapbase := NIL
+  ENDIF
+  -> ICONIFY: tear the AppIcon plumbing down. RemoveAppIcon FIRST (Workbench
+  -> stops sending for it), then drain+reply any AppMessage already in flight
+  -> before the port dies, then free the icon and close the libraries.
+  IF testai
+    RemoveAppIcon(testai)
+    testai := NIL
+  ENDIF
+  IF wbport
+    WHILE (msg := GetMsg(wbport)) DO ReplyMsg(msg)
+    DeleteMsgPort(wbport)
+    wbport := NIL
+  ENDIF
+  IF iconobj
+    FreeDiskObject(iconobj)
+    iconobj := NIL
+  ENDIF
+  IF workbenchbase
+    CloseLibrary(workbenchbase)
+    workbenchbase := NIL
+  ENDIF
+  IF iconbase
+    CloseLibrary(iconbase)
+    iconbase := NIL
   ENDIF
   IF ihsigbit >= 0
     FreeSignal(ihsigbit)
@@ -1687,6 +1738,82 @@ PROC fontload(ta:PTR TO textattr)
   IF f = NIL THEN f := OpenFont(ta)
 ENDPROC f
 
+-> ---------- v1.3 ICONIFY: AppIcon plumbing (Stage 0) ----------
+-> The icon image is loaded ONCE and shared by every iconified window's
+-> AppIcon. GetDiskObject reads the .info file (DOS), so it rides the
+-> fontload helper process - the same throwaway-process, own-pr_MsgPort
+-> escape the disk-font loader uses, keeping the no-DOS rule whole.
+
+-> runs ON THE HELPER process (A4 restored by the poked stub, exactly
+-> like fonthelper). A missing DEVS:CCon.info (or no icon.library) falls
+-> back to the ROM/ENV default project icon, so an AppIcon always renders.
+PROC iconhelper()
+  DEF p:PTR TO process
+  p := FindTask(NIL)
+  p.windowptr := -1             -> no "please insert volume" boxes
+  iconobj := NIL
+  IF iconbase
+    iconobj := GetDiskObject('DEVS:CCon')   -> appends .info
+    IF iconobj = NIL THEN iconobj := GetDefDiskObject(WBPROJECT)
+  ENDIF
+  Signal(fhtask, fhsig)         -> ALWAYS - the handler is waiting
+ENDPROC
+
+-> spawn the helper to fetch the shared AppIcon image, the same one-shot
+-> mechanism fontload uses. The stub's proc vector (fhgd[1]) is repointed
+-> at iconhelper for this call and restored to fonthelper after - safe
+-> because this runs at init, BEFORE any font load, single-threaded.
+PROC iconload()
+  IF fhok = FALSE THEN RETURN
+  fhgd[1] := {iconhelper}
+  SetSignal(0, fhsig)           -> no stale wakeups
+  IF CreateNewProc([NP_ENTRY, fhstub,
+                    NP_NAME, 'ccon-iconload',
+                    NP_STACKSIZE, 16384,
+                    NP_COPYVARS, FALSE,
+                    NP_CURRENTDIR, 0,
+                    NP_INPUT, 0,
+                    NP_OUTPUT, 0,
+                    NP_CLOSEINPUT, FALSE,
+                    NP_CLOSEOUTPUT, FALSE,
+                    TAG_DONE, NIL])
+    Wait(fhsig)
+  ENDIF
+  fhgd[1] := {fonthelper}       -> restore the stub for disk fonts
+ENDPROC
+
+-> lazily bring the AppIcon plumbing up: open workbench.library +
+-> icon.library (both ROM-resident, pure exec OpenLibrary) and fetch the
+-> shared icon once. Lazy - not at handler init - so it runs the first
+-> time a window opens, by which point a public screen exists (Workbench
+-> is up); an early system-CON: mount pre-Workbench would find no app to
+-> take the icon. Returns whether iconify can work. wbport carries the
+-> click back and joins the main Wait() mask.
+PROC wbensure()
+  IF iconok THEN RETURN TRUE
+  IF workbenchbase = NIL THEN workbenchbase := OpenLibrary('workbench.library', 37)
+  IF iconbase = NIL THEN iconbase := OpenLibrary('icon.library', 37)
+  IF workbenchbase = NIL THEN RETURN FALSE
+  IF wbport = NIL THEN wbport := CreateMsgPort()
+  IF wbport = NIL THEN RETURN FALSE
+  IF iconobj = NIL THEN iconload()
+  IF iconobj = NIL THEN RETURN FALSE
+  iconok := TRUE
+ENDPROC TRUE
+
+-> a Workbench AppMessage arrived (an AppIcon was double-clicked). STAGE 0:
+-> the only AppIcon is the test one, so a click proves the whole round-trip
+-> - AddAppIconA put it up, Workbench delivered the message to wbport, and
+-> RemoveAppIcon takes it away again. Later stages dispatch on am.userdata
+-> (the console) to un-iconify. Reply ALWAYS.
+PROC doappmsg(am:PTR TO appmessage)
+  IF (am.type = AMTYPE_APPICON) AND testai
+    RemoveAppIcon(testai)
+    testai := NIL
+  ENDIF
+  ReplyMsg(am)
+ENDPROC
+
 PROC openwin()
   DEF ta:textattr, i, idc, scrn:PTR TO screen, v,     -> audit2 B9: a
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
@@ -1975,6 +2102,18 @@ PROC openwin()
   -> armed last: the chain handler takes nothing until the per-window
   -> state above is fully rebuilt (conbywin checks this flag)
   curcon.armed := TRUE
+  -> STAGE-0 SCAFFOLD (remove in Stage 1): the first time a window opens -
+  -> so a public screen exists and Workbench is up - bring the AppIcon
+  -> plumbing up and drop ONE test AppIcon on the backdrop. Double-clicking
+  -> it removes it (doappmsg), proving load + AddAppIconA + the wbport
+  -> AppMessage round-trip + RemoveAppIcon on real hardware, with no window
+  -> code touched yet. userdata=0 (no console association yet).
+  IF testdone = FALSE
+    IF wbensure()
+      testai := AddAppIconA(0, 0, 'CCON', wbport, 0, iconobj, NIL)
+      IF testai THEN testdone := TRUE   -> only consume the one-shot on
+    ENDIF                               -> SUCCESS - a pre-Workbench mount
+  ENDIF                                 -> retries on the next window open
 ENDPROC
 
 -> real close semantics (M5c): pending reads answer EOF, pending
