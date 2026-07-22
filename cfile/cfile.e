@@ -3945,15 +3945,13 @@ PROC arcxfer_in(p, q, ismove, force)
       src[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, k, stop=FALSE, ndone=0,
       added=FALSE, doit, replace, total=0
-  IF islzx(q)
-    arclzxsoon()
-    RETURN
-  ENDIF
   IF involume(p) OR efail[p] OR (ecount[p] = 0)
     showmsg('nothing to add from this pane')
     RETURN
   ENDIF
-  IF arcwrite
+  -> lha ONEXIT defers the add (arcxfer_indefer). lha DIRECT and lzx (which
+  -> does not defer yet - that is step 5) add immediately below.
+  IF arcwrite AND (islzx(q) = FALSE)
     arcxfer_indefer(p, q, ismove, force)
     RETURN
   ENDIF
@@ -3987,7 +3985,11 @@ PROC arcxfer_in(p, q, ismove, force)
         IF EstrLen(arcsub[q]) = 0
           -> add straight from the source pane: -r stores nm/... at the
           -> archive root, no mirror copy needed
-          StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], nm)
+          IF islzx(q)
+            StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[q], nm)
+          ELSE
+            StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], nm)
+          ENDIF
           res := arcrunprog(ppath[p], cmd)
         ELSE
           -> mirror the tree under the arcsub prefix, then -r add its top
@@ -3997,7 +3999,11 @@ PROC arcxfer_in(p, q, ismove, force)
           makepath(sfile)
           IF copytree(src, sfile, 0)
             firstcomp(topname, arcsub[q])
-            StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            IF islzx(q)
+              StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[q], topname)
+            ELSE
+              StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            ENDIF
             res := arcrunprog('T:CFile-a', cmd)
           ELSE
             res := -1
@@ -4048,11 +4054,18 @@ PROC arcxfer_in(p, q, ismove, force)
               StrCopy(topname, nm)
             ENDIF
             -> now the source is safely staged, drop the old member so the
-            -> add is not skipped as "already present"
-            IF replace THEN arcdelmember(arcpath[q], member)
-            -> -r a from the scratch root: lha stores the tree-relative
-            -> path, the only add form that keeps a subdirectory prefix
-            StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            -> add is not skipped/duplicated as "already present"
+            IF replace
+              IF islzx(q) THEN lzxdelmember(arcpath[q], member) ELSE arcdelmember(arcpath[q], member)
+            ENDIF
+            -> -r a from the scratch root: stores the tree-relative path, the
+            -> only add form that keeps a subdirectory prefix (lzx -e too, so
+            -> an empty subdir in the staged tree is archived)
+            IF islzx(q)
+              StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[q], topname)
+            ELSE
+              StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+            ENDIF
             res := arcrunprog('T:CFile-a', cmd)
             DeleteFile('T:CFile-out')
             IF res = -1
@@ -4254,10 +4267,6 @@ PROC arcdelete(p)
   DEF b, nmark, i, pick, k, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       mb[130]:STRING, total=0, ndel=0, hasdir=FALSE, ok,
       stageroot[CPATHLEN]:STRING
-  IF islzx(p)
-    arclzxsoon()
-    RETURN
-  ENDIF
   IF ecount[p] = 0 THEN RETURN
   b := p * MAXENT
   nmark := markcount(p)
@@ -4274,6 +4283,26 @@ PROC arcdelete(p)
   k := waitvanilla()
   IF (k <> "y") AND (k <> "Y")
     drawpaths()
+    RETURN
+  ENDIF
+  IF islzx(p)
+    -> lzx: delete now (files by name, folders and all via lzxdeltree - lzx d
+    -> removes stored dir members, so no rebuild). Not deferred yet (step 5).
+    FOR i := 0 TO ecount[p] - 1
+      pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+      IF pick
+        arcmember(member, arcsub[p], enames[b + i])
+        IF edirs[b + i] THEN lzxdeltree(p, member) ELSE lzxdelmember(arcpath[p], member)
+        ndel := ndel + 1
+      ENDIF
+    ENDFOR
+    loadarchive(p, arcpath[p])
+    refreshall()
+    IF ndel > 0
+      StringF(mb, '\d entr\s deleted from the archive', ndel,
+              IF ndel = 1 THEN 'y' ELSE 'ies')
+      showmsg(mb)
+    ENDIF
     RETURN
   ENDIF
   IF arcwrite
