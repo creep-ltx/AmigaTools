@@ -3264,9 +3264,31 @@ documented with the real fix parked (`audit2.md` D).
       against the same model. Asked about 19.7.26d, deliberately
       not scoped further yet — "note it down for later," his words.
 
-- [ ] **Double buffering — THE v1.2 PRIORITY (his call, 22.7.26).**
-      Of the parked big-swing items this is the one that matters most
-      to him. (or a cheaper partial fix) for screen
+- [x] **Double buffering SHIPPED, and the More complaint SOLVED - but by
+      a DIFFERENT fix than expected (1.2b23, 22.7.26). "he loves it".**
+      Double buffering is in (1.2b21-b23): a SHARED offscreen back-buffer,
+      client output accumulates in it and blits once per packet drain
+      (`bufopen`/`bufflush`/`bufensure`, `bbactive`; `curcon.rp` funnels
+      all drawing so the draw code was untouched). It makes multi-row
+      writes atomic and fixed a black trail. BUT it did NOT fix More
+      paging, because the More complaint was never a buffering problem:
+      **More sends `^L` (form feed, byte 12) before every page to clear
+      the screen, and `render()` never handled byte 12** - so More's page
+      appended and SCROLLED instead of replacing. CON:/console.device
+      clear on FF; `list` sends no `^L`, which is why `list` always
+      scrolled right. Found by CAPTURING More's actual output bytes (the
+      trace also showed `WFWFWF` - More round-trips one write per line, so
+      no drain-batching could ever catch a page). Fixed in b23: `render()`
+      treats `^L` as clear-screen + home. More now page-replaces like
+      CON:. The double buffering stays (it earns its keep on multi-row
+      writes), but the STAR was the one-byte form-feed fix - the "read
+      what the client actually sends" habit again. Residual, if he ever
+      wants More TRULY instant (not just page-replaced): batch from `^L`
+      to page-settle - only FF-senders repaint, so it would not touch
+      `list`. Not needed unless asked. Original write-up follows.
+
+      The original scope question (kept for the record):
+      (or a cheaper partial fix) for screen
       redraws. His observation: under stock CON:, a full-page
       client redraw (More paging) flips to the new page instantly;
       under CCON the same redraw is visibly progressive, "scroll
