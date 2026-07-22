@@ -30,7 +30,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `a` / `A` | mark all / mark none |
 | `*` | invert the marks |
 | `+` | mark by pattern — a `*.mod` glob or an AmigaDOS `#?.mod` pattern; matches are added to the marked set |
-| `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total |
+| `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total. Inside an archive it sums the member sizes under the folder (instant) |
 | `s` | sort: pick `(n)ame`, `(s)ize` or `(d)ate`, or `(r)everse`; both panes re-sort at once, directories stay first. Sorting by date shows a compact date in the size column |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |

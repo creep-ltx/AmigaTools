@@ -85,9 +85,9 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 - [ ] **Per-byte progress inside a file** — the bar ticks once per
       file, so one big member is a single jump. lha prints a
       `(done/total)` byte counter that could drive it finer.
-- [ ] **Archive dir sizing** — `=` refuses inside an archive (treestat
-      walks the real FS only), but a member subtree's size is a cheap
-      sum of amsz under the prefix. Could fill the column there too.
+- [x] **Archive dir sizing** — done. `=` inside an archive sums the
+      member sizes under the folder (arcsizeunder over the amsz cache),
+      filling the size column instantly, no walk.
 
 ## 0.3 candidates — "fast in the hand"
 

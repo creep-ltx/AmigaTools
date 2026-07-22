@@ -6355,24 +6355,28 @@ ENDPROC
 -> every directory on entry would freeze CFile on a real drive. The
 -> figure lasts until the pane is re-read (which resets dirs to <DIR>).
 PROC sizedir()
-  DEF p, i, path[CPATHLEN]:STRING
+  DEF p, i, path[CPATHLEN]:STRING, member[CPATHLEN]:STRING
   p := active
   IF involume(p) THEN RETURN
   IF efail[p] OR (ecount[p] = 0) THEN RETURN
-  IF inarchive(p)
-    showmsg('directory sizing works on real directories only')
-    RETURN
-  ENDIF
   i := (p * MAXENT) + esel[p]
   IF edirs[i] = 0 THEN RETURN    -> a file already shows its size
-  buildfull(path, ppath[p], enames[i])
-  showmsg('measuring - please wait')
-  statbytes := 0
-  statfiles := 0
-  treestat(path, 0)
-  esize[i] := statbytes
-  clearmsg()    -> restores the paths row (marked total now includes it)
+  IF inarchive(p)
+    -> inside an archive the sizes are already cached: just sum the
+    -> member bytes under this folder's prefix (instant, no walk)
+    arcmember(member, arcsub[p], enames[i])
+    esize[i] := arcsizeunder(p, member)
+  ELSE
+    buildfull(path, ppath[p], enames[i])
+    showmsg('measuring - please wait')
+    statbytes := 0
+    statfiles := 0
+    treestat(path, 0)
+    esize[i] := statbytes
+    clearmsg()    -> restores the paths row
+  ENDIF
   drawrow(p, esel[p] - etop[p])
+  drawpaths()    -> a marked measured dir now weighs into the border total
 ENDPROC
 
 -> extract one file member of pane p's archive into T:CFile-x, path
