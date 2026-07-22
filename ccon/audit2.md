@@ -29,19 +29,26 @@ specified in audit.md, both never applied.
 
 ## Status
 
+**CAMPAIGN COMPLETE (22.7.26).** All findings resolved: four batches
+shipped and boot-green, B12 closed as not-a-CCON-bug, P6 documented with
+its real fix parked by Tobias's call. Per-finding detail below; each
+finding's own section carries the fix and its verification.
+
 | Finding | Kind | Reachable | State |
 |---|---|---|---|
-| B12 | freeze | any runaway/unbounded-output client | open - HARD LOCK, mechanism not yet located (22.7.26) |
-| P3 | perf | every keystroke | **re-opened** - written in audit.md, never implemented |
-| B9 | leak | every window open | open |
-| B11 | robustness | crafted/buggy clipboard | open |
-| B10 | correctness | extreme geometry only | open |
-| P6 | robustness | wedged/slow filesystem | open (was audit.md's P5 tail) |
-| H3 | hardening | latent, not live | **re-opened** - covered by closewin today |
-| H6 | cleanliness | n/a | open |
+| B9 | leak | every window open | **fixed** 1.2b15 (stack textattr), boot-green |
+| H3 | hardening | latent, not live | **fixed** 1.2b15 (condispose completes) |
+| H6 | cleanliness | n/a | **fixed** 1.2b15 (stray Han bytes scrubbed) |
+| P3 | perf | every keystroke | **fixed** 1.2b16 (histslot + early-out), BOOT-GREEN |
+| B10 | correctness | extreme geometry only | **fixed** 1.2b17 (selcopy LF guarded), boot-green |
+| B11 | robustness | crafted/buggy clipboard | **fixed** 1.2b17 (negative-chunk guard), boot-green |
+| P6 | robustness | wedged/slow filesystem | **documented, fix PARKED** (comment at fscall) |
+| B12 | freeze | runaway-output client | **CLOSED - not a CCON bug** (was ls, fixed ls 0.3) |
 
-Ranked hardest-to-avoid first. P3 and B9 fire in normal daily use; B11
-and B10 need a specific trigger; H3/H6 are hygiene.
+P3 and B9 fired in normal daily use (highest value); B11/B10 needed a
+specific trigger; H3/H6 were hygiene; B12 turned out to be `ls`, not
+CCON. P3 and H3 were audit.md findings written up but never implemented,
+re-opened here and now done.
 
 ---
 

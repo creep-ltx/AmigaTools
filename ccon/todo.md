@@ -3174,8 +3174,33 @@ window width without counting characters. `ccon-b1-fill` is the screen,
 
 ### Parked for v1.2 — the big swing
 
-- [ ] **Mount it AS CON: (and RAW:).** The KingCON crown: every
-      console window in the system becomes a CCON window. Own
+**Current standing (22.7.26, his priorities):** the whole audit2
+campaign is done — findings closed, see `audit2.md`/`audit2-roadmap.md`;
+live handler is 1.2b17. Of the four big-swing items below:
+1. **Mount as CON:/RAW: — effectively DONE.** Proven in EXTENDED real
+   use: he has run it as his system CON:/RAW: for a long time now with
+   no issues. Core mechanism + running-as-system-console are battle-
+   tested; only cosmetic polish remains (see the item).
+2. **Double buffering — the PRIORITY.** His call: this is the one of
+   the parked features that matters most for v1.2.
+3. **ICONIFY — low priority.** "Nice to have, not very prioritized."
+4. **DECSTBM — parked, no observed need** (no tested client sets margins).
+Also still open from the FIRST audit: **B8** (raw-mode/Ed resize; root-
+caused, fix reverted — see `audit.md`). And **P6** (fscall timeout)
+documented with the real fix parked (`audit2.md` D).
+
+- [x] **Mount it AS CON: (and RAW:) — proven in extended use, polish
+      only remains (22.7.26).** He has run CCON mounted as the system
+      CON:/RAW: for a long time now with no issues, so the blast-radius
+      risk ("every console the OS opens") is retired in practice. What's
+      left is cosmetic/minor, not blocking: the per-mount probe-answer
+      choice, `dn_Startup` naming so one binary knows which name it was
+      mounted under, and the "CCON:" labels (debug-node + default title)
+      that still read literally even when serving as CON:. The original
+      write-up follows.
+
+      The KingCON crown: every console window in the system becomes a
+      CCON window. Own
       release, own test ladder — the blast radius changes from
       "windows you asked for" to "every console the OS opens"
       (Startup-Sequence output, requesters' CON: opens, EndCLI,
@@ -3211,7 +3236,8 @@ window width without counting characters. `ccon-b1-fill` is the screen,
       binary carries CON:/RAW:/CCON:/CRAW: cleanly and knows which
       name it was mounted under.
 
-- [ ] **ICONIFY.** Stock CON:'s option, not implemented (`ccon.doc`
+- [ ] **ICONIFY — low priority (his call, 22.7.26): nice to have, not
+      prioritized.** Stock CON:'s option, not implemented (`ccon.doc`
       LIMITATIONS has said so since Theme A). A gadget on the
       window that collapses it to a Workbench AppIcon and restores
       it on a click. Real, multi-part work, not a quick fix: needs
@@ -3226,7 +3252,9 @@ window width without counting characters. `ccon-b1-fill` is the screen,
       against the same model. Asked about 19.7.26d, deliberately
       not scoped further yet — "note it down for later," his words.
 
-- [ ] **Double buffering** (or a cheaper partial fix) for screen
+- [ ] **Double buffering — THE v1.2 PRIORITY (his call, 22.7.26).**
+      Of the parked big-swing items this is the one that matters most
+      to him. (or a cheaper partial fix) for screen
       redraws. His observation: under stock CON:, a full-page
       client redraw (More paging) flips to the new page instantly;
       under CCON the same redraw is visibly progressive, "scroll
