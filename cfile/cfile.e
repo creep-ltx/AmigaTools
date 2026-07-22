@@ -2547,7 +2547,8 @@ ENDPROC ok
 PROC deltree(path, depth, tick)
   DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, ok, got, isdir=FALSE,
       nm[108]:STRING, child, pm[130]:STRING,
-      skip[16]:ARRAY OF LONG, nskip=0, j, more, over, sawany=FALSE
+      skip[16]:ARRAY OF LONG, nskip=0, j, more, over, sawany=FALSE,
+      giveup=FALSE    -> stop this level, but nskip stays the true slot count
   IF depth > 20
     showmsg('directory tree too deep')
     gfails := gfails + 1
@@ -2563,7 +2564,7 @@ PROC deltree(path, depth, tick)
     IF (lock := Lock(path, SHARED_LOCK)) = NIL
       StringF(pm, 'cannot read "\s"', FilePart(path))
       faultmsg(pm)
-      nskip := 999    -> cannot even scan: give up on this level
+      giveup := TRUE    -> cannot even scan: give up on this level
     ELSE
       IF Examine(lock, fib)
         -> first child that is not on the skip list
@@ -2606,23 +2607,23 @@ PROC deltree(path, depth, tick)
         -> leave it behind and carry on with its siblings
         IF nskip < 16
           IF (skip[nskip] := String(108)) = NIL
-            nskip := 999
+            giveup := TRUE
           ELSE
             StrCopy(skip[nskip], nm)
             nskip := nskip + 1
           ENDIF
         ELSE
-          nskip := 999    -> too many failures here: stop this level
+          giveup := TRUE    -> too many failures here: stop this level
         ENDIF
       ENDIF
     ENDIF
-  UNTIL (got = FALSE) OR (nskip > 16)
-  IF nskip > 0
-    IF nskip <= 16
-      FOR j := 0 TO nskip - 1
-        DisposeLink(skip[j])
-      ENDFOR
-    ENDIF
+  UNTIL (got = FALSE) OR giveup
+  -> free every skip slot we actually allocated (nskip is the true count now,
+  -> so a give-up no longer leaks them)
+  FOR j := 0 TO nskip - 1
+    DisposeLink(skip[j])
+  ENDFOR
+  IF (nskip > 0) OR giveup
     ok := FALSE
     gfails := gfails + 1    -> the directory itself stays behind
   ELSE

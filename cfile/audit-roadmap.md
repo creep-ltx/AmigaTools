@@ -90,7 +90,17 @@ _Original finding:_
 - **Test:** `s` → date, `/`, type a filter, confirm the date column matches
   each visible name.
 
-### [ ] 3. `deltree` leaks its skip-list when a dir has >16 undeletable entries
+### [x] 3. `deltree` leaks its skip-list when a dir has >16 undeletable entries
+
+**Fixed.** The `999` sentinel was overloaded onto `nskip` (the allocated-string
+count), so the `IF nskip <= 16` cleanup guard skipped disposal on give-up. Split
+the sentinel into a separate `giveup` flag; `nskip` is now strictly the true
+slot count, the cleanup unconditionally `DisposeLink`s `skip[0..nskip-1]`, and
+the loop terminator / "dir stays behind" test use `giveup`. Behaviour unchanged;
+the leak is gone (and the theoretical out-of-bounds skip-scan the `999` could
+have caused is moot now too). Compiles clean, staged to FS-UAE.
+
+_Original finding:_
 
 - **Where:** `deltree` `cfile.e:2605-2623`.
 - **Symptom:** When `skip[0..15]` are all allocated and another entry fails,
