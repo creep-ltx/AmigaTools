@@ -43,6 +43,8 @@ KEYS
   =            measure the selected directory: its size replaces
                "<DIR>" in the size column, and a measured directory
                then counts towards the marked total
+  s            sort: pick (n)ame, (s)ize or (d)ate, or (r)everse;
+               both panes re-sort at once, directories stay first
   c / C        copy the selection or marked set to the other pane
                (C overwrites collisions without asking)
   m / M        move likewise (same volume renames, across volumes
@@ -169,6 +171,7 @@ CONFIGURATION
     SAVEDIRS  ON
     ARCWRITE  ONEXIT
     ICONS     ON
+    SORT      name
     FONT      MicroKnight7/7
 
   LEFT/RIGHT are the start paths ("(volumes)" starts a pane in the
@@ -179,8 +182,10 @@ CONFIGURATION
   reach the disk: ONEXIT (the default) batches them and commits on
   leaving the archive, DIRECT rewrites it on every edit. ICONS ON
   (the default) makes copy/move/delete/rename carry a file's
-  "<name>.info" icon along; OFF leaves icons alone. FONT takes
-  any fixed-width disk
+  "<name>.info" icon along; OFF leaves icons alone. SORT sets the
+  start-up order - name (the default), size or date, with an optional
+  "rev" (e.g. SORT size rev); the s key changes it for the session.
+  FONT takes any fixed-width disk
   font; "topaz" always means the ROM font, and a font that fails to
   open, is proportional, or leaves less than an 80x18 grid is
   refused - CFile falls back to Topaz/8. Editing the config in

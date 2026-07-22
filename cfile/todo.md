@@ -110,9 +110,12 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       along; a file and its icon both marked is handled once (infodup).
       `ICONS OFF` restores the old behaviour. Filesystem ops only for
       now — archive copy/move does not carry sidecars yet.
-- [ ] **`s` sort options** — by name/size/date, reversed; dirs stay
-      first. Size is now sort-tracked in sortpane, so sort-by-size is
-      just another entbefore tier. (Long deferred.)
+- [x] **`s` sort options** — done. `s` picks name/size/date or
+      reverse; both panes re-sort in place (marks and cursor kept),
+      dirs stay first, size default largest-first and date newest-first.
+      A new `edate` field (days*1440+minute) feeds date sort on real
+      dirs. Persist the choice with a `SORT name|size|date [rev]` config
+      key; the s key overrides it for the session.
 - [x] **Free space + marked totals** — done in 0.3b2, border row.
 - [ ] **`KEYMAP` config key** — e.g. `KEYMAP s` for a Swedish
       keymap when started without a Startup-Sequence. `C:` is a

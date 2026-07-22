@@ -93,6 +93,8 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     edirs[1000]:ARRAY OF CHAR,    -> nonzero = entry is a directory
     emark[1000]:ARRAY OF CHAR,    -> nonzero = entry is marked
     esize[1000]:ARRAY OF LONG,    -> file size (0 for dirs/volumes)
+    edate[1000]:ARRAY OF LONG,    -> sortable date key (days*1440+minute,
+                                  -> 0 for archive members and volumes)
     ealloc[2]:ARRAY OF LONG,      -> allocated name slots per pane
     ecount[2]:ARRAY OF LONG,
     esel[2]:ARRAY OF LONG,
@@ -141,6 +143,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     icons=TRUE,             -> ICONS key: TRUE = copy/move/delete/rename
                             -> take a "<name>.info" sidecar along (default),
                             -> FALSE = leave icons where they are.
+    sortmode=0,             -> 0 = name (A-Z), 1 = size (large first),
+                            -> 2 = date (newest first); directories always
+                            -> sort ahead of files
+    sortrev=FALSE,          -> reverse the within-tier order
     cfgfont[40]:STRING,     -> FONT key, applied by the grid build
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
@@ -301,6 +307,17 @@ PROC loadconfig()
           ELSEIF StrCmp(key, 'ICONS')
             UpperStr(val)
             icons := StrCmp(val, 'ON')    -> else OFF
+          ELSEIF StrCmp(key, 'SORT')
+            -> SORT name|size|date, plus an optional "rev" word
+            UpperStr(val)
+            IF InStr(val, 'SIZE') >= 0
+              sortmode := 1
+            ELSEIF InStr(val, 'DATE') >= 0
+              sortmode := 2
+            ELSE
+              sortmode := 0
+            ENDIF
+            sortrev := InStr(val, 'REV') >= 0
           ELSEIF StrCmp(key, 'FONT')
             StrCopy(cfgfont, val)
           ENDIF
@@ -380,13 +397,15 @@ PROC saveconfig()
     wline(fh, line)
     StringF(line, '; SAVEDIRS ON|OFF, ARCWRITE DIRECT|ONEXIT,\n')
     wline(fh, line)
-    StringF(line, '; ICONS ON|OFF, FONT name/size\n')
+    StringF(line, '; ICONS ON|OFF, SORT name|size|date [rev], FONT name/size\n')
     wline(fh, line)
     StringF(line, 'SAVEDIRS ON\n')
     wline(fh, line)
     StringF(line, 'ARCWRITE ONEXIT\n')
     wline(fh, line)
     StringF(line, 'ICONS ON\n')
+    wline(fh, line)
+    StringF(line, 'SORT name\n')
     wline(fh, line)
     IF EstrLen(cfgfont) > 0
       StringF(line, 'FONT \s\n', cfgfont)
@@ -506,7 +525,7 @@ PROC arcdiscard(p)
   ENDIF
 ENDPROC
 
-PROC addentry(p, name, isdir, size)
+PROC addentry(p, name, isdir, size, date)
   DEF i
   i := ecount[p]
   IF i >= MAXENT THEN RETURN
@@ -517,6 +536,7 @@ PROC addentry(p, name, isdir, size)
   StrCopy(enames[(p * MAXENT) + i], name)
   edirs[(p * MAXENT) + i] := isdir
   esize[(p * MAXENT) + i] := size
+  edate[(p * MAXENT) + i] := date
   ecount[p] := i + 1
 ENDPROC
 
@@ -670,17 +690,30 @@ PROC infodup(p, idx)
   infobase(enames[idx], base)
 ENDPROC nameismarked(p, base)
 
--> sort order: directories first, then files, alphabetical within each
+-> sort order: directories first, then files. Within a tier the key is
+-> the chosen mode - name (A-Z), size (largest first) or date (newest
+-> first) - reversed by sortrev. The dir-before-file tier never reverses,
+-> so folders stay on top either way. Returns TRUE if i sorts before j.
 PROC entbefore(p, i, j)
-  DEF b, di, dj
+  DEF b, di, dj, c=0
   b := p * MAXENT
   di := edirs[b + i]
   dj := edirs[b + j]
   -> higher tier sorts first: directories/volumes (255) over
-  -> assigns (1) over files (0), alphabetical within each
+  -> assigns (1) over files (0)
   IF di > dj THEN RETURN TRUE
   IF di < dj THEN RETURN FALSE
-ENDPROC nccmp(enames[b + i], enames[b + j]) < 0
+  -> same tier: order by mode (c < 0 means i comes first)
+  IF sortmode = 1          -> size, largest first
+    IF esize[b + i] > esize[b + j] THEN c := -1
+    IF esize[b + i] < esize[b + j] THEN c := 1
+  ELSEIF sortmode = 2      -> date, newest first
+    IF edate[b + i] > edate[b + j] THEN c := -1
+    IF edate[b + i] < edate[b + j] THEN c := 1
+  ENDIF
+  IF c = 0 THEN c := nccmp(enames[b + i], enames[b + j])   -> name / tiebreak
+  IF sortrev THEN c := -c
+ENDPROC c < 0
 
 -> selection sort: n*n/2 compares but only n swaps; fine for one
 -> directory's worth of names
@@ -705,6 +738,14 @@ PROC sortpane(p)
       t := esize[b + i]
       esize[b + i] := esize[b + m]
       esize[b + m] := t
+      t := edate[b + i]
+      edate[b + i] := edate[b + m]
+      edate[b + m] := t
+      -> marks are zero during a read, but an in-place re-sort (s) runs
+      -> after marking, so the mark has to travel with its entry too
+      t := emark[b + i]
+      emark[b + i] := emark[b + m]
+      emark[b + m] := t
     ENDIF
   ENDFOR
 ENDPROC
@@ -894,7 +935,7 @@ PROC loadarchive(p, arcfile)
 ENDPROC amcnt[p] > 0
 
 PROC readdir(p)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, ds:PTR TO LONG
   ecount[p] := 0
   efail[p] := FALSE
   clearmarks(p)
@@ -913,7 +954,11 @@ PROC readdir(p)
       -> so it must never sit in a compound condition
       more := ExNext(lock, fib)
       WHILE more
-        addentry(p, fib.filename, fib.direntrytype > 0, fib.size)
+        -> a sortable date key: minutes since the epoch (days*1440 +
+        -> minute). datestamp is a 3-LONG DateStamp; ticks are dropped
+        ds := fib.datestamp
+        addentry(p, fib.filename, fib.direntrytype > 0, fib.size,
+                 Mul(ds[0], 1440) + ds[1])
         more := ExNext(lock, fib)
       ENDWHILE
     ELSE
@@ -991,10 +1036,10 @@ PROC readarcdir(p)
           ENDWHILE
           IF sl < 0
             StrCopy(comp, rest)
-            addentry(p, comp, FALSE, z[k])    -> a file at this level
+            addentry(p, comp, FALSE, z[k], 0)    -> a file at this level
           ELSE
             StrCopy(comp, rest, sl)           -> a subdirectory name
-            IF arcdirseen(p, comp) = FALSE THEN addentry(p, comp, 255, 0)
+            IF arcdirseen(p, comp) = FALSE THEN addentry(p, comp, 255, 0, 0)
           ENDIF
         ENDIF
       ENDIF
@@ -1025,7 +1070,7 @@ PROC readvolumes(p)
     ENDFOR
     SetStr(nm, len)
     StrAdd(nm, ':')
-    addentry(p, nm, 255, 0)
+    addentry(p, nm, 255, 0, 0)
     dl := NextDosEntry(dl, LDF_VOLUMES)
   ENDWHILE
   -> assigns below the volumes (tier 1 sorts after tier 255)
@@ -1039,7 +1084,7 @@ PROC readvolumes(p)
     ENDFOR
     SetStr(nm, len)
     StrAdd(nm, ':')
-    addentry(p, nm, 1, 0)
+    addentry(p, nm, 1, 0, 0)
     dl := NextDosEntry(dl, LDF_ASSIGNS)
   ENDWHILE
   UnLockDosList(LDF_VOLUMES OR LDF_ASSIGNS OR LDF_READ)
@@ -5964,6 +6009,50 @@ PROC markpattern(p)
   showmsg(mb)
 ENDPROC
 
+-> re-sort a pane's existing listing in place (no re-read) under the
+-> current mode, keeping the cursor on the same entry and its scroll sane
+PROC resortpane(p)
+  DEF b, i, selname[110]:STRING
+  IF ecount[p] < 1 THEN RETURN
+  b := p * MAXENT
+  StrCopy(selname, enames[b + esel[p]])
+  sortpane(p)
+  esel[p] := 0
+  FOR i := 0 TO ecount[p] - 1
+    IF nccmp(enames[b + i], selname) = 0 THEN esel[p] := i
+  ENDFOR
+  etop[p] := esel[p] - (visrows / 2)
+  IF etop[p] > (ecount[p] - visrows) THEN etop[p] := ecount[p] - visrows
+  IF etop[p] < 0 THEN etop[p] := 0
+ENDPROC
+
+-> s: pick the sort mode. One key sets it - (n)ame, (s)ize, (d)ate - or
+-> (r)everse toggles the direction; the setting is global and both panes
+-> re-sort in place at once (dirs always stay ahead of files).
+PROC dosort()
+  DEF k, mb[70]:STRING, nm
+  promptrow('sort: (n)ame  (s)ize  (d)ate  (r)everse')
+  k := waitvanilla()
+  IF k = "n"
+    sortmode := 0
+  ELSEIF k = "s"
+    sortmode := 1
+  ELSEIF k = "d"
+    sortmode := 2
+  ELSEIF (k = "r") OR (k = "R")
+    sortrev := IF sortrev THEN FALSE ELSE TRUE
+  ELSE
+    drawpaths()
+    RETURN
+  ENDIF
+  resortpane(0)
+  resortpane(1)
+  drawall()
+  nm := IF sortmode = 0 THEN 'name' ELSE (IF sortmode = 1 THEN 'size' ELSE 'date')
+  StringF(mb, 'sorted by \s\s', nm, IF sortrev THEN ' (reversed)' ELSE '')
+  showmsg(mb)
+ENDPROC
+
 -> '=': measure the selected real directory with treestat (the same
 -> walk the progress bar pre-counts with) and drop its byte total into
 -> esize, so the size column shows it in place of "<DIR>" and a marked
@@ -6393,7 +6482,7 @@ PROC helpscreen()
   helptext('u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)', y + 9)
   helptext('Space ...... mark/unmark (ops take the marks if any)', y + 10)
   helptext('a A * + .... mark all / none / invert / by pattern', y + 11)
-  helptext('= .......... measure the selected directory (byte size)', y + 12)
+  helptext('= / s ...... measure dir size / sort (name/size/date)', y + 12)
   helptext('c / C ...... copy to the other pane (C overwrites)', y + 13)
   helptext('m / M ...... move to the other pane (M overwrites)', y + 14)
   helptext('r .......... rename (marks: one at a time)', y + 15)
@@ -6461,6 +6550,8 @@ PROC eventloop()
         markinvert(active)
       ELSEIF code = "+"    -> mark by pattern (#?.mod ...)
         markpattern(active)
+      ELSEIF (code = "s") OR (code = "S")    -> sort mode
+        dosort()
       ELSEIF code = "="    -> measure the selected directory's size
         sizedir()
       ELSEIF code = "/"    -> live filter: narrow the pane by typing

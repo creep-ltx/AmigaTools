@@ -30,6 +30,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `*` | invert the marks |
 | `+` | mark by pattern — a `*.mod` glob or an AmigaDOS `#?.mod` pattern; matches are added to the marked set |
 | `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total |
+| `s` | sort: pick `(n)ame`, `(s)ize` or `(d)ate`, or `(r)everse`; both panes re-sort at once, directories stay first |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
@@ -144,6 +145,7 @@ RIGHT     RAM:
 SAVEDIRS  ON
 ARCWRITE  ONEXIT
 ICONS     ON
+SORT      name
 FONT      MicroKnight7/7
 ```
 
@@ -159,6 +161,9 @@ FONT      MicroKnight7/7
   `DIRECT` rewrites the archive on every edit.
 - `ICONS ON` — the default; copy/move/delete/rename carry a file's
   `<name>.info` icon along. `OFF` leaves icons alone.
+- `SORT name` — the start-up sort order: `name` (default), `size` or
+  `date`, with an optional `rev` (e.g. `SORT size rev`). The `s` key
+  changes it for the session.
 - `FONT name/size` — any fixed-width disk font; `topaz` always
   means the ROM font. The whole frame, both panes and the viewer
   re-derive from the font cell, so a small font like a 7×7 gives
