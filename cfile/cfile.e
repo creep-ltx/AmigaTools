@@ -479,6 +479,21 @@ PROC leavearchive(p)
   SetStr(arcsub[p], 0)
 ENDPROC
 
+-> throw away a pane's uncommitted archive edits: drop the staging tree
+-> and reset every flag to CLEAN, so the arccommit that leavearchive runs
+-> next finds nothing to write and the archive on disk is left untouched.
+PROC arcdiscard(p)
+  DEF st:PTR TO LONG, k, stageroot[CPATHLEN]:STRING
+  arcstage(p, stageroot)
+  arcwipe(stageroot)
+  IF amst[p] AND (amcnt[p] > 0)
+    st := amst[p]
+    FOR k := 0 TO amcnt[p] - 1
+      st[k] := MST_CLEAN
+    ENDFOR
+  ENDIF
+ENDPROC
+
 PROC addentry(p, name, isdir, size)
   DEF i
   i := ecount[p]
@@ -1877,7 +1892,7 @@ PROC enterdir()
 ENDPROC
 
 PROC parentdir()
-  DEF p, s:PTR TO CHAR, l, i, cut=-1, colon=-1, start
+  DEF p, s:PTR TO CHAR, l, i, cut=-1, colon=-1, start, k
   p := active
   IF inarchive(p)
     IF EstrLen(arcsub[p]) > 0
@@ -1897,7 +1912,21 @@ PROC parentdir()
       ENDIF
     ELSE
       -> at the archive root: leave the archive, back to its real
-      -> directory, and reselect the archive file there
+      -> directory, and reselect the archive file there. A modified
+      -> archive asks first - save the pending edits, discard them, or
+      -> cancel and stay inside. (Quitting CFile always saves.)
+      IF arcdirty(p)
+        promptrow('archive modified - (s)ave (d)iscard (c)ancel')
+        k := waitvanilla()
+        IF (k = "d") OR (k = "D")
+          arcdiscard(p)    -> leavearchive's commit then finds nothing
+        ELSEIF (k = "s") OR (k = "S")
+          -> keep the pending edits; leavearchive commits them
+        ELSE
+          drawpaths()      -> cancel: stay in the archive
+          RETURN
+        ENDIF
+      ENDIF
       StrCopy(prevname, FilePart(arcpath[p]))
       leavearchive(p)
     ENDIF
