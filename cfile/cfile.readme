@@ -17,6 +17,9 @@ KEYS
 
   Tab          switch the active pane
   Up/Down      move the selection (Shift = page, Ctrl = first/last)
+  /            filter the pane live: type to narrow to matching names,
+               Up/Down walk the matches, Space marks one, Enter keeps
+               the cursor on the match, Esc restores the full listing
   Right        enter the selected directory, volume, or lha archive
   Left         parent directory; at a device root, the volume list;
                inside an archive, up a level and then back out

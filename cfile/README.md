@@ -18,6 +18,7 @@ ANSI, text), and each verb does the natural thing for the type.
 |-----|--------|
 | `Tab` | switch the active pane |
 | `Up` / `Down` | move the selection (`Shift` = page, `Ctrl` = first/last) |
+| `/` | filter the pane live — type to narrow to matching names, `Up`/`Down` walk the matches, `Space` marks one, `Enter` keeps the cursor on the match, `Esc` restores the full listing |
 | `Right` | enter the selected directory, volume, or lha archive |
 | `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
 | `Enter` | open by type: enter a directory or lha archive, view text/ANSI, run an executable (asks first), hex-view the rest |

@@ -91,11 +91,12 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## 0.3 candidates — "fast in the hand"
 
-- [ ] **`/` filter with live narrowing** — `/` enters a prompt mode
-      (like `:`), so every key is text there and no hotkey is lost;
-      the pane narrows live while typing, Esc restores the full
-      listing, Enter keeps the selection on the match. Plain
-      type-ahead cannot work in a hotkey FM — `/` is the type-ahead.
+- [x] **`/` filter with live narrowing** — done. `/` narrows the pane
+      to case-insensitive substring matches as you type; Up/Down walk
+      the matches, Space marks one (so filter-then-mark works), Enter
+      keeps the cursor on the match in the restored full listing, Esc
+      restores it. The full listing is snapshotted and put back
+      untouched, so marks and sort order survive; no disk re-read.
 - [ ] **Manual rescan** — panes go stale when a shell or Workbench
       changes a directory behind CFile's back; one key (?) re-reads
       both panes.

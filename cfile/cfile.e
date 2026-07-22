@@ -596,6 +596,28 @@ PROC nccmp(a, b)
   UNTIL (d <> 0) OR (ca = 0)
 ENDPROC d
 
+-> TRUE if `needle` occurs anywhere in `hay`, case-insensitively (the
+-> empty needle matches everything). Drives the / live filter.
+PROC nchas(hay:PTR TO CHAR, needle:PTR TO CHAR)
+  DEF hl, nl, i, j, c1, c2, ok
+  nl := StrLen(needle)
+  IF nl = 0 THEN RETURN TRUE
+  hl := StrLen(hay)
+  IF nl > hl THEN RETURN FALSE
+  FOR i := 0 TO hl - nl
+    j := 0
+    ok := TRUE
+    WHILE ok AND (j < nl)
+      c1 := hay[i + j]
+      c2 := needle[j]
+      IF (c1 >= "a") AND (c1 <= "z") THEN c1 := c1 - 32
+      IF (c2 >= "a") AND (c2 <= "z") THEN c2 := c2 - 32
+      IF c1 <> c2 THEN ok := FALSE ELSE j++
+    ENDWHILE
+    IF ok THEN RETURN TRUE
+  ENDFOR
+ENDPROC FALSE
+
 -> sort order: directories first, then files, alphabetical within each
 PROC entbefore(p, i, j)
   DEF b, di, dj
@@ -5626,6 +5648,157 @@ PROC doopen()
   ENDIF
 ENDPROC
 
+-> rebuild the active pane's visible listing from the saved full one,
+-> keeping only the entries whose name contains `filt`. The name buffers
+-> are only reordered (pointers), never freed, so the saved arrays can
+-> put everything back on exit. Selection jumps to the first match.
+PROC filterapply(p, snames:PTR TO LONG, sdirs:PTR TO CHAR, ssize:PTR TO LONG,
+                 smark:PTR TO CHAR, fsrc:PTR TO LONG, fullcount, filt:PTR TO CHAR)
+  DEF b, i, j=0
+  b := p * MAXENT
+  FOR i := 0 TO fullcount - 1
+    IF nchas(snames[i], filt)
+      enames[b + j] := snames[i]
+      edirs[b + j] := sdirs[i]
+      esize[b + j] := ssize[i]
+      emark[b + j] := smark[i]
+      fsrc[j] := i    -> which saved entry this visible row came from
+      j++
+    ENDIF
+  ENDFOR
+  ecount[p] := j
+  esel[p] := 0
+  etop[p] := 0
+ENDPROC
+
+-> the / live filter: type to narrow the active pane to matching names,
+-> Up/Down walk the matches, Enter keeps the cursor on the highlighted one
+-> in the restored full listing, Esc restores it where it was. Every key
+-> is filter text, so no hotkey fires while filtering. The full listing is
+-> snapshotted and put back untouched - marks and order survive.
+PROC dofilter()
+  DEF p, b, i, fullcount, origsel, esc=FALSE, done=FALSE, class, code, l,
+      snames=NIL:PTR TO LONG, ssize=NIL:PTR TO LONG,
+      sdirs=NIL:PTR TO CHAR, smark=NIL:PTR TO CHAR, fsrc=NIL:PTR TO LONG,
+      filt[42]:STRING, keepname[110]:STRING
+  p := active
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  b := p * MAXENT
+  fullcount := ecount[p]
+  origsel := esel[p]
+  snames := New(MAXENT * 4)
+  ssize := New(MAXENT * 4)
+  sdirs := New(MAXENT)
+  smark := New(MAXENT)
+  fsrc := New(MAXENT * 4)
+  IF (snames = NIL) OR (ssize = NIL) OR (sdirs = NIL) OR (smark = NIL) OR
+     (fsrc = NIL)
+    IF snames THEN Dispose(snames)
+    IF ssize THEN Dispose(ssize)
+    IF sdirs THEN Dispose(sdirs)
+    IF smark THEN Dispose(smark)
+    IF fsrc THEN Dispose(fsrc)
+    RETURN
+  ENDIF
+  FOR i := 0 TO fullcount - 1
+    snames[i] := enames[b + i]
+    ssize[i] := esize[b + i]
+    sdirs[i] := edirs[b + i]
+    smark[i] := emark[b + i]
+    fsrc[i] := i    -> identity until the first filter compacts the view
+  ENDFOR
+  StrCopy(filt, '')
+  promptrow('')    -> dress the border row once; drawinput fills it
+  drawinput('/', filt, 0, 40)
+  WHILE done = FALSE
+    class := WaitIMessage(win)
+    code := MsgCode()
+    IF class = IDCMP_VANILLAKEY
+      IF code = 13
+        IF ecount[p] > 0 THEN StrCopy(keepname, enames[b + esel[p]])
+        done := TRUE
+      ELSEIF code = 27
+        esc := TRUE
+        done := TRUE
+      ELSEIF code = 32
+        -> Space marks the highlighted match rather than typing a space -
+        -> filter-then-mark is the point. The mark is written back to the
+        -> saved set so it survives re-filtering and the restore on exit.
+        IF ecount[p] > 0
+          i := b + esel[p]
+          emark[i] := IF emark[i] THEN 0 ELSE 1
+          smark[fsrc[esel[p]]] := emark[i]
+          IF esel[p] < (ecount[p] - 1)
+            movedown()
+          ELSE
+            drawrow(p, esel[p] - etop[p])
+          ENDIF
+          drawinput('/', filt, EstrLen(filt), 40)
+        ENDIF
+      ELSEIF code = 8
+        l := EstrLen(filt)
+        IF l > 0
+          SetStr(filt, l - 1)
+          filterapply(p, snames, sdirs, ssize, smark, fsrc, fullcount, filt)
+          drawpane(p)
+          drawinput('/', filt, EstrLen(filt), 40)
+        ENDIF
+      ELSEIF (code > 32) AND (code <= 255)
+        l := EstrLen(filt)
+        IF l < 40
+          filt[l] := code
+          SetStr(filt, l + 1)
+          filterapply(p, snames, sdirs, ssize, smark, fsrc, fullcount, filt)
+          drawpane(p)
+          drawinput('/', filt, EstrLen(filt), 40)
+        ENDIF
+      ENDIF
+    ELSEIF class = IDCMP_RAWKEY
+      IF code < $80
+        IF code = RK_UP
+          IF MsgQualifier() AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            pagemove(-(visrows - 1))
+          ELSE
+            moveup()
+          ENDIF
+          drawinput('/', filt, EstrLen(filt), 40)
+        ELSEIF code = RK_DOWN
+          IF MsgQualifier() AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            pagemove(visrows - 1)
+          ELSE
+            movedown()
+          ENDIF
+          drawinput('/', filt, EstrLen(filt), 40)
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+  -> restore the full listing exactly as it was
+  FOR i := 0 TO fullcount - 1
+    enames[b + i] := snames[i]
+    esize[b + i] := ssize[i]
+    edirs[b + i] := sdirs[i]
+    emark[b + i] := smark[i]
+  ENDFOR
+  ecount[p] := fullcount
+  Dispose(snames)
+  Dispose(ssize)
+  Dispose(sdirs)
+  Dispose(smark)
+  Dispose(fsrc)
+  drawpaths()    -> clear the filter prompt from the border row
+  IF esc OR (EstrLen(keepname) = 0)
+    esel[p] := origsel
+    etop[p] := origsel - (visrows / 2)
+    IF etop[p] > (fullcount - visrows) THEN etop[p] := fullcount - visrows
+    IF etop[p] < 0 THEN etop[p] := 0
+    drawpane(p)
+  ELSE
+    StrCopy(prevname, keepname)
+    selectbyname(p)    -> lands the cursor on the match, centred, redraws
+  ENDIF
+ENDPROC
+
 -> Space: toggle the mark and step down (runs mark quickly that way)
 PROC togglemark()
   DEF p, i
@@ -6049,8 +6222,9 @@ PROC helpscreen()
   SetBPen(rp, 0)
   y := 0
   helptext('CFile 0.3b3', y)
-  helptext('Tab ........ switch pane', y + 2)
-  helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 3)
+  helptext('Tab ........ switch pane', y + 1)
+  helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 2)
+  helptext('/ .......... filter list: type to narrow, Space marks', y + 3)
   helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
   helptext('Enter ...... open: enter dir, view text, run binary', y + 5)
   helptext('v .......... view; marks tour with Right/Left', y + 6)
@@ -6121,6 +6295,8 @@ PROC eventloop()
         togglemark()
       ELSEIF code = "="    -> measure the selected directory's size
         sizedir()
+      ELSEIF code = "/"    -> live filter: narrow the pane by typing
+        dofilter()
       ELSEIF code = ":"    -> a shell command in the active directory
         docommand()
       ELSEIF (code = "u") OR (code = "U")
