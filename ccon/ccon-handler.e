@@ -408,30 +408,6 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> LINEAR dest row + column (converted to a screen row at the end).
     rftr[2]:ARRAY OF LONG, rftc[2]:ARRAY OF LONG,
     rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG,
-    -> v1.2 double buffering: a SHARED offscreen back-buffer. Grown to
-    -> the largest window that ever needs it; the handler renders ONE
-    -> console at a time, so one shared buffer is safe (bbactive names
-    -> the one accumulating; switching flushes the previous). NIL bbmap =
-    -> no buffer, draw direct. bufoff is the kill switch.
-    -> v1.2b26: DEFAULT OFF. Double buffering was never what made More
-    -> flip instead of scroll - that was the ^L=clear+home handling (see
-    -> the byte-12 case in render, and its own comment "never about double
-    -> buffering"). The buffer only added the ATOMIC page-flip polish, and
-    -> it cost a full copy-in/copy-out per write batch - a visible lag on
-    -> ordinary commands (avail). Off = draw direct, like stock CON:: fast
-    -> output, More still clears+homes and paints its page top-to-bottom.
-    -> The machinery stays (bufoff=FALSE re-arms it, now with a model-seed
-    -> copy-in that never reads the screen - the drawer-graphics bug).
-    bbmap=NIL:PTR TO bitmap,     -> the back-buffer bitmap (exec alloc)
-    bbrp=NIL:PTR TO rastport,    -> a RastPort over it (E-heap, lazy)
-    bbw=0, bbh=0, bbdepth=0,     -> current buffer size (grow-only)
-    bbactive=NIL:PTR TO console, -> the console accumulating in the buffer
-    bbpage=FALSE,                -> the accumulation is a ^L page: hold the
-                                 -> flush past the per-drain point until the
-                                 -> client READs (page done) - a full-screen
-                                 -> repaint sent as many round-tripped writes
-                                 -> then shows in ONE blit (instant More)
-    bufoff=TRUE,                 -> TRUE = force direct drawing (default; see above)
     -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
     -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
     -> DOS re-mounts a fresh handler on the next open). ihdevopen tracks
@@ -696,10 +672,6 @@ PROC main()
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
     UNTIL msg = NIL
-    -> double buffering: show what this drain accumulated - UNLESS it is a
-    -> held ^L page (bbpage), which waits for the client's READ so the whole
-    -> repaint, sent as many round-tripped writes, shows in ONE blit.
-    IF bbpage = FALSE THEN bufflush()
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
     -> drain every console's window port - UNLESS that console's
@@ -857,10 +829,6 @@ PROC killhandler()
   IF fsport                     -> the tab-completion reply port
     DeleteMsgPort(fsport)
     fsport := NIL
-  ENDIF
-  IF bbmap                      -> the double-buffer bitmap (AllocBitMap,
-    FreeBitMap(bbmap)           -> an exec resource E does not track; bbrp
-    bbmap := NIL                -> is New()'d and rides E's list)
   ENDIF
 ENDPROC
 
@@ -1210,12 +1178,6 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
-    -> instant-page: flush a held ^L page only when the read will BLOCK
-    -> (nothing queued = the page is done and More waits for a key). A read
-    -> WITH data queued is More consuming a CSI report (window size, cursor
-    -> pos) MID-page - flushing then showed the page early and the rest
-    -> drew per-write (top-to-bottom fill, slow on a deep WB screen).
-    IF inavail() = 0 THEN bufflush()
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -1234,7 +1196,6 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     curcon := c
     ensurewin()
-    IF inavail() = 0 THEN bufflush()  -> as READ: only when it will wait
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
     -> let timer.device answer (input arrival wakes all waiters)
@@ -1375,14 +1336,6 @@ PROC dowrite(pkt:PTR TO dospacket)
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
-  -> v1.2 double buffering: accumulate this console's output in the shared
-  -> back-buffer (bufopen redirects curcon.rp to it). ALL of this write's
-  -> draws - render, the cursor, the edit line - land in the buffer; the
-  -> main loop's bufflush() blits it once after every pending packet is
-  -> drained, so a More page arriving as SEVERAL writes shows as ONE
-  -> instant flip, not a visible scroll. bufopen returns FALSE (leaves
-  -> curcon.rp on the window) if no buffer - then everything draws direct.
-  bufopen(curcon)
   IF curcon.rawmode
     curserase()                 -> raw: the app owns the screen, no blip
     render(pkt.arg2, len)       -> - but the console owns the block
@@ -2285,14 +2238,6 @@ PROC closewin()
     RemoveAppIcon(curcon.appicon)
     curcon.appicon := NIL
   ENDIF
-  -> double buffering: if this console was accumulating in the shared
-  -> buffer, drop it (do NOT flush - the window is going away). Prevents
-  -> a later bufflush/bufopen touching a freed console (a client can send
-  -> its output then ACTION_END inside one packet drain).
-  IF bbactive = curcon
-    bbactive := NIL
-    bbpage := FALSE
-  ENDIF
   IF curcon.win = NIL
     -> a windowless console (an AUTO whose open failed) can still
     -> hold parked packets - they MUST be replied before the console
@@ -2610,9 +2555,6 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed
   IF curcon.win = NIL THEN RETURN
-  bufflush()                    -> show any held ^L page before we resize
-                                -> (else its buffer is a stale size); no-op
-                                -> in the normal case
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
@@ -3578,128 +3520,6 @@ PROC pastehintshow(l)
   curcon.pastehintrow := row
 ENDPROC
 
--> ---------- v1.2 double buffering ----------
--> Client output accumulates in a SHARED offscreen buffer and is shown in
--> ONE blit per drain, so a page a client sends as several writes flips
--> instantly instead of scrolling. bufopen(c) redirects c.rp into the
--> buffer (copying the window IN the first time for c); every draw for c
--> then lands in the buffer; the main loop's bufflush() blits it OUT after
--> all pending packets are drained. The copy-IN matters: an INCREMENTAL
--> draw into the buffer still blits the correct FULL window back, never
--> stale buffer bytes. Switching consoles flushes the previous first (the
--> buffer is shared, one console at a time). Degrades like the ring: if
--> the bitmap will not allocate, bufopen returns FALSE and c.rp stays on
--> the window - everything draws direct exactly as before.
-
--> grow-only: make the shared bitmap at least as big/deep as c's window.
--> FALSE = no usable buffer (caller draws direct).
-PROC bufensure(c:PTR TO console)
-  DEF w, h, d, bm:PTR TO bitmap
-  IF bufoff THEN RETURN FALSE
-  IF c.win = NIL THEN RETURN FALSE
-  IF c.fwin THEN RETURN FALSE          -> borrowed window: its owner may draw
-  IF c.sb = NIL THEN RETURN FALSE      -> no model to seed the buffer from
-                                       -> (redraw() would leave it blank); the
-                                       -> degraded no-ring console draws direct
-  bm := c.win.rport.bitmap
-  IF bm = NIL THEN RETURN FALSE
-  IF bbrp = NIL
-    bbrp := New(SIZEOF rastport)        -> the RastPort struct, once (E-heap)
-    IF bbrp = NIL THEN RETURN FALSE
-  ENDIF
-  w := c.win.width
-  h := c.win.height
-  d := bm.depth
-  IF (bbmap <> NIL) AND (bbw >= w) AND (bbh >= h) AND (bbdepth >= d)
-    RETURN TRUE                         -> current buffer already fits
-  ENDIF
-  IF w < bbw THEN w := bbw              -> grow-only, no realloc thrash
-  IF h < bbh THEN h := bbh
-  IF d < bbdepth THEN d := bbdepth
-  IF bbmap THEN FreeBitMap(bbmap)
-  bbmap := AllocBitMap(w, h, d, 0, bm)  -> friend = window's bitmap
-  IF bbmap = NIL
-    bbw := 0; bbh := 0; bbdepth := 0
-    RETURN FALSE
-  ENDIF
-  bbw := w; bbh := h; bbdepth := d
-  InitRastPort(bbrp)
-  bbrp.bitmap := bbmap
-ENDPROC TRUE
-
--> ensure the shared buffer is ACCUMULATING for console c, and return
--> whether it is (FALSE = no buffer, draw direct). Idempotent: called at
--> the top of a buffered paint, it copies the window in and redirects
--> c.rp only the FIRST time for c. So several writes to the same console
--> in one drain - a More page that arrives as many writes - all draw into
--> the buffer and are shown by ONE bufflush later: an instant page flip
--> instead of a visible scroll. Switching to a DIFFERENT console flushes
--> the previous one first (the buffer is shared, one console at a time).
-PROC bufopen(c:PTR TO console)
-  DEF il, it, iw, ih
-  IF bbactive = c THEN RETURN TRUE        -> already accumulating for c
-  IF bbactive THEN bufflush()             -> a different console: show it first
-  IF bufensure(c) = FALSE THEN RETURN FALSE
-  il := c.win.borderleft
-  it := c.win.bordertop
-  iw := c.win.width - c.win.borderright - il
-  ih := c.win.height - c.win.borderbottom - it
-  IF (iw <= 0) OR (ih <= 0) THEN RETURN FALSE
-  c.rp := bbrp                            -> every draw below targets the buffer
-  -> start accumulation in the SAME state openwin gives the window rport:
-  -> font, default pens. bbrp PERSISTS (the window rport gets reset by
-  -> drawedit/openwin, bbrp does not), so without this a scroll before any
-  -> setpens() - More's first page-down - fills the newly-exposed row with
-  -> the STALE BgPen left black by the previous page's inverse status line
-  -> (clearrow zeroes only the model, not the pixels): a black trail.
-  IF c.tf THEN SetFont(bbrp, c.tf)
-  -> SEED the buffer from our MODEL, never from the screen. The 1.2b19
-  -> copy-in read the RAW screen bitmap at the window's on-screen position
-  -> (BltBitMap, no layer), which captured WHATEVER window sat on top of
-  -> ours in the overlap: a Workbench drawer covering the console, then
-  -> sent to back, left its icons baked into the buffer, and bufflush blit
-  -> them into our window once that region became ours - foreign graphics
-  -> stuck in the console. redraw() reconstructs the inner area from the
-  -> scrollback ring instead - OUR content, obscure-proof - exactly the
-  -> repaint doresize() does (clear the inner rect, then redraw from the
-  -> model). The edit-line text rides along: drawedit() mirrors it into the
-  -> ring, so redraw() paints it too; the block cursor / blip is redrawn by
-  -> dowrite's end-of-write cursdraw()/drawedit(), and the batch-start
-  -> curserase()/eraseedit() repaint from the same model - all consistent.
-  -> c is always curcon here (the sole caller), so redraw()'s curcon.rp is
-  -> the bbrp just set. bufensure() has already refused a NIL-model console.
-  SetAPen(bbrp, 0)
-  RectFill(bbrp, il, it, il + iw - 1, it + ih - 1)
-  SetAPen(bbrp, c.deffg)
-  SetBPen(bbrp, 0)
-  redraw()
-  bbactive := c
-  bbpage := FALSE               -> a fresh batch; a ^L in it turns it into
-                                -> a held page (render sets bbpage)
-ENDPROC TRUE
-
--> show the accumulated buffer: restore direct drawing and blit the
--> buffer's inner area onto the active console's window in one atomic op.
--> A no-op when nothing is accumulating. Called at the packet-drain settle
--> point and when the active console is closing or switched away from.
-PROC bufflush()
-  DEF c:PTR TO console, il, it, iw, ih
-  IF bbactive = NIL THEN RETURN
-  c := bbactive
-  bbactive := NIL
-  bbpage := FALSE
-  IF c.win = NIL THEN RETURN               -> window gone; nothing to show
-  c.rp := c.win.rport
-  IF bbmap = NIL THEN RETURN
-  il := c.win.borderleft
-  it := c.win.bordertop
-  iw := c.win.width - c.win.borderright - il
-  ih := c.win.height - c.win.borderbottom - it
-  IF (iw <= 0) OR (ih <= 0) THEN RETURN
-  BltBitMapRastPort(bbmap, il, it, c.win.rport, il, it, iw, ih, $C0)
-ENDPROC
-
--> redraw the whole grid from the model at the current view offset;
 -> model zeroes render as spaces. viewoff = lines back, 0 = live.
 PROC redraw()
   DEF r, idx
@@ -4479,8 +4299,7 @@ PROC render(buf, len)
       -> START A NEW PAGE - More sends one before every page. CCON never
       -> handled byte 12, so More's page appended and SCROLLED instead of
       -> replacing: THE whole "More scrolls under CCON, flips under CON:"
-      -> complaint, and never about double buffering (list, which does not
-      -> send ^L, correctly kept scrolling the entire time).
+      -> complaint. list, which does not send ^L, correctly kept scrolling.
       SetAPen(curcon.rp, 0)
       RectFill(curcon.rp, curcon.left, curcon.topy,
                curcon.left + Mul(curcon.cols, curcon.cw) - 1,
@@ -4493,13 +4312,6 @@ PROC render(buf, len)
       ENDIF
       curcon.cx := 0
       curcon.cy := 0
-      -> instant-page: a ^L means a full-screen repaint is starting. HOLD
-      -> the buffer's flush (this clear + the page's many round-tripped
-      -> writes accumulate) until the client READs - then the whole page
-      -> shows in one blit. Only when buffering this console; a program
-      -> that never reads is covered by the READ trigger's absence being
-      -> rare (documented) - the common full-screen clients all read.
-      IF bbactive = curcon THEN bbpage := TRUE
       i := i + 1
     ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
       -> printable run: ASCII and Latin-1; $7F-$9F are controls.
