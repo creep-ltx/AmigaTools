@@ -2,6 +2,32 @@
 
 A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
+## 0.3.1 (2026-07-22)
+
+A code-audit pass over 0.3: one data-loss fix, a consistency fix for the
+deferred archive model, and a batch of hardening. No new features.
+
+**The editor no longer caps line length.** A line longer than 200
+characters used to be silently cut on load, and saving wrote the cut back
+— losing the tail. Lines now grow as needed; only the line count (8192)
+and the 512 KB whole-file limit remain.
+
+**`ARCWRITE ONEXIT` now defers a move-out too.** Moving a file or folder
+*out* of an archive used to delete the member from disk immediately, even
+under ONEXIT. It now waits for the commit like every other archive edit —
+the member leaves the pane at once, the border shows `modified`, and the
+deletion lands on leave or quit. (Discarding on leave therefore turns a
+move-out into a copy.)
+
+**The `/` filter keeps the date column aligned** when the panes are
+sorted by date.
+
+**Hardening.** A directory delete with many undeletable entries no longer
+leaks its skip list; a recursive archive-cache walk takes its path buffers
+from the heap; a full member cache can no longer mis-flag an entry; and a
+hand-edited config larger than 4 KB is read and rewritten whole instead of
+clipped.
+
 ## 0.3 (2026-07-22)
 
 Archives you can go *inside* and work like a directory, the deferred write

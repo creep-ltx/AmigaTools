@@ -6886,7 +6886,7 @@ PROC helpscreen()
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   y := 0
-  helptext('CFile 0.3', y)
+  helptext('CFile 0.3.1', y)
   helptext('Tab ........ switch pane', y + 1)
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 2)
   helptext('/ .......... filter list: type to narrow, Space marks', y + 3)
@@ -7130,4 +7130,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.3 (22.7.26) E build',0
+version: CHAR '$VER: CFile 0.3.1 (22.7.26) E build',0
