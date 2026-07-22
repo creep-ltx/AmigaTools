@@ -2155,7 +2155,7 @@ ENDPROC
 -> under it, typing inserts. names=TRUE refuses "/" and ":" (object
 -> names, never paths); FALSE takes anything (shell commands).
 PROC lineinput(prompt, buf, max, names)
-  DEF class, code, l, i, res=-2, s:PTR TO CHAR, cpos
+  DEF class, code, l, i, j, qual, res=-2, s:PTR TO CHAR, cpos
   s := buf
   -> a prefill longer than the field (a long-name filesystem entry)
   -> is truncated - the new name is capped at max anyway
@@ -2171,14 +2171,32 @@ PROC lineinput(prompt, buf, max, names)
         res := 1
       ELSEIF code = 27
         res := 0
-      ELSEIF code = 8    -> backspace: delete before the cursor
+      ELSEIF code = 8    -> backspace: one char; Shift = to line start,
+                         -> Ctrl = back to the nearest "/" or ":" (path bit)
         IF cpos > 0
+          qual := MsgQualifier()
+          IF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            j := 0
+          ELSEIF qual AND IEQUALIFIER_CONTROL
+            -> skip any separators right before the cursor, then the
+            -> component, stopping just after the previous "/" or ":"
+            j := cpos
+            WHILE (j > 0) AND ((s[j-1] = "/") OR (s[j-1] = ":"))
+              j--
+            ENDWHILE
+            WHILE (j > 0) AND (s[j-1] <> "/") AND (s[j-1] <> ":")
+              j--
+            ENDWHILE
+          ELSE
+            j := cpos - 1
+          ENDIF
+          -> delete [j, cpos): shift the tail down by (cpos - j)
           l := EstrLen(buf)
           FOR i := cpos TO l - 1
-            s[i - 1] := s[i]
+            s[i - (cpos - j)] := s[i]
           ENDFOR
-          SetStr(buf, l - 1)
-          cpos := cpos - 1
+          SetStr(buf, l - (cpos - j))
+          cpos := j
           drawinput(prompt, buf, cpos, max)
         ENDIF
       ELSEIF code = 127    -> Del: delete under the cursor
@@ -6224,6 +6242,59 @@ PROC livecmd(p, cmd)
   liveend()
 ENDPROC
 
+-> g - type a path and jump the active pane straight there. The path must
+-> lock and be a directory; NameFromLock canonicalises it (device -> volume
+-> name, no trailing slash) so Left/parentdir walks it correctly afterwards.
+-> Not available inside an archive (Left out first).
+PROC dogoto()
+  DEF p, lock, fib:PTR TO fileinfoblock, isdir=FALSE, mx,
+      buf[CPATHLEN]:STRING, canon[CPATHLEN]:STRING
+  p := active
+  IF inarchive(p)
+    showmsg('leave the archive first (Left), then go to a path')
+    RETURN
+  ENDIF
+  -> field width fits the border row (the "go to: " prompt + the guillemets)
+  mx := ncols - 16
+  IF mx < 20 THEN mx := 20
+  IF mx > (CPATHLEN - 2) THEN mx := CPATHLEN - 2
+  -> prefill with the current path when it fits, so a subdir is a quick edit
+  IF involume(p) OR (EstrLen(ppath[p]) > mx)
+    StrCopy(buf, '')
+  ELSE
+    StrCopy(buf, ppath[p])
+  ENDIF
+  IF lineinput('go to: ', buf, mx, FALSE) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF EstrLen(buf) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF (lock := Lock(buf, SHARED_LOCK)) = NIL
+    faultmsg('cannot go there')
+    RETURN
+  ENDIF
+  IF fib := AllocDosObject(DOS_FIB, NIL)
+    IF Examine(lock, fib) THEN isdir := fib.direntrytype > 0
+    FreeDosObject(DOS_FIB, fib)
+  ENDIF
+  IF isdir = FALSE
+    UnLock(lock)
+    showmsg('that is not a directory')
+    RETURN
+  ENDIF
+  IF NameFromLock(lock, canon, CPATHLEN - 2) = 0 THEN StrCopy(canon, buf)
+  UnLock(lock)
+  StrCopy(ppath[p], canon)
+  esel[p] := 0
+  etop[p] := 0
+  readpane(p)
+  drawpaths()
+  drawpane(p)
+ENDPROC
+
 -> : - a shell command line, run in the active pane's directory
 PROC docommand()
   DEF cmd[140]:STRING
@@ -7230,7 +7301,7 @@ PROC helpscreen()
   helptext('Tab ........ switch pane', y + 1)
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 2)
   helptext('/ .......... filter list: type to narrow, Space marks', y + 3)
-  helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
+  helptext('Right/Left . enter dir/lha/lzx archive / parent, vols', y + 4)
   helptext('F5 ......... rescan: re-read both panes', y + 5)
   helptext('Enter ...... open: enter dir, view text, run binary', y + 6)
   helptext('v .......... view; marks tour with Right/Left', y + 7)
@@ -7312,6 +7383,8 @@ PROC eventloop()
         sizedir()
       ELSEIF code = "/"    -> live filter: narrow the pane by typing
         dofilter()
+      ELSEIF (code = "g") OR (code = "G")    -> go to a typed path
+        dogoto()
       ELSEIF code = ":"    -> a shell command in the active directory
         docommand()
       ELSEIF (code = "u") OR (code = "U")
