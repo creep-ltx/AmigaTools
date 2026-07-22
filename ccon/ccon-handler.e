@@ -313,6 +313,10 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     treq=NIL:PTR TO timerequest,
     timerarmed=FALSE,
     rawdef=FALSE,               -> Startup="RAW": streams open raw (M9)
+    devname[32]:ARRAY OF CHAR,  -> the mounted device NAME (CON/RAW/CCON/
+                                -> CRAW) read from dol_Name at startup, so
+                                -> the input-handler node name and default
+                                -> window title reflect which stanza we are
     -> tab-completion fs plumbing (M5b): hand-rolled packets ride a
     -> private reply port so pr_MsgPort is never touched (no-DOS rule)
     fsport=NIL:PTR TO mp,       -> private reply port for fs packets
@@ -423,6 +427,21 @@ PROC main()
          (tcfold(stps[3]) = "W") THEN rawdef := TRUE
     ENDIF
   ENDIF
+  -> the mounted device NAME (dol_Name, a BSTR - same BPTR-then-Shl(,2)
+  -> shape the Startup read above uses). Lets the labels read CON:/RAW:
+  -> when mounted as the system console instead of a hardcoded CCON. One
+  -> binary per stanza (GlobVec=-1), so this name is ours for our life.
+  devname[0] := 0
+  IF dnode.name
+    stps := Shl(dnode.name, 2)
+    mx := stps[0]                       -> BSTR length byte
+    IF mx > 30 THEN mx := 30
+    FOR my := 0 TO mx - 1
+      devname[my] := stps[my + 1]
+    ENDFOR
+    devname[mx] := 0
+  ENDIF
+  IF devname[0] = 0 THEN StrCopy(devname, 'CCON')   -> defensive fallback
   -> M10b: no console exists until the first open makes one - dofind
   -> builds them, the list carries them, curcon may be NIL between
   -> dispatches and every dispatch boundary sets it before use
@@ -524,7 +543,7 @@ PROC main()
           IF ihis
             ihis.ln.type := NT_INTERRUPT
             ihis.ln.pri := IHPRI
-            ihis.ln.name := 'CCON'
+            ihis.ln.name := devname   -> the real mount name, not 'CCON'
             ihis.data := ihgd
             ihis.code := {gluestub}
             ihreq.command := IND_ADDHANDLER
@@ -1351,7 +1370,8 @@ PROC parsecon(bname)
   curcon.pwy := 18
   curcon.pww := 640
   curcon.pwh := 130
-  StrCopy(curcon.wtitlebase, 'CCON:')
+  StrCopy(curcon.wtitlebase, devname)   -> the real mount name (CON:/RAW:/
+  StrAdd(curcon.wtitlebase, ':')        -> CCON:/CRAW:), not a hardcoded CCON:
   curcon.waitmode := FALSE
   curcon.closegad := TRUE              -> stock 3.2 shape: close gadget on
   curcon.fwptr := NIL                  -> (NOCLOSE removes it)
@@ -6453,4 +6473,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b17 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b18 CCON: LTX console handler', 0

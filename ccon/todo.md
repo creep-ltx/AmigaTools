@@ -3193,10 +3193,22 @@ documented with the real fix parked (`audit2.md` D).
       only remains (22.7.26).** He has run CCON mounted as the system
       CON:/RAW: for a long time now with no issues, so the blast-radius
       risk ("every console the OS opens") is retired in practice. What's
-      left is cosmetic/minor, not blocking: the per-mount probe-answer
-      choice, `dn_Startup` naming so one binary knows which name it was
-      mounted under, and the "CCON:" labels (debug-node + default title)
-      that still read literally even when serving as CON:. The original
+      left is now essentially just one deliberate design point. **The
+      "CCON:" labels ARE fixed (1.2b18):** the input-handler node name
+      (`ihis.ln.name`) and the default window title (`wtitlebase`) now
+      read the REAL mounted device name from `dol_Name` at startup - a
+      new `devname` global, filled from the DeviceNode's BSTR the same
+      BPTR-then-`Shl(,2)` way the `rawdef` Startup read already uses,
+      falling back to `CCON` defensively. So an untitled window under a
+      `CON:` mount now titles "CON:", not "CCON:", and the input handler
+      lists under its real name. A normal `CCON:` mount is byte-for-byte
+      unchanged (`dol_Name` = "CCON"). That also retires the "`dn_Startup`
+      naming so one binary knows which name it was mounted under" item -
+      `devname` IS that knowledge. What remains is ONLY the probe-answer
+      choice, and it is arguably a non-item: CCON always answers `'CCON'`
+      to the V47 shell probe, which is DELIBERATE - it is exactly what
+      hands the shell's line editing to us, the whole point of the
+      takeover - so "correct as-is" is the honest read. The original
       write-up follows.
 
       The KingCON crown: every console window in the system becomes a
@@ -3272,6 +3284,40 @@ documented with the real fix parked (`audit2.md` D).
       overhead so redraws usually finish within one frame — lower
       risk, but doesn't GUARANTEE the sweep never shows). Asked
       19.7.26d, his call on scope still open.
+
+      **RECOMMENDED APPROACH (22.7.26 analysis, grounded in the code):**
+      an offscreen BitMap that `curcon.rp` draws into, blitted to the
+      window on flush. It is the SAFE choice precisely because every draw
+      already funnels through `curcon.rp` (111 refs; ZERO `Move`/`Text`/
+      `RectFill`/`ScrollRaster` bypass it - checked), and `openwin` sets
+      `curcon.rp := curcon.win.rport`. So the todo "touches every drawing
+      call" worry is wrong - the change is three small pieces, drawing
+      code UNTOUCHED: (1) alloc an offscreen bitmap + RastPort by the
+      window; (2) point `curcon.rp` at it; (3) add one `flush()` =
+      `BltBitMapRastPort` offscreen -> `win.rport`. Flush per render (end
+      of each WRITE's render): a More page arriving as a burst renders
+      offscreen and lands in ONE blit - the atomic flip CON: shows.
+      `ScrollRaster` still works (scrolls offscreen, then blit). Degrade
+      like the ring does: alloc-fail -> `curcon.rp = win.rport`, no
+      flush. Realloc on `doresize`. Stage it (B7 discipline): prove an
+      offscreen-draw-then-blit round-trips PIXEL-IDENTICAL, then wire
+      flush points one at a time, boot-test More paging.
+
+      **Memory - shared vs per-window (his question, 22.7.26): START
+      SHARED.** One screen-sized back-buffer, flushed per render. Two
+      windows with two More instances is NOT a problem for it: CCON is a
+      single process handling ONE packet at a time, so the two Mores'
+      output is serialised - render More-A's WRITE and blit it to window
+      A, THEN render More-B's WRITE and blit it to window B; the two
+      renders never overlap, so the shared scratch cannot cross-
+      contaminate no matter how many windows. Per-window buffers buy only
+      one thing - batching a page split across several WRITEs (flush at
+      the loop's settle point instead of per-render) - a fringe gain that
+      costs ~60-80KB PER window. Switching shared->per-window later is
+      cheap: only the flush TRIGGER changes (per-render -> settle-point),
+      the drawing code does not move at all (still all through
+      `curcon.rp`). So shared first, upgrade only if a real split-page
+      case is ever seen.
 
 - [ ] **DECSTBM (scroll-region margins).** Never implemented, and
       until now never even written down as a to-do — it was a
