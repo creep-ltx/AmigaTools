@@ -2885,7 +2885,13 @@ PROC selcopy()
         len++
       ENDIF
     ENDFOR
-    IF r < r1
+    -> audit2 B10: same headroom guard the char copy above uses. This
+    -> LF was UNguarded, so a very tall window (a small font on a big
+    -> screen) with a dense full-window selection could add more trailing
+    -> row-LFs than the -64 slack covers and overrun clipbuf into its
+    -> heap neighbour. With the guard the -64 bounds every write - chars,
+    -> LFs and the pad below - so 20 + len + pad always fits CLIPMAX.
+    IF (r < r1) AND (len < (CLIPMAX - 64))
       p[len] := 10              -> LF between rows, the FTXT way
       len++
     ENDIF
@@ -2956,18 +2962,30 @@ PROC dopaste(forceexec)
     lw := clipbuf + i
     id := lw[0]
     sz := lw[1]
-    IF id = $43485253           -> CHRS: inject its text
-      b := clipbuf + i + 8
-      take := Min(sz, got - i - 8)
-      IF exec
-        FOR c := 0 TO take - 1
-          injectbyte(b[c])
-        ENDFOR
-      ELSE
-        pasteinsert(b, take)
+    IF sz < 0                   -> audit2 B11: a chunk claiming a NEGATIVE
+      i := got                  -> size is malformed (sz is read straight
+                                -> from the untrusted clipboard). Without
+                                -> this, sz <= -8 makes the step below <= 0,
+                                -> so i stalls or goes backward and this
+                                -> WHILE spins forever - and a wedged
+                                -> handler is EVERY CCON: window, not one.
+                                -> Stop the walk (i := got exits it); any
+                                -> valid chunks already read are handled,
+                                -> and the tail below still flushes them.
+    ELSE
+      IF id = $43485253         -> CHRS: inject its text
+        b := clipbuf + i + 8
+        take := Min(sz, got - i - 8)
+        IF exec
+          FOR c := 0 TO take - 1
+            injectbyte(b[c])
+          ENDFOR
+        ELSE
+          pasteinsert(b, take)
+        ENDIF
       ENDIF
+      i := i + 8 + sz + (sz AND 1)
     ENDIF
-    i := i + 8 + sz + (sz AND 1)
   ENDWHILE
   IF exec
     IF curcon.rawmode THEN inputarrived()
@@ -6420,4 +6438,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b16 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b17 CCON: LTX console handler', 0

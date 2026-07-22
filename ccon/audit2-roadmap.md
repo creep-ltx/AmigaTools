@@ -196,7 +196,34 @@ is worth the ten minutes.
 
 ---
 
-## Batch C - two robustness one-liners - B10, B11
+## Batch C - two robustness one-liners - B10, B11 - DONE + BOOT-GREEN (1.2b17, 22.7.26)
+
+**Findings:** B10 (selcopy LF overflow), B11 (dopaste infinite loop).
+
+**Outcome:** both landed in 1.2b17, as written in the plan.
+- **B10:** the inter-row LF in `selcopy()` now carries the same
+  `len < (CLIPMAX - 64)` guard the char copy has, so the -64 headroom
+  genuinely bounds every write (chars, LFs, and the trailing pad) and
+  `20 + len + pad` always fits `CLIPMAX`.
+- **B11:** `dopaste()`'s chunk walk bails (`IF sz < 0 THEN i := got`)
+  before the step math when a chunk claims a negative size - `i := got`
+  exits the WHILE, and because the step (`i := i + 8 + sz + (sz AND 1)`)
+  now lives in the ELSE it can never stall/reverse `i`. A well-formed
+  clip (sz >= 0) is untouched. The tail (`inputarrived`/`drawedit`) still
+  runs, so bytes from valid earlier chunks flush.
+
+Compiled clean (LARGE), UNREFERENCED set unchanged from baseline, no new
+local. Both shipped **reasoned-not-reproduced** (as the plan allowed, like
+B4): B10's trigger needs an extreme geometry the test rig may not reach,
+B11's needs a hand-built malformed FTXT clip. Both fixes are the
+"make an argued bound into a real one" shape, not behavioural changes.
+
+**Boot test PASSED (22.7.26):** normal drag-select -> copy and RAMIGA-V
+paste work fine on 1.2b17 - both procs exercised on their valid paths,
+no regression. Both fixes only touch the extreme/malformed paths, so
+ordinary copy/paste working IS the whole test.
+
+The plan as written follows, kept for the record.
 
 **Findings:** B10 (selcopy LF overflow), B11 (dopaste infinite loop).
 
