@@ -3282,10 +3282,20 @@ documented with the real fix parked (`audit2.md` D).
       treats `^L` as clear-screen + home. More now page-replaces like
       CON:. The double buffering stays (it earns its keep on multi-row
       writes), but the STAR was the one-byte form-feed fix - the "read
-      what the client actually sends" habit again. Residual, if he ever
-      wants More TRULY instant (not just page-replaced): batch from `^L`
-      to page-settle - only FF-senders repaint, so it would not touch
-      `list`. Not needed unless asked. Original write-up follows.
+      what the client actually sends" habit again.
+      **THEN made TRULY instant (1.2b24-b25): the `^L` page batches.** A
+      `^L` marks the buffer a HELD page (`bbpage`); its flush waits past
+      the per-drain point until the client's blocking READ, so a page More
+      sends as many round-tripped line-writes shows in ONE blit - matching
+      CON:/ViNCEd. `list` never sends `^L`, untouched. Two causes found
+      via the "slow on WB, instant on my CTerm screen" clue + a B/L/F
+      trace: (1) the READ trigger fired on More's MID-page CSI-report
+      reads - fixed to flush only when the read will BLOCK (empty queue =
+      page done); (2) the FIRST page's `CSI 6n` (cursor-pos request) was
+      unanswered, so that read hit an empty queue and flushed early -
+      added a Cursor Position Report responder (`sendcpr`). All pages
+      instant on WB, boot-confirmed ("all pages draw instantly now!").
+      Original write-up follows.
 
       The original scope question (kept for the record):
       (or a cheaper partial fix) for screen
