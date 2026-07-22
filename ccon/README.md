@@ -214,4 +214,8 @@ the app, and a custom gadget renders but never sees the click — so
 the trigger is a key, the way AmiExpress does it. And More, or any
 program that repaints a full screen, now REPLACES the page on a form
 feed the way `CON:` always did, instead of scrolling it — the one
-thing 1.0 and 1.1 were missing. The full account is in `todo.md`.
+thing 1.0 and 1.1 were missing. And 1.1's raw arrow-key fix turned out
+to be half a fix: switching the cursor-key introducer to the 7-bit
+`ESC[` made More page but had been silently breaking Ed, which reads
+that `ESC` as its command line — both are back on the 8-bit `$9B` stock
+`CON:` sends, and both navigate now. The full account is in `todo.md`.
