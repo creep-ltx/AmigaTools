@@ -11,19 +11,21 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
 
 ---
 
-## [Unreleased] — 1.2 (current build 1.2b25)
+## [Unreleased] — 1.2
 
 ### Added
-- **Double buffering.** Client output renders into a shared offscreen
-  back-buffer and is blitted in one pass, so a multi-row update is
-  atomic instead of sweeping row by row. (1.2b21)
-- **Instant full-screen paging.** Form feed (`^L`) now clears the
-  screen like `CON:`, and a `^L` page is held and shown in a single
-  blit when the client next reads for input — so More, and any
-  full-screen program that repaints, flips pages **instantly** on any
-  screen, matching `CON:`/ViNCEd. Includes a Cursor Position Report
-  responder (`CSI 6n` → `CSI row;col R`) so a client that probes the
-  cursor on its first page stays in step. (1.2b23–b25)
+- **Iconify.** `RightAmiga+I` sends a window to the Workbench as an
+  AppIcon — the window vanishes while its console keeps running (output
+  that arrives while iconified pauses until you restore). Double-click
+  the icon to bring the window back exactly as it was: scrollback,
+  a half-typed command line, cursor, colours and all. Works in a raw
+  full-screen client (Ed) too. The icon is built into the handler, so
+  there is nothing to install.
+- **Full-screen paging like `CON:`.** Form feed (`^L`) now clears the
+  screen and homes the cursor, so More — and any full-screen program
+  that repaints — replaces the page instead of scrolling it. A Cursor
+  Position Report responder (`CSI 6n` → `CSI row;col R`) keeps a client
+  that probes the cursor on its first page in step.
 - **`CON:`/`RAW:` labels reflect the real mount name.** When CCON is
   mounted as the system `CON:`/`RAW:`, the input-handler node name and
   the default window title read the device's `dol_Name` instead of a
@@ -34,6 +36,14 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
   `1` command turning up after every `ls`/`dir`. (1.2b1)
 - History stores each command once, moving a repeat to the newest
   position (zsh `HIST_IGNORE_ALL_DUPS`). (1.2b14)
+
+### Known limitations
+- Resizing a **raw-mode client's** window (e.g. Ed) can leave stale
+  pixels and does not re-lay-out the client — the console repaint for a
+  raw client is not wired up (B8).
+- `fscall` (Tab completion and the history file) has no timeout, so a
+  wedged or still-spinning-up filesystem blocks the handler until it
+  replies (P6).
 
 ### Fixed — first audit (a full static read of the handler)
 - Edit-line erase no longer leaves a stale paint extent at a
@@ -70,8 +80,6 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
 - A runaway-client machine freeze was traced to the `ls` tool (it
   looped forever on empty-named directory entries), **not** CCON —
   proved console-independent and closed as misattributed (B12).
-- The `fscall` no-timeout hazard is documented; the real timeout is
-  parked (P6).
 
 ---
 
