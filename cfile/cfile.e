@@ -3811,8 +3811,9 @@ ENDPROC
 -> bar running uninterrupted.
 PROC doxfer(ismove, force)
   DEF p, q, i, b, s, nmark, nsel=0, r, la, lb, samevol=TRUE,
-      anydir=FALSE, showbar=FALSE, haderr=FALSE,
-      tname[110]:STRING, tpath[310]:STRING,
+      anydir=FALSE, showbar=FALSE, haderr=FALSE, free, k,
+      tname[110]:STRING, tpath[310]:STRING, mb[130]:STRING,
+      fb1[12]:STRING, fb2[12]:STRING,
       iname[120]:STRING, itname[120]:STRING, isrc[320]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
@@ -3899,6 +3900,22 @@ PROC doxfer(ismove, force)
         statbytes := statbytes + esize[b + i]
       ENDIF
     ENDFOR
+    -> free-space check: if the copy won't fit on the target volume, ask
+    -> before starting. Conservative - it does not credit space that an
+    -> overwrite would free - so the user can always say yes.
+    pfreeok[q] := FALSE    -> force a fresh Info() on the target
+    free := freebytes(q)
+    IF (free >= 0) AND (statbytes > free)
+      fmtbytes(fb1, statbytes)
+      fmtbytes(fb2, free)
+      StringF(mb, 'needs \s, \s free - proceed? (y)es (n)o', fb1, fb2)
+      promptrow(mb)
+      k := waitvanilla()
+      IF (k <> "y") AND (k <> "Y")
+        drawpaths()
+        RETURN
+      ENDIF
+    ENDIF
     IF anydir OR (nsel > 1) OR (statbytes > 131072) THEN showbar := TRUE
     IF showbar THEN progshow(statbytes)
   ENDIF
@@ -4180,7 +4197,7 @@ PROC infowindow()
       fpath[310]:STRING, lock=NIL, fib=NIL:PTR TO fileinfoblock,
       dtb[26]:ARRAY OF CHAR, dt:PTR TO datetime,
       db[20]:ARRAY OF CHAR, tb[20]:ARRAY OF CHAR,
-      fl[10]:STRING, cmt[80]:STRING, ln[40]:STRING
+      fl[10]:STRING, cmt[84]:STRING, ln[40]:STRING, cbuf[84]:STRING
   p := active
   IF inarchive(p)
     showmsg('file info is not available inside an archive yet')
@@ -4250,7 +4267,7 @@ PROC infowindow()
     StrCopy(ln, 'comment: -')
   ENDIF
   infline(xx, yy, 5, ln)
-  infline(xx, yy, 6, 'hsparwed = toggle - Esc = close')
+  infline(xx, yy, 6, 'hsparwed=bits c=note Esc=close')
   REPEAT
     flagstr(fl, mask)
     StringF(ln, 'flags: \s', fl)
@@ -4259,6 +4276,29 @@ PROC infowindow()
     changed := FALSE
     IF k = 27
       done := TRUE
+    ELSEIF (k = "c") OR (k = "C")
+      -> edit the FileNote comment (the prompt takes the border row; the
+      -> box sits below it, so they do not overlap). The field is capped
+      -> to what fits the row - the ROM limit is 79, but a narrow screen
+      -> takes fewer
+      StrCopy(cbuf, cmt)
+      r := ncols - 14
+      IF r > 79 THEN r := 79
+      IF r < 12 THEN r := 12
+      IF lineinput('comment: ', cbuf, r, FALSE) = 1
+        IF SetComment(fpath, cbuf)
+          StrCopy(cmt, cbuf)
+        ELSE
+          faultmsg('cannot set comment')
+        ENDIF
+      ENDIF
+      IF EstrLen(cmt) > 0
+        StringF(ln, 'comment: \s', cmt)
+      ELSE
+        StrCopy(ln, 'comment: -')
+      ENDIF
+      infline(xx, yy, 5, ln)
+      drawpaths()    -> wipe the input prompt from the border row
     ELSEIF (k = "h") OR (k = "H")
       mask := Eor(mask, FIBF_HOLD)
       changed := TRUE

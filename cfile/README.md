@@ -25,7 +25,7 @@ ANSI, text), and each verb does the natural thing for the type.
 | `Enter` | open by type: enter a directory or lha archive, view text/ANSI, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
-| `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live |
+| `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live, `c` edits the comment |
 | `Space` | mark/unmark the entry (and step down) |
 | `a` / `A` | mark all / mark none |
 | `*` | invert the marks |
@@ -51,6 +51,8 @@ In every text prompt the cursor walks with `Left`/`Right`, and
 Copy and move ask about name collisions per file —
 `(s)kip (o)verwrite (r)ename?` — and all questions are asked *before*
 anything is transferred, so cancelling leaves everything untouched.
+If the copy won't fit on the target volume, CFile asks before it
+starts (a same-volume move is a rename and needs no room).
 Directories go recursively; copying preserves protection bits,
 datestamps and comments; a directory can be merged into an existing
 one. A centered progress bar covers the longer operations, byte-

@@ -128,9 +128,10 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## Nice, cheap, no hurry
 
-- [ ] **Comment editing** — the `i` window shows the FileNote but
-      cannot edit it, though it already edits protection bits live.
-      A natural extension of that window.
+- [x] **Comment editing** — done. `c` in the `i` window edits the
+      FileNote (lineinput, capped to the row width) and SetComment saves
+      it. Also: copy/move now free-space-checks the target volume first
+      (real dir-to-dir; archive copy-in/out still to do).
 - [x] **Directory size on demand** — done in 0.3b2 as `=` (fills the
       size column via treestat), not the `i` window.
 - [x] **Size/date columns** — done. Size column shipped in 0.3b2; the
