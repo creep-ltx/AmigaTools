@@ -157,6 +157,12 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
                             -> sort ahead of files
     sortrev=FALSE,          -> reverse the within-tier order
     cfgfont[40]:STRING,     -> FONT key, applied by the grid build
+    bmark[10]:ARRAY OF LONG,     -> 10 bookmark slots: String ptr per slot,
+                                 -> "" = the volume list. Set by Alt+digit,
+                                 -> jumped to by the bare digit. Slot i is
+                                 -> the digit i (0-9).
+    bmarkset[10]:ARRAY OF CHAR,  -> nonzero = that slot holds a bookmark
+    savebmarks=FALSE,       -> SAVEBOOKMARKS key: persist slots across runs
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
     edcur=0, edcol=0, edvtop=0, edxoff=0, edmod=FALSE, ednew=FALSE,
@@ -195,6 +201,10 @@ PROC initpanes()
   ENDFOR
   StrCopy(ppath[0], cfgleft)
   StrCopy(ppath[1], cfgright)
+  FOR p := 0 TO 9
+    IF (bmark[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    bmarkset[p] := 0
+  ENDFOR
   IF (copybuf := String(CBUFSZ)) = NIL THEN Raise("MEM")
 ENDPROC
 
@@ -6242,13 +6252,44 @@ PROC livecmd(p, cmd)
   liveend()
 ENDPROC
 
--> g - type a path and jump the active pane straight there. The path must
--> lock and be a directory; NameFromLock canonicalises it (device -> volume
--> name, no trailing slash) so Left/parentdir walks it correctly afterwards.
--> Not available inside an archive (Left out first).
+-> jump pane p to `path`: "" = the volume list; otherwise the path must lock
+-> and be a directory, canonicalised via NameFromLock (device -> volume name,
+-> no trailing slash) so Left/parentdir walks it afterwards. Returns TRUE on
+-> the jump, FALSE (with a message) if the path is gone or is not a directory.
+-> Shared by go-to (typed) and a bookmark jump (stored).
+PROC gotopath(p, path)
+  DEF lock, fib:PTR TO fileinfoblock, isdir=FALSE, canon[CPATHLEN]:STRING
+  IF EstrLen(path) = 0
+    SetStr(ppath[p], 0)    -> the volume list
+  ELSE
+    IF (lock := Lock(path, SHARED_LOCK)) = NIL
+      faultmsg('cannot go there')
+      RETURN FALSE
+    ENDIF
+    IF fib := AllocDosObject(DOS_FIB, NIL)
+      IF Examine(lock, fib) THEN isdir := fib.direntrytype > 0
+      FreeDosObject(DOS_FIB, fib)
+    ENDIF
+    IF isdir = FALSE
+      UnLock(lock)
+      showmsg('that is not a directory')
+      RETURN FALSE
+    ENDIF
+    IF NameFromLock(lock, canon, CPATHLEN - 2) = 0 THEN StrCopy(canon, path)
+    UnLock(lock)
+    StrCopy(ppath[p], canon)
+  ENDIF
+  esel[p] := 0
+  etop[p] := 0
+  readpane(p)
+  drawpaths()
+  drawpane(p)
+ENDPROC TRUE
+
+-> g - type a path and jump the active pane straight there. Not available
+-> inside an archive (Left out first).
 PROC dogoto()
-  DEF p, lock, fib:PTR TO fileinfoblock, isdir=FALSE, mx,
-      buf[CPATHLEN]:STRING, canon[CPATHLEN]:STRING
+  DEF p, mx, buf[CPATHLEN]:STRING
   p := active
   IF inarchive(p)
     showmsg('leave the archive first (Left), then go to a path')
@@ -6272,27 +6313,52 @@ PROC dogoto()
     drawpaths()
     RETURN
   ENDIF
-  IF (lock := Lock(buf, SHARED_LOCK)) = NIL
-    faultmsg('cannot go there')
+  gotopath(p, buf)
+ENDPROC
+
+-> store the active pane's location in bookmark slot `d` (0-9). Real
+-> directories and the volume list only, not a spot inside an archive.
+PROC bookmarkset(d)
+  DEF mb[80]:STRING
+  StrCopy(bmark[d], ppath[active])    -> "" = the volume list
+  bmarkset[d] := 1
+  StringF(mb, 'bookmark \d set: \s', d,
+          IF EstrLen(ppath[active]) = 0 THEN '(volumes)' ELSE ppath[active])
+  showmsg(mb)
+ENDPROC
+
+-> b: set a bookmark. Press b, then a digit 0-9 to store this location in
+-> that slot (a plain two-key sequence - no modifier for the WM, FS-UAE or
+-> the keymap to swallow). Any other key cancels. Jump with the bare digit.
+PROC dobookmark()
+  DEF k
+  IF inarchive(active)
+    showmsg('cannot bookmark a spot inside an archive')
     RETURN
   ENDIF
-  IF fib := AllocDosObject(DOS_FIB, NIL)
-    IF Examine(lock, fib) THEN isdir := fib.direntrytype > 0
-    FreeDosObject(DOS_FIB, fib)
+  promptrow('bookmark this location as? (0-9)')
+  k := waitvanilla()
+  IF (k >= "0") AND (k <= "9")
+    bookmarkset(k - "0")
+  ELSE
+    drawpaths()    -> any other key cancels
   ENDIF
-  IF isdir = FALSE
-    UnLock(lock)
-    showmsg('that is not a directory')
+ENDPROC
+
+-> a bare digit: jump the active pane to slot `d`. Not inside an archive.
+PROC bookmarkjump(d)
+  DEF p, mb[40]:STRING
+  p := active
+  IF inarchive(p)
+    showmsg('leave the archive first (Left), then jump')
     RETURN
   ENDIF
-  IF NameFromLock(lock, canon, CPATHLEN - 2) = 0 THEN StrCopy(canon, buf)
-  UnLock(lock)
-  StrCopy(ppath[p], canon)
-  esel[p] := 0
-  etop[p] := 0
-  readpane(p)
-  drawpaths()
-  drawpane(p)
+  IF bmarkset[d] = 0
+    StringF(mb, 'bookmark \d is empty', d)
+    showmsg(mb)
+    RETURN
+  ENDIF
+  gotopath(p, bmark[d])    -> shows its own error if the path is gone
 ENDPROC
 
 -> : - a shell command line, run in the active pane's directory
@@ -7385,6 +7451,10 @@ PROC eventloop()
         dofilter()
       ELSEIF (code = "g") OR (code = "G")    -> go to a typed path
         dogoto()
+      ELSEIF (code = "b") OR (code = "B")    -> set a bookmark (b then a digit)
+        dobookmark()
+      ELSEIF (code >= "0") AND (code <= "9")    -> jump to bookmark slot (digit)
+        bookmarkjump(code - "0")
       ELSEIF code = ":"    -> a shell command in the active directory
         docommand()
       ELSEIF (code = "u") OR (code = "U")
