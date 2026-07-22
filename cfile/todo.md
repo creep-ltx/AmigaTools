@@ -6,17 +6,17 @@ suggestions, not decided.
 
 ## Roadmap
 
-- **0.3b2 — sizes** (done, boot-tested 21.7.26): size column, `=` dir
-  sizing, free-space + marked totals on the border row.
-- **0.3b3 — deferred archive writes** (done, boot-tested 22.7.26):
-  archive edits are staged on the archive's own volume and committed in
-  one pass on leave/quit; `ARCWRITE ONEXIT` (default) / `DIRECT`. A
-  modified archive shows "modified" and asks (s)ave/(d)iscard/(c)ancel on
-  leave. Folder deletes rebuild the archive (LhA cannot remove a stored
-  directory member), which also clears duplicate entries — in both modes.
-- **0.3b4 — lzx inside**: listing parser + the four command shapes into
-  the batched layer; capture lzx's real output to a file and parse
-  against that, like lha got.
+**0.3 RELEASED (22.7.26)** — inside-archive browse + full deferred write
+model, sizes/sorting, `/` filter, mark all/pattern, `.info` sidecars,
+F5 rescan, byte-weighted archive progress, comment editing, free-space
+check, self-maintaining config. See CHANGELOG.md. Path there:
+0.3b1 inside archives -> 0.3b2 sizes -> 0.3b3 deferred writes -> a run of
+backlog polish.
+
+- **0.4 — lzx inside**: listing parser + the four command shapes into the
+  already-batched write layer; capture lzx's real output to a file and
+  parse against that, like lha got. Its command/flag set differs from
+  LhA and is not yet researched — do a dump-driven probe pass first.
 
 ## 0.3b3 — deferred archive writes (done)
 
