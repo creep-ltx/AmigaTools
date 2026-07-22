@@ -32,6 +32,12 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
   hardcoded "CCON". (1.2b18)
 
 ### Changed
+- Raw-mode arrow and function keys use the 8-bit `$9B` CSI introducer
+  (what stock `CON:` sends), so **Ed's cursor navigation works**. 1.1
+  had switched these to the 7-bit `ESC[` form for More's paging, but Ed
+  reads that leading `ESC` as its command line (stray "blue" command
+  text) — the same way `ESC[` broke `ls`. Both Ed and More page and
+  navigate correctly on `$9B`.
 - The window-bounds report uses the 8-bit CSI (`$9B`), fixing a phantom
   `1` command turning up after every `ls`/`dir`. (1.2b1)
 - History stores each command once, moving a repeat to the newest

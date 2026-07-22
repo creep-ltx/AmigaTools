@@ -5429,57 +5429,47 @@ ENDPROC
 -> use; shifted arrows and F-keys flagged for a boot check): Up/Down/
 -> Right/Left = CSI A/B/C/D, shifted = CSI T / S / SPACE @ / SPACE A,
 -> F1-F10 = CSI 0~..9~, shifted F = CSI 10~..19~, Help = CSI ?~
--> v1.1b42: the CSI introducer was the bare 8-bit C1 byte ($9B) -
--> real AmigaOS raw-key reporting (and the overwhelming majority of
--> ANSI-aware programs, including apparently More) expects the
--> 7-bit ESC+'[' two-byte form instead. His direct side-by-side
--> proof: the SAME More binary navigates correctly under stock
--> CON: (Up arrow moves 99% -> 50%) and does not under CCON - the
--> same client, a different console, therefore CCON's own encoding
--> choice, not something broken inside More. Every one of these
--> used to start with a bare enqueue($9B); now they all start with
--> ESC(27) then '['.
--> audit B3: each branch below knows its own exact byte count before
--> writing a single one (3-5 bytes, fixed once sh is known), so each
--> asks inqroom() for that count first and bails whole - never a bare
--> ESC or a stray CSI introducer left sitting in the queue with the
--> letter that would have made it a real sequence dropped behind it.
+-> The CSI introducer is the 8-bit C1 byte ($9B) - the console.device
+-> convention stock CON: sends and native programs expect. b42 tried the
+-> 7-bit ESC+'[' form (for More's arrow paging), but that leading ESC
+-> opens Ed's command line (the "blue command text" - `ESC` then `[A`
+-> read as a typed command), the same way ESC[ broke `ls` when sendreport
+-> briefly used it (ls read the '[' as the report's final byte). So $9B
+-> here, like sendreport and ihreport - boot-confirmed 23.7.26: Ed's
+-> cursor navigation works AND More still pages, both on $9B.
+-> audit B3: each branch knows its own exact byte count before writing a
+-> single one, asks inqroom() first and bails whole - never a bare CSI
+-> introducer left in the queue with its trailing letter dropped behind.
 PROC rawcsikey(code, qual)
   DEF sh
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   IF code = RK_UP
-    IF inqroom(3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("T") ELSE enqueue("A")
   ELSEIF code = RK_DOWN
-    IF inqroom(3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("S") ELSE enqueue("B")
   ELSEIF code = RK_RIGHT
-    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 3 ELSE 2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("@") ELSE enqueue("C")
   ELSEIF code = RK_LEFT
-    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 3 ELSE 2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("A") ELSE enqueue("D")
   ELSEIF (code >= $50) AND (code <= $59)     -> F1..F10
-    IF inqroom(IF sh THEN 5 ELSE 4) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("1")
     enqueue(48 + (code - $50))
     enqueue("~")
   ELSEIF code = $5F                          -> Help
-    IF inqroom(4) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(3) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     enqueue("?")
     enqueue("~")
   ELSE
