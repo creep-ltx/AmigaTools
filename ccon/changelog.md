@@ -43,10 +43,15 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
 - History stores each command once, moving a repeat to the newest
   position (zsh `HIST_IGNORE_ALL_DUPS`). (1.2b14)
 
+### Fixed
+- **Resizing a fullscreen program's window (Ed)** now repaints and
+  sends the size report, so the client re-measures and redraws instead
+  of leaving a stale frame — the resize event was previously never even
+  seen for a raw-mode client (B8). (Ed doesn't re-wrap text to a
+  narrower window, the same as under `CON:` — that's the editor's own
+  behaviour.)
+
 ### Known limitations
-- Resizing a **raw-mode client's** window (e.g. Ed) can leave stale
-  pixels and does not re-lay-out the client — the console repaint for a
-  raw client is not wired up (B8).
 - `fscall` (Tab completion and the history file) has no timeout, so a
   wedged or still-spinning-up filesystem blocks the handler until it
   replies (P6).

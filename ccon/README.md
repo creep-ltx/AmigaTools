@@ -218,4 +218,8 @@ thing 1.0 and 1.1 were missing. And 1.1's raw arrow-key fix turned out
 to be half a fix: switching the cursor-key introducer to the 7-bit
 `ESC[` made More page but had been silently breaking Ed, which reads
 that `ESC` as its command line — both are back on the 8-bit `$9B` stock
-`CON:` sends, and both navigate now. The full account is in `todo.md`.
+`CON:` sends, and both navigate now. Fixing that also un-stuck Ed's
+window resize, which had looked unfixable: the earlier attempt's "Ed
+breaks worse" was this very arrow bug firing on every test keypress, not
+the resize — with it gone, letting the resize event through repaints Ed
+and lets it re-measure cleanly. The full account is in `todo.md`.

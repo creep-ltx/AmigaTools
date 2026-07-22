@@ -91,9 +91,6 @@ LIMITATIONS
 
   - SMART/SIMPLE and ALT not implemented
 
-  - Resizing a raw-mode fullscreen program's window (Ed) can
-    leave stale pixels and doesn't re-lay-out the program
-
   - Tab completion and the history file have no filesystem
     timeout; a wedged or spinning-up disk blocks the window
 

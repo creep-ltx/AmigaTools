@@ -622,9 +622,6 @@
   - SMART/SIMPLE and ALT are not implemented.
   - A borrowed window (WINDOW0xADDR) keeps its owner's font; FONT
     only applies to windows CCON: opens itself.
-  - Resizing a window that a raw-mode fullscreen program (Ed) owns
-    can leave stale pixels, and the program is not told the new
-    size - the console repaint for a raw client is not wired up.
   - Tab completion and the history file talk to the filesystem
     with no timeout, so a wedged or still-spinning-up disk can
     block the window until that filesystem answers.
