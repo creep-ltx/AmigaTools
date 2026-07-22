@@ -100,10 +100,11 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 - [ ] **Manual rescan** — panes go stale when a shell or Workbench
       changes a directory behind CFile's back; one key (?) re-reads
       both panes.
-- [ ] **Mark all / none / invert / by pattern** — Space-only marking
-      makes big bulk ops tedious. Pattern marking (`#?.mod`) is
-      MatchPattern over the pane; the marks machinery already
-      exists. Keys (?): maybe a/A for all/none, * for pattern.
+- [x] **Mark all / none / invert / by pattern** — done. `a`/`A` mark
+      all/none, `*` inverts, `+` marks by pattern via
+      ParsePatternNoCase/MatchPatternNoCase over the pane. Both a
+      `*.mod` glob (translated to `#?`) and native AmigaDOS `#?.mod`
+      work — the glob alias also helps keyboards that can't type `#`.
 - [ ] **.info sidecars** — copy/move/delete/rename `foo` should
       offer to take `foo.info` along (a config toggle, DOpus-style
       "Icons"). Without it, moved drawers and tools silently lose

@@ -36,6 +36,10 @@ KEYS
   i            info window: size, date, comment, protection bits -
                h s p a r w e d toggle the bits live
   Space        mark/unmark the entry (and step down)
+  a / A        mark all / mark none
+  *            invert the marks
+  +            mark by pattern: type a glob (*.mod) or an AmigaDOS
+               pattern (#?.mod); matches are added to the marked set
   =            measure the selected directory: its size replaces
                "<DIR>" in the size column, and a measured directory
                then counts towards the marked total
@@ -75,9 +79,10 @@ FILE OPERATIONS
   that will not go is skipped while the rest of the run continues,
   and the summary names what remains.
 
-  Marks (Space) turn c, m, Del and u into bulk operations on the
-  whole set; r walks the marked set one prompt at a time, and v
-  tours it file by file.
+  Marks turn c, m, Del and u into bulk operations on the whole set;
+  r walks the marked set one prompt at a time, and v tours it file by
+  file. Space marks one entry; a / A mark all / none, * inverts, and
+  + marks by pattern (a *.mod glob or an AmigaDOS #?.mod pattern).
 
 THE EDITOR
 

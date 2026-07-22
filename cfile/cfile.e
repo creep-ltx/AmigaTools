@@ -5815,6 +5815,83 @@ PROC togglemark()
   drawpaths()    -> the marked count and bytes live on the border row
 ENDPROC
 
+-> a: mark every entry, A: mark none - a fast bulk set/clear. The border
+-> row's marked count and total redraw with it.
+PROC markall(p, val)
+  DEF b, i
+  IF involume(p) THEN RETURN
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  b := p * MAXENT
+  FOR i := 0 TO ecount[p] - 1
+    emark[b + i] := val
+  ENDFOR
+  drawpane(p)
+  drawpaths()
+ENDPROC
+
+-> *: flip every mark - the marked set becomes the unmarked set
+PROC markinvert(p)
+  DEF b, i
+  IF involume(p) THEN RETURN
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  b := p * MAXENT
+  FOR i := 0 TO ecount[p] - 1
+    emark[b + i] := IF emark[b + i] THEN 0 ELSE 1
+  ENDFOR
+  drawpane(p)
+  drawpaths()
+ENDPROC
+
+-> +: mark every entry whose name matches a pattern, added to whatever
+-> is already marked. Both AmigaDOS (#?.mod) and Unix-style globs (*.mod)
+-> work - a typed '*' is translated to '#?' before parsing, so a keyboard
+-> without '#' can still glob and the syntax is the familiar one either
+-> way. '?' already means one character in both. Matching is case-
+-> insensitive and whole-name, the way the shell matches.
+PROC markpattern(p)
+  DEF b, i, j=0, c, pat[44]:STRING, glob[90]:STRING, parsed:PTR TO CHAR,
+      n=0, mb[80]:STRING
+  IF involume(p) THEN RETURN
+  IF efail[p] OR (ecount[p] = 0) THEN RETURN
+  StrCopy(pat, '')
+  IF lineinput('mark pattern: ', pat, 42, FALSE) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF EstrLen(pat) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  -> translate a Unix '*' to AmigaDOS '#?' (each '*' becomes two chars)
+  FOR i := 0 TO EstrLen(pat) - 1
+    c := pat[i]
+    IF c = "*"
+      glob[j++] := "#"
+      glob[j++] := "?"
+    ELSE
+      glob[j++] := c
+    ENDIF
+  ENDFOR
+  glob[j] := 0
+  SetStr(glob, j)
+  -> ParsePatternNoCase wants up to 2x the source plus slop
+  IF (parsed := New(200)) = NIL THEN RETURN
+  IF ParsePatternNoCase(glob, parsed, 200) >= 0
+    b := p * MAXENT
+    FOR i := 0 TO ecount[p] - 1
+      IF MatchPatternNoCase(parsed, enames[b + i])
+        emark[b + i] := 1
+        n++
+      ENDIF
+    ENDFOR
+  ENDIF
+  Dispose(parsed)
+  drawpane(p)
+  drawpaths()
+  StringF(mb, '\d entr\s matched', n, IF n = 1 THEN 'y' ELSE 'ies')
+  showmsg(mb)
+ENDPROC
+
 -> '=': measure the selected real directory with treestat (the same
 -> walk the progress bar pre-counts with) and drop its byte total into
 -> esize, so the size column shows it in place of "<DIR>" and a marked
@@ -6230,9 +6307,9 @@ PROC helpscreen()
   helptext('v .......... view; marks tour with Right/Left', y + 6)
   helptext('e .......... edit text file (e in the viewer works too)', y + 7)
   helptext('i .......... file info, edit protection bits', y + 8)
-  helptext('u .......... unpack archive(s), marks work', y + 9)
-  helptext('p .......... pack into an archive (.lha/.lzx/.zip)', y + 10)
-  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 11)
+  helptext('u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)', y + 9)
+  helptext('Space ...... mark/unmark (ops take the marks if any)', y + 10)
+  helptext('a A * + .... mark all / none / invert / by pattern', y + 11)
   helptext('= .......... measure the selected directory (byte size)', y + 12)
   helptext('c / C ...... copy to the other pane (C overwrites)', y + 13)
   helptext('m / M ...... move to the other pane (M overwrites)', y + 14)
@@ -6293,6 +6370,14 @@ PROC eventloop()
         dodelete()
       ELSEIF code = 32     -> Space: mark for a bulk copy/move/delete
         togglemark()
+      ELSEIF code = "a"    -> mark all
+        markall(active, 1)
+      ELSEIF code = "A"    -> mark none
+        markall(active, 0)
+      ELSEIF code = "*"    -> invert marks
+        markinvert(active)
+      ELSEIF code = "+"    -> mark by pattern (#?.mod ...)
+        markpattern(active)
       ELSEIF code = "="    -> measure the selected directory's size
         sizedir()
       ELSEIF code = "/"    -> live filter: narrow the pane by typing

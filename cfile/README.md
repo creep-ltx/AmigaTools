@@ -26,6 +26,9 @@ ANSI, text), and each verb does the natural thing for the type.
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live |
 | `Space` | mark/unmark the entry (and step down) |
+| `a` / `A` | mark all / mark none |
+| `*` | invert the marks |
+| `+` | mark by pattern — a `*.mod` glob or an AmigaDOS `#?.mod` pattern; matches are added to the marked set |
 | `=` | measure the selected directory — its size replaces `<DIR>` in the size column and then counts towards the marked total |
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
@@ -56,7 +59,9 @@ Deleting is recursive and resilient: a delete-protected entry asks
 and the rest of the run continues, and the summary names what
 remains. Marks turn `c`/`m`/`Del`/`u` into bulk operations on the
 whole set at once; `r` walks the marked set one prompt at a time,
-and `v` tours it.
+and `v` tours it. `Space` marks one; `a`/`A` mark all/none, `*`
+inverts, and `+` marks by pattern (a `*.mod` glob or AmigaDOS
+`#?.mod`).
 
 ## The editor
 
