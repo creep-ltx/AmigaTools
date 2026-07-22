@@ -67,7 +67,7 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'devices/clipboard',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
        'keymap','diskfont',
-       -> v1.3 ICONIFY: 'wb' = workbench.library (AddAppIconA/RemoveAppIcon) +
+       -> v1.2 ICONIFY: 'wb' = workbench.library (AddAppIconA/RemoveAppIcon) +
        -> workbenchbase; 'workbench/workbench' = the diskobject/appmessage
        -> structs + WBTOOL/AMTYPE_APPICON consts. The AppIcon is baked in
        -> (bicondo), so no icon.library. AddAppIcon/RemoveAppIcon are exec.
@@ -297,7 +297,7 @@ OBJECT console
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
-  appicon:PTR TO appicon        -> v1.3 ICONIFY: this console's desktop
+  appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
                                 -> AppIcon while iconified (NIL = not
                                 -> iconified). RightAmiga+I zips the window
                                 -> small and drops the icon; clicking it zips
@@ -379,7 +379,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fhtask=NIL,
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
-    -> v1.3 ICONIFY: AppIcon plumbing. iconobj is the DiskObject every
+    -> v1.2 ICONIFY: AppIcon plumbing. iconobj is the DiskObject every
     -> iconified window's AppIcon renders - the baked-in bicondo (built at
     -> init, no file/DOS). wbport receives the click (AppMessage) from Workbench.
     iconok=FALSE,               -> workbench.library + a usable icon both up
@@ -1824,7 +1824,7 @@ PROC fontload(ta:PTR TO textattr)
   IF f = NIL THEN f := OpenFont(ta)
 ENDPROC f
 
--> ---------- v1.3 ICONIFY: AppIcon plumbing ----------
+-> ---------- v1.2 ICONIFY: AppIcon plumbing ----------
 -> The AppIcon is BAKED IN (bicondo, built at handler init) - no file, no
 -> icon.library, no DOS - so there is no icon-load path here at all.
 
