@@ -1115,17 +1115,10 @@ PROC lzxname(dst, line:PTR TO CHAR)
   SetStr(dst, e)
 ENDPROC EstrLen(dst) > 0
 
--> TRUE if pane p is inside an lzx archive (vs lha) - write verbs branch on
--> it, and 0.4-step-1 keeps them out of an lzx entirely (view/browse only)
+-> TRUE if pane p is inside an lzx archive (vs lha) - the archive write verbs
+-> branch on it (lzx commands, immediate; lha keeps its deferred/direct paths)
 PROC islzx(p)
 ENDPROC inarchive(p) AND (arcfmt[p] = TY_LZX)
-
--> 0.4 step 1: browsing and viewing inside lzx work; the write verbs are
--> wired in later steps. Until then they bow out here, so no lha command is
--> ever aimed at an lzx archive.
-PROC arclzxsoon()
-  showmsg('inside lzx: browse and view only for now (writing comes later)')
-ENDPROC
 
 -> parse `lha v` output into pane p's cache: find the header, take its field
 -> count before Name, then read data rows (name = everything past those
@@ -5639,8 +5632,13 @@ ENDPROC saved
 PROC arcreadd(p, scratchroot, member)
   DEF topname[CPATHLEN]:STRING, cmd[700]:STRING, res
   firstcomp(topname, member)    -> member's first path component
-  arcdelmember(arcpath[p], member)
-  StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+  IF islzx(p)
+    lzxdelmember(arcpath[p], member)
+    StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[p], topname)
+  ELSE
+    arcdelmember(arcpath[p], member)
+    StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+  ENDIF
   res := runcapture(scratchroot, cmd, 'T:CFile-out')
   DeleteFile('T:CFile-out')
 ENDPROC res
@@ -5714,10 +5712,6 @@ ENDPROC
 PROC arcedit(p)
   DEF i, nm:PTR TO CHAR, member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING,
       ty, r, res
-  IF islzx(p)
-    arclzxsoon()
-    RETURN
-  ENDIF
   IF ecount[p] = 0 THEN RETURN
   i := (p * MAXENT) + esel[p]
   IF edirs[i]
@@ -5726,7 +5720,9 @@ PROC arcedit(p)
   ENDIF
   nm := enames[i]
   arcmember(member, arcsub[p], nm)
-  IF arcwrite
+  -> lha ONEXIT defers the edit; lha DIRECT and lzx (no defer yet) re-add
+  -> immediately through arcextractone/arcreadd, both format-aware.
+  IF arcwrite AND (islzx(p) = FALSE)
     arceditdefer(p, i, nm, member)
     RETURN
   ENDIF
@@ -6737,7 +6733,11 @@ PROC arcextractone(p, member)
   StrAdd(sfile, member)
   makepath(sfile)
   DeleteFile(sfile)
-  StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-x/')
+  IF islzx(p)
+    StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-x/')
+  ELSE
+    StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, 'T:CFile-x/')
+  ENDIF
   res := runcapture(NIL, cmd, 'T:CFile-out')
   DeleteFile('T:CFile-out')
 ENDPROC (res <> -1) AND (pathtype(sfile) = 1)
@@ -6754,10 +6754,6 @@ PROC arcrename(p)
       oldm[CPATHLEN]:STRING, newm[CPATHLEN]:STRING,
       oldp[CPATHLEN]:STRING, newp[CPATHLEN]:STRING,
       topname[CPATHLEN]:STRING, cmd[700]:STRING, res
-  IF islzx(p)
-    arclzxsoon()
-    RETURN
-  ENDIF
   b := p * MAXENT
   nmark := markcount(p)
   FOR i := 0 TO ecount[p] - 1
@@ -6802,7 +6798,11 @@ PROC arcrename(p)
               faultmsg('cannot rename in the work area')
               stopped := TRUE
             ELSE
-              StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+              IF islzx(p)
+                StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[p], topname)
+              ELSE
+                StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+              ENDIF
               res := runcapture('T:CFile-x', cmd, 'T:CFile-out')
               DeleteFile('T:CFile-out')
               IF res = -1
@@ -6810,7 +6810,11 @@ PROC arcrename(p)
                 stopped := TRUE
               ELSE
                 -> the new name is safely in; drop the old member(s)
-                IF isdir THEN arcdeltree(p, oldm) ELSE arcdelmember(arcpath[p], oldm)
+                IF islzx(p)
+                  IF isdir THEN lzxdeltree(p, oldm) ELSE lzxdelmember(arcpath[p], oldm)
+                ELSE
+                  IF isdir THEN arcdeltree(p, oldm) ELSE arcdelmember(arcpath[p], oldm)
+                ENDIF
                 any := TRUE
                 StrCopy(prevname, tname)
               ENDIF
@@ -6947,10 +6951,6 @@ PROC arcnew(p)
   DEF tname[40]:STRING, s:PTR TO CHAR, i, l, b, wantdir=FALSE, r, exists=FALSE,
       member[CPATHLEN]:STRING, sfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
       cmd[700]:STRING, res, lock
-  IF islzx(p)
-    arclzxsoon()
-    RETURN
-  ENDIF
   StrCopy(tname, '')
   IF lineinput('new (name/ = dir): ', tname, 31, FALSE) = 0
     drawpaths()
@@ -6988,7 +6988,9 @@ PROC arcnew(p)
     RETURN
   ENDIF
   arcmember(member, arcsub[p], tname)
-  IF arcwrite
+  -> lha ONEXIT defers the new entry; lha DIRECT and lzx (no defer yet) add
+  -> it immediately below.
+  IF arcwrite AND (islzx(p) = FALSE)
     arcnewdefer(p, tname, member, wantdir)
     RETURN
   ENDIF
@@ -7008,8 +7010,12 @@ PROC arcnew(p)
       RETURN
     ENDIF
     UnLock(lock)
-    -> -e so the empty directory is actually stored
-    StringF(cmd, 'lha -M -r -e a "\s" "\s"', arcpath[p], topname)
+    -> -e so the empty directory is actually stored (both archivers)
+    IF islzx(p)
+      StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[p], topname)
+    ELSE
+      StringF(cmd, 'lha -M -r -e a "\s" "\s"', arcpath[p], topname)
+    ENDIF
     res := runcapture('T:CFile-a', cmd, 'T:CFile-out')
   ELSE
     drawpaths()
@@ -7019,7 +7025,11 @@ PROC arcnew(p)
       drawall()
       RETURN
     ENDIF
-    StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+    IF islzx(p)
+      StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[p], topname)
+    ELSE
+      StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[p], topname)
+    ENDIF
     res := runcapture('T:CFile-a', cmd, 'T:CFile-out')
   ENDIF
   DeleteFile('T:CFile-out')
