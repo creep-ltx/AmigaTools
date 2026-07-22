@@ -134,10 +134,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     cmodel=NIL, cmrow=0,    -> its text model: the scrollback
     cfgleft[300]:STRING, cfgright[300]:STRING,    -> start paths
     savedirs=TRUE,          -> rewrite the config with them on quit
-    arcwrite=FALSE,         -> ARCWRITE key: FALSE = DIRECT (repack per
-                            -> edit), TRUE = ONEXIT (batch, commit on
-                            -> leave/quit). Read but not yet acted on -
-                            -> the batched write path lands in 0.3b3.
+    arcwrite=TRUE,          -> ARCWRITE key: TRUE = ONEXIT (batch archive
+                            -> edits, commit on leave/quit - the default
+                            -> since 0.3b3), FALSE = DIRECT (repack per
+                            -> edit, the old behaviour).
     cfgfont[40]:STRING,     -> FONT key, applied by the grid build
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
@@ -375,6 +375,8 @@ PROC saveconfig()
     StringF(line, '; SAVEDIRS ON|OFF, ARCWRITE DIRECT|ONEXIT, FONT name/size\n')
     wline(fh, line)
     StringF(line, 'SAVEDIRS ON\n')
+    wline(fh, line)
+    StringF(line, 'ARCWRITE ONEXIT\n')
     wline(fh, line)
     IF EstrLen(cfgfont) > 0
       StringF(line, 'FONT \s\n', cfgfont)
@@ -6046,7 +6048,7 @@ PROC helpscreen()
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   y := 0
-  helptext('CFile 0.3b2', y)
+  helptext('CFile 0.3b3', y)
   helptext('Tab ........ switch pane', y + 2)
   helptext('Up/Down .... move (Shift = page, Ctrl = first/last)', y + 3)
   helptext('Right/Left . enter dir/lha archive / parent, volumes', y + 4)
@@ -6274,4 +6276,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.3b2 (21.7.26) E build',0
+version: CHAR '$VER: CFile 0.3b3 (22.7.26) E build',0
