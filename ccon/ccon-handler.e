@@ -848,6 +848,20 @@ PROC condispose(c:PTR TO console)
   IF c.srbuf THEN Dispose(c.srbuf)
   IF c.srstash THEN Dispose(c.srstash)
   IF c.pasteq THEN Dispose(c.pasteq)
+  -> audit2 H3: the model planes are freed by closewin() on the only
+  -> path that reaches condispose (conclose calls closewin first), so
+  -> these are already NIL here and every one is a guarded no-op today.
+  -> Present so condispose is complete on its own terms, not correct
+  -> only by coincidence with its one caller's ordering - the proc a
+  -> future direct teardown would call expecting it to free everything.
+  IF c.sb THEN Dispose(c.sb)
+  IF c.sa THEN Dispose(c.sa)
+  IF c.ss THEN Dispose(c.ss)
+  IF c.sw THEN Dispose(c.sw)
+  IF c.tf THEN CloseFont(c.tf)
+  IF c.altm THEN Dispose(c.altm)
+  IF c.alta THEN Dispose(c.alta)
+  IF c.alts THEN Dispose(c.alts)
   Dispose(c)
 ENDPROC
 
@@ -1607,7 +1621,7 @@ PROC fontload(ta:PTR TO textattr)
 ENDPROC f
 
 PROC openwin()
-  DEF ta:PTR TO textattr, i, idc, scrn:PTR TO screen, v,
+  DEF ta:textattr, i, idc, scrn:PTR TO screen, v,     -> audit2 B9: a
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
       pubscr:PTR TO screen, fname[48]:ARRAY OF CHAR, fl, ok,
       gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn
@@ -1712,7 +1726,12 @@ PROC openwin()
     -> keeps even topaz 9 on disk now). A name nowhere to be found,
     -> or a proportional face (the grid needs fixed cells), falls
     -> back to topaz 8 silently.
-    NEW ta
+    -> audit2 B9: ta is a STACK textattr now (DEF ta:textattr above),
+    -> not NEW - openwin runs once per window open and the old NEW ta
+    -> was never freed, so an immortal handler churning windows leaked
+    -> ~8 bytes per open forever (E frees the New list only at process
+    -> exit, i.e. ACTION_DIE). ta is pure scratch for fontload/OpenFont;
+    -> the font lands in curcon.tf, nothing outlives the proc.
     ta.name := 'topaz.font'
     ta.ysize := 8
     ta.style := 0
@@ -2976,7 +2995,7 @@ ENDPROC
 -> looking literal character, the same way a stray control byte
 -> typed by hand would be if this codepath ever saw it. Anything
 -> past that first LF queues, never runs here - the line the user
--> SEES is always完全 ordinary, single-row, ACTUAL edit-line
+-> SEES is always completely ordinary, single-row, ACTUAL edit-line
 -> content, ZERO new rendering concepts, because it always really
 -> is just one line.
 PROC pasteinsert(b:PTR TO CHAR, take)
@@ -6360,4 +6379,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b14 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2b15 CCON: LTX console handler', 0
