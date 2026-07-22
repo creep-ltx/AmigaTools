@@ -130,6 +130,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     opmsg[120]:STRING,    -> last message, re-shown after a bulk refresh
     progon=FALSE, progtotal=1, progdone=0, progpx=0, progx=0, progy=0,
     progbyfile=FALSE,    -> bar counts lha's per-file lines, not copy bytes
+    progbybytes=FALSE,   -> bar advances by each lha member's byte total
+                         -> (parsed from its "(done/total)"), for the
+                         -> archive copy/move bar - big members weigh more
     statbytes=0, statfiles=0,    -> pre-scan totals for the progress bar
     gfails=0,    -> entries a delete run could not remove
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
@@ -2932,7 +2935,7 @@ ENDPROC res
 -> verified by the caller, not by an exit code the asynch run hides.
 PROC arcrunprog(dir, cmd)
   DEF wout=NIL, nin=NIL, rdr=NIL, dlock=NIL, old=NIL, res,
-      buf[260]:ARRAY OF CHAR, n, i, c, st=0
+      buf[260]:ARRAY OF CHAR, n, i, c, st=0, prevtotal=0, curtot=0
   IF (wout := Open('PIPE:cfile-arc', NEWFILE)) = NIL
     RETURN runcapture(dir, cmd, 'T:CFile-out')    -> no PIPE: no bar
   ENDIF
@@ -2961,22 +2964,58 @@ PROC arcrunprog(dir, cmd)
     WHILE n > 0
       FOR i := 0 TO n - 1
         c := buf[i]
-        IF (st = 3) AND (c = ":")
-          progadd(1)
-          st := 0
-        ELSEIF (st = 2) AND (c = "g")
-          st := 3
-        ELSEIF (st = 1) AND (c = "n")
-          st := 2
-        ELSEIF c = "i"
-          st := 1
+        IF progbybytes
+          -> match "ing:" for a new file, then read its "(...  /  total)":
+          -> on each new file the PREVIOUS one is done, so its total is
+          -> added; the last file's total is added when the pipe closes.
+          IF st = 6                    -> reading the total's digits
+            IF (c >= "0") AND (c <= "9")
+              curtot := Mul(curtot, 10) + (c - "0")
+            ELSEIF c <> 32
+              prevtotal := curtot
+              st := 0
+            ENDIF
+          ELSEIF st = 5                -> inside (), seek the '/'
+            IF c = "/"
+              curtot := 0
+              st := 6
+            ENDIF
+          ELSEIF st = 4                -> after "ing:", seek the '('
+            IF c = "("
+              st := 5
+            ENDIF
+          ELSEIF (st = 3) AND (c = ":")
+            progadd(prevtotal)         -> the previous member finished
+            prevtotal := 0
+            st := 4
+          ELSEIF (st = 2) AND (c = "g")
+            st := 3
+          ELSEIF (st = 1) AND (c = "n")
+            st := 2
+          ELSEIF c = "i"
+            st := 1
+          ELSE
+            st := 0
+          ENDIF
         ELSE
-          st := 0
+          IF (st = 3) AND (c = ":")
+            progadd(1)
+            st := 0
+          ELSEIF (st = 2) AND (c = "g")
+            st := 3
+          ELSEIF (st = 1) AND (c = "n")
+            st := 2
+          ELSEIF c = "i"
+            st := 1
+          ELSE
+            st := 0
+          ENDIF
         ENDIF
       ENDFOR
       n := Read(rdr, buf, 256)
     ENDWHILE
     Close(rdr)
+    IF progbybytes THEN progadd(prevtotal)    -> the last member
   ENDIF
 ENDPROC res
 
@@ -2992,6 +3031,26 @@ PROC arccountunder(p, prefix)
       m := a[k]
       IF ncprefix(m, pfx, pl)
         IF m[pl] THEN n := n + 1
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC n
+
+-> total byte size of the file members under `prefix` (the progress
+-> denominator for a byte-weighted extract)
+PROC arcsizeunder(p, prefix)
+  DEF a:PTR TO LONG, z:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl,
+      m:PTR TO CHAR, n=0
+  StrCopy(pfx, prefix)
+  StrAdd(pfx, '/')
+  pl := StrLen(pfx)
+  a := amem[p]
+  z := amsz[p]
+  IF amcnt[p] > 0
+    FOR k := 0 TO amcnt[p] - 1
+      m := a[k]
+      IF ncprefix(m, pfx, pl)
+        IF m[pl] THEN n := n + z[k]
       ENDIF
     ENDFOR
   ENDIF
@@ -3390,21 +3449,22 @@ PROC arcxfer_out(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
-  -> pre-count files (extract ticks per file); the extract, then a move's
-  -> delete, each report one line per file, so the bar spans them both
+  -> pre-scan BYTES: the bar advances by each extracted member's size, so
+  -> a big member weighs more than a small one. A move's delete pass has
+  -> no byte counter, so the bar just rests full while it runs.
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
     IF pick
       IF edirs[b + i]
         arcmember(member, arcsub[p], enames[b + i])
-        total := total + arccountunder(p, member)
+        total := total + arcsizeunder(p, member)
       ELSE
-        total := total + 1
+        total := total + esize[b + i]
       ENDIF
     ENDIF
   ENDFOR
-  IF ismove THEN total := total * 2    -> extract pass + delete pass
-  progbyfile := TRUE
+  progbyfile := TRUE     -> suppress copyfile's own byte ticks
+  progbybytes := TRUE    -> arcrunprog drives the bar from lha's totals
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
@@ -3500,6 +3560,7 @@ PROC arcxfer_out(p, q, ismove, force)
   ENDFOR
   progoff()
   progbyfile := FALSE
+  progbybytes := FALSE
   arcwipe('T:CFile-x')
   IF deld THEN loadarchive(p, arcpath[p])    -> cache lost some members
   refreshall()
@@ -3618,7 +3679,7 @@ PROC arcxfer_in(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
-  -> pre-count files: the lha add reports one line per file added
+  -> pre-scan BYTES: the add bar advances by each added member's size
   statbytes := 0
   statfiles := 0
   FOR i := 0 TO ecount[p] - 1
@@ -3626,14 +3687,15 @@ PROC arcxfer_in(p, q, ismove, force)
     IF pick
       IF edirs[b + i]
         buildfull(src, ppath[p], enames[b + i])
-        treestat(src, 0)
+        treestat(src, 0)    -> adds the tree's bytes to statbytes
       ELSE
-        statfiles := statfiles + 1
+        statbytes := statbytes + esize[b + i]
       ENDIF
     ENDIF
   ENDFOR
-  total := statfiles
+  total := statbytes
   progbyfile := TRUE
+  progbybytes := TRUE
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
@@ -3730,6 +3792,7 @@ PROC arcxfer_in(p, q, ismove, force)
   ENDFOR
   progoff()
   progbyfile := FALSE
+  progbybytes := FALSE
   arcwipe('T:CFile-a')
   IF added THEN loadarchive(q, arcpath[q])    -> cache gained members
   refreshall()
@@ -3993,6 +4056,7 @@ PROC arcdelete(p)
   ENDFOR
   progoff()
   progbyfile := FALSE
+  progbybytes := FALSE
   loadarchive(p, arcpath[p])    -> rebuild the cache without the deleted
   refreshall()
   IF ndel > 0

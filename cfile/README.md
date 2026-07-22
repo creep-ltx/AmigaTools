@@ -53,8 +53,10 @@ Copy and move ask about name collisions per file —
 anything is transferred, so cancelling leaves everything untouched.
 Directories go recursively; copying preserves protection bits,
 datestamps and comments; a directory can be merged into an existing
-one. A centered progress bar (byte-accurate for copies) covers the
-longer operations.
+one. A centered progress bar covers the longer operations, byte-
+accurate: file copies/moves count real bytes, and copying members in
+or out of an archive weighs each by its size (a big member fills the
+bar, a small one barely moves it).
 
 Deleting is recursive and resilient: a delete-protected entry asks
 `unprotect? (y)es (n)o (a)ll`, an entry that will not go is skipped

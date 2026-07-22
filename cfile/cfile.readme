@@ -77,7 +77,9 @@ FILE OPERATIONS
   untouched. Directories go recursively; copying preserves
   protection bits, datestamps and comments; a directory can be
   merged into an existing one. A centered progress bar covers the
-  longer operations, byte-accurate for copies.
+  longer operations, byte-accurate: file copies and moves count real
+  bytes, and copying members in or out of an archive weighs each by its
+  size, so a big member fills the bar and a small one barely moves it.
 
   Deleting is recursive and does not give up easily: a
   delete-protected entry asks unprotect? (y)es (n)o (a)ll, an entry
