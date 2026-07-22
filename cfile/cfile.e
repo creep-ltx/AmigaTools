@@ -3533,7 +3533,8 @@ ENDPROC ok
 -> archive; the bar ticks per member removed.
 PROC arcdelete(p)
   DEF b, nmark, i, pick, k, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
-      mb[130]:STRING, total=0, ndel=0
+      mb[130]:STRING, total=0, ndel=0, hasdir=FALSE, ok,
+      stageroot[CPATHLEN]:STRING
   IF ecount[p] = 0 THEN RETURN
   b := p * MAXENT
   nmark := markcount(p)
@@ -3569,6 +3570,37 @@ PROC arcdelete(p)
     drawpane(p)
     IF ndel > 0
       StringF(mb, '\d entr\s removed (on exit)', ndel,
+              IF ndel = 1 THEN 'y' ELSE 'ies')
+      showmsg(mb)
+    ENDIF
+    RETURN
+  ENDIF
+  -> DIRECT with a directory in the selection: lha d cannot remove a
+  -> -lhd- member, so a folder delete takes the rebuild path (extract,
+  -> prune, repack) - the same one the deferred commit uses. Files-only
+  -> deletes stay on the fast lha d path below.
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick AND edirs[b + i] THEN hasdir := TRUE
+  ENDFOR
+  IF hasdir
+    FOR i := 0 TO ecount[p] - 1
+      pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+      IF pick
+        arcmember(member, arcsub[p], enames[b + i])
+        arcflagdel(p, member, edirs[b + i])    -> flag, then rebuild at once
+        ndel := ndel + 1
+      ENDIF
+    ENDFOR
+    promptrow('writing changes to the archive')
+    arcstage(p, stageroot)    -> no staging in DIRECT; rebuild skips overlay
+    ok := arcrebuild(p, stageroot)
+    loadarchive(p, arcpath[p])    -> reload the rebuilt archive, flags cleared
+    refreshall()
+    IF ok = FALSE
+      showmsg('could not rebuild the archive - nothing deleted')
+    ELSEIF ndel > 0
+      StringF(mb, '\d entr\s deleted from the archive', ndel,
               IF ndel = 1 THEN 'y' ELSE 'ies')
       showmsg(mb)
     ENDIF
