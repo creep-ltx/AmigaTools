@@ -201,11 +201,17 @@ PROC initpanes()
   ENDFOR
   StrCopy(ppath[0], cfgleft)
   StrCopy(ppath[1], cfgright)
-  FOR p := 0 TO 9
-    IF (bmark[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
-    bmarkset[p] := 0
-  ENDFOR
   IF (copybuf := String(CBUFSZ)) = NIL THEN Raise("MEM")
+ENDPROC
+
+-> the bookmark slots, allocated before loadconfig so it can fill them from
+-> saved BOOKMARK<d> lines (initpanes runs after the config is read)
+PROC initbookmarks()
+  DEF i
+  FOR i := 0 TO 9
+    IF (bmark[i] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    bmarkset[i] := 0
+  ENDFOR
 ENDPROC
 
 -> without a Startup-Sequence there is no ENV: or T:; CFile makes
@@ -289,7 +295,7 @@ ENDPROC buf
 -> = the volume list), SAVEDIRS ON|OFF, FONT name/size (stored and
 -> preserved; takes effect with the font-grid build).
 PROC loadconfig()
-  DEF fh, buf=NIL, n, i=0, j, c, s:PTR TO CHAR,
+  DEF fh, buf=NIL, n, i=0, j, c, d, s:PTR TO CHAR,
       line[300]:STRING, key[20]:STRING, val[280]:STRING, l, sp
   StrCopy(cfgleft, 'SYS:')
   StrCopy(cfgright, 'RAM:')
@@ -360,6 +366,20 @@ PROC loadconfig()
             sortrev := InStr(val, 'REV') >= 0
           ELSEIF StrCmp(key, 'FONT')
             StrCopy(cfgfont, val)
+          ELSEIF StrCmp(key, 'SAVEBOOKMARKS')
+            UpperStr(val)
+            savebmarks := StrCmp(val, 'ON')
+          ELSEIF (EstrLen(key) = 9) AND StrCmp(key, 'BOOKMARK', 8) AND
+                 (key[8] >= "0") AND (key[8] <= "9")
+            -> BOOKMARK<d> <path>; "(volumes)" = the volume list. bmark[] is
+            -> allocated by initbookmarks() before loadconfig runs.
+            d := key[8] - "0"
+            IF StrCmp(val, '(volumes)')
+              StrCopy(bmark[d], '')
+            ELSE
+              StrCopy(bmark[d], val)
+            ENDIF
+            bmarkset[d] := 1
           ENDIF
         ENDIF
       ENDIF
@@ -416,10 +436,31 @@ PROC savepane(fh, keyname, p)
   wline(fh, line)
 ENDPROC
 
+-> write a config line through verbatim, restoring the newline slurpfh stripped
+PROC passline(fh, line)
+  DEF b[302]:STRING
+  StrCopy(b, line)
+  StrAdd(b, '\n')
+  wline(fh, b)
+ENDPROC
+
+-> SAVEBOOKMARKS ON: write a BOOKMARK<d> line for each set slot. Old
+-> BOOKMARK lines are dropped in the pass-through, so these are the fresh set.
+PROC savebookmarks(fh)
+  DEF d, line[340]:STRING
+  FOR d := 0 TO 9
+    IF bmarkset[d]
+      StringF(line, 'BOOKMARK\d \s\n', d,
+              IF EstrLen(bmark[d]) = 0 THEN '(volumes)' ELSE bmark[d])
+      wline(fh, line)
+    ENDIF
+  ENDFOR
+ENDPROC
+
 PROC saveconfig()
   DEF fh, buf=NIL, n=0, i, j, l, sp, c, s:PTR TO CHAR,
       line[300]:STRING, key[20]:STRING, wl=FALSE, wr=FALSE
-  IF savedirs = FALSE THEN RETURN
+  IF (savedirs = FALSE) AND (savebmarks = FALSE) THEN RETURN
   IF fh := Open('PROGDIR:cfile.config', OLDFILE)
     buf := slurpfh(fh, {n})
     Close(fh)
@@ -478,20 +519,28 @@ PROC saveconfig()
           ENDIF
         ENDIF
       ENDIF
+      -> LEFT/RIGHT are rewritten only when SAVEDIRS is on; otherwise they
+      -> pass through untouched. Old BOOKMARK lines are dropped (the current
+      -> set is written fresh at the end when SAVEBOOKMARKS is on).
       IF StrCmp(key, 'LEFT')
-        savepane(fh, 'LEFT', 0)
+        IF savedirs THEN savepane(fh, 'LEFT', 0) ELSE passline(fh, line)
         wl := TRUE
       ELSEIF StrCmp(key, 'RIGHT')
-        savepane(fh, 'RIGHT', 1)
+        IF savedirs THEN savepane(fh, 'RIGHT', 1) ELSE passline(fh, line)
         wr := TRUE
+      ELSEIF (EstrLen(key) = 9) AND StrCmp(key, 'BOOKMARK', 8) AND
+             (key[8] >= "0") AND (key[8] <= "9")
+        -> drop it
       ELSE
-        StrAdd(line, '\n')
-        wline(fh, line)
+        passline(fh, line)
       ENDIF
     ENDWHILE
   ENDIF
-  IF wl = FALSE THEN savepane(fh, 'LEFT', 0)
-  IF wr = FALSE THEN savepane(fh, 'RIGHT', 1)
+  IF savedirs
+    IF wl = FALSE THEN savepane(fh, 'LEFT', 0)
+    IF wr = FALSE THEN savepane(fh, 'RIGHT', 1)
+  ENDIF
+  IF savebmarks THEN savebookmarks(fh)
   Close(fh)
   IF buf THEN Dispose(buf)
 ENDPROC
@@ -529,6 +578,8 @@ PROC cfgval(key, dst)
     IF sortrev THEN StrAdd(dst, ' rev')
   ELSEIF StrCmp(key, 'FONT')
     IF EstrLen(cfgfont) = 0 THEN StrCopy(dst, 'topaz.font') ELSE StrCopy(dst, cfgfont)
+  ELSEIF StrCmp(key, 'SAVEBOOKMARKS')
+    StrCopy(dst, IF savebmarks THEN 'ON' ELSE 'OFF')
   ELSE
     StrCopy(dst, '')
   ENDIF
@@ -566,7 +617,7 @@ ENDPROC found
 -> setting added in a later CFile just appears, no hand-editing). The
 -> table is the one place a new setting is declared - key + its comment.
 PROC configensure()
-  DEF tab:PTR TO LONG, nk=7, ki, fh, buf=NIL, n=0, exists=FALSE,
+  DEF tab:PTR TO LONG, nk=8, ki, fh, buf=NIL, n=0, exists=FALSE,
       key:PTR TO CHAR, comment:PTR TO CHAR, val[300]:STRING,
       anymissing=FALSE, line[80]:STRING
   tab := ['LEFT', 'Left pane start path.  (volumes) starts in the volume list.',
@@ -575,7 +626,8 @@ PROC configensure()
           'ARCWRITE', 'Archive edits to disk: ONEXIT (batch, commit on leave) or DIRECT.',
           'ICONS', 'Carry a file .info icon along on copy/move/delete/rename: ON or OFF.',
           'SORT', 'Start-up sort order: name, size or date; add rev to reverse.',
-          'FONT', 'Display font name/size.  topaz.font = ROM Topaz 8.']:LONG
+          'FONT', 'Display font name/size.  topaz.font = ROM Topaz 8.',
+          'SAVEBOOKMARKS', 'Remember the b+digit bookmark slots across runs: ON or OFF.']:LONG
   IF fh := Open('PROGDIR:cfile.config', MODE_OLDFILE)
     exists := TRUE
     buf := slurpfh(fh, {n})
@@ -7501,6 +7553,7 @@ ENDPROC
 
 PROC main() HANDLE
   ensureassigns()
+  initbookmarks()    -> before loadconfig, which may fill the slots
   loadconfig()
   configensure()    -> create/complete cfile.config before the args override
   parseargs()
