@@ -71,6 +71,7 @@ MODULE 'intuition/intuition','intuition/screens',
        'dos/datetime','dos/dostags','devices/inputevent','diskfont'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
+      FINDMAX=500,    -> find: results collected before the search stops
       FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
       CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
       EDMAXL=8192, EDLINIT=120,    -> editor: line count cap, initial
@@ -2694,6 +2695,72 @@ PROC treestat(path, depth)
     UnLock(lock)
   ENDIF
   DisposeLink(child)
+  FreeDosObject(DOS_FIB, fib)
+ENDPROC
+
+-> TRUE if `s` carries an AmigaDOS pattern metacharacter - then find globs
+-> the whole name instead of matching a substring
+PROC hasmeta(s:PTR TO CHAR)
+  DEF i=0, c
+  WHILE c := s[i]
+    IF (c = "#") OR (c = "?") OR (c = "*") OR (c = "(") OR (c = ")") OR
+       (c = "|") OR (c = "~") OR (c = "[") OR (c = "]") OR (c = "%")
+      RETURN TRUE
+    ENDIF
+    i++
+  ENDWHILE
+ENDPROC FALSE
+
+-> recursively collect every real file/dir under `dir` whose name matches
+-> into res[], each a String'd full path, up to FINDMAX. isglob TRUE = whole-
+-> name MatchPatternNoCase against `parsed`; otherwise a case-insensitive
+-> substring of `pat`. cnt^ is shared across the recursion. Cancellable via
+-> Esc (checkabort - the caller sets cancelok). Heap path buffers, like
+-> copytree: a deep tree cannot sit on E's stack.
+PROC findwalk(dir, depth, pat, parsed, isglob, res:PTR TO LONG, cnt:PTR TO LONG)
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, child=NIL, full=NIL, s, match
+  IF depth > 20 THEN RETURN
+  IF cnt[0] >= FINDMAX THEN RETURN
+  IF checkabort() THEN RETURN
+  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN
+  child := String(CPATHLEN)
+  full := String(CPATHLEN)
+  IF (child = NIL) OR (full = NIL)
+    IF child THEN DisposeLink(child)
+    IF full THEN DisposeLink(full)
+    FreeDosObject(DOS_FIB, fib)
+    RETURN
+  ENDIF
+  IF lock := Lock(dir, SHARED_LOCK)
+    IF Examine(lock, fib)
+      more := ExNext(lock, fib)
+      WHILE more AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
+        StrCopy(full, dir)
+        AddPart(full, fib.filename, CPATHLEN - 4)
+        SetStr(full, StrLen(full))
+        IF isglob
+          match := MatchPatternNoCase(parsed, fib.filename)
+        ELSE
+          match := nchas(fib.filename, pat)
+        ENDIF
+        IF match
+          IF (s := String(EstrLen(full) + 1))
+            StrCopy(s, full)
+            res[cnt[0]] := s
+            cnt[0] := cnt[0] + 1
+          ENDIF
+        ENDIF
+        IF (fib.direntrytype > 0) AND (cnt[0] < FINDMAX)
+          StrCopy(child, full)
+          findwalk(child, depth + 1, pat, parsed, isglob, res, cnt)
+        ENDIF
+        more := ExNext(lock, fib)
+      ENDWHILE
+    ENDIF
+    UnLock(lock)
+  ENDIF
+  DisposeLink(child)
+  DisposeLink(full)
   FreeDosObject(DOS_FIB, fib)
 ENDPROC
 
@@ -6442,6 +6509,172 @@ PROC dobookmark()
   ENDIF
 ENDPROC
 
+-> one page of the find-results list: visrows rows from `vtop`, the selected
+-> one inverted. A long path shows its tail (the filename end).
+PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel)
+  DEF r, ln, s:PTR TO CHAR, l, y, ww
+  ww := ncols
+  FOR r := 0 TO visrows - 1
+    y := panetop + (r * ch)
+    ln := vtop + r
+    SetAPen(rp, 0)
+    RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
+    IF ln < cnt
+      s := res[ln]
+      l := StrLen(s)
+      IF l > ww
+        s := s + (l - ww)    -> show the tail (filename end) of a long path
+        l := ww
+      ENDIF
+      IF ln = sel
+        SetAPen(rp, txtpen)
+        RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
+        SetAPen(rp, 0)
+        SetBPen(rp, txtpen)
+      ELSE
+        SetAPen(rp, txtpen)
+        SetBPen(rp, 0)
+      ENDIF
+      Move(rp, x0, y + baseline)
+      Text(rp, s, l)
+      SetBPen(rp, 0)
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> show the find results as a selectable, scrollable list; Up/Down move
+-> (Shift = page, Ctrl = ends), Enter picks (returns the index), Esc = -1.
+PROC findlist(res:PTR TO LONG, cnt)
+  DEF sel=0, vtop=0, ns, class, code, qual, done=FALSE, pick=-1, hb[130]:STRING
+  drawviewframe(TRUE)
+  StringF(hb, '\d match\s - Up/Down, Enter jumps, Esc cancels', cnt,
+          IF cnt = 1 THEN '' ELSE 'es')
+  promptrow(hb)
+  drawfindpage(res, cnt, vtop, sel)
+  WHILE done = FALSE
+    class := WaitIMessage(win)
+    code := MsgCode()
+    qual := MsgQualifier()
+    ns := sel
+    IF class = IDCMP_VANILLAKEY
+      IF code = 27
+        done := TRUE
+      ELSEIF code = 13
+        pick := sel
+        done := TRUE
+      ENDIF
+    ELSEIF class = IDCMP_RAWKEY
+      IF code < $80
+        IF code = RK_UP
+          IF qual AND IEQUALIFIER_CONTROL
+            ns := 0
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            ns := sel - (visrows - 1)
+          ELSE
+            ns := sel - 1
+          ENDIF
+        ELSEIF code = RK_DOWN
+          IF qual AND IEQUALIFIER_CONTROL
+            ns := cnt - 1
+          ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
+            ns := sel + (visrows - 1)
+          ELSE
+            ns := sel + 1
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+    IF ns > (cnt - 1) THEN ns := cnt - 1
+    IF ns < 0 THEN ns := 0
+    IF (ns <> sel) AND (done = FALSE)
+      sel := ns
+      IF sel < vtop THEN vtop := sel
+      IF sel >= (vtop + visrows) THEN vtop := sel - visrows + 1
+      drawfindpage(res, cnt, vtop, sel)
+    ENDIF
+  ENDWHILE
+ENDPROC pick
+
+-> f: recursive name search from the active pane's directory. Type a name
+-> fragment; matching files and dirs are listed (case-insensitive substring)
+-> and Enter jumps the pane to the chosen one. Esc during the search stops
+-> it (partial results still shown). Real directories only.
+PROC dofind()
+  DEF p, res:PTR TO LONG, cnt=0, i, j=0, c, pat[42]:STRING, glob[90]:STRING,
+      parsed=NIL:PTR TO CHAR, isglob=FALSE, pick, pp:PTR TO CHAR,
+      hit[CPATHLEN]:STRING, dir[CPATHLEN]:STRING, nm[120]:STRING
+  p := active
+  IF inarchive(p)
+    showmsg('find works in real directories - Left out of the archive')
+    RETURN
+  ENDIF
+  IF involume(p)
+    showmsg('enter a volume first, then find')
+    RETURN
+  ENDIF
+  IF efail[p] THEN RETURN
+  StrCopy(pat, '')
+  IF lineinput('find (name or #?): ', pat, 40, FALSE) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF EstrLen(pat) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF (res := New(FINDMAX * 4)) = NIL
+    showmsg('not enough memory to search')
+    RETURN
+  ENDIF
+  -> a metachar means glob the whole name (Unix * -> AmigaDOS #?); plain
+  -> text stays a case-insensitive substring
+  IF hasmeta(pat)
+    FOR i := 0 TO EstrLen(pat) - 1
+      c := pat[i]
+      IF c = "*"
+        glob[j++] := "#"
+        glob[j++] := "?"
+      ELSE
+        glob[j++] := c
+      ENDIF
+    ENDFOR
+    glob[j] := 0
+    SetStr(glob, j)
+    IF (parsed := New(300))
+      IF ParsePatternNoCase(glob, parsed, 300) >= 0 THEN isglob := TRUE
+    ENDIF
+  ENDIF
+  showmsg('searching - Esc to stop')
+  cancelok := TRUE
+  abort := FALSE
+  findwalk(ppath[p], 0, pat, parsed, isglob, res, {cnt})
+  cancelok := FALSE
+  abort := FALSE
+  IF parsed THEN Dispose(parsed)
+  IF cnt = 0
+    Dispose(res)
+    showmsg('nothing found')
+    RETURN
+  ENDIF
+  pick := findlist(res, cnt)
+  IF pick >= 0 THEN StrCopy(hit, res[pick])
+  FOR i := 0 TO cnt - 1
+    IF res[i] THEN DisposeLink(res[i])
+  ENDFOR
+  Dispose(res)
+  drawall()
+  IF pick >= 0
+    -> split the match into its parent dir + name, jump there, land on it
+    pp := PathPart(hit)
+    StrCopy(dir, hit, pp - hit)
+    StrCopy(nm, FilePart(hit))
+    IF gotopath(p, dir)
+      StrCopy(prevname, nm)
+      selectbyname(p)
+    ENDIF
+  ENDIF
+ENDPROC
+
 -> a bare digit: jump the active pane to slot `d`. Not inside an archive.
 PROC bookmarkjump(d)
   DEF p, mb[40]:STRING
@@ -7474,6 +7707,7 @@ PROC helpscreen()
             'Up/Down .... move (Shift = page, Ctrl = first/last)',
             'Right/Left . enter dir/lha/lzx archive / parent, volumes',
             'g .......... go to a typed path',
+            'f .......... find by name or #? pattern (recursive)',
             'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
             '/ .......... filter: type to narrow, Space marks a match',
             'F5 ......... rescan: re-read both panes from disk',
@@ -7608,6 +7842,8 @@ PROC eventloop()
         dofilter()
       ELSEIF (code = "g") OR (code = "G")    -> go to a typed path
         dogoto()
+      ELSEIF (code = "f") OR (code = "F")    -> find files by name, recursively
+        dofind()
       ELSEIF (code = "b") OR (code = "B")    -> set a bookmark (b then a digit)
         dobookmark()
       ELSEIF (code >= "0") AND (code <= "9")    -> jump to bookmark slot (digit)
