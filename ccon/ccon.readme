@@ -27,6 +27,11 @@ FEATURES
 
   - Hosts real AmigaShells: NewShell CCON:
 
+  - Iconify to the Workbench: RightAmiga+I sends a window to a
+    desktop icon and a click brings it back exactly as you left
+    it - scrollback, a half-typed line and all; its own icon is
+    built into the handler. Works over a fullscreen client (Ed) too
+
   - fish-style autosuggestions: history's continuation as grey
     ghost text; Right accepts, Ctrl+Right/Tab take it word by word
 
@@ -70,7 +75,7 @@ FEATURES
 
   - can replace CON:/RAW: system-wide, KingCON style (Assign
     DISMOUNT + Mount FROM the same mountlist) - experimental,
-    see ccon.doc section 14
+    see ccon.doc section 15
 
 
 LIMITATIONS
@@ -84,7 +89,10 @@ LIMITATIONS
 
   - Completion: no quoted words, one menu page of 80
 
-  - SMART/SIMPLE, ALT, ICONIFY not implemented
+  - SMART/SIMPLE and ALT not implemented
+
+  - Tab completion and the history file have no filesystem
+    timeout; a wedged or spinning-up disk blocks the window
 
 
 INSTALL
@@ -97,6 +105,38 @@ INSTALL
 
   The drawers mirror SYS:. Put the Mounts in S:User-Startup to
   keep them. After updating the handler: reboot, not re-Mount.
+
+
+HISTORY
+
+  1.2
+    - Iconify: RightAmiga+I sends a window to a Workbench icon,
+      a click restores it exactly as left; icon built in
+    - Full-screen paging like CON:: form feed clears and homes,
+      so More and any repainting program replace the page
+      instead of scrolling it
+    - Ed fixed: cursor keys navigate (raw keys back to 8-bit
+      $9B), and resizing the window re-measures and repaints
+    - Bug fixes: a narrowed window now re-wraps the transcript
+      instead of losing it, paste can't overflow the clipboard
+      buffer, clean handler unmount, history stores each command
+      once, plus assorted hardening
+
+  1.1
+    - Per-window FONT and real italic/underline/inverse styles
+    - Alternate screen for Ed/More (paged content stays out of
+      scrollback)
+    - Shared, persistent, prefix-filtered command history
+    - Safe multi-line paste; scrollback content search (Ctrl+R)
+    - Can replace the system CON:/RAW: KingCON style
+
+  1.0
+    - First release: output scrollback, fullscreen client
+      support, a readline line editor, fish-style suggestions,
+      zsh-style Tab completion, copy & paste, the input.device
+      chain, and stock CON: open/close semantics
+
+  Full version history: changelog.md.
 
 
 

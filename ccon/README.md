@@ -10,13 +10,16 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.1.** Every milestone boot-verified on an AmigaOS 3.2
-install (FS-UAE, 68030). The release archive is `ltx-cc11.lha`. Since
-1.0: per-window FONT and soft styles, an alternate-screen contract
-for Ed/More (no console had that before), shared persistent
-history, safe multi-line paste, scrollback content search, and —
-new this release — CCON: can stand in for the system's own CON:/
-RAW: entirely, KingCON style.
+**Status: 1.2.** Every milestone boot-verified on an AmigaOS 3.2
+install (FS-UAE, 68030). New in 1.2: **iconify** a window to a
+Workbench icon (RightAmiga+I; click it to bring the window back
+exactly as you left it), and clean full-screen paging — a form feed
+now replaces the page the way `CON:` does instead of scrolling it, so
+More and any program that repaints flips pages properly. 1.1 brought
+per-window FONT and soft styles, an alternate-screen contract for
+Ed/More (no console had that before), shared persistent history, safe
+multi-line paste, scrollback content search, and the KingCON-style
+`CON:`/`RAW:` takeover.
 
 ## Screenshots
 
@@ -52,6 +55,12 @@ the real prompt comes back from the scrollback model:
   `NOBORDER`, …) parsed per open, `WIDTH`/`HEIGHT` of `-1` filling
   whatever's left of the screen from `X`/`Y`; `*`/`CONSOLE:` opens
   attach to the caller's console.
+- **Iconify to the Workbench**: RightAmiga+I sends a window to a
+  desktop icon and the console keeps running behind it (output pauses,
+  then flushes on restore); double-click the icon and the window is
+  back exactly as you left it — scrollback, a half-typed line, cursor
+  and all. The icon is built into the handler, and it works over a
+  fullscreen client like Ed too.
 - **FONT and LINES per window**: your own face/size (loaded from
   disk if needed) or scrollback depth; unset FONT follows your
   Font Prefs default instead of a hardcoded topaz 8.
@@ -92,7 +101,7 @@ the real prompt comes back from the scrollback model:
 - **Can replace CON:/RAW: system-wide**, KingCON style — dismount
   the stock devices, mount CCON: under their names instead, and
   every console the OS opens becomes a CCON: window. Experimental;
-  see `ccon.doc` section 14.
+  see `ccon.doc` section 15.
 - Swedish (and other) dead-key composition survives raw mode.
 
 ## Try it
@@ -120,7 +129,7 @@ design notes. A running handler keeps its seglist: after updating
 - `ccon.readme` — short-form readme for the release archive.
 - `ccon.doc` — the full plain-text manual (Amiga-width lines).
 - [`changelog.md`](changelog.md) — the version history, 0.1 to now.
-- `ltx-cc11.lha` — the release archive (`L/`, `DEVS/`, docs).
+- `ltx-cc12.lha` — the release archive (`L/`, `DEVS/`, docs).
 - `todo.md` — the complete build history: every milestone, every
   verified protocol fact, every disassembly finding, every latent
   bug the boots flushed out. The project's lab notebook.
@@ -191,3 +200,26 @@ a real `S:User-Startup`, once it turned out to need no handler
 code at all — just the same mountlist trick KingCON already uses.
 The full account, including what didn't work first, is in
 `todo.md`.
+
+## Since 1.1
+
+CCON: windows now **iconify** to the Workbench — RightAmiga+I
+collapses a window to a desktop icon (its own icon, built into the
+handler, so there's nothing to install), the console keeping its
+scrollback and half-typed line behind it; a click brings it back
+untouched. Getting there settled, the hard way, that a DOS-handler
+window can't take a click on a title-bar gadget at all — the standard
+iconify gadget is handled entirely inside Intuition with no report to
+the app, and a custom gadget renders but never sees the click — so
+the trigger is a key, the way AmiExpress does it. And More, or any
+program that repaints a full screen, now REPLACES the page on a form
+feed the way `CON:` always did, instead of scrolling it — the one
+thing 1.0 and 1.1 were missing. And 1.1's raw arrow-key fix turned out
+to be half a fix: switching the cursor-key introducer to the 7-bit
+`ESC[` made More page but had been silently breaking Ed, which reads
+that `ESC` as its command line — both are back on the 8-bit `$9B` stock
+`CON:` sends, and both navigate now. Fixing that also un-stuck Ed's
+window resize, which had looked unfixable: the earlier attempt's "Ed
+breaks worse" was this very arrow bug firing on every test keypress, not
+the resize — with it gone, letting the resize event through repaints Ed
+and lets it re-measure cleanly. The full account is in `todo.md`.

@@ -66,7 +66,12 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'devices/inputevent','devices/timer','devices/input',
        'devices/clipboard',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
-       'keymap','diskfont'
+       'keymap','diskfont',
+       -> v1.2 ICONIFY: 'wb' = workbench.library (AddAppIconA/RemoveAppIcon) +
+       -> workbenchbase; 'workbench/workbench' = the diskobject/appmessage
+       -> structs + WBTOOL/AMTYPE_APPICON consts. The AppIcon is baked in
+       -> (bicondo), so no icon.library. AddAppIcon/RemoveAppIcon are exec.
+       'wb','workbench/workbench'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -292,6 +297,11 @@ OBJECT console
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
+  appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
+                                -> AppIcon while iconified (NIL = not
+                                -> iconified). RightAmiga+I zips the window
+                                -> small and drops the icon; clicking it zips
+                                -> back (ZipWindow toggles), AmiExpress-style
   -> byte arrays last (alignment)
   inq[2048]:ARRAY OF CHAR       -> input byte queue (finished lines)
   pscrname[64]:ARRAY OF CHAR    -> SCREENname: a public screen
@@ -369,6 +379,19 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     fhtask=NIL,
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
+    -> v1.2 ICONIFY: AppIcon plumbing. iconobj is the DiskObject every
+    -> iconified window's AppIcon renders - the baked-in bicondo (built at
+    -> init, no file/DOS). wbport receives the click (AppMessage) from Workbench.
+    iconok=FALSE,               -> workbench.library + a usable icon both up
+    iconobj=NIL:PTR TO diskobject,  -> the AppIcon DiskObject (= bicondo, baked in)
+    -> the CCON AppIcon is BAKED INTO the binary (no external CCon.info): his
+    -> 55x23x3 icon extracted from CCon.info, a DiskObject built in code.
+    biconimg:image,             -> normal Image (GadgetRender)
+    biconimg2:image,            -> selected Image (SelectRender, GFLG_GADGHIMAGE)
+    bicondo:diskobject,         -> the DiskObject handed to AddAppIconA
+    bicondat=NIL:PTR TO LONG,   -> static planar data, normal
+    bicondat2=NIL:PTR TO LONG,  -> static planar data, selected
+    wbport=NIL:PTR TO mp,       -> AppMessage reply port (in the Wait mask)
     ihmap[36]:ARRAY OF CHAR,    -> MapRawKey result bytes
     -> B7 reflow scratch: the write cursor and destination planes the
     -> emit helpers share. Globals because E has no closures and the
@@ -385,21 +408,6 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> LINEAR dest row + column (converted to a screen row at the end).
     rftr[2]:ARRAY OF LONG, rftc[2]:ARRAY OF LONG,
     rfdw[2]:ARRAY OF LONG, rfdc2[2]:ARRAY OF LONG,
-    -> v1.2 double buffering: a SHARED offscreen back-buffer. Grown to
-    -> the largest window that ever needs it; the handler renders ONE
-    -> console at a time, so one shared buffer is safe (bbactive names
-    -> the one accumulating; switching flushes the previous). NIL bbmap =
-    -> no buffer, draw direct. bufoff is a kill switch for a future option.
-    bbmap=NIL:PTR TO bitmap,     -> the back-buffer bitmap (exec alloc)
-    bbrp=NIL:PTR TO rastport,    -> a RastPort over it (E-heap, lazy)
-    bbw=0, bbh=0, bbdepth=0,     -> current buffer size (grow-only)
-    bbactive=NIL:PTR TO console, -> the console accumulating in the buffer
-    bbpage=FALSE,                -> the accumulation is a ^L page: hold the
-                                 -> flush past the per-drain point until the
-                                 -> client READs (page done) - a full-screen
-                                 -> repaint sent as many round-tripped writes
-                                 -> then shows in ONE blit (instant More)
-    bufoff=FALSE,                -> TRUE = force direct drawing
     -> audit B5: ACTION_DIE teardown. dieing ends main()'s loop; mydnode
     -> is our DeviceNode, kept so the DIE handler can clear dn_Task (so
     -> DOS re-mounts a fresh handler on the next open). ihdevopen tracks
@@ -412,7 +420,7 @@ PROC main()
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
       stps:PTR TO CHAR, c:PTR TO console, cnext,
-      wp:PTR TO INT, lp:PTR TO LONG
+      wp:PTR TO INT, lp:PTR TO LONG, amsg:PTR TO appmessage, parked
 
   IF wbmessage = NIL
     WriteF('ccon-handler is a DOS handler; Mount starts it, not you.\n')
@@ -504,6 +512,78 @@ PROC main()
   -> the vector address rides as an immediate poked in here, since
   -> a process entry carries no is_Data pointer. Exec-only; if any
   -> step fails, fhok stays FALSE and FONT falls back to OpenFont.
+  -> ICONIFY: build the baked-in CCON AppIcon (his CCon.info, 55x23x3, its
+  -> image data static below). E globals start as GARBAGE, so zero the two
+  -> structs first, then set only the fields AddAppIconA reads. A classic
+  -> Image (GFLG_GADGIMAGE), no external file, no icon.library, no DOS.
+  bicondat := [
+   $00000000, $00000400, $7BFFFFFF, $FFF08400, $2AAEAEAE, $AEB08400, $FFFFFFFF, $FFF7BC00,
+   $55555554, $80002C00, $7FFEA800, $00001C00, $5DD55552, $00002C00, $7F7B8800, $00001400,
+   $55D55510, $00002C00, $7FEA8000, $00000400, $55555500, $00000C00, $6BB88020, $00000400,
+   $55555500, $00000400, $7EA80000, $00000400, $55555000, $00000400, $6B880200, $00000400,
+   $55555000, $00000400, $6A800000, $00000400, $55550000, $00000400, $6A800000, $00000400,
+   $40000000, $00000400, $7FFFFFFF, $FFFFFC00, $00000000, $00000000, $FFFFFFFF, $FFFFF800,
+   $84000000, $00184000, $84000000, $00084000, $2AAAAAA9, $22000000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $80000000, $00004000,
+   $80000000, $00004000, $80000000, $00004000, $80000000, $00004000, $BFFFFFFF, $FFFFC000,
+   $AAA55552, $48000000, $00000000, $00000000, $00000000, $00000600, $7BFFFFFF, $FFE73A00,
+   $6AAEAEAE, $AEA73A00, $80000000, $00084200, $15555554, $800AAA00, $3BFEA800, $00551A00,
+   $11555552, $02AAAA00, $3BBB8800, $00551200, $11555510, $22AAAA00, $3BEA8000, $00150200,
+   $15555500, $2AAA8A00, $2BB88020, $04550200, $15555502, $2AAA9200, $3EA80000, $055F8200,
+   $15555002, $AAAA9200, $2B880200, $4577AA00, $15555022, $AAAA9200, $2A800000, $15FFAA00,
+   $1555002A, $AAAAB200, $2A800000, $57FFAA00, $00000000, $00003A00, $00000000, $00000200,
+   $FFFFFFFF, $FFFFFE00
+   ]:LONG
+  bicondat2 := [
+   $00000000, $00000000, $00000000, $00000200, $3DFFFFFF, $FFFBDE00, $3DFFFFFF, $FFFBDE00,
+   $7FFFFFFF, $FFFBDE00, $2AAAAAAA, $40001E00, $3FFF5400, $00001E00, $2EEFAAA9, $00001E00,
+   $3FBFC400, $00001E00, $2AEFAA88, $00001E00, $3FFF4000, $00001E00, $2AAAAA80, $00001E00,
+   $35DC4010, $00001E00, $2AAAAA80, $00001600, $3F540000, $00001E00, $2AAAA800, $00001600,
+   $35C40100, $00000E00, $2AAAA800, $00001600, $35400000, $00000E00, $2AAA8000, $00000600,
+   $35400000, $00000E00, $20000000, $00000600, $3FFFFFFF, $FFFFFE00, $00000000, $00000000,
+   $7FFFFFFF, $FFFFFC00, $7FFFFFFF, $FFFFBC00, $7FFFFFFF, $FFF7BC00, $15555554, $91000000,
+   $40000000, $00003C00, $400F0000, $00003C00, $400F0000, $00003C00, $400F0000, $00003C00,
+   $400F0000, $00003C00, $400F0000, $00003C00, $40000000, $00003C00, $40000000, $00003C00,
+   $40000000, $00003400, $40000000, $00003C00, $40000000, $00003400, $40000000, $00002C00,
+   $40000000, $00003400, $40000000, $00002C00, $40000000, $00002400, $40000000, $00002C00,
+   $5FFFFFFF, $FFFFE400, $5552AAA9, $24000000, $FFFFFFFF, $FFFFFE00, $80000000, $00000200,
+   $80000000, $00000000, $80000000, $00000000, $C0000000, $00042000, $8AAAAAAA, $40054000,
+   $9DFF5400, $002A8000, $88AFAAA9, $01554000, $9DDFC400, $002A8000, $88AFAA88, $11554000,
+   $9DFF4000, $000A8000, $8AAAAA80, $15554000, $95DC4010, $022A8000, $8AAAAA81, $15554800,
+   $9F540000, $02AFC000, $8AAAA801, $55554800, $95C40100, $22BBD000, $8AAAA811, $55554800,
+   $95400000, $0AFFD000, $8AAA8015, $55555800, $95400000, $2BFFD000, $80000000, $00001800,
+   $80000000, $00000000
+   ]:LONG
+  stps := bicondo
+  FOR tmp := 0 TO SIZEOF diskobject - 1 DO stps[tmp] := 0
+  stps := biconimg
+  FOR tmp := 0 TO SIZEOF image - 1 DO stps[tmp] := 0
+  stps := biconimg2
+  FOR tmp := 0 TO SIZEOF image - 1 DO stps[tmp] := 0
+  biconimg.width := 55
+  biconimg.height := 23
+  biconimg.depth := 3
+  biconimg.imagedata := bicondat
+  biconimg.planepick := 7
+  biconimg2.width := 55
+  biconimg2.height := 23
+  biconimg2.depth := 3
+  biconimg2.imagedata := bicondat2
+  biconimg2.planepick := 7
+  bicondo.magic := $E310
+  bicondo.version := 1
+  bicondo.gadget.width := 55
+  bicondo.gadget.height := 23
+  bicondo.gadget.flags := GFLG_GADGIMAGE OR GFLG_GADGHIMAGE  -> two-state icon
+  bicondo.gadget.gadgetrender := biconimg   -> bare = the global image's address
+  bicondo.gadget.selectrender := biconimg2  -> shown while selected/clicked
+  bicondo.gadget.gadgettype := GTYP_BOOLGADGET
+  bicondo.type := WBTOOL
+  bicondo.currentx := NO_ICON_POSITION
+  bicondo.currenty := NO_ICON_POSITION
+  iconobj := bicondo                        -> bare = the baked DiskObject's address
   fhtask := FindTask(NIL)
   fhsigbit := AllocSignal(-1)
   fhstub := New(32)
@@ -585,58 +665,56 @@ PROC main()
     ENDWHILE
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
+    IF wbport THEN wsig := wsig OR Shl(1, wbport.sigbit)  -> ICONIFY: AppMessages
     Wait(psig OR wsig)
     -> drain the packet port
     REPEAT
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
     UNTIL msg = NIL
-    -> double buffering: show what this drain accumulated - UNLESS it is a
-    -> held ^L page (bbpage), which waits for the client's READ so the whole
-    -> repaint, sent as many round-tripped writes, shows in ONE blit.
-    IF bbpage = FALSE THEN bufflush()
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
-    -> drain every console's window port - UNLESS that console's
-    -> client asked for raw event reports (Ed). Disassembling C:Ed
-    -> (18.7.26) showed it never touches this port at all (no
-    -> ModifyIDCMP/GetMsg on our window; the LVO hits that suggested
-    -> it were rexxsyslib collisions - Ed's ARexx machinery). The
-    -> park stays anyway: with the chain on, the only IDCMP class
-    -> left is CLOSEWINDOW, and deferring a close-gadget click while
-    -> a raw-events client (Ed fullscreen) owns the session beats
-    -> tearing the window down under it. Leftovers drain when the
-    -> mask clears (CSI }, cooked reversion, close). A closereq may
-    -> destroy the console inside the walk - the next pointer is
-    -> taken FIRST.
+    -> drain every console's window port. A raw-events client (Ed) takes
+    -> its keys/mouse/menus through the input chain, not here, so those
+    -> classes are suppressed for it (parked, below) - but NEWSIZE and
+    -> CLOSEWINDOW are the console's own frame events and are always acted
+    -> on, so an Ed resize finally runs doresize() (B8). A closereq may
+    -> destroy the console inside the walk - the next pointer is taken FIRST.
     c := conlist
     WHILE c
       cnext := c.next
       IF c.win
         curcon := c
-        IF (ihon = FALSE) OR (c.evmask = 0)
-          REPEAT
-            im := GetMsg(c.win.userport)
-            IF im
-              class := im.class
-              code := im.code
-              qual := im.qualifier
-              mx := im.mousex
-              my := im.mousey
-              ia := im.iaddress
-              secs := im.seconds
-              mics := im.micros
-              ReplyMsg(im)
+        -> B8: ALWAYS drain the UserPort now. A raw-events client (Ed) still
+        -> owns keys/mouse/menus through the chain, so those classes stay
+        -> suppressed (parked) - but the window-FRAME classes, IDCMP_NEWSIZE
+        -> and IDCMP_CLOSEWINDOW, are the console's, and resizing Ed needs
+        -> doresize() to run + send the class-12 report so Ed re-measures.
+        -> (The old whole-port skip is why an Ed resize was never seen.)
+        parked := ihon AND (c.evmask <> 0)
+        REPEAT
+          im := GetMsg(c.win.userport)
+          IF im
+            class := im.class
+            code := im.code
+            qual := im.qualifier
+            mx := im.mousex
+            my := im.mousey
+            ia := im.iaddress
+            secs := im.seconds
+            mics := im.micros
+            ReplyMsg(im)
+            IF parked = FALSE
               IF class = IDCMP_VANILLAKEY THEN dovanilla(code, qual)
               IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
               IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
               IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code, secs, mics)
               IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
-              IF class = IDCMP_NEWSIZE THEN doresize()
-              IF class = IDCMP_CLOSEWINDOW THEN doclosew()
             ENDIF
-          UNTIL im = NIL
-        ENDIF
+            IF class = IDCMP_NEWSIZE THEN doresize()
+            IF class = IDCMP_CLOSEWINDOW THEN doclosew()
+          ENDIF
+        UNTIL im = NIL
         IF c.closereq             -> deferred: never CloseWindow while
           c.closereq := FALSE     -> draining the port it owns
           conclose(c)
@@ -654,6 +732,13 @@ PROC main()
         ENDIF
       UNTIL msg = NIL
     ENDIF
+    -> ICONIFY: drain Workbench's AppMessages (AppIcon double-clicks)
+    IF wbport
+      REPEAT
+        amsg := GetMsg(wbport)
+        IF amsg THEN doappmsg(amsg)
+      UNTIL amsg = NIL
+    ENDIF
   ENDWHILE
   killhandler()                 -> B5: release exec resources, then E's
 ENDPROC                         -> exit (CLEANUPALL) frees the New memory
@@ -669,6 +754,7 @@ ENDPROC                         -> exit (CLEANUPALL) frees the New memory
 -> ihis/ihring underneath a still-live handler. CloseDevice before
 -> DeleteIORequest before DeleteMsgPort throughout.
 PROC killhandler()
+  DEF msg:PTR TO mn, c:PTR TO console   -> ICONIFY: stray AppMessages + icons
   IF ihon                       -> the chain handler was added
     ihreq.command := IND_REMHANDLER
     ihreq.data := ihis
@@ -690,6 +776,27 @@ PROC killhandler()
   IF keymapbase
     CloseLibrary(keymapbase)
     keymapbase := NIL
+  ENDIF
+  -> ICONIFY: RemoveAppIcon every still-iconified console, then drain+reply any
+  -> AppMessage in flight before the port dies, free the icon, close the libs.
+  c := conlist
+  WHILE c
+    IF c.appicon
+      RemoveAppIcon(c.appicon)
+      c.appicon := NIL
+    ENDIF
+    c := c.next
+  ENDWHILE
+  IF wbport
+    WHILE (msg := GetMsg(wbport)) DO ReplyMsg(msg)
+    DeleteMsgPort(wbport)
+    wbport := NIL
+  ENDIF
+  -> iconobj is the baked-in static bicondo, NOT a GetDiskObject allocation:
+  -> do NOT FreeDiskObject it. Nothing to free.
+  IF workbenchbase
+    CloseLibrary(workbenchbase)
+    workbenchbase := NIL
   ENDIF
   IF ihsigbit >= 0
     FreeSignal(ihsigbit)
@@ -723,10 +830,6 @@ PROC killhandler()
   IF fsport                     -> the tab-completion reply port
     DeleteMsgPort(fsport)
     fsport := NIL
-  ENDIF
-  IF bbmap                      -> the double-buffer bitmap (AllocBitMap,
-    FreeBitMap(bbmap)           -> an exec resource E does not track; bbrp
-    bbmap := NIL                -> is New()'d and rides E's list)
   ENDIF
 ENDPROC
 
@@ -1076,12 +1179,6 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
-    -> instant-page: flush a held ^L page only when the read will BLOCK
-    -> (nothing queued = the page is done and More waits for a key). A read
-    -> WITH data queued is More consuming a CSI report (window size, cursor
-    -> pos) MID-page - flushing then showed the page early and the rest
-    -> drew per-write (top-to-bottom fill, slow on a deep WB screen).
-    IF inavail() = 0 THEN bufflush()
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -1100,7 +1197,6 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     curcon := c
     ensurewin()
-    IF inavail() = 0 THEN bufflush()  -> as READ: only when it will wait
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
     -> let timer.device answer (input arrival wakes all waiters)
@@ -1215,6 +1311,18 @@ ENDPROC
 -> flush after a selection drag ends
 PROC dowrite(pkt:PTR TO dospacket)
   DEF sender:PTR TO mp, len
+  -> ICONIFY: while iconified the console is windowless BY CHOICE - park the
+  -> write (blocking the writer) until restore, when flushwq replays it. This
+  -> is distinct from the win=NIL error below (a console that never opened).
+  IF curcon.appicon
+    IF curcon.wqn < WQMAX
+      curcon.wq[curcon.wqn] := pkt
+      curcon.wqn := curcon.wqn + 1
+    ELSE
+      ReplyPkt(pkt, pkt.arg3, 0)   -> overflow (rare): accept + discard output
+    ENDIF
+    RETURN
+  ENDIF
   ensurewin()                   -> an AUTO window appears on first
   IF curcon.win = NIL                  -> output; no window at all = the
     ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)  -> write cannot land
@@ -1229,14 +1337,6 @@ PROC dowrite(pkt:PTR TO dospacket)
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
-  -> v1.2 double buffering: accumulate this console's output in the shared
-  -> back-buffer (bufopen redirects curcon.rp to it). ALL of this write's
-  -> draws - render, the cursor, the edit line - land in the buffer; the
-  -> main loop's bufflush() blits it once after every pending packet is
-  -> drained, so a More page arriving as SEVERAL writes shows as ONE
-  -> instant flip, not a visible scroll. bufopen returns FALSE (leaves
-  -> curcon.rp on the window) if no buffer - then everything draws direct.
-  bufopen(curcon)
   IF curcon.rawmode
     curserase()                 -> raw: the app owns the screen, no blip
     render(pkt.arg2, len)       -> - but the console owns the block
@@ -1678,6 +1778,167 @@ PROC fontload(ta:PTR TO textattr)
   IF f = NIL THEN f := OpenFont(ta)
 ENDPROC f
 
+-> ---------- v1.2 ICONIFY: AppIcon plumbing ----------
+-> The AppIcon is BAKED IN (bicondo, built at handler init) - no file, no
+-> icon.library, no DOS - so there is no icon-load path here at all.
+
+-> lazily bring the AppIcon plumbing up: open workbench.library (ROM-resident,
+-> pure exec OpenLibrary) and the reply port. The icon (iconobj = bicondo) is
+-> baked in and built at init, so nothing is loaded here. Lazy - not at handler
+-> init - because AddAppIcon needs Workbench up; the first iconify (RightAmiga+I)
+-> only happens with a window on-screen, i.e. Workbench running. wbport carries
+-> the click back and joins the main Wait() mask.
+PROC wbensure()
+  IF iconok THEN RETURN TRUE
+  IF workbenchbase = NIL THEN workbenchbase := OpenLibrary('workbench.library', 37)
+  IF workbenchbase = NIL THEN RETURN FALSE
+  IF wbport = NIL THEN wbport := CreateMsgPort()
+  IF wbport = NIL THEN RETURN FALSE
+  IF iconobj = NIL THEN RETURN FALSE     -> baked icon missing (never happens)
+  iconok := TRUE
+ENDPROC TRUE
+
+-> a Workbench AppMessage arrived (an AppIcon was double-clicked). STAGE 0:
+-> the only AppIcon is the test one, so a click proves the whole round-trip
+-> - AddAppIconA put it up, Workbench delivered the message to wbport, and
+-> the desktop AppIcon was double-clicked: reopen its console's window,
+-> repainted exactly as it was, and flush any output parked while hidden.
+-> The console pointer rode along as am.userdata. Reply ALWAYS.
+PROC doappmsg(am:PTR TO appmessage)
+  DEF c:PTR TO console, oldcur:PTR TO console
+  IF am.type = AMTYPE_APPICON
+    c := am.userdata
+    IF c AND c.appicon
+      RemoveAppIcon(c.appicon)
+      c.appicon := NIL
+      oldcur := curcon
+      curcon := c
+      reopenwin()                    -> window back, repainted from the model
+      IF curcon.win THEN flushwq()     -> replay writes parked while hidden
+      curcon := oldcur
+    ENDIF
+  ENDIF
+  ReplyMsg(am)
+ENDPROC
+
+-> RightAmiga+I: iconify this console. The window TRULY vanishes (closed via
+-> hidewin, which keeps the whole console - model, font, geometry, cursor,
+-> mode) and the CCon.info AppIcon goes on the desktop carrying the console
+-> as userdata. Clicking it (doappmsg) reopens. Owned windows only.
+PROC doiconify()
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.fwin THEN RETURN
+  IF curcon.appicon THEN RETURN         -> already iconified
+  IF wbensure() = FALSE THEN RETURN
+  curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0, iconobj, NIL)
+  IF curcon.appicon THEN hidewin()      -> only vanish if the icon really went up
+ENDPROC
+
+-> ICONIFY hide: close the window but KEEP the console whole so reopenwin can
+-> restore it exactly. Contrast closewin, which disposes the model - a real
+-> teardown. Owned windows only (a borrowed frame belongs to its owner).
+PROC hidewin()
+  DEF i
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.fwin THEN RETURN
+  curcon.armed := FALSE                  -> chain ignores a windowless console
+  curcon.cursx := -1
+  curcon.selon := FALSE
+  curcon.sello := -1
+  curcon.selhi := -1
+  -> ANSI pens go back to the screen with the window (reopenwin re-obtains)
+  IF curcon.anscm
+    FOR i := 0 TO 7
+      IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
+      curcon.anstab[i] := -1
+    ENDFOR
+    curcon.anscm := NIL
+  ENDIF
+  CloseWindow(curcon.win)
+  curcon.win := NIL
+  curcon.rp := NIL
+ENDPROC
+
+-> ICONIFY restore: reopen the window at its saved geometry and repaint the
+-> kept scrollback. NOT openwin() - that resets the console to a fresh state;
+-> here every console field is preserved and only the window is rebuilt. This
+-> mirrors openwin's window-open/font/pen/metrics setup (font + model are
+-> kept, so they are reused, not reloaded/reallocated). setidcmp fixes idc.
+PROC reopenwin()
+  DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
+      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR
+  IF curcon.win THEN RETURN
+  idc := IDCMP_CLOSEWINDOW
+  IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
+  pubscr := NIL
+  IF curcon.pscrname[0] THEN pubscr := LockPubScreen(curcon.pscrname)
+  curcon.win := OpenWindowTagList(NIL,
+    [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
+     WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
+     WA_DRAGBAR, IF curcon.pnodrag THEN FALSE ELSE TRUE,
+     WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
+     WA_ACTIVATE, TRUE,
+     WA_CLOSEGADGET, curcon.closegad,
+     WA_SIZEGADGET, IF curcon.pnosize THEN FALSE ELSE TRUE,
+     WA_BORDERLESS, curcon.pnoborder,
+     WA_BACKDROP, curcon.pbackdrop,
+     WA_PUBSCREEN, pubscr,
+     WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
+     WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
+     WA_IDCMP, idc,
+     TAG_DONE, NIL])
+  IF pubscr THEN UnlockPubScreen(NIL, pubscr)
+  IF curcon.win = NIL THEN RETURN        -> reopen failed; stays hidden
+  curcon.rp := curcon.win.rport
+  IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
+  curcon.cw := curcon.rp.txwidth
+  curcon.ch := curcon.rp.txheight
+  curcon.baseline := curcon.rp.txbaseline
+  curcon.softmask := AskSoftStyle(curcon.rp)
+  curcon.can16 := FALSE
+  IF curcon.rp.bitmap
+    IF curcon.rp.bitmap.depth >= 4 THEN curcon.can16 := TRUE
+  ENDIF
+  curcon.anscm := NIL
+  FOR i := 0 TO 7
+    curcon.anstab[i] := -1
+  ENDFOR
+  IF curcon.wbpens = FALSE
+    pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
+    pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
+    pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
+    scrn := curcon.win.wscreen
+    IF scrn
+      curcon.anscm := scrn.viewport.colormap
+      IF curcon.anscm
+        FOR i := 0 TO 7
+          v := ObtainBestPenA(curcon.anscm, Mul(pr[i], $11111111),
+                 Mul(pg[i], $11111111), Mul(pb[i], $11111111), NIL)
+          IF v > 15
+            ReleasePen(curcon.anscm, v)
+            v := -1
+          ENDIF
+          curcon.anstab[i] := v
+        ENDFOR
+      ENDIF
+    ENDIF
+  ENDIF
+  gridcalc()
+  -> clear the inner rect and repaint the kept model, cursor, edit line
+  SetAPen(curcon.rp, 0)
+  RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,
+           curcon.win.width - curcon.win.borderright - 1,
+           curcon.win.height - curcon.win.borderbottom - 1)
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
+  redraw()
+  settitle()
+  IF curcon.rawmode THEN cursdraw() ELSE drawedit()
+  setidcmp()
+  ReportMouse(TRUE, curcon.win)
+  curcon.armed := TRUE
+ENDPROC
+
 PROC openwin()
   DEF ta:textattr, i, idc, scrn:PTR TO screen, v,     -> audit2 B9: a
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
@@ -1972,14 +2233,11 @@ ENDPROC
 -> WAIT_CHARs answer FALSE, the model is returned to the heap, and a
 -> borrowed window goes back to its owner with its IDCMP restored
 PROC closewin()
-  DEF i
-  -> double buffering: if this console was accumulating in the shared
-  -> buffer, drop it (do NOT flush - the window is going away). Prevents
-  -> a later bufflush/bufopen touching a freed console (a client can send
-  -> its output then ACTION_END inside one packet drain).
-  IF bbactive = curcon
-    bbactive := NIL
-    bbpage := FALSE
+  DEF i, p:PTR TO dospacket
+  -> ICONIFY: a console closing while iconified must take its AppIcon with it
+  IF curcon.appicon
+    RemoveAppIcon(curcon.appicon)
+    curcon.appicon := NIL
   ENDIF
   IF curcon.win = NIL
     -> a windowless console (an AUTO whose open failed) can still
@@ -1996,6 +2254,12 @@ PROC closewin()
     WHILE curcon.rdn > 0
       curcon.rdn := curcon.rdn - 1
       ReplyPkt(curcon.rdq[curcon.rdn], 0, 0)
+    ENDWHILE
+    -> ICONIFY: reply writes parked while iconified, or their senders hang
+    WHILE curcon.wqn > 0
+      curcon.wqn := curcon.wqn - 1
+      p := curcon.wq[curcon.wqn]
+      ReplyPkt(p, p.arg3, 0)
     ENDWHILE
     RETURN
   ENDIF
@@ -2292,9 +2556,6 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed
   IF curcon.win = NIL THEN RETURN
-  bufflush()                    -> show any held ^L page before we resize
-                                -> (else its buffer is a stale size); no-op
-                                -> in the normal case
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
@@ -2812,6 +3073,8 @@ PROC setidcmp()
     idc := idc OR IDCMP_MOUSEBUTTONS
     IF curcon.selon THEN idc := idc OR IDCMP_MOUSEMOVE
   ENDIF
+  -> ICONIFY: keep the title-bar gadget's report alive across every IDCMP
+  -> recompute (owned windows only - a borrowed frame carries no gadget)
   ModifyIDCMP(curcon.win, idc)
 ENDPROC
 
@@ -3258,114 +3521,6 @@ PROC pastehintshow(l)
   curcon.pastehintrow := row
 ENDPROC
 
--> ---------- v1.2 double buffering ----------
--> Client output accumulates in a SHARED offscreen buffer and is shown in
--> ONE blit per drain, so a page a client sends as several writes flips
--> instantly instead of scrolling. bufopen(c) redirects c.rp into the
--> buffer (copying the window IN the first time for c); every draw for c
--> then lands in the buffer; the main loop's bufflush() blits it OUT after
--> all pending packets are drained. The copy-IN matters: an INCREMENTAL
--> draw into the buffer still blits the correct FULL window back, never
--> stale buffer bytes. Switching consoles flushes the previous first (the
--> buffer is shared, one console at a time). Degrades like the ring: if
--> the bitmap will not allocate, bufopen returns FALSE and c.rp stays on
--> the window - everything draws direct exactly as before.
-
--> grow-only: make the shared bitmap at least as big/deep as c's window.
--> FALSE = no usable buffer (caller draws direct).
-PROC bufensure(c:PTR TO console)
-  DEF w, h, d, bm:PTR TO bitmap
-  IF bufoff THEN RETURN FALSE
-  IF c.win = NIL THEN RETURN FALSE
-  IF c.fwin THEN RETURN FALSE          -> borrowed window: its owner may draw
-  bm := c.win.rport.bitmap
-  IF bm = NIL THEN RETURN FALSE
-  IF bbrp = NIL
-    bbrp := New(SIZEOF rastport)        -> the RastPort struct, once (E-heap)
-    IF bbrp = NIL THEN RETURN FALSE
-  ENDIF
-  w := c.win.width
-  h := c.win.height
-  d := bm.depth
-  IF (bbmap <> NIL) AND (bbw >= w) AND (bbh >= h) AND (bbdepth >= d)
-    RETURN TRUE                         -> current buffer already fits
-  ENDIF
-  IF w < bbw THEN w := bbw              -> grow-only, no realloc thrash
-  IF h < bbh THEN h := bbh
-  IF d < bbdepth THEN d := bbdepth
-  IF bbmap THEN FreeBitMap(bbmap)
-  bbmap := AllocBitMap(w, h, d, 0, bm)  -> friend = window's bitmap
-  IF bbmap = NIL
-    bbw := 0; bbh := 0; bbdepth := 0
-    RETURN FALSE
-  ENDIF
-  bbw := w; bbh := h; bbdepth := d
-  InitRastPort(bbrp)
-  bbrp.bitmap := bbmap
-ENDPROC TRUE
-
--> ensure the shared buffer is ACCUMULATING for console c, and return
--> whether it is (FALSE = no buffer, draw direct). Idempotent: called at
--> the top of a buffered paint, it copies the window in and redirects
--> c.rp only the FIRST time for c. So several writes to the same console
--> in one drain - a More page that arrives as many writes - all draw into
--> the buffer and are shown by ONE bufflush later: an instant page flip
--> instead of a visible scroll. Switching to a DIFFERENT console flushes
--> the previous one first (the buffer is shared, one console at a time).
-PROC bufopen(c:PTR TO console)
-  DEF il, it, iw, ih
-  IF bbactive = c THEN RETURN TRUE        -> already accumulating for c
-  IF bbactive THEN bufflush()             -> a different console: show it first
-  IF bufensure(c) = FALSE THEN RETURN FALSE
-  il := c.win.borderleft
-  it := c.win.bordertop
-  iw := c.win.width - c.win.borderright - il
-  ih := c.win.height - c.win.borderbottom - it
-  IF (iw <= 0) OR (ih <= 0) THEN RETURN FALSE
-  -> copy-in reads the RAW screen bitmap (no layer), so the source is
-  -> SCREEN coordinates - the window's on-screen position plus the border
-  -> inset - NOT the window-relative (il,it) the RastPort-based copy-out
-  -> uses. Getting this wrong read the screen's top-left (the title bars)
-  -> and tiled "CON:" down the window (1.2b19).
-  BltBitMap(c.win.rport.bitmap, c.win.leftedge + il, c.win.topedge + it,
-            bbmap, il, it, iw, ih, $C0, $FF, NIL)
-  c.rp := bbrp
-  -> start accumulation in the SAME state openwin gives the window rport:
-  -> font, default pens. bbrp PERSISTS (the window rport gets reset by
-  -> drawedit/openwin, bbrp does not), so without this a scroll before any
-  -> setpens() - More's first page-down - fills the newly-exposed row with
-  -> the STALE BgPen left black by the previous page's inverse status line
-  -> (clearrow zeroes only the model, not the pixels): a black trail.
-  IF c.tf THEN SetFont(bbrp, c.tf)
-  SetAPen(bbrp, c.deffg)
-  SetBPen(bbrp, 0)
-  bbactive := c
-  bbpage := FALSE               -> a fresh batch; a ^L in it turns it into
-                                -> a held page (render sets bbpage)
-ENDPROC TRUE
-
--> show the accumulated buffer: restore direct drawing and blit the
--> buffer's inner area onto the active console's window in one atomic op.
--> A no-op when nothing is accumulating. Called at the packet-drain settle
--> point and when the active console is closing or switched away from.
-PROC bufflush()
-  DEF c:PTR TO console, il, it, iw, ih
-  IF bbactive = NIL THEN RETURN
-  c := bbactive
-  bbactive := NIL
-  bbpage := FALSE
-  IF c.win = NIL THEN RETURN               -> window gone; nothing to show
-  c.rp := c.win.rport
-  IF bbmap = NIL THEN RETURN
-  il := c.win.borderleft
-  it := c.win.bordertop
-  iw := c.win.width - c.win.borderright - il
-  ih := c.win.height - c.win.borderbottom - it
-  IF (iw <= 0) OR (ih <= 0) THEN RETURN
-  BltBitMapRastPort(bbmap, il, it, c.win.rport, il, it, iw, ih, $C0)
-ENDPROC
-
--> redraw the whole grid from the model at the current view offset;
 -> model zeroes render as spaces. viewoff = lines back, 0 = live.
 PROC redraw()
   DEF r, idx
@@ -4145,8 +4300,7 @@ PROC render(buf, len)
       -> START A NEW PAGE - More sends one before every page. CCON never
       -> handled byte 12, so More's page appended and SCROLLED instead of
       -> replacing: THE whole "More scrolls under CCON, flips under CON:"
-      -> complaint, and never about double buffering (list, which does not
-      -> send ^L, correctly kept scrolling the entire time).
+      -> complaint. list, which does not send ^L, correctly kept scrolling.
       SetAPen(curcon.rp, 0)
       RectFill(curcon.rp, curcon.left, curcon.topy,
                curcon.left + Mul(curcon.cols, curcon.cw) - 1,
@@ -4159,13 +4313,6 @@ PROC render(buf, len)
       ENDIF
       curcon.cx := 0
       curcon.cy := 0
-      -> instant-page: a ^L means a full-screen repaint is starting. HOLD
-      -> the buffer's flush (this clear + the page's many round-tripped
-      -> writes accumulate) until the client READs - then the whole page
-      -> shows in one blit. Only when buffering this console; a program
-      -> that never reads is covered by the READ trigger's absence being
-      -> rare (documented) - the common full-screen clients all read.
-      IF bbactive = curcon THEN bbpage := TRUE
       i := i + 1
     ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
       -> printable run: ASCII and Latin-1; $7F-$9F are controls.
@@ -5283,57 +5430,47 @@ ENDPROC
 -> use; shifted arrows and F-keys flagged for a boot check): Up/Down/
 -> Right/Left = CSI A/B/C/D, shifted = CSI T / S / SPACE @ / SPACE A,
 -> F1-F10 = CSI 0~..9~, shifted F = CSI 10~..19~, Help = CSI ?~
--> v1.1b42: the CSI introducer was the bare 8-bit C1 byte ($9B) -
--> real AmigaOS raw-key reporting (and the overwhelming majority of
--> ANSI-aware programs, including apparently More) expects the
--> 7-bit ESC+'[' two-byte form instead. His direct side-by-side
--> proof: the SAME More binary navigates correctly under stock
--> CON: (Up arrow moves 99% -> 50%) and does not under CCON - the
--> same client, a different console, therefore CCON's own encoding
--> choice, not something broken inside More. Every one of these
--> used to start with a bare enqueue($9B); now they all start with
--> ESC(27) then '['.
--> audit B3: each branch below knows its own exact byte count before
--> writing a single one (3-5 bytes, fixed once sh is known), so each
--> asks inqroom() for that count first and bails whole - never a bare
--> ESC or a stray CSI introducer left sitting in the queue with the
--> letter that would have made it a real sequence dropped behind it.
+-> The CSI introducer is the 8-bit C1 byte ($9B) - the console.device
+-> convention stock CON: sends and native programs expect. b42 tried the
+-> 7-bit ESC+'[' form (for More's arrow paging), but that leading ESC
+-> opens Ed's command line (the "blue command text" - `ESC` then `[A`
+-> read as a typed command), the same way ESC[ broke `ls` when sendreport
+-> briefly used it (ls read the '[' as the report's final byte). So $9B
+-> here, like sendreport and ihreport - boot-confirmed 23.7.26: Ed's
+-> cursor navigation works AND More still pages, both on $9B.
+-> audit B3: each branch knows its own exact byte count before writing a
+-> single one, asks inqroom() first and bails whole - never a bare CSI
+-> introducer left in the queue with its trailing letter dropped behind.
 PROC rawcsikey(code, qual)
   DEF sh
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   IF code = RK_UP
-    IF inqroom(3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("T") ELSE enqueue("A")
   ELSEIF code = RK_DOWN
-    IF inqroom(3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("S") ELSE enqueue("B")
   ELSEIF code = RK_RIGHT
-    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 3 ELSE 2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("@") ELSE enqueue("C")
   ELSEIF code = RK_LEFT
-    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 3 ELSE 2) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue(32)
     IF sh THEN enqueue("A") ELSE enqueue("D")
   ELSEIF (code >= $50) AND (code <= $59)     -> F1..F10
-    IF inqroom(IF sh THEN 5 ELSE 4) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(IF sh THEN 4 ELSE 3) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     IF sh THEN enqueue("1")
     enqueue(48 + (code - $50))
     enqueue("~")
   ELSEIF code = $5F                          -> Help
-    IF inqroom(4) = FALSE THEN RETURN TRUE
-    enqueue(27)
-    enqueue("[")
+    IF inqroom(3) = FALSE THEN RETURN TRUE
+    enqueue($9B)
     enqueue("?")
     enqueue("~")
   ELSE
@@ -5693,6 +5830,10 @@ PROC ihkey(e:PTR TO ihev)
         -> RAMIGA-C re-copies the standing highlight - release
         -> already copied, but the stock muscle memory is free
         IF curcon.sello >= 0 THEN selcopy()
+        RETURN
+      ENDIF
+      IF (ihmap[0] = "i") OR (ihmap[0] = "I")
+        doiconify()               -> RAMIGA-I: window to a desktop AppIcon
         RETURN
       ENDIF
     ENDIF
@@ -6679,4 +6820,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2b25 CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2 (23.7.26) CCON: LTX console handler', 0

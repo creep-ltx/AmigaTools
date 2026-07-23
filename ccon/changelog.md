@@ -6,34 +6,49 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0 and 1.1 are released and tagged;
-1.2 is in development.
+Dates are release/build dates. 1.0, 1.1 and 1.2 are released and tagged.
 
 ---
 
-## [Unreleased] — 1.2 (current build 1.2b25)
+## [1.2] — 2026-07-23 (tag `ccon-1.2`)
 
 ### Added
-- **Double buffering.** Client output renders into a shared offscreen
-  back-buffer and is blitted in one pass, so a multi-row update is
-  atomic instead of sweeping row by row. (1.2b21)
-- **Instant full-screen paging.** Form feed (`^L`) now clears the
-  screen like `CON:`, and a `^L` page is held and shown in a single
-  blit when the client next reads for input — so More, and any
-  full-screen program that repaints, flips pages **instantly** on any
-  screen, matching `CON:`/ViNCEd. Includes a Cursor Position Report
-  responder (`CSI 6n` → `CSI row;col R`) so a client that probes the
-  cursor on its first page stays in step. (1.2b23–b25)
+- **Iconify.** `RightAmiga+I` sends a window to the Workbench as an
+  AppIcon — the window vanishes while its console keeps running (output
+  that arrives while iconified pauses until you restore). Double-click
+  the icon to bring the window back exactly as it was: scrollback,
+  a half-typed command line, cursor, colours and all. Works in a raw
+  full-screen client (Ed) too. The icon is built into the handler, so
+  there is nothing to install.
+- **Full-screen paging like `CON:`.** Form feed (`^L`) now clears the
+  screen and homes the cursor, so More — and any full-screen program
+  that repaints — replaces the page instead of scrolling it. A Cursor
+  Position Report responder (`CSI 6n` → `CSI row;col R`) keeps a client
+  that probes the cursor on its first page in step.
 - **`CON:`/`RAW:` labels reflect the real mount name.** When CCON is
   mounted as the system `CON:`/`RAW:`, the input-handler node name and
   the default window title read the device's `dol_Name` instead of a
   hardcoded "CCON". (1.2b18)
 
 ### Changed
+- Raw-mode arrow and function keys use the 8-bit `$9B` CSI introducer
+  (what stock `CON:` sends), so **Ed's cursor navigation works**. 1.1
+  had switched these to the 7-bit `ESC[` form for More's paging, but Ed
+  reads that leading `ESC` as its command line (stray "blue" command
+  text) — the same way `ESC[` broke `ls`. Both Ed and More page and
+  navigate correctly on `$9B`.
 - The window-bounds report uses the 8-bit CSI (`$9B`), fixing a phantom
   `1` command turning up after every `ls`/`dir`. (1.2b1)
 - History stores each command once, moving a repeat to the newest
   position (zsh `HIST_IGNORE_ALL_DUPS`). (1.2b14)
+
+### Fixed
+- **Resizing a fullscreen program's window (Ed)** now repaints and
+  sends the size report, so the client re-measures and redraws instead
+  of leaving a stale frame — the resize event was previously never even
+  seen for a raw-mode client (B8). (Ed doesn't re-wrap text to a
+  narrower window, the same as under `CON:` — that's the editor's own
+  behaviour.)
 
 ### Fixed — first audit (a full static read of the handler)
 - Edit-line erase no longer leaves a stale paint extent at a
@@ -70,8 +85,6 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
 - A runaway-client machine freeze was traced to the `ls` tool (it
   looped forever on empty-named directory entries), **not** CCON —
   proved console-independent and closed as misattributed (B12).
-- The `fscall` no-timeout hazard is documented; the real timeout is
-  parked (P6).
 
 ---
 
