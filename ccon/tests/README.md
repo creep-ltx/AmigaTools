@@ -80,6 +80,32 @@ and the edit anchor lands after its prompt. Written for B7 (fixed in
 touched - it caught four defects during development, including a
 destination row not cleared on ring wraparound.
 
+## sbmaxtest.e - runs on Linux
+
+Carries `visrow()`'s two lines of ring-index arithmetic verbatim and
+sweeps every `(sbtop, row)` pair, reporting the worst index each
+geometry can produce against the plane's real bounds.
+
+```
+ecompile sbmaxtest.e sbmaxtest
+vamos sbmaxtest
+```
+
+Written for audit3 C1: `openwin()` floored the model depth at 100 lines
+and never compared it to the window's row count, while every ring
+accessor corrects its wrap with a single subtraction. The harness
+reproduces the escape as a computed index - `sbmax=100, rows=126`
+reaches 124 in a plane whose legal range is 0..99 - and then pins the
+boundary: the escape begins at `rows >= sbmax + 2`.
+
+That result **corrected the fix's own reasoning**, which is why the
+harness exists rather than an argument. The index minimum is
+`sbmax >= rows - 1`, not the `rows + 1` first claimed; the shipped
+floor is `rows + 2` for a different reason, namely that `sbmax - rows`
+is also the scrollback capacity, so the bare index minimum would buy a
+safe ring with no history in it. Re-run it if the floor in `openwin()`,
+the clamp in `doresize()`, or any of the ring accessors change.
+
 ## ccon-b1, ccon-b1-fill, ccon-b1-off - run on the Amiga
 
 The same bug, on real hardware. Copy all three into `S:` on the Amiga
