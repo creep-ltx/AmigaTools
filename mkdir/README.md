@@ -1,17 +1,11 @@
 # mkdir
 
-A Unix-style make-directory command for AmigaDOS — implemented twice:
-once in Amiga E ([mkdir.e](mkdir.e)) and once in 68000 assembly
-([mkdir.asm](mkdir.asm)). Identical behaviour; build whichever one you
-like and install it as `C:mkdir`.
+A Unix-style make-directory command for AmigaDOS, written in Amiga E
+([mkdir.e](mkdir.e)). Build it (or use the included binary) and
+install it as `C:mkdir`.
 
-| Implementation | Binary size |
-|---|---|
-| mkdir.e (E-VO) | 3712 bytes |
-| mkdir.asm (vasm) | 1664 bytes |
-
-Speed is identical — making a directory is all dos.library — so the
-assembly version's win is size, not speed.
+An assembly twin (`mkdir.asm`) was retired — a few KB of size win
+against hand-porting every change. It lives on in git history.
 
 ## Usage
 
@@ -70,28 +64,16 @@ prints nothing at all, not even the newline.
 
 ## Building
 
-Both prebuilt binaries are included in this directory — `mkdir` (the E
-build) and `mkdir-asm` (the assembly build). No compiler needed; copy
-either one to `C:mkdir` and go.
-
-To build them yourself — the E version, with the E-VO compiler:
+The prebuilt `mkdir` binary is included in this directory — no
+compiler needed; copy it to `C:mkdir` and go. To build it yourself,
+with the E-VO compiler:
 
 ```
 evo mkdir.e
 ```
 
-The assembly version, with [vasm](http://sun.hasenbraten.de/vasm/):
+This produces an AmigaOS loadseg()able executable.
 
-```
-vasmm68k_mot -Fhunkexe -nosym -o mkdir-asm mkdir.asm
-```
-
-Both produce an AmigaOS loadseg()able executable. The asm source uses
-Devpac-style Motorola syntax and plain 68000 instructions.
-
-The E build has been boot-tested on an AmigaOS 3.2 install (FS-UAE):
+The build has been boot-tested on an AmigaOS 3.2 install (FS-UAE):
 `mkdir -p` nested creation, and the error reporting (a missing parent
-prints its fault on its own line). The assembly build is verified under
-vamos to produce byte-identical output to the E build across the full
-behaviour matrix — a fresh FS-UAE pass on `mkdir-asm` is worth doing
-before relying on it.
+prints its fault on its own line).

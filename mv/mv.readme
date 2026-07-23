@@ -4,13 +4,8 @@ mv - a Unix-style move command for AmigaDOS
 WHAT IT IS
 
   mv moves or renames files and directories, like Unix mv, with
-  AmigaDOS pattern support. The reference build is in Amiga E (mv.e);
-  a 68000 assembly sibling (mv.asm) mirrors it. Build whichever you
-  prefer and install it as C:mv.
-
-  Note: the assembly build has not yet been regenerated for the -f/-b
-  flags -- it still uses the older OVERWRITE/BACKUP keyword template.
-  Use the E build for the interface below.
+  AmigaDOS pattern support. Written in Amiga E (mv.e); install the
+  included binary as C:mv.
 
   Requires Kickstart 2.04 or newer.
 
@@ -78,17 +73,9 @@ HOW IT WORKS
 
 BUILDING
 
-  Both prebuilt binaries are included: mv (the E build) and mv-asm
-  (the assembly build). No compiler needed; copy the mv E build to
-  C:mv for the -f/-b interface above (mv-asm still carries the older
-  keyword syntax until it is regenerated).
-
-  To build them yourself -- the E version, with the E-VO E compiler:
+  The prebuilt mv binary is included -- no compiler needed; copy it
+  to C:mv. To build it yourself, with the E-VO E compiler:
 
     evo mv.e
 
-  The assembly version, with vasm:
-
-    vasmm68k_mot -Fhunkexe -nosym -o mv mv.asm
-
-  Both produce an AmigaOS loadseg()able executable.
+  This produces an AmigaOS loadseg()able executable.

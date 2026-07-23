@@ -143,7 +143,7 @@ PROC checkbreak()
 ENDPROC
 
 PROC usage()
-  WriteF('ls 0.3.1 -- Unix-style directory lister\n')
+  WriteF('ls 0.3.2 -- Unix-style directory lister\n')
   WriteF('usage: ls [-1ahlrRSt] [path | pattern ...]\n')
   WriteF('  -l  long listing (protection, size, date, filenote)\n')
   WriteF('  -a  show .info files and hidden (h-bit) entries\n')
@@ -416,7 +416,7 @@ ENDPROC
    work list in display order). */
 PROC listdir(path:PTR TO CHAR) HANDLE
   DEF lock=NIL, head=NIL:PTR TO dent, count, e:PTR TO dent
-  DEF ok, err, disp:PTR TO CHAR
+  DEF ok, err, disp:PTR TO CHAR, dl
   DEF dbuf[NAMELEN]:ARRAY OF CHAR
 
   lock := Lock(path, ACCESS_READ)
@@ -462,7 +462,15 @@ PROC listdir(path:PTR TO CHAR) HANDLE
 
   IF headers
     IF firstgrp = FALSE THEN WriteF('\n')
-    WriteF('\s:\n', disp)
+    -> a volume-root argument already ends in ':' - print it as
+    -> typed, not 'DH1::' (the group colon is only added when the
+    -> path doesn't bring its own)
+    dl := StrLen(disp)
+    IF (dl > 0) AND (disp[dl-1] = ":")
+      WriteF('\s\n', disp)
+    ELSE
+      WriteF('\s:\n', disp)
+    ENDIF
   ENDIF
   firstgrp := FALSE
 
@@ -829,4 +837,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.3.1 (24.7.26) E build',0
+version: CHAR '$VER: ls 0.3.2 (24.7.26) E build',0

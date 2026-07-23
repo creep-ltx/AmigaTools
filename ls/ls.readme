@@ -4,11 +4,8 @@ ls - a Unix-style directory lister for AmigaDOS
 WHAT IT IS
 
   ls lists directories the way Unix fingers expect: multi-column,
-  alphabetical, with `-la` and friends as bundled flags. It comes as
-  two implementations: one in Amiga E (ls.e, 11452 bytes) and one
-  in 68000 assembly (ls.asm, 5284 bytes). The E build is the
-  reference and carries the latest fixes; the assembly twin
-  currently tracks 0.2. Install either as C:ls.
+  alphabetical, with `-la` and friends as bundled flags. Written in
+  Amiga E (ls.e); install the included binary as C:ls.
 
   Requires Kickstart 2.04 or newer.
 
@@ -61,17 +58,9 @@ HOW IT WORKS
 
 BUILDING
 
-  Both prebuilt binaries are included: ls (the E build) and
-  ls-asm (the assembly build). No compiler needed; copy either
-  one to C:ls.
-
-  To build them yourself -- the E version, with the E-VO E
-  compiler:
+  The prebuilt ls binary is included -- no compiler needed; copy it
+  to C:ls. To build it yourself, with the E-VO E compiler:
 
     evo ls.e
 
-  The assembly version, with vasm:
-
-    vasmm68k_mot -Fhunkexe -nosym -o ls-asm ls.asm
-
-  Both produce an AmigaOS loadseg()able executable.
+  This produces an AmigaOS loadseg()able executable.

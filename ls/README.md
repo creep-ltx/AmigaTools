@@ -40,25 +40,25 @@ arguments, 20 break (Ctrl+C is honoured mid-listing).
 ## Files
 
 - `ls.e` — the source, Amiga E.
-- `ls` — prebuilt AmigaOS binary, E build.
-- `ls.asm` — the same tool in 68000 assembly.
-- `ls-asm` — prebuilt AmigaOS binary, asm build (about half the size).
+- `ls` — prebuilt AmigaOS binary.
+
+An assembly twin (`ls.asm`) was retired in 0.3.2: the size win was
+a few KB, every fix had to be ported by hand, and the twins had
+already drifted (it had frozen at 0.2). It lives on in git history
+and the old release archives if anyone wants it.
 
 ## Building
 
 ```
 evo ls.e
-vasmm68k_mot -Fhunkexe -nosym -o ls-asm ls.asm
 ```
 
 ## Status
 
-Both builds boot-verified on an AmigaOS 3.2 install (FS-UAE):
-columns and the width probe against both the stock CON: console
-and the CCON: handler, colors, window-resize adaptation,
-redirect fallback, Ctrl+C. The two builds are also differentially
-tested against each other under vamos — byte-identical output
-across the whole flag matrix.
+Boot-verified on an AmigaOS 3.2 install (FS-UAE): columns and the
+width probe against both the stock CON: console and the CCON:
+handler, colors, window-resize adaptation, redirect fallback,
+Ctrl+C.
 
 Found while building: E's `Mod()` with a divisor over 64K raises
 a CPU exception (the same 16-bit DIVU floor as `/`) — the

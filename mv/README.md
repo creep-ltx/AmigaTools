@@ -1,20 +1,13 @@
 # mv
 
-A Unix-style move command for AmigaDOS. The reference build is in Amiga
-E ([mv.e](mv.e)); a 68000 assembly sibling ([mv.asm](mv.asm)) mirrors
-it. Build whichever you like and install it as `C:mv`.
+A Unix-style move command for AmigaDOS, written in Amiga E
+([mv.e](mv.e)). Build it (or use the included binary) and install it
+as `C:mv`.
 
-> **Note:** the assembly build hasn't been regenerated for the `-f`/`-b`
-> flags yet — it still uses the older `OVERWRITE`/`BACKUP` keyword
-> template. Use the E build (`mv.e`) for the interface documented below.
-
-| Implementation | Binary size |
-|---|---|
-| mv.e (E-VO) | 6124 bytes |
-| mv.asm (vasm) | 2620 bytes — pending `-f`/`-b` update |
-
-Speed is identical — a move spends all its time inside dos.library —
-so the assembly version's win is size, not speed.
+An assembly sibling (`mv.asm`) was retired — it had frozen at the
+old `OVERWRITE`/`BACKUP` keyword interface and the few KB of size
+win weren't worth hand-porting every change. It lives on in git
+history and the old release archives.
 
 ## Usage
 
@@ -90,26 +83,15 @@ and matches literal names with the same code path.
 
 ## Building
 
-Both prebuilt binaries are included in this directory — `mv` (the E
-build) and `mv-asm` (the assembly build). No compiler needed; copy the
-`mv` E build to `C:mv` for the `-f`/`-b` interface above (`mv-asm` still
-carries the older keyword syntax until it's regenerated).
-
-To build them yourself — the E version, with the E-VO compiler:
+The prebuilt `mv` binary is included in this directory — no compiler
+needed; copy it to `C:mv`. To build it yourself, with the E-VO
+compiler:
 
 ```
 evo mv.e
 ```
 
-The assembly version, with [vasm](http://sun.hasenbraten.de/vasm/):
-
-```
-vasmm68k_mot -Fhunkexe -nosym -o mv mv.asm
-```
-
-Both produce an AmigaOS loadseg()able executable. The asm source uses
-Devpac-style Motorola syntax and plain 68000 instructions, so other
-assemblers should cope with at most minor tweaks.
+This produces an AmigaOS loadseg()able executable.
 
 The `-f`/`-b` E build has been exercised under the E-VO toolchain
 (vamos): usage, bad-flag rejection, rename, move-into-directory,

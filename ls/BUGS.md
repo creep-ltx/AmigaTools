@@ -200,7 +200,10 @@ freed until exit - benign); ccon and cfile allocate their disposed
 objects with New() and are clean.
 
 **Still worth doing, unchanged**: the visited-directory cycle guard
-(fix 2) for real soft-link cycles. Note also the asm twin `ls-asm`
-is still 0.2 - it predates even the B1 guard (its own allocator, not
-E's, so THIS bug doesn't apply to it, but the -R self-recursion
-guard was never ported).
+(fix 2) for real soft-link cycles.
+
+**The asm twin is RETIRED (0.3.2, 24.7.26).** `ls-asm` had frozen at
+0.2 - it predated even the B1 guard (its own allocator, not E's, so
+the Dispose bug never applied to it, but no fix since 0.2 was ever
+ported either). The few-KB size win wasn't worth hand-porting every
+change; git history and the old release archives keep it.

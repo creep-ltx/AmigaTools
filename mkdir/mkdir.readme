@@ -4,10 +4,8 @@ mkdir - a Unix-style make directory command for AmigaDOS
 WHAT IT IS
 
   mkdir creates directories, like Unix mkdir, with -p to build a whole
-  chain of parents at once. It comes as two implementations with
-  identical behaviour: one in Amiga E (mkdir.e) and one in 68000
-  assembly (mkdir.asm). Build whichever you prefer and install it as
-  C:mkdir.
+  chain of parents at once. Written in Amiga E (mkdir.e); install the
+  included binary as C:mkdir.
 
   Requires Kickstart 2.04 or newer.
 
@@ -57,16 +55,9 @@ HOW -p WORKS
 
 BUILDING
 
-  Both prebuilt binaries are included: mkdir (the E build) and
-  mkdir-asm (the assembly build). No compiler needed; copy either one
-  to C:mkdir.
-
-  To build them yourself -- the E version, with the E-VO E compiler:
+  The prebuilt mkdir binary is included -- no compiler needed; copy
+  it to C:mkdir. To build it yourself, with the E-VO E compiler:
 
     evo mkdir.e
 
-  The assembly version, with vasm:
-
-    vasmm68k_mot -Fhunkexe -nosym -o mkdir-asm mkdir.asm
-
-  Both produce an AmigaOS loadseg()able executable.
+  This produces an AmigaOS loadseg()able executable.
