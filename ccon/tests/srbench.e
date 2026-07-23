@@ -47,7 +47,7 @@ MODULE 'intuition/intuition', 'intuition/screens',
        'utility/tagitem',
        'dos/dos'
 
-CONST NTESTS=5, RESSZ=2000
+CONST NTESTS=11, RESSZ=2600
 
 DEF win:PTR TO window, rp:PTR TO rastport,
     res:PTR TO CHAR, scratch[160]:STRING,
@@ -55,7 +55,13 @@ DEF win:PTR TO window, rp:PTR TO rastport,
     cw, ch, rows, cols,
     ticks[NTESTS]:ARRAY OF LONG,
     reps=200,
-    line78[80]:ARRAY OF CHAR
+    line78[80]:ARRAY OF CHAR,
+    -> 0.2 (the sync-line campaign): the candidate primitives' shared
+    -> geometry - the window's SCREEN-absolute region and its bitmap,
+    -> resolved once. zrow feeds the CPU test's vacated-strip clear.
+    sbm:PTR TO bitmap, sdepth,
+    ax, ay,                     -> il/it in screen coordinates
+    zrow[128]:ARRAY OF CHAR
 
 PROC main() HANDLE
   DEF rdargs=NIL, argarray:PTR TO LONG, fname:PTR TO CHAR, p:PTR TO LONG,
@@ -117,6 +123,19 @@ PROC main() HANDLE
   cols := Div(iw, cw)
   rows := Div(ih, ch)
   IF rows < 2 THEN Throw("WIN", 'window too small to test in')
+
+  -> 0.2: the candidates' shared geometry - screen bitmap, region in
+  -> screen coordinates, depth capped at the planes array, and zrow
+  -> zeroed EXPLICITLY (E globals start as garbage, the iconify lesson)
+  scr := win.wscreen
+  sbm := scr.rastport.bitmap
+  sdepth := sbm.depth
+  IF sdepth > 8 THEN sdepth := 8
+  ax := win.leftedge + il
+  ay := win.topedge + it
+  FOR i := 0 TO 127
+    zrow[i] := 0
+  ENDFOR
 
   -> varied printable filler, conbench's rule: no repeated-glyph
   -> shortcuts, this is what a real listing looks like
@@ -202,10 +221,92 @@ PROC runtests()
         RectFill(rp, il, it, ir, ib)           -> fill is ever a no-op
       ENDFOR
       SetAPen(rp, 1)
+    -> ---- 0.2: the candidate primitives. The question on the table:
+    -> stock console.device renders a scrolled line in ~17ms where
+    -> ScrollRaster costs ~34 for the same region - what is it NOT
+    -> paying? Every candidate below performs the same LOGICAL op as
+    -> scroll-1 (move the region up one text line, vacate the bottom
+    -> strip) so the numbers are directly comparable. ----
+    CASE 5                        -> scrollbf-1: the backfill variant
+      FOR i := 1 TO reps
+        ScrollRasterBF(rp, 0, ch, il, it, ir, ib)
+      ENDFOR
+    CASE 6                        -> blit-1: direct BltBitMap, no layer
+      -> walk - the region in SCREEN coordinates on the screen's own
+      -> bitmap, LockLayerRom held exactly as a real handler swap
+      -> would hold it (single uncovered cliprect assumed - which is
+      -> the fast path a real swap would gate on). The vacated strip
+      -> is RectFilled after, matching ScrollRaster's own erase step.
+      FOR i := 1 TO reps
+        LockLayerRom(win.wlayer)
+        BltBitMap(sbm, ax, ay + ch, sbm, ax, ay, iw, ih - ch, $C0, $FF, NIL)
+        UnlockLayerRom(win.wlayer)
+        SetAPen(rp, 0)
+        RectFill(rp, il, ib - ch + 1, ir, ib)
+        SetAPen(rp, 1)
+      ENDFOR
+    CASE 7                        -> blit-10: ten lines, one direct blit
+      dy := Mul(10, ch)
+      IF dy > (ih - ch) THEN dy := ih - ch
+      FOR i := 1 TO reps
+        LockLayerRom(win.wlayer)
+        BltBitMap(sbm, ax, ay + dy, sbm, ax, ay, iw, ih - dy, $C0, $FF, NIL)
+        UnlockLayerRom(win.wlayer)
+        SetAPen(rp, 0)
+        RectFill(rp, il, ib - dy + 1, ir, ib)
+        SetAPen(rp, 1)
+      ENDFOR
+    CASE 8                        -> cpu-1: planar row copies, the
+      cpuscroll()                 -> reference the blitter must beat
+                                  -> (and on real chip-bus iron, will)
+    CASE 9                        -> mask3-scroll-1: THE console.device
+      -> trick, decoded from the 3.2 ROM (46.1, site $2592): it pokes
+      -> a used-planes byte into rp_Mask before ScrollRaster, so the
+      -> blitter skips planes the text never touched. Pens 0-3 =
+      -> mask %0011 = TWO of this screen's four planes.
+      rp.mask := $03
+      FOR i := 1 TO reps
+        ScrollRaster(rp, 0, ch, il, it, ir, ib)
+      ENDFOR
+      rp.mask := $FF
+    CASE 10                       -> mask1-scroll-1: pen-1-only text
+      rp.mask := $01              -> (the bare shell transcript) = ONE
+      FOR i := 1 TO reps          -> plane in four
+        ScrollRaster(rp, 0, ch, il, it, ir, ib)
+      ENDFOR
+      rp.mask := $FF
     ENDSELECT
     WaitBlit()                    -> the last blit may still be running;
     DateStamp(t1)                 -> without this the final op is free
     ticks[id] := stampticks(t0, t1)
+  ENDFOR
+ENDPROC
+
+-> 0.2: the CPU planar reference - per plane, per raster row, CopyMem
+-> the region bytes one text line up, then clear the vacated strip
+-> from a zero row. Byte-aligned x (rounded OUT to cover the region),
+-> which a real swap would also do - cell columns are byte-multiples
+-> whenever cw is 8, and the round-out only ever widens the move.
+PROC cpuscroll()
+  DEF i, p, r, pl, bpr, xb, wb, ytop
+  bpr := sbm.bytesperrow
+  xb := Shr(ax, 3)
+  wb := Shr(ax + iw + 7, 3) - xb
+  IF wb > 128 THEN wb := 128    -> zrow's reach; 640px = 80 bytes, ample
+  ytop := ay
+  FOR i := 1 TO reps
+    LockLayerRom(win.wlayer)
+    FOR p := 0 TO sdepth - 1
+      pl := sbm.planes[p]
+      FOR r := 0 TO ih - ch - 1
+        CopyMem(pl + Mul(ytop + ch + r, bpr) + xb,
+                pl + Mul(ytop + r, bpr) + xb, wb)
+      ENDFOR
+      FOR r := ih - ch TO ih - 1
+        CopyMem(zrow, pl + Mul(ytop + r, bpr) + xb, wb)
+      ENDFOR
+    ENDFOR
+    UnlockLayerRom(win.wlayer)
   ENDFOR
 ENDPROC
 
@@ -217,6 +318,12 @@ PROC testname(id)
   CASE 2; s := 'scroll-page'
   CASE 3; s := 'text-78'
   CASE 4; s := 'rectfill'
+  CASE 5; s := 'scrollbf-1'
+  CASE 6; s := 'blit-1'
+  CASE 7; s := 'blit-10'
+  CASE 8; s := 'cpu-1'
+  CASE 9; s := 'mask3-scroll'
+  CASE 10; s := 'mask1-scroll'
   DEFAULT; s := '?'
   ENDSELECT
 ENDPROC s
@@ -250,7 +357,7 @@ PROC report(w, h, depth)
 
   StrCopy(res, '')
   addres('==========================================================\n')
-  StringF(scratch, 'srbench : window \dx\d, inner \dx\d, \dx\d cells of \dx\d, depth \d\n',
+  StringF(scratch, 'srbench 0.2: window \dx\d, inner \dx\d, \dx\d cells of \dx\d, depth \d\n',
           w, h, iw, ih, cols, rows, cw, ch, depth)
   addres(scratch)
   StringF(scratch, 'run     : reps \d per test\n', reps)
