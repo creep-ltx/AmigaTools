@@ -4907,6 +4907,46 @@ PROC eraseedit()
     ax0 := 0
     ay0 := ay0 + 1
   ENDIF
+  -> S1 (perf campaign, 23.7.26): the blip-only fast path. Every cooked
+  -> write brackets render() with this proc, and during command output
+  -> the editor is EMPTY - yet the full body below repaints the whole
+  -> anchor row (drawmodelrow per row, a full-width Text) to unpaint one
+  -> blip cell. That was ~1.6ms of the 1.85ms bytewise tax conbench
+  -> measured (vs stock CON:'s 0.35ms). When the last drawedit painted
+  -> nothing but the blip - n = 0 (no mirrored text cells) and edext <= 1
+  -> (no ghost; the blip alone) - the only editor pixels on the glass are
+  -> ONE cell at the normalized anchor: drawedit's own blip math lands at
+  -> bc = ancx + 0, r = bc/cols, which is exactly (ay0, ax0) after the
+  -> normalization above, pending-wrap included. Repaint that cell alone.
+  -> The conditions that keep this honest, each load-bearing:
+  -> - n = 0: any mirrored text means the full mirror-zero loop + row
+  ->   repaints below must run (B1's territory, untouched).
+  -> - edext <= 1: a ghost extends past the blip and is pixels-only; it
+  ->   needs the full-row repaint to evaporate.
+  -> - srch = FALSE: the Ctrl+R banner overprints prompt cells 0..ancx-1
+  ->   pixels-only, and only the full-row repaint removes it. (sbsrch
+  ->   needs no clause: dowrite sbexit()s before this proc, and its
+  ->   highlight lives in view rows this proc never touched anyway.)
+  -> - sb present: no model, nothing to repaint the cell FROM - the
+  ->   no-model RectFill branch below stays the only correct erase.
+  -> - the paste hint needs no clause either: it lives on its own row
+  ->   with its own lifecycle (pastehintshow), which this proc never
+  ->   handled in the first place.
+  -> Bookkeeping stays bit-identical to the full path: edlast was taken
+  -> and cleared at the TOP (the B1 rule - no early return may leave it
+  -> describing dead paint), and edext resets here exactly as the bottom
+  -> of the proc would. ay0 <= rows-1 mirrors the full path's r1 clamp
+  -> (edroom guarantees the blip was on-screen when painted; if it was
+  -> clipped, there is nothing to erase - same as the old loop's
+  -> ay0 > r1 no-op). Pixel-equivalence vs the full path is harnessed in
+  -> tests/ederasetest.e, not hand-traced (the b32 lesson).
+  IF (n = 0) AND (curcon.edext <= 1) AND (curcon.srch = FALSE) AND (curcon.sb <> NIL)
+    IF (curcon.edext = 1) AND (ay0 <= (curcon.rows - 1))
+      drawmodelcells(ay0, ax0, ax0)
+    ENDIF
+    curcon.edext := 0
+    RETURN
+  ENDIF
   IF curcon.sb
     cc := ax0
     r := ay0
@@ -7265,4 +7305,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.2b1 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.2b2 (23.7.26) CCON: LTX console handler', 0

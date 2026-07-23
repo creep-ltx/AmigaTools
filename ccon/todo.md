@@ -3456,6 +3456,59 @@ Boot checklist (REBOOT FIRST — the running handler keeps its seglist):
       within 6%). bytewise/cursor-pos/erase-eol/sgr unchanged BY
       DESIGN - S1 territory. The engine's numbers land on the model.
 
+### 1.2.2b2 — S1, the blip-only eraseedit fast path (23.7.26)
+
+Every cooked write brackets render() with eraseedit()/drawedit(), and
+during command output the editor is EMPTY - yet eraseedit repainted
+the whole anchor row (drawmodelrow, a full-width Text) to unpaint one
+blip cell. That was ~1.6ms of the 1.85ms bytewise tax. Now: when the
+last drawedit painted only the blip (edlast=0, edext<=1, srch off,
+model present), repaint exactly the one normalized anchor cell via
+drawmodelcells and return. All four guards are load-bearing (mirrored
+text / ghost / banner / no-model each still take the full body - see
+the comment block in eraseedit). Bookkeeping identical: edlast taken
+at top as always (B1 rule), edext reset on the new exit.
+
+Harnessed, not hand-traced (the b32 lesson): tests/ederasetest.e runs
+OLD full-row eraseedit vs NEW fast path in lockstep over screen+model
+grids - blip lifecycle, \r-parked anchors (b8), pending-wrap anchors,
+banner, ghost, typed text - 9 directed + 3000 random cycles, pixel-
+identical. The harness misfired twice before it ran true, BOTH times
+its own fault (fed the engines different random bytes; flipped srch
+before the erase, a state the handler can't reach - srexit/srcancel
+verified in source to heal the banner themselves before any
+eraseedit). Verified srch discipline is what makes the srch guard
+sufficient.
+
+Expected: bytewise 2.22 -> ~0.6s, cursor-pos 0.92 -> ~0.4, erase-eol
+0.96 -> ~0.4, sgr-colour 7.36 -> ~5.5, More's keystroke echo snappier.
+plain-lines/scroll-nl move little (blit-floor bound, S5 territory).
+
+Boot checklist (REBOOT FIRST):
+
+- [ ] plain boot, type at the prompt - blip follows, no stale blocks,
+      no prompt damage (the B1/b10 regression watch)
+- [ ] type a command, Left-arrow into the middle, type more, Enter -
+      interior editing repaints right (n>0 path untouched, but this
+      is the minefield's perimeter)
+- [ ] Ctrl+R, type a fragment (banner replaces prompt), Ctrl+R again,
+      Esc - banner in/out clean, prompt restored (srch guard)
+- [ ] ghost suggestion: type a prefix of an old command - grey ghost
+      shows; output arriving while it shows erases it clean (edext>1
+      declines the fast path)
+- [ ] a \r progress bar (ccon-b1-fill deck or `working: N%` loop) -
+      blip parked over client text gives the cell back uninverted
+      (the b8 shape, now via the 1-cell repaint)
+- [ ] More a file - echo/keystroke feel, pages still instant
+- [x] conbench rerun (his, 12:52, S:conbench-ccon-results3.txt):
+      bytewise 2.22 -> 0.66 (predicted ~0.6; tax 1.85 -> 0.55ms/write,
+      stock is ~0.35), cursor-pos 0.92 -> 0.22? (= stock's 0.20?),
+      erase-eol 0.96 -> 0.52, sgr-colour 7.36 -> 4.96 (stock 4.70,
+      6% off), clear-page 6.04 -> 5.56, small shavings everywhere
+      else. TOTAL 47.16 - campaign to date 288.68 -> 47.16, 11.6x ->
+      1.9x of stock. Remaining gap = plain-lines/scroll-nl/clear-page
+      blit floor (S5 territory).
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
