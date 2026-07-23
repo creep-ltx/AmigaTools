@@ -107,6 +107,35 @@ INSTALL
   keep them. After updating the handler: reboot, not re-Mount.
 
 
+HISTORY
+
+  1.2 (23.7.26)
+    - Iconify: RightAmiga+I sends a window to a Workbench icon,
+      a click restores it exactly as left; icon built in
+    - Full-screen paging like CON:: form feed clears and homes,
+      so More and any repainting program replace the page
+      instead of scrolling it
+    - Ed fixed: cursor keys navigate (raw keys back to 8-bit
+      $9B), and resizing the window re-measures and repaints
+    - Double buffering removed (unused, and it slowed drawing)
+
+  1.1
+    - Per-window FONT and real italic/underline/inverse styles
+    - Alternate screen for Ed/More (paged content stays out of
+      scrollback)
+    - Shared, persistent, prefix-filtered command history
+    - Safe multi-line paste; scrollback content search (Ctrl+R)
+    - Can replace the system CON:/RAW: KingCON style
+
+  1.0
+    - First release: output scrollback, fullscreen client
+      support, a readline line editor, fish-style suggestions,
+      zsh-style Tab completion, copy & paste, the input.device
+      chain, and stock CON: open/close semantics
+
+  Full version history: changelog.md.
+
+
 
 
   CCON: is part of the LTX AmigaTools collection.
