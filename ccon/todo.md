@@ -3375,6 +3375,87 @@ documented with the real fix parked (`audit2.md` D).
       "the whole window" becomes "the current margin, defaulting to
       the whole window when none is set." Not scoped further yet.
 
+## 1.2.2 — the speed campaign, S2+S3 (23.7.26)
+
+Background: his three-console conbench run (results in S:) put CCON at
+11.6x stock CON: overall and 203s on scroll-nl. srbench (S4, C:srbench)
+pinned the physics: ScrollRaster ~34.7ms whether it moves 1 line or 10,
+text-78 1.3ms, rectfill 23.4ms — blit COUNT is the whole game. (Full
+analysis in the perf notes outside the repo, his call.) The conbench
+windows were 77 cols (size gadget eats the right border), so its 78-char
+lines wrapped: every "line" was TWO scrolls. The handler was otherwise
+exonerated — ~1.5ms/write of editor tax, everything else was scroll
+count times 34.7ms.
+
+$VER 1.2.2b1, deployed live + staged (L:ccon-handler-1.2.2b1,
+.bak = 1.2.1). THE deferred-blit engine (df* procs, ccon-handler.e):
+inside one render() the sequential paths (printables, LF, TAB, FF,
+ESC D/E) write the MODEL only; dfflush() at packet end (or before any
+pixel-touching escape: CSI J/K/L/M/S/T/@/P, ?47 alt screen, RI at top)
+pays AT MOST one ScrollRaster + dirty-span repaints via drawmodelcells,
+or NO blit + redraw() when a screenful+ scrolled by or a FF cleared the
+page (the FF RectFill is gone entirely, not deferred). sb=NIL or
+rows>256 consoles run the 1.2.1 path bit for bit. Write replies still
+land AFTER pixels — S5 (ack-then-render) deliberately NOT taken.
+
+Harness: tests/defertest.e (vamos) — legacy and deferred engines
+reimplemented over cell grids, screens+models+cursors+wrap flags+ring
+compared after every packet. PASS: 10 directed + 4000 seeded-random
+packets identical. (Harness lesson re-learned: Mod is a DIVS — a
+24-bit dividend overflows the 16-bit quotient and rnd(39) returned
+156, the fill loop trampled the globals. Two "failure" runs were the
+harness corrupting itself; the engine never was wrong.)
+
+Expected on the next conbench run (same 640x246 windows, honest
+sync-off): scroll-nl 203s -> ~19s (one 31ms blit per 10-LF packet);
+block-4k 27.3s -> well under 1s (dffull: zero blits, one 29-row
+repaint per 4K packet — should now BEAT stock CON:'s 7.0s);
+plain-lines 27.9s -> ~15s (the wrap's two scrolls merge into one
+2-line blit); clear-page ~10s -> ~1s (no FF fill, one repaint pass
+per page). bytewise/cursor-pos/erase-eol barely move — that is S1's
+job, not started yet.
+
+Boot checklist (REBOOT FIRST — the running handler keeps its seglist):
+
+- [ ] plain boot: NewShell CCON: opens, types, completes, scrolls
+- [ ] `type ccon.doc` full-speed — visibly faster, text intact at the
+      end (spot-check the tail against a CON: type of the same file),
+      no doubled or missing rows after the long scroll
+- [ ] `dir SYS: ALL` or `list SYS:` — burst output correct, Ctrl+C
+      still breaks it
+- [ ] scroll-nl feel: `echo` a file of blank lines / rerun conbench —
+      the 203s row collapses
+- [ ] More a file: pages flip instantly (the 1.2 ^L+CSI-6n behaviour),
+      page CONTENT complete on every flip (dffull path), q leaves a
+      sane shell
+- [ ] Ed the same file: arrows scroll (ESC D / CSI S paths — S flushes,
+      D defers), insert/delete lines mid-screen, menus, resize while
+      open (B8 regression watch), quit clean
+- [ ] styles still: `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"`,
+      then Shift+Up into scrollback and back over it (deferred writes
+      land attrs through the same model the view reads)
+- [ ] select/copy during and after a long type — selection cleared by
+      output as before, no stale highlight cells
+- [ ] paste a multi-line clip into the shell — the paste hint row and
+      edroom's immediate screenscroll still behave (they run OUTSIDE
+      render, kept the old blit)
+- [ ] iconify mid-`type`, reopen — transcript intact (writes park in
+      the queue, flushwq replays through the new engine)
+- [ ] resize after a deferred-heavy session — reflow (B7) intact: the
+      wrap flags are written by dfnl/dfwrapnl now, same values, same
+      rows
+- [ ] a second CCON window: interleaved output in both, no cross-window
+      smear (df state is global but settles inside every packet)
+- [x] conbench rerun (his, 12:24, S:conbench-ccon-results2.txt):
+      TOTAL 288.68 -> 54.00 (5.3x, now 2.2x stock vs 11.6x).
+      plain-lines 14.44 (~predicted), scroll-nl 19.14 (~predicted),
+      block-4k 0.36? = dffull zero-blit, 19x FASTER than stock CON:,
+      wrap-long 2.56, clear-page 6.04 (prediction ~1s was wrong, the
+      engine is right: 77-col wrap makes a page 40 rows, the last ~6
+      lines per page each carry a 2-row scroll packet - re-derived
+      within 6%). bytewise/cursor-pos/erase-eol/sgr unchanged BY
+      DESIGN - S1 territory. The engine's numbers land on the model.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
