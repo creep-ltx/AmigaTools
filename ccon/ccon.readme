@@ -95,50 +95,43 @@ LIMITATIONS
     timeout; a wedged or spinning-up disk blocks the window
 
 
-INSTALL
-
-  copy L/ccon-handler L:
-  copy DEVS/ccon-mountlist DEVS:
-  Mount CCON: FROM DEVS:CCON-mountlist
-  Mount CRAW: FROM DEVS:CCON-mountlist
-  NewShell CCON:
-
-  The drawers mirror SYS:. Put the Mounts in S:User-Startup to
-  keep them. After updating the handler: reboot, not re-Mount.
-
-
 HISTORY
 
   1.2
     - Iconify: RightAmiga+I sends a window to a Workbench icon,
       a click restores it exactly as left; icon built in
+
     - Full-screen paging like CON:: form feed clears and homes,
       so More and any repainting program replace the page
       instead of scrolling it
+
     - Ed fixed: cursor keys navigate (raw keys back to 8-bit
       $9B), and resizing the window re-measures and repaints
+
     - Bug fixes: a narrowed window now re-wraps the transcript
       instead of losing it, paste can't overflow the clipboard
       buffer, clean handler unmount, history stores each command
       once, plus assorted hardening
 
+
   1.1
     - Per-window FONT and real italic/underline/inverse styles
+
     - Alternate screen for Ed/More (paged content stays out of
       scrollback)
+
     - Shared, persistent, prefix-filtered command history
+
     - Safe multi-line paste; scrollback content search (Ctrl+R)
+
     - Can replace the system CON:/RAW: KingCON style
+
 
   1.0
     - First release: output scrollback, fullscreen client
       support, a readline line editor, fish-style suggestions,
       zsh-style Tab completion, copy & paste, the input.device
       chain, and stock CON: open/close semantics
-
-  Full version history: changelog.md.
-
-
 
 
   CCON: is part of the LTX AmigaTools collection.
