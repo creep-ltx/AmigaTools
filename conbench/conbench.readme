@@ -1,0 +1,40 @@
+conbench - console speed benchmark for AmigaOS
+================================================
+
+WHAT IT IS
+
+  conbench times a console handler from the client side of the
+  packet interface: fifteen workloads, from plain line output and
+  4K/32K block writes to colour runs, full-screen editor repaints,
+  insert/delete blits and a per-line render barrier. Run it inside
+  CON:, CCON:, KingCON, ViNCEd or anything else that speaks the
+  console packet protocol; results append to one file so consoles
+  can be read side by side. Written in Amiga E, a native AmigaOS
+  executable. Needs AmigaOS 2.0+.
+
+WHY ANOTHER BENCHMARK
+
+  Because a console that replies before it renders looks fast in
+  any naive timing loop. conbench ships the tools to see through
+  that: a SYNC mode that barriers every test, a sync-line test
+  that barriers every LINE (the gap against plain-lines IS the
+  deferral), and a window probe that records the real text grid -
+  with a warning when the window is too narrow and the line tests
+  would silently measure wrapping instead.
+
+USAGE
+
+  Run it IN the console you want to measure:
+
+    NewShell CCON:
+    conbench CCON TO RAM:conbench.txt
+    conbench CCON TO RAM:conbench.txt SYNC
+
+  NAME/A, TO/K, REPS/K/N (default 3, best-of), SCALE/K/N, SYNC/S.
+  Results under half a second are flagged '?' - raise SCALE.
+
+HISTORY
+
+  0.3  (23.7.26) each test names itself in the window; own tool now
+  0.2  suite doubled, six new tests, the window probe works
+  0.1  first version, nine tests
