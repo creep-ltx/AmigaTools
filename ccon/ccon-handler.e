@@ -241,6 +241,15 @@ OBJECT console
   sbcnt                         -> history lines above the screen
   sbmax                         -> v1.1: model lines THIS console keeps
                                 -> (LINES=n; default SBMAX)
+  sbcols                        -> audit3 C2: the column STRIDE the four
+                                -> planes above were actually allocated
+                                -> with. Normally equal to cols - but the
+                                -> two are set by different code at
+                                -> different times (cols by gridcalc from
+                                -> the window, the planes by openwin/
+                                -> reflowring), and C2 was exactly them
+                                -> disagreeing with nothing to notice.
+                                -> Explicit state beats a promise.
   viewoff                       -> lines scrolled back; 0 = live
   -> raw-session alternate screen (v1.1b10): More/Ed restore the
   -> transcript on exit instead of leaving their UI in it
@@ -776,6 +785,17 @@ PROC killhandler()
   IF keymapbase
     CloseLibrary(keymapbase)
     keymapbase := NIL
+  ENDIF
+  -> audit3 C7: diskfont.library was opened (by the fontload HELPER process,
+  -> fonthelper() - the no-DOS escape) and never closed anywhere, so any
+  -> handler that had ever served a FONT option left its OpenCnt permanently
+  -> raised and the library could never be expunged. The only outlier in an
+  -> otherwise complete teardown. Safe here by construction: fontload()
+  -> blocks on Wait(fhsig) until the helper has signalled, so no helper can
+  -> still be inside OpenDiskFont when main()'s loop falls out to us.
+  IF diskfontbase
+    CloseLibrary(diskfontbase)
+    diskfontbase := NIL
   ENDIF
   -> ICONIFY: RemoveAppIcon every still-iconified console, then drain+reply any
   -> AppMessage in flight before the port dies, free the icon, close the libs.
@@ -1334,6 +1354,15 @@ PROC dowrite(pkt:PTR TO dospacket)
                                 -> this line is what makes Ctrl+C reach it
                                 -> (AROS con-handler does the same)
   len := pkt.arg3
+  -> audit3 C9: client output ends a scrollback CONTENT search. snaplive()
+  -> below resets viewoff and repaints live, but left sbsrch TRUE - so the
+  -> next keystroke took dovanilla's sbsrch branch and sbfind() yanked the
+  -> view straight back to a match ("my window jumped"). Targeted here
+  -> rather than inside snaplive(): the KEY paths that call snaplive()
+  -> already have their own carefully-reasoned sbsrch handling (see the
+  -> two-pass-trap comments in dorawkey), and clearing it there would stop
+  -> arrows being consumed the way those comments require.
+  IF curcon.sbsrch THEN sbexit()
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
@@ -1808,14 +1837,40 @@ PROC doappmsg(am:PTR TO appmessage)
   DEF c:PTR TO console, oldcur:PTR TO console
   IF am.type = AMTYPE_APPICON
     c := am.userdata
-    IF c AND c.appicon
+    -> audit3 C3: VALIDATE the pointer before touching it. am_UserData is a
+    -> console pointer captured when the AppIcon went up, and it can outlive
+    -> its console: an iconified console is windowless, so ACTION_END with
+    -> the last handle takes dopkt's `ELSE conclose(c)` arm and disposes it -
+    -> and main() drains the window ports BEFORE wbport, so a double-click
+    -> already queued here is processed after the free. Every other place
+    -> that receives a console pointer from outside validates it (dopkt's
+    -> END/READ/WRITE, conbysender, ihdrain, timerexpired); this was the one
+    -> that did not, on the one path where the pointer can dangle.
+    -> NESTED, not `IF conok(c) AND c.appicon`: E's AND does not short-
+    -> circuit (see the histslot note in dorawkey), so the AND form would
+    -> read c.appicon out of freed memory anyway - the exact dereference
+    -> this guard exists to prevent. conok(NIL) walks the list and returns
+    -> FALSE, so the old `c AND` NIL check is subsumed.
+    IF conok(c)
+     IF c.appicon
       RemoveAppIcon(c.appicon)
       c.appicon := NIL
       oldcur := curcon
       curcon := c
       reopenwin()                    -> window back, repainted from the model
-      IF curcon.win THEN flushwq()     -> replay writes parked while hidden
+      IF curcon.win
+        flushwq()                    -> replay writes parked while hidden
+      ELSE
+        -> audit3 C8: the reopen FAILED (no memory, or the public screen we
+        -> were on has gone). The AppIcon was already removed above, so
+        -> without this the console is windowless AND iconless: nothing to
+        -> click, nothing to close, and dowrite() answers its client
+        -> ERROR_NO_FREE_STORE forever. Put the icon back so the user can
+        -> simply try again once whatever failed has passed.
+        curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0, iconobj, NIL)
+      ENDIF
       curcon := oldcur
+     ENDIF
     ENDIF
   ENDIF
   ReplyMsg(am)
@@ -1854,6 +1909,22 @@ PROC hidewin()
     ENDFOR
     curcon.anscm := NIL
   ENDIF
+  -> audit3 C2: SNAPSHOT the live geometry before the window goes. pwx/pwy/
+  -> pww/pwh are otherwise written ONLY by parsecon(), i.e. they are frozen
+  -> at whatever the open string said - so reopenwin() rebuilt the window at
+  -> its ORIGINAL size and position no matter what the user had done to it.
+  -> That is two bugs in one: the window visibly jumped back on restore, and
+  -> far worse, reopenwin()'s gridcalc() then derived a DIFFERENT cols than
+  -> the one the model planes were allocated with, while nothing reflowed or
+  -> reallocated them - so redraw() indexed `sb + idx * newcols` through a
+  -> buffer sized for oldcols and ran off the end, and every later outchr()
+  -> wrote there. Reachable by resizing a window and iconifying it, which is
+  -> ordinary use. Recording what the window really is makes the restore
+  -> exact and the stride agreement automatic.
+  curcon.pwx := curcon.win.leftedge
+  curcon.pwy := curcon.win.topedge
+  curcon.pww := curcon.win.width
+  curcon.pwh := curcon.win.height
   CloseWindow(curcon.win)
   curcon.win := NIL
   curcon.rp := NIL
@@ -1924,6 +1995,36 @@ PROC reopenwin()
     ENDIF
   ENDIF
   gridcalc()
+  -> audit3 C2, the belt. The pw* snapshot in hidewin() means the restored
+  -> window is the one we closed, so gridcalc() should derive exactly the
+  -> grid the model was built for. "Should" has been wrong in this file
+  -> before, and the screen underneath us can genuinely move while we are
+  -> iconified (a Prefs screen-mode change, or our public screen closing so
+  -> the reopen lands somewhere with different borders). If the grid and the
+  -> planes disagree, EVERY model access from here on is a wrong-stride
+  -> index into a real allocation - so drop the model instead and run this
+  -> console without scrollback, which is precisely what openwin() does on a
+  -> failed allocation and what doresize() does on a failed reflow. Losing
+  -> the transcript is a bad day; indexing past the plane is a corrupt heap.
+  IF curcon.sb
+    IF curcon.cols <> curcon.sbcols
+      Dispose(curcon.sb)
+      Dispose(curcon.sa)
+      Dispose(curcon.ss)
+      Dispose(curcon.sw)
+      curcon.sb := NIL
+      curcon.sa := NIL
+      curcon.ss := NIL
+      curcon.sw := NIL          -> all four or none (B7)
+      curcon.sbtop := 0
+      curcon.sbcnt := 0
+      curcon.viewoff := 0
+      curcon.cy := 0
+      curcon.cx := 0
+      curcon.ancx := 0
+      curcon.ancy := 0
+    ENDIF
+  ENDIF
   -> clear the inner rect and repaint the kept model, cursor, edit line
   SetAPen(curcon.rp, 0)
   RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,
@@ -2127,6 +2228,29 @@ PROC openwin()
   IF v = 0 THEN v := SBMAX
   IF v < 100 THEN v := 100
   IF v > SBMAXCAP THEN v := SBMAXCAP
+  -> audit3 C1: THE floor that actually enforces what the comment above has
+  -> always claimed - "the visible grid must always fit inside the ring".
+  -> 100 was never that guarantee: gridcalc() has already run, curcon.rows
+  -> is right here, and nothing compared them. Every ring accessor (visrow,
+  -> sarow, ssrow, swrow, selvidx, redraw, drawmodelrow, drawmodelcells and
+  -> the two idx computations in inschars/delchars) corrects its wrap with a
+  -> SINGLE subtraction, so the pre-correction worst case sbtop+r =
+  -> (sbmax-1)+(rows-1) lands on rows-2 after one subtract - still out of
+  -> range as soon as rows >= sbmax + 2, writing past a plane that is only
+  -> sbmax*cols bytes. Reachable today: LINES100 on a tall RTG screen
+  -> (1280x1024 at topaz 8 is 126 rows against a 100-row ring).
+  -> Why rows + 2 and not the bare index minimum (harness-measured, see
+  -> tests/sbmaxtest.e - the boundary was CHECKED, not reasoned): the escape
+  -> starts at rows >= sbmax + 2, so sbmax >= rows - 1 is all the INDEXING
+  -> needs. rows + 2 is chosen because sbmax - rows is also the scrollback
+  -> CAPACITY - screenscroll()'s `IF sbcnt < (sbmax - rows)` is what lets
+  -> history accumulate at all - so a ring merely big enough to index safely
+  -> would be a console with zero lines of scrollback. rows + 2 is the
+  -> smallest value that is both safe and still a scrollback.
+  -> Placed AFTER the SBMAXCAP clamp deliberately: safety outranks the
+  -> ceiling if they ever conflict (they cannot today - cols is capped at
+  -> 255, so a window tall enough to need 4999 rows does not exist).
+  IF v < (curcon.rows + 2) THEN v := curcon.rows + 2
   curcon.sbmax := v
   curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
   curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
@@ -2143,6 +2267,7 @@ PROC openwin()
     curcon.ss := NIL
     curcon.sw := NIL
   ENDIF
+  curcon.sbcols := curcon.cols  -> audit3 C2: record the real stride
   curcon.sbtop := 0
   curcon.sbcnt := 0
   curcon.viewoff := 0
@@ -2508,6 +2633,7 @@ PROC reflowring(ocols, orows)
   curcon.sa := nsa
   curcon.ss := nss
   curcon.sw := nsw
+  curcon.sbcols := curcon.cols  -> audit3 C2: the new planes' real stride
   -> the newest `rows` dest rows are the screen; the rest is history,
   -> capped by what the ring can still hold behind it
   IF rftot < curcon.rows THEN rftot := curcon.rows
@@ -2576,6 +2702,26 @@ PROC doresize()
   oc := curcon.cols
   orows := curcon.rows          -> audit B2: the grow block below needs
   gridcalc()                    -> to know how many rows were gained
+  -> audit3 C1, the other direction. openwin() floors sbmax at rows + 2 for
+  -> the geometry it opened with, but GROWING the window past that height
+  -> walks into the same single-subtraction wrap from the other side, and
+  -> sbmax is never revisited after the open. The ring cannot serve more
+  -> visible rows than it holds, so cap the grid at what the model can
+  -> actually address. The alternative - grow sbmax and reallocate - means
+  -> reflowring() would need the OLD sbmax passed in as well (it uses the
+  -> field for both its source walk and its destination allocation), i.e. a
+  -> signature change to the one proc whose header says to read
+  -> tests/reflowtest.e before touching it. Not worth it for this: with the
+  -> open-time floor in place this can only bite when someone asks for a
+  -> SMALL LINES and then grows the window far beyond it, and the visible
+  -> cost is unused space at the bottom - which a window whose height is not
+  -> an exact multiple of the cell height already has. Blank rows, not a
+  -> corrupt heap. If that ever actually annoys someone, growing the ring
+  -> properly is the follow-up (audit3-roadmap, Batch B).
+  IF curcon.sb
+    IF curcon.rows > (curcon.sbmax - 2) THEN curcon.rows := curcon.sbmax - 2
+    IF curcon.rows < 1 THEN curcon.rows := 1
+  ENDIF
   IF curcon.sb
     IF curcon.cols <> oc
       IF reflowring(oc, orows) = FALSE
@@ -3269,7 +3415,7 @@ ENDPROC
 -> because the hint makes the pending state impossible to miss.
 PROC dopaste(forceexec)
   DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
-      lw:PTR TO LONG, b:PTR TO CHAR, exec
+      lw:PTR TO LONG, b:PTR TO CHAR, exec, trunc=FALSE
   IF curcon.selon THEN RETURN
   IF clipopen() = FALSE THEN RETURN
   clipreq.command := CMD_READ
@@ -3294,7 +3440,15 @@ PROC dopaste(forceexec)
     lw := clipbuf + i
     id := lw[0]
     sz := lw[1]
-    IF sz < 0                   -> audit2 B11: a chunk claiming a NEGATIVE
+    -> audit3 C4: B11 (below) rejected a NEGATIVE size, which stalled the
+    -> walk - but a large POSITIVE one is just as malformed and was let
+    -> through: sz near $7FFFFFFF makes the `i + 8 + sz` step overflow to a
+    -> NEGATIVE i, the WHILE condition stays true, and the next pass reads
+    -> `clipbuf + i` from well BEFORE the buffer. Same untrusted field, same
+    -> exit, one more condition: a chunk that cannot fit inside what was
+    -> actually read is malformed too. This bounds the step from both sides,
+    -> so i only ever moves forward and only ever inside [12, got].
+    IF (sz < 0) OR (sz > (got - i - 8))
       i := got                  -> size is malformed (sz is read straight
                                 -> from the untrusted clipboard). Without
                                 -> this, sz <= -8 makes the step below <= 0,
@@ -3310,7 +3464,19 @@ PROC dopaste(forceexec)
         take := Min(sz, got - i - 8)
         IF exec
           FOR c := 0 TO take - 1
-            injectbyte(b[c])
+            -> audit3 C5: in RAW mode every pasted byte becomes one queue
+            -> slot (injectbyte -> enqueue), and enqueue() drops silently
+            -> when the ring is full - so a paste larger than INQMAX-1 lost
+            -> its tail with no beep, no hint, nothing. The whole-or-nothing
+            -> discipline B3 built for the report writers (sendreport,
+            -> sendcpr, ihreport, rawcsikey all ask inqroom() first) never
+            -> reached this path.
+            -> This does NOT raise the ceiling - see the note under the
+            -> loop - it makes hitting it AUDIBLE instead of silent.
+            IF curcon.rawmode
+              IF inqroom(1) = FALSE THEN trunc := TRUE
+            ENDIF
+            IF trunc = FALSE THEN injectbyte(b[c])
           ENDFOR
         ELSE
           pasteinsert(b, take)
@@ -3325,6 +3491,21 @@ PROC dopaste(forceexec)
     drawedit()                  -> pasteinsert never draws itself -
   ENDIF                         -> one clean paint after the whole
                                 -> clip is in, not one per line
+  -> audit3 C5: say so when the tail did not fit.
+  -> WHY THIS IS A SIGNAL AND NOT A CURE, honestly: the obvious fix -
+  -> call inputarrived() mid-loop so the blocked reader drains the queue -
+  -> DOES NOT WORK here, and it is worth writing down so nobody spends an
+  -> evening rediscovering it. inputarrived() replies the READ packets that
+  -> are already queued, and Ed reads ONE BYTE AT A TIME (its keystroke loop
+  -> was disassembled during the More hunt - WaitForChar then Read(fh,buf,1)).
+  -> Its NEXT read arrives as a packet on our port, and we are inside
+  -> dopaste, inside the main loop, not draining packets - so one
+  -> inputarrived() moves one byte and then the queue is full again.
+  -> Actually raising the ceiling needs a raw paste TAIL that refills inq
+  -> from satisfyreads() as the client consumes, i.e. new per-console state
+  -> plus a pump - real work with its own commit and its own boot test, not
+  -> a line in a memory-safety batch. Written up in audit3-roadmap.
+  IF trunc THEN DisplayBeep(NIL)
 ENDPROC
 
 PROC injectbyte(c)
@@ -4180,7 +4361,8 @@ ENDPROC
 -> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
 -> the rest silently.
 PROC render(buf, len)
-  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2, at, sty
+  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2, at, sty,
+      rp:PTR TO rastport, rleft, rcw, rtopy, rch, rbase, rcols  -> audit3 P2
   IF curcon.win = NIL THEN RETURN
   s := buf
   WHILE i < len
@@ -4330,14 +4512,38 @@ PROC render(buf, len)
       -> one evaluation out here is the same answer every cell got.
       at := curattr()
       sty := curcon.cursty
+      -> audit3 P2: the same treatment audit2-P4 gave drawmrow, drawselrow
+      -> and drawmodelcells, finally applied to the proc that needed it
+      -> most. E reloads the curcon GLOBAL and then the field on every
+      -> single `curcon.x`, and cannot hoist that itself - and this is the
+      -> loop every byte of client output passes through, so it was paying
+      -> seven of those per wrap chunk for values that cannot move.
+      -> What is safe to hoist and why: rp/left/cw/topy/ch/baseline/cols are
+      -> pure GEOMETRY, and geometry only changes in gridcalc(), which runs
+      -> from openwin/reopenwin/doresize - never from inside a write. What
+      -> is NOT hoisted: cx and cy, because outwrapnl() moves both, and sb/
+      -> sbtop, because the screenscroll() inside it advances the ring - so
+      -> visrow/sarow/ssrow must still resolve per chunk.
+      rp := curcon.rp
+      rleft := curcon.left
+      rcw := curcon.cw
+      rtopy := curcon.topy
+      rch := curcon.ch
+      rbase := curcon.baseline
+      rcols := curcon.cols
+      -> and the pens once per RUN, not once per wrap chunk: the same
+      -> argument audit P1 used for `at`/`sty` just above - nothing inside
+      -> this loop can move the SGR state, so setting them per chunk was
+      -> re-answering a settled question (setsoft already self-caches;
+      -> setpens did two real SetAPen/SetBPen calls every time).
+      setpens()
+      setsoft(sty)
       WHILE run > 0
-        IF curcon.cx >= curcon.cols THEN outwrapnl()  -> B7: margin wrap, not a newline
-        fit := curcon.cols - curcon.cx
+        IF curcon.cx >= rcols THEN outwrapnl()  -> B7: margin wrap, not a newline
+        fit := rcols - curcon.cx
         IF fit > run THEN fit := run
-        setpens()
-        setsoft(curcon.cursty)
-        Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
-        Text(curcon.rp, s + i, fit)
+        Move(rp, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase)
+        Text(rp, s + i, fit)
         IF curcon.sb
           CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
           m := sarow(curcon.cy) + curcon.cx
@@ -4375,7 +4581,18 @@ ENDPROC
 
 -> the most chars the line can hold: LINEMAX, or every cell from
 -> the anchor to the bottom-right corner minus one for the blip
-PROC edcap() IS Min(LINEMAX - 1, Mul(curcon.rows, curcon.cols) - curcon.ancx - 1)
+-> audit3 C10: FLOORED AT 0. With rows = 1 and the legal pending-wrap anchor
+-> (ancx = cols) this expression is -1, and the four `WHILE StrLen(ebuf) >
+-> edcap() DO SetStr(ebuf, StrLen(ebuf) - 1)` trim loops (srfind, sbfind,
+-> sgall, histload) then never terminate: at length 0 the condition 0 > -1
+-> still holds, so SetStr(ebuf, -1) writes the terminator at s[-1] - inside
+-> the E-string header - and the loop walks backwards through the heap.
+-> rows >= 2 makes this >= cols - 1, so only a one-row grid reaches it; our
+-> own WA_MINHEIGHT rules that out for owned windows, but a BORROWED window
+-> (WINDOW0xADDR, which is exactly what CTerm's frame handoff uses) is
+-> adopted with no size floor at all. One Max() fixes all four loops without
+-> touching them.
+PROC edcap() IS Max(0, Min(LINEMAX - 1, Mul(curcon.rows, curcon.cols) - curcon.ancx - 1))
 
 -> the last row a line of n chars (plus its blip cell) touches
 PROC edlastrow(n) IS curcon.ancy + ((curcon.ancx + n) / curcon.cols)
@@ -5586,10 +5803,9 @@ PROC dorawkey(code, qual)
       RETURN TRUE
     ENDIF
   ENDIF
-  IF curcon.sbsrch
-    IF (code = RK_UP) OR (code = RK_DOWN) OR
-       (code = RK_LEFT) OR (code = RK_RIGHT) THEN sbexit()
-  ENDIF
+  -> audit3 X1: a SECOND, identical sbsrch/arrow block used to sit here. It
+  -> was unreachable - the block above RETURNs for exactly those four codes -
+  -> and it is gone. Leftover from the b31-b33 two-pass-trap work.
   s := curcon.ebuf
   l := StrLen(curcon.ebuf)
   IF code = RK_UP
@@ -6820,4 +7036,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.1b1 (23.7.26) CCON: LTX console handler', 0
