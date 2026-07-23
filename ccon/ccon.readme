@@ -89,6 +89,11 @@ LIMITATIONS
 
   - Completion: no quoted words, one menu page of 80
 
+  - Pasting into a fullscreen program (Ed) stops at ~2000 bytes
+    and beeps; cooked-mode paste has no limit
+
+  - 255 columns maximum; a window is at most that wide
+
   - SMART/SIMPLE and ALT not implemented
 
   - Tab completion and the history file have no filesystem
@@ -96,6 +101,23 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.2.1
+    - An iconified window comes back at the size and place it
+      had, not the one it first opened with - and no longer
+      scrambles its own scrollback doing it
+
+    - A tall window with a small LINES no longer writes past its
+      scrollback buffer; the depth is raised to fit the window
+
+    - Faster output rendering
+
+    - Bug fixes: clipboard parsing bounded against malformed
+      data, a failed window restore can't strand a console,
+      pasting into Ed says so when it hits its size limit,
+      output during a scrollback search no longer snaps the view
+      back, diskfont.library released on unmount
+
 
   1.2
     - Iconify: RightAmiga+I sends a window to a Workbench icon,
