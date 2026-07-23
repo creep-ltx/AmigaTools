@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.3
+                               CCON: 1.2.4
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -633,6 +633,20 @@
   at full depth, correctly) and narrows again at a form feed, a
   resize, leaving a fullscreen program, or an iconify restore.
   Non-planar (RTG-style) screens are never masked.
+
+  And a blank screen is never scrolled (1.2.4): when the visible
+  area holds nothing, a scroll would move blank pixels to blank
+  pixels, so CCON does not ask the blitter to do it at all. This
+  is what stock CON: has always done, and on real hardware it is
+  the difference between a bare-newline flood being the slowest
+  thing the console does and one of the fastest. In the same
+  release the full-screen editing sequences (insert and delete
+  line and character, erase-to-end, scroll-region) stopped forcing
+  an immediate redraw each - they update the model and repaint
+  with the rest of the write's output in one batch, so Ed
+  scrolling a document is far lighter, and a program waiting on a
+  keystroke has its output drawn at once rather than on the batch
+  timer, keeping editing immediate.
 
   A window with no FONT option opens in whatever font Font Prefs
   has set as "System Default Text" - the same font stock CON:

@@ -10,72 +10,73 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.3.** Every milestone boot-verified on an AmigaOS 3.2
-install (FS-UAE). 1.2.3 is **the masking release**: CCON tracks
-which bitplanes its text actually occupies and masks its rendering
-down to them — the trick read out of the 3.2 ROM's own
-console.device — so plain shell output moves one plane in four.
-Together with 1.2.2's engine (model-first rendering, at most one
-scroll blit per write, accept-then-render buffering) that makes
-CCON the fastest console of the three measured, in the honest mode:
-render barriers on, nothing deferred past the stopwatch (see
-**Speed**, below). Before them: 1.2.1 applied a third read of the
-source (two memory-corruption fixes among nine); 1.2 brought
-**iconify** to a Workbench icon (RightAmiga+I) and clean
-full-screen page flips; 1.1 brought per-window FONT and soft
-styles, an alternate-screen contract for Ed/More, shared persistent
-history, safe multi-line paste, scrollback content search, and the
-KingCON-style `CON:`/`RAW:` takeover.
+**Status: 1.2.4.** Every milestone boot-verified on AmigaOS 3.2 —
+and, as of 1.2.4, on real hardware (A1200 + PiStorm). 1.2.4 is **the
+tuning release**: on a real accelerated Amiga it runs the whole
+benchmark suite **five times faster than stock `CON:`** and faster on
+essentially every test (see **Speed**, below). It builds on 1.2.3's
+plane-masked rendering (CCON masks its drawing to the bitplanes the
+text actually occupies — the trick read out of the 3.2 ROM's own
+console.device) and 1.2.2's model-first engine (at most one scroll
+blit per write, accept-then-render buffering), and adds the change
+that mattered most on real silicon: **it never scrolls a blank
+screen.** Before them: 1.2.1 applied a third read of the source (two
+memory-corruption fixes among nine); 1.2 brought **iconify** to a
+Workbench icon (RightAmiga+I) and clean full-screen page flips; 1.1
+brought per-window FONT and soft styles, an alternate-screen contract
+for Ed/More, shared persistent history, safe multi-line paste,
+scrollback content search, and the KingCON-style `CON:`/`RAW:`
+takeover.
 
 ## Speed
 
-Measured, not vibed: the 1.2.2/1.2.3 engine was built in one
+Measured, not vibed: the 1.2.2–1.2.4 engine was built across one
 benchmarked campaign, and [conbench](../conbench/) — written for it,
 now its own tool — keeps the receipts. The honest mode throughout:
 **render barriers on** (`SYNC`), which no write-behind buffering can
-hide from. For contrast, ViNCEd's *unbarriered* total is 0.18 s
-against its barrier totals below — unbarriered console benchmarks
-measure how quickly a console says "done", not how quickly it draws.
-CCON's barrier totals sit within a few percent of its unbarriered
-ones: its fast numbers and its honest numbers are the same numbers.
+hide from. (Unbarriered console benchmarks measure how quickly a
+console says "done", not how quickly it draws — ViNCEd's unbarriered
+total is 0.18 s against a barriered 111 s. CCON's barriered numbers
+sit within a few percent of its unbarriered ones: its fast numbers
+and its honest numbers are the same numbers.)
 
-Dev configuration (68030, fast RAM), same 77×29 window, same day:
-
-| console | full suite, barriers ON |
-|---|---|
-| **CCON 1.2.3** | **6.28 s** |
-| stock CON: | 74.16 s |
-| ViNCEd | 111.68 s |
-
-At authentic stock-A1200 timing (14MHz 68EC020, no fast RAM, FS-UAE
-at its most accurate — emulation, not proven real hardware;
-real-iron conbench results welcome):
+**On real hardware** — an A1200 with a PiStorm accelerator, a fast
+CPU driving the genuine AGA chipset, 82×53 window, barriers on:
 
 | console | full suite, barriers ON |
 |---|---|
-| **CCON 1.2.3** | **124.5 s** |
-| stock CON: | 177.7 s |
-| ViNCEd | 282.5 s |
+| **CCON 1.2.4** | **2.54 s** |
+| stock CON: | 12.98 s |
 
-Fastest overall in both worlds, 2.6–5.6× ahead of stock where
-output actually flows (line output, block writes, wrapping,
-character echo) — and honestly: at authentic CPU speed the ROM's
-hand-tuned assembler still takes several escape-heavy rows
-(newline floods, insert/delete ops). Those are the named target of
-a future release. The one-line history: CCON 1.2.1 ran the original
-suite in 288.68 s; 1.2.3 runs it in about 2.4.
+Five times faster overall, and faster on 13 of the 15 individual
+tests (one tie; the single nominal loss is stock's own deferral
+reading zero on a test that is already near-zero for both). This is
+the config people actually run, and it is the number that counts:
+earlier releases were measured only in emulation, where the blitter
+is faster than real silicon and hid the one cost — scrolling a blank
+screen — that 1.2.4 removes. On that real machine, 1.2.3 had narrowly
+*lost* the total to stock; 1.2.4 wins it by 5×.
 
-The engine is four ideas stacked: render into the scrollback model
+In emulation the picture is the same shape: on a 68030 dev config
+the barriered suite is **CCON 4.3 s vs stock 74 s vs ViNCEd 112 s**.
+The one-line history: CCON 1.2.1 ran the original nine-test suite in
+**288 seconds**; 1.2.4 runs it in about **two and a half**.
+
+The engine is a short stack of ideas, each proven by a Linux-side
+harness before it ever booted: render into the scrollback model
 first and let the screen catch up with at most one blit per write
-(zero for a screenful or a page flip); erase one prompt cell instead
-of repainting the row under every write; release the writer as soon
-as its bytes are copied so bursts pool into batched blits — the
-bargain every fast console on this platform makes, with the ordering
-kept honest (reads, mode switches, keystrokes, selection, paste,
-resize, iconify and close all settle pending output first); and
-mask the rendering to the bitplanes the text actually occupies, so
-the blitter skips planes that hold nothing — console.device's own
-trick, found by disassembling it, applied with scrollback-aware
+(zero for a screenful, a page flip, or a **blank scroll**); mask the
+drawing to the bitplanes the text actually occupies so the blitter
+skips empty planes; treat the full-screen editing escapes as model
+operations that batch like everything else; erase one prompt cell
+instead of repainting the row under every write; and release the
+writer as soon as its bytes are copied so bursts pool into batched
+blits — the bargain every fast console on this platform makes, with
+the ordering kept honest (reads, mode switches, keystrokes,
+selection, paste, resize, iconify and close all settle pending
+output first) and a program waiting for a keystroke flushed at once
+so interaction stays immediate — console.device's own tricks, found
+by disassembling it, applied with scrollback-aware
 rules it never needed.
 
 ## Screenshots

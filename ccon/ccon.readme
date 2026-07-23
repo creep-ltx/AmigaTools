@@ -22,14 +22,16 @@ FEATURES
     with the found line ready to edit or run, n/N re-walk the
     same matches if you scroll back again later
 
-  - Fast: output renders model-first (at most one scroll blit per
-    write, none for a screenful), writes are answered ahead of the
-    pixels (a frame at most, the stock console's own bargain), and
-    rendering is plane-masked - plain text moves one bitplane in
-    four, the 3.2 console.device's own trick. Under render
-    barriers, the honest measure, the fastest of the three
-    consoles tested at both accelerated and stock-A1200 timing
-    (conbench, also in this collection)
+  - Fast: on a real A1200 with a PiStorm accelerator, five times
+    faster overall than stock CON: with render barriers on (the
+    honest measure), and faster on nearly every test. Output
+    renders model-first (at most one scroll blit per write, none
+    for a screenful or a blank scroll), writes are answered ahead
+    of the pixels (a frame at most, the stock console's own
+    bargain), rendering is plane-masked - plain text moves one
+    bitplane in four, the 3.2 console.device's own trick - and the
+    full-screen editing sequences batch like ordinary output, so
+    Ed scrolls like butter (conbench, also in this collection)
 
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0xADDR, NOBORDER, ...) per window
@@ -110,6 +112,18 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.2.4
+    - The tuning release: on a real accelerated A1200 the whole
+      benchmark suite runs five times faster than stock CON: and
+      faster on nearly every test. Blank screens are never
+      scrolled (moving no pixels needs no blit - stock's own
+      trick, and the change that flipped the real-hardware
+      result), the full-screen editing sequences batch instead of
+      redrawing one at a time, and output is drawn the instant a
+      program waits for a key. Command output is there before you
+      see it draw; Ed scrolls like butter. All in Amiga E, no
+      assembler, still one source file
 
   1.2.3
     - Plane-masked rendering: text draws and scrolls only the

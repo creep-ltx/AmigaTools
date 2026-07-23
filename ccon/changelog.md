@@ -6,10 +6,62 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2 and 1.2.3
-are released and tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3 and
+1.2.4 are released and tagged.
 
 ---
+
+## [1.2.4] — 2026-07-23 (tag `ccon-1.2.4`)
+
+The tuning release. 1.2.2/1.2.3 made CCON fast in emulation; 1.2.4
+made it fast on the machine people actually run. On a real A1200 with
+a PiStorm accelerator — a fast CPU driving the genuine AGA chipset —
+1.2.3 had quietly *lost* to stock `CON:` overall, by a hair, on one
+test: scrolling a blank screen, where CCON asked the blitter to move
+nothing and stock did not bother. Five more render changes (builds
+1.2.4b1–b6), each proven by a Linux-side harness before it booted,
+turn that around completely: on the same real hardware CCON now runs
+the whole benchmark suite in **2.54 seconds against stock's 12.98** —
+five times faster, and faster on essentially every individual test.
+
+### Changed
+- **Blank scrolls cost nothing.** CCON now knows when the visible
+  screen is empty and skips the scroll blit entirely — scrolling
+  blank rows moves no pixels, so there is nothing to do. This is the
+  single change that flipped the real-hardware result; a bare-newline
+  flood went from the slowest thing CCON did to one of the fastest.
+- **The full-screen editing sequences render with everything else.**
+  Insert/delete line and character, erase-to-end, scroll-region — the
+  operations Ed and More lean on — no longer each force an immediate
+  redraw. They join the same one-blit-per-write batch as ordinary
+  output, so an editor scrolling a document is dramatically lighter,
+  and edits that cancel out within a frame cost nothing to draw.
+- **Faster everywhere the CPU was the limit.** Blank rows are filled,
+  not typed as spaces; colour and style runs are stamped in bulk; the
+  output parser checks the common case first; internal bookkeeping
+  that scaled with window height no longer does. Together these lift
+  the plain-output, colour, and clear-screen paths on slower machines.
+- **Snappier interaction.** A program waiting for a keystroke now sees
+  its output drawn at once rather than on the batch timer, so Ed feels
+  immediate; bulk producers (`dir`, `type`) keep batching for speed.
+
+### Numbers
+Real A1200 + PiStorm, 82×53 window, render barriers on (`SYNC`):
+CCON **2.54 s** total against stock `CON:` **12.98 s** and, for the
+same suite in emulation, unchanged correctness. CCON wins outright on
+13 of the 15 tests, ties one, and the only nominal loss is stock's
+own deferral reading zero on a test that is already near-zero for
+both. In everyday use the result is simpler to state: command output
+is there before you see it draw, and Ed scrolls like butter.
+
+### Notes
+- The one place stock's hand-tuned assembler can still edge ahead is
+  very heavy colour-escape parsing on a genuinely stock (unaccel-
+  erated) 14MHz machine — a CPU-bound corner, not felt in normal use.
+- All rendering changes are pure Amiga E; no assembler was added and
+  the handler stayed a single source file.
+
+## [1.2.3] — 2026-07-23 (tag `ccon-1.2.3`)
 
 ## [1.2.3] — 2026-07-23 (tag `ccon-1.2.3`)
 
