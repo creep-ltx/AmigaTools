@@ -1,6 +1,31 @@
 /* conbench.e -- console speed benchmark for CCON:, CON: and ViNCEd
    usage: conbench NAME <label> [TO file] [REPS n] [SCALE n] [SYNC] [FORCE]
 
+   VERSION 2.0 (23.7.26) - bigger, longer, tougher, and the window
+   probe finally works. Changes against 1.0, which matter when
+   comparing result files:
+   - the classic tests are DOUBLED in size (plain-lines 816 lines,
+     block-4k 16 blocks, bytewise 2400, scroll-nl 12000, wrap-long
+     140, sgr-colour 300 lines, cursor-pos/erase-eol 700, clear-page
+     40 pages) - a 2.0 TOTAL is not comparable to a 1.0 TOTAL.
+   - six NEW tests: block-32k (one giant write per packet - exercises
+     any big-write slow path), sgr-perchar (a colour change before
+     EVERY glyph: run-batching's worst case), vt-frame (full-screen
+     app repaint: position + erase-line + text per row, the Ed/More
+     frame shape), insdel-line (CSI L/M region blits), insdel-char
+     (CSI @/P mid-line cell shifts), and sync-line (a WaitForChar
+     render barrier after EVERY line - the per-line cost no deferring
+     console can hide; see below).
+   - the window-size probe (X6): 1.0 wrote CSI 0 SPACE q to Output()
+     and then tried to READ THE ANSWER FROM Output() too - and every
+     console tested (stock CON: included) answered that with silence.
+     The report arrives on the console's INPUT stream: ask on out,
+     listen on Input() - the dir idiom. 2.0 does that, records the
+     size in the file, and WARNS when the window is narrower than the
+     78-column test lines, because a 77-col window silently turns
+     every line test into a wrap-and-double-scroll test (the exact
+     trap the 1.2.2 perf campaign fell into for a day).
+
    Run it INSIDE the console you want to measure - it writes its test
    output to stdout, so the console under test is whichever one the
    shell is running in:
@@ -25,15 +50,22 @@
    "how long the handler takes to accept and acknowledge the output".
 
    For a console that draws before it replies, that IS drawing time.
-   CCON: works this way - it renders directly and replies afterwards
-   (the double-buffering experiment was removed in 1.2, so there is
-   no deferred flush left in it).
+   CCON: worked that way up to 1.2.2b2. As of 1.2.2b4 it accepts and
+   acks writes ahead of rendering like everything else fast on this
+   platform, so its sync-off numbers are now exactly as optimistic
+   as ViNCEd's and stock CON:'s always were.
 
-   A console that replies FIRST and draws later would look faster
-   here than it feels to a user. That is not a hypothetical: it is
-   the obvious way to make a console appear quick, and this benchmark
-   cannot see past it from the client side. There is no reliable
-   cross-console "render barrier" a client can ask for.
+   A console that replies FIRST and draws later looks faster here
+   than it feels to a user, and this benchmark cannot see past it
+   from the client side. There is no reliable cross-console "render
+   barrier" a client can ask for - which is why 2.0 adds sync-line:
+   a WaitForChar(fh, 0) after EVERY line forces the handler to
+   process the queue up to that point before answering, per line.
+   It is still not a guaranteed PIXEL barrier, but it defeats simple
+   write-behind buffering on every console the same way, so it is
+   the closest thing to an honest per-line figure the packet
+   interface allows. Compare sync-line and plain-lines: a big gap =
+   that console defers aggressively.
 
    The SYNC switch is the honest partial answer. With SYNC, each test
    ends with a WaitForChar(fh, 0) - a separate packet, which the
@@ -72,25 +104,33 @@ MODULE 'dos/dos', 'dos/dosextens', 'dos/datetime'
 CONST BLKSZ=4096,           -> the big-write buffer
       BLKLINES=51,          -> whole 79-byte lines inside one 4K block
       BLKBYTES=4029,        -> BLKLINES * 79, the block test's write size
-      BLKREPS=8,            -> so block-4k moves BLKREPS*BLKBYTES bytes
-      NLINES=408,           -> = BLKREPS * BLKLINES: plain-lines moves the
+      BLKREPS=16,           -> so block-4k moves BLKREPS*BLKBYTES bytes
+      NLINES=816,           -> = BLKREPS * BLKLINES: plain-lines moves the
                             -> SAME bytes and the same line count, which is
                             -> the only reason comparing the two means
-                            -> anything
+                            -> anything (2.0: both doubled together)
+      BIGSZ=32768,          -> 2.0: the block-32k buffer...
+      BIGBYTES=32706,       -> ...and its write size: 414 whole 79-byte
+                            -> lines in ONE Write() - a console with a
+                            -> big-write slow path shows it here
+      BIGREPS=2,
       LONGLINE=300,         -> the auto-wrap test's line length
       RESSZ=8192,           -> the results text accumulated in memory
-      NTESTS=9,
+      NTESTS=15,
       SLOWTICKS=25          -> below this a result is not trustworthy
 
 DEF out,                    -> the console under test (stdout)
     blk:PTR TO CHAR,        -> BLKSZ of printable filler
+    big:PTR TO CHAR,        -> 2.0: BIGSZ of the same filler
     longl:PTR TO CHAR,      -> LONGLINE printable chars, no newline
     res:PTR TO CHAR,        -> results text, written at the very end
     scratch[256]:STRING,
     best[NTESTS]:ARRAY OF LONG,
     bytes[NTESTS]:ARRAY OF LONG,
     dosync=FALSE,
-    cols=0, rows=0
+    cols=0, rows=0,
+    probeskip=FALSE         -> 2.1: the size line must distinguish its
+                            -> own absence: skipped is not unanswered
 
 PROC main() HANDLE
   DEF rdargs, argarray:PTR TO LONG, label:PTR TO CHAR, fname:PTR TO CHAR,
@@ -129,9 +169,10 @@ PROC main() HANDLE
   ENDIF
 
   blk := New(BLKSZ + 4)
+  big := New(BIGSZ + 4)
   longl := New(LONGLINE + 4)
   res := String(RESSZ)
-  IF (blk = NIL) OR (longl = NIL) OR (res = NIL) THEN Throw("MEM", 'out of memory')
+  IF (blk = NIL) OR (big = NIL) OR (longl = NIL) OR (res = NIL) THEN Throw("MEM", 'out of memory')
   fillbuffers()
 
   -> the window size, asked of the console itself. Done ONCE, before
@@ -202,6 +243,17 @@ PROC fillbuffers()
   ENDFOR
   blk[BLKSZ] := 0
   c := 33
+  FOR i := 0 TO BIGSZ - 1      -> 2.0: same 79-byte-line layout, 32K of it
+    IF Mod(i, 79) = 78
+      big[i] := 10
+    ELSE
+      big[i] := c
+      c := c + 1
+      IF c > 126 THEN c := 33
+    ENDIF
+  ENDFOR
+  big[BIGSZ] := 0
+  c := 33
   FOR i := 0 TO LONGLINE - 1
     longl[i] := c
     c := c + 1
@@ -240,7 +292,14 @@ ENDPROC stampticks(t0, t1)
 -> is quick enough to finish one under SLOWTICKS.
 -> ---------------------------------------------------------------
 PROC dotest(id, scale)
-  DEF i, j, n=0, s[80]:STRING, k
+  DEF i, j, n=0, s[80]:STRING, k, line2[280]:STRING, fr, fc, tmp[24]:STRING
+
+  -> vt-frame and friends adapt to the PROBED window; a console that
+  -> did not answer gets the classic 77x24 assumption
+  fr := IF rows > 1 THEN rows ELSE 24
+  fc := IF cols > 1 THEN cols ELSE 77
+  IF fr > 50 THEN fr := 50
+  IF fc > 79 THEN fc := 79
 
   SELECT id
   CASE 0
@@ -262,39 +321,47 @@ PROC dotest(id, scale)
       n := n + BLKBYTES
     ENDFOR
   CASE 2
+    -> BLOCK-32K (2.0): 414 lines in ONE Write(). A console that
+    -> special-cases big writes (a bounded copy buffer, a synchronous
+    -> slow path) is caught between this and block-4k.
+    FOR i := 1 TO Mul(BIGREPS, scale)
+      Write(out, big, BIGBYTES)
+      n := n + BIGBYTES
+    ENDFOR
+  CASE 3
     -> BYTEWISE: one Write() per character. Brutal, and not artificial
     -> - it is exactly what a program using unbuffered single-character
     -> output does, and More reads and echoes this way. Almost pure
     -> packet round-trip cost.
-    FOR i := 1 TO Mul(1200, scale)
+    FOR i := 1 TO Mul(2400, scale)
       Write(out, blk + Mod(i, 78), 1)
       n := n + 1
     ENDFOR
-  CASE 3
+  CASE 4
     -> SCROLL: bare newlines in one big write. Isolates the scroll
     -> path (ScrollRaster plus whatever bookkeeping the console does
     -> per line) from glyph drawing entirely.
-    FOR i := 1 TO Mul(6, scale)
+    FOR i := 1 TO Mul(12, scale)
       FOR j := 1 TO 100
         Write(out, '\n\n\n\n\n\n\n\n\n\n', 10)
         n := n + 10
       ENDFOR
     ENDFOR
-  CASE 4
+  CASE 5
     -> WRAP: 300-character lines with no newline, so the console must
     -> wrap them itself. CCON: also updates its soft-wrap plane here,
     -> which is what lets it re-flow on resize - a cost stock CON:
     -> pays differently and ViNCEd not at all in the same way.
-    FOR i := 1 TO Mul(70, scale)
+    FOR i := 1 TO Mul(140, scale)
       Write(out, longl, LONGLINE)
       n := n + LONGLINE
     ENDFOR
-  CASE 5
+  CASE 6
     -> SGR: colour changes several times per line. Every console has
     -> to split the line into runs and change pens between them; this
     -> is the `ls` colour case, and CCON: additionally stores an
     -> attribute per cell for its scrollback.
-    FOR i := 1 TO Mul(150, scale)
+    FOR i := 1 TO Mul(300, scale)
       FOR k := 0 TO 7
         StringF(s, '\c[3\dm12345678', 27, k)
         Write(out, s, StrLen(s))
@@ -303,21 +370,77 @@ PROC dotest(id, scale)
       Write(out, '\n', 1)
       n := n + 1
     ENDFOR
-  CASE 6
+  CASE 7
+    -> SGR-PERCHAR (2.0): a colour change before EVERY glyph - run
+    -> length one, the worst case for any run-batching renderer and
+    -> for per-cell attribute storage alike. One Write() per line so
+    -> the packet count stays civilised; the parser does the work.
+    FOR i := 1 TO Mul(60, scale)
+      StrCopy(line2, '')
+      FOR k := 0 TO 39
+        StringF(tmp, '\c[3\dm\c', 27, Mod(k, 8), 65 + Mod(k + i, 26))
+        StrAdd(line2, tmp)
+      ENDFOR
+      StrAdd(line2, '\n')
+      Write(out, line2, StrLen(line2))
+      n := n + StrLen(line2)
+    ENDFOR
+  CASE 8
     -> CURSOR: absolute positioning then a short string, the shape a
     -> full-screen editor draws in. Tests the CSI parser and random
     -> access to the grid rather than sequential appending.
-    FOR i := 1 TO Mul(350, scale)
+    FOR i := 1 TO Mul(700, scale)
       StringF(s, '\c[\d;\dH-cursor-', 27, Mod(i, 20) + 1, Mod(i, 60) + 1)
       Write(out, s, StrLen(s))
       n := n + StrLen(s)
     ENDFOR
-  CASE 7
+  CASE 9
+    -> VT-FRAME (2.0): a full-screen application repaint - position,
+    -> erase to EOL, a row of text, for every row, one Write() per
+    -> row, then the next frame. This is what Ed scrolling a page or
+    -> More redrawing feels like, and it exercises the CSI dispatch
+    -> and any flush-before-pixel-ops seam a deferring console has.
+    FOR i := 1 TO Mul(15, scale)
+      FOR j := 1 TO fr
+        StringF(s, '\c[\d;1H\c[K', 27, j, 27)
+        k := StrLen(s)
+        -> row text from longl, NOT blk: blk embeds a \n every 79th
+        -> byte and a stray newline here would add scrolls and break
+        -> the frame shape
+        CopyMem(longl + Mod(Mul(j, 7) + i, 240), s + k, Min(60, fc - 1))
+        SetStr(s, k + Min(60, fc - 1))
+        Write(out, s, StrLen(s))
+        n := n + StrLen(s)
+      ENDFOR
+    ENDFOR
+  CASE 10
+    -> INSDEL-LINE (2.0): insert a line mid-screen, delete it again -
+    -> two half-window region blits per iteration, the shape editors
+    -> use for line open/close. No console can defer past these: they
+    -> read the live pixels.
+    StringF(tmp, '\c[\d;1H', 27, Div(fr, 2))
+    FOR i := 1 TO Mul(100, scale)
+      StrCopy(line2, tmp)
+      StringF(s, '\c[L\c[M', 27, 27)
+      StrAdd(line2, s)
+      Write(out, line2, StrLen(line2))
+      n := n + StrLen(line2)
+    ENDFOR
+  CASE 11
+    -> INSDEL-CHAR (2.0): CSI @/P - open a gap mid-line, close it
+    -> again. Row-tail cell shifts, the word-processor idiom.
+    FOR i := 1 TO Mul(200, scale)
+      StringF(line2, '\c[\d;5Habcdefgh\c[\d;5H\c[4@\c[4P', 27,
+              Mod(i, fr - 2) + 2, 27, Mod(i, fr - 2) + 2, 27, 27)
+      Write(out, line2, StrLen(line2))
+      n := n + StrLen(line2)
+    ENDFOR
+  CASE 12
     -> CLEAR: form feed then a screenful. This is the More page-flip
     -> path - the one CCON: 1.2 fixed - and it is worth its own number
     -> because a console that clears slowly feels slow at exactly the
     -> moment a user is waiting to read something.
-    FOR i := 1 TO Mul(20, scale)
+    FOR i := 1 TO Mul(40, scale)
       Write(out, [12]:CHAR, 1)
       n := n + 1
       FOR j := 1 TO 20
@@ -325,32 +448,50 @@ PROC dotest(id, scale)
         n := n + 79
       ENDFOR
     ENDFOR
-  CASE 8
+  CASE 13
     -> ERASE-EOL: carriage return, text, erase to end of line - the
     -> progress-bar / percentage-counter idiom that rewrites one row
     -> over and over without scrolling.
-    FOR i := 1 TO Mul(350, scale)
+    FOR i := 1 TO Mul(700, scale)
       StringF(s, '\cworking: \d%\c[K', 13, Mod(i, 100), 27)
       Write(out, s, StrLen(s))
       n := n + StrLen(s)
     ENDFOR
     Write(out, '\n', 1)
     n := n + 1
+  CASE 14
+    -> SYNC-LINE (2.0): plain-lines with a WaitForChar(fh, 0) barrier
+    -> after EVERY line. The wait packet must dequeue behind the write
+    -> it follows, so a write-behind console has to catch up line by
+    -> line - the closest the packet interface gets to an honest
+    -> per-line figure, on every console alike. Compare against
+    -> plain-lines: the gap IS the deferral.
+    FOR i := 1 TO Mul(200, scale)
+      Write(out, blk, 79)
+      WaitForChar(out, 0)
+      n := n + 79
+    ENDFOR
   ENDSELECT
 ENDPROC n
 
 PROC testname(id)
   DEF s
   SELECT id
-  CASE 0; s := 'plain-lines'
-  CASE 1; s := 'block-4k'
-  CASE 2; s := 'bytewise'
-  CASE 3; s := 'scroll-nl'
-  CASE 4; s := 'wrap-long'
-  CASE 5; s := 'sgr-colour'
-  CASE 6; s := 'cursor-pos'
-  CASE 7; s := 'clear-page'
-  CASE 8; s := 'erase-eol'
+  CASE 0;  s := 'plain-lines'
+  CASE 1;  s := 'block-4k'
+  CASE 2;  s := 'block-32k'
+  CASE 3;  s := 'bytewise'
+  CASE 4;  s := 'scroll-nl'
+  CASE 5;  s := 'wrap-long'
+  CASE 6;  s := 'sgr-colour'
+  CASE 7;  s := 'sgr-perchar'
+  CASE 8;  s := 'cursor-pos'
+  CASE 9;  s := 'vt-frame'
+  CASE 10; s := 'insdel-line'
+  CASE 11; s := 'insdel-char'
+  CASE 12; s := 'clear-page'
+  CASE 13; s := 'erase-eol'
+  CASE 14; s := 'sync-line'
   DEFAULT; s := '?'
   ENDSELECT
 ENDPROC s
@@ -362,17 +503,29 @@ ENDPROC s
 -> columns - but a console that does NOT answer must not hang us,
 -> so every read is gated behind WaitForChar with a timeout and the
 -> whole thing gives up after a second.
+-> X6 fix (2.0): version 1.0 sent the request on Output() and then
+-> tried to WaitForChar/Read the ANSWER from Output() as well - and
+-> every console tested, stock CON: included, answered with silence.
+-> The report is INPUT-stream data: ask on out, listen on Input(),
+-> the way dir does it. Raw mode is set on the INPUT handle for the
+-> same reason - that is the side being read byte-by-byte.
 -> ---------------------------------------------------------------
 PROC winsize()
-  DEF b[80]:ARRAY OF CHAR, n=0, c, got=FALSE, i, v, fld, done=FALSE
+  DEF b[80]:ARRAY OF CHAR, n=0, c, got=FALSE, i, v, fld, done=FALSE, in,
+      dig=FALSE
 
-  SetMode(out, 1)                 -> raw: bytes arrive as they come
+  in := Input()
+  IF IsInteractive(in) = 0        -> redirected stdin (Execute Command,
+    probeskip := TRUE             -> scripts): no probe, and the report
+    RETURN                        -> says SKIPPED, not unanswered
+  ENDIF
+  SetMode(in, 1)                  -> raw: bytes arrive as they come
   Write(out, [27,"[","0",32,"q"]:CHAR, 5)
   WHILE (done = FALSE) AND (n < 78)
-    IF WaitForChar(out, 500000) = 0    -> half a second per byte, plenty
+    IF WaitForChar(in, 500000) = 0     -> half a second per byte, plenty
       done := TRUE
     ELSE
-      IF Read(out, b + n, 1) <> 1
+      IF Read(in, b + n, 1) <> 1
         done := TRUE
       ELSE
         c := b[n]
@@ -386,23 +539,39 @@ PROC winsize()
       ENDIF
     ENDIF
   ENDWHILE
-  SetMode(out, 0)
+  SetMode(in, 0)
   IF got = FALSE THEN RETURN
-  -> pull the last two numbers out of the ;-separated run: the report
-  -> is 1;1;rows;cols, so field 2 is rows and field 3 is cols
+  -> pull rows and cols out of the report: 1;1;rows;cols[;pixw;pixh] r
+  -> - numeric field 2 is rows, field 3 is cols. Third parser, each
+  -> predecessor convicted by hardware (23.7.26):
+  -> 2.0 latched cols only at the FINAL byte - but 3.2-family replies
+  ->     append pixel fields, so cols ends at a ';' and was lost (rows
+  ->     survived: its boundary IS a ';'). Fingerprint: vt-frame sized
+  ->     itself to 29/29/28 probed rows under a "?x?" header.
+  -> 2.1 advanced the field count on EVERY non-digit - and the CSI
+  ->     introducer became a phantom field, shifting everything one
+  ->     slot: "window: 29x1" = rows sitting in the cols seat, and
+  ->     vt-frame painted 28 wide off the bogus cols (his screenshot).
+  -> 2.2: a field EXISTS only where digits were seen. Intro bytes, the
+  -> pre-terminator space and the final 'r' close nothing unless a
+  -> digit run is actually open - so both intro forms (8-bit CSI,
+  -> 7-bit ESC [) and both tails (space-r, extra fields) parse alike.
   fld := 0
   v := 0
+  dig := FALSE
   FOR i := 0 TO n - 1
     c := b[i]
     IF (c >= "0") AND (c <= "9")
       v := Mul(v, 10) + (c - 48)
-    ELSEIF c = ";"
-      IF fld = 2 THEN rows := v
-      fld := fld + 1
-      v := 0
+      dig := TRUE
     ELSE
-      IF fld = 3 THEN cols := v
+      IF dig
+        IF fld = 2 THEN rows := v
+        IF fld = 3 THEN cols := v
+        fld := fld + 1
+      ENDIF
       v := 0
+      dig := FALSE
     ENDIF
   ENDFOR
 ENDPROC
@@ -429,7 +598,7 @@ ENDPROC
 
 PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
   DEF i, t, cs, rate, tot=0, totb=0, d[LEN_DATSTRING]:ARRAY OF CHAR,
-      tm[LEN_DATSTRING]:ARRAY OF CHAR, sz[40]:STRING,
+      tm[LEN_DATSTRING]:ARRAY OF CHAR, sz[64]:STRING,
       flag:PTR TO CHAR, dt:datetime, secs[16]:STRING,
       nb[20]:STRING, nr[20]:STRING
 
@@ -453,17 +622,31 @@ PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
   ENDIF
   IF cols > 0
     StringF(sz, '\dx\d', cols, rows)
+  ELSEIF probeskip
+    StrCopy(sz, '?x? (stdin not interactive - probe skipped)')
+  ELSEIF rows > 0
+    StringF(sz, '?x\d (partial answer - report a bug)', rows)
   ELSE
     StrCopy(sz, '?x? (console did not answer)')
   ENDIF
 
   addres('==========================================================\n')
-  StringF(scratch, 'console : \s\n', label)
+  StringF(scratch, 'console : \s   (conbench 2.2)\n', label)
   addres(scratch)
   StringF(scratch, 'when    : \s \s\n', d, tm)
   addres(scratch)
   StringF(scratch, 'window  : \s\n', sz)
   addres(scratch)
+  IF (cols > 1) AND (cols < 79)
+    -> the trap that cost the 1.2.2 campaign a day of wrong arithmetic:
+    -> the line tests write 78-char lines, and in a narrower window
+    -> every one of them wraps - two rows, two scrolls, and the whole
+    -> table quietly measures something else. Say so IN the file.
+    StringF(scratch, 'WARNING : only \d cols - the 78-char line tests WRAP\n',
+            cols)
+    addres(scratch)
+    addres('          (widen the window past 78 text columns to compare)\n')
+  ENDIF
   StringF(scratch, 'run     : reps \d, scale \d, sync \s\n',
           reps, scale, IF dosync THEN 'ON' ELSE 'off')
   addres(scratch)
