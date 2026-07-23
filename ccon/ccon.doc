@@ -434,10 +434,11 @@
                Ed works), up to about 2000 bytes in one go - past
                that the tail is dropped and the window beeps, so
                paste a long file in pieces. In COOKED mode, only
-               the FIRST line lands
-               live - looking exactly like anything you typed, no
-               markers, no symbols. If the clip has more lines, a
-               grey hint appears below the prompt: "N more lines
+               the FIRST line lands live - looking exactly like
+               anything you typed, no markers, no symbols. There
+               is no size cap in cooked mode; the rest queues.
+               If the clip has more lines, a grey hint appears
+               below the prompt: "N more lines
                queued - Enter runs this one, Esc cancels all." Each
                Enter runs the line on screen and loads the next;
                nothing later in the paste ever runs on its own, and
