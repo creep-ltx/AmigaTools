@@ -6,10 +6,55 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1 and 1.2.2 are
-released and tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2 and 1.2.3
+are released and tagged.
 
 ---
+
+## [1.2.3] — 2026-07-23 (tag `ccon-1.2.3`)
+
+The masking release, shipped the same day as 1.2.2. After the speed
+release, one measured gap to stock CON: remained: the raw scroll
+blit, ~34ms per full-window ScrollRaster against stock's ~17 per
+rendered line under barriers. The answer was read out of the 3.2
+ROM itself — console.device pokes a used-planes byte into the
+rastport's write mask before scrolling, so the blitter skips
+bitplanes the text never touched. CCON now does the same, and the
+last row flipped.
+
+### Changed
+- **Plane-masked rendering** (b1/b2). CCON tracks which pens the
+  transcript has actually drawn with and masks its rendering down to
+  the bitplanes those pens can occupy — plain shell text on a
+  16-colour screen moves one plane in four instead of all of them.
+  The mask follows stock's own tier scheme (pen 1 / pens 0-3 /
+  everything), widens the moment a new pen appears, and narrows
+  again at the natural boundaries: a form feed, a resize, leaving a
+  fullscreen program, an iconify restore. Colour-heavy windows
+  simply run at full depth — exactly the 1.2.2 behaviour. Editor
+  overlays (the ghost, the completion menu, the search banner)
+  always render at full depth and never affect the mask. RTG-style
+  non-planar screens are never masked.
+
+### Numbers
+Same machine, same 77x29 window, render barriers on (`SYNC`):
+sync-line — the one row stock still won after 1.2.2 — went from
+6.70s to **1.78s** against stock CON:'s 3.40; the full-suite total
+from 18.46s to **6.28s** against stock's 74.16 and ViNCEd's 111.68.
+On a second configuration at authentic stock-A1200 timing (14MHz
+68EC020, no fast RAM, FS-UAE at its most accurate — emulation, not
+proven real iron), the totals read CCON 124.5s, stock CON: 177.7s,
+ViNCEd 282.5s: fastest overall, 2.6-5.6x ahead on ordinary output.
+
+### Notes
+- Honesty, as measured: at authentic CPU speed the ROM's hand-tuned
+  assembler still wins several escape-heavy corners (bare-newline
+  floods, insert/delete ops, full-screen frame repaints) — per-row
+  results are 5 wins of 15 there, with the totals ours because the
+  wins carry the heavy traffic. Those rows are the named target of a
+  future release.
+- conbench (this collection) is the measuring stick; real-hardware
+  results are welcome and would outrank every number above.
 
 ## [1.2.2] — 2026-07-23 (tag `ccon-1.2.2`)
 

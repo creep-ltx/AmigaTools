@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.2
+                               CCON: 1.2.3
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -623,6 +623,16 @@
   closing. Output still freezes while you drag a selection, as
   stock does. Writes larger than 4K, and consoles mounted without
   a scrollback model, take the fully synchronous path.
+
+  Rendering is also plane-masked (1.2.3): CCON tracks which pens
+  the transcript has drawn with and masks its drawing and its
+  scroll blits down to the bitplanes those pens can occupy - plain
+  pen-1 text on a 16-colour screen moves one plane in four. This
+  is the same trick the 3.2 console.device uses. The mask widens
+  the instant a new colour appears (colour output always renders
+  at full depth, correctly) and narrows again at a form feed, a
+  resize, leaving a fullscreen program, or an iconify restore.
+  Non-planar (RTG-style) screens are never masked.
 
   A window with no FONT option opens in whatever font Font Prefs
   has set as "System Default Text" - the same font stock CON:

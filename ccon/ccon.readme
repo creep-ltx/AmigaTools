@@ -22,12 +22,14 @@ FEATURES
     with the found line ready to edit or run, n/N re-walk the
     same matches if you scroll back again later
 
-  - Fast: output renders model-first - at most one scroll blit
-    per write, none at all for a screenful or a page flip - and
-    writes are answered ahead of the pixels (a frame at most, the
-    stock console's own bargain). Under render barriers, the
-    honest measure, 4x faster than stock CON: and 6x faster than
-    ViNCEd (conbench, also in this collection)
+  - Fast: output renders model-first (at most one scroll blit per
+    write, none for a screenful), writes are answered ahead of the
+    pixels (a frame at most, the stock console's own bargain), and
+    rendering is plane-masked - plain text moves one bitplane in
+    four, the 3.2 console.device's own trick. Under render
+    barriers, the honest measure, the fastest of the three
+    consoles tested at both accelerated and stock-A1200 timing
+    (conbench, also in this collection)
 
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0xADDR, NOBORDER, ...) per window
@@ -108,6 +110,14 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.2.3
+    - Plane-masked rendering: text draws and scrolls only the
+      bitplanes its colours occupy (the 3.2 console.device trick),
+      widening instantly for colour, narrowing at page and window
+      boundaries. With render barriers on, the fastest console of
+      the three measured at both accelerated and stock timing -
+      and the one whose fast numbers ARE its honest numbers
 
   1.2.2
     - The speed release: rendering is model-first (at most one
