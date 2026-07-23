@@ -6,12 +6,12 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1 and 1.2 are released and tagged.
-1.2.1 is written and built but NOT yet boot-verified or tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2 and 1.2.1 are released and
+tagged.
 
 ---
 
-## [1.2.1] — unreleased (built as 1.2.1b1, boot test pending)
+## [1.2.1] — 2026-07-23 (tag `ccon-1.2.1`)
 
 A point release with no new features: the findings of a third read of
 the source (`audit3.md`, worked per `audit3-roadmap.md`), applied. Two

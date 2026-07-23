@@ -8,7 +8,10 @@
 -> unfalsifiable changes land first in one commit; anything that needs a
 -> real before/after lands alone, where a bisect can name it.
 ->
--> Nothing here is boot-verified. Every batch states what would prove it.
+-> STATUS: shipped as 1.2.1 (tag ccon-1.2.1, PR #8). C2 - the fix the
+-> campaign turned on - was verified on hardware: resize, iconify,
+-> restore, and the window came back at the right size with its
+-> transcript intact. Every batch below states what would prove it.
 -> A fix that cannot be shown failing before and passing after is not a
 -> fix, it is a hope. (Campaign one was overturned by its own harness
 -> three times - B1, B2, B7 - so this is not a slogan.)
@@ -63,9 +66,8 @@ The precedent is CFile: 0.3 shipped, its post-release code audit shipped
 as **0.3.1** - a point release that is exactly "the audit, applied".
 This campaign is the same shape and should carry the same label.
 
-**His call, not mine:** 1.2.1 as a point release, or hold the fixes for
-1.3 alongside a feature. Recommending 1.2.1 - C1 and C2 can corrupt a
-heap and should not wait behind a feature.
+**DECIDED: 1.2.1, a point release.** His call, taken 23.7.26 - the two
+heap fixes should not wait behind a feature.
 
 Build/deploy per the usual routine: `ecompile ccon-handler.e
 ccon-handler LARGE`, copy to the FS-UAE AmigaOS3.2 `L/`, keep
@@ -424,7 +426,9 @@ overriding.
 
 | | |
 |---|---|
-| **Done in 1.2.1b1** | C1, C2, C3, C4, C5 (partial), C7, C8, C9, C10, X1, P2 |
+| **Done in 1.2.1** | C1, C2, C3, C4, C5 (partial), C7, C8, C9, C10, X1, P2 |
+| **Hardware-verified** | C2 end to end (resize, iconify, restore: right geometry AND intact transcript), plus a clean boot and normal use |
+| **Not separately re-tested** | C1's tall-window repro, C9, C5's beep, C7's unmount. C3/C8/C10 have no on-demand repro by nature |
 | **Deliberately not done** | C6 (his call to overturn), P1 (needs a boot test) |
 | **Owed** | the doc pass (X3, X4, X5, the raw-paste limit, LINES wording) |
 | **Still parked** | audit2 P6 (`fscall` timeout), P3, P4 |
@@ -434,7 +438,7 @@ set are identical to the released 1.2 baseline. Binary 83388 -> 84076
 (+688 bytes, almost all of it the `reopenwin` stride guard and the
 `sbmaxtest`-justified floor).
 
-**Nothing here is committed.** The changes sit in the working tree.
+**Released as 1.2.1** (tag `ccon-1.2.1`), merged via PR #8.
 
 ---
 
@@ -445,7 +449,15 @@ Deployed to `L:ccon-handler`; the released 1.2 binary is preserved as
 handler keeps its seglist, so copying to `L:` alone changes nothing.
 
 Confirm the right binary is live first: `version L:ccon-handler` should
-say **1.2.1b1**. If it says 1.2, the reboot did not take.
+say **1.2.1**. If it says 1.2, the reboot did not take. (This is not a
+theoretical check: during this campaign a `$VER` bump was made AFTER the
+last compile, and the "deployed" binary was still stamped 1.2. Read the
+version out of the FILE, not the source.)
+
+**Item 6 below PASSED on hardware** - he resized, iconified and restored,
+and it came back correctly with its transcript intact. That is C2
+confirmed in both halves and the result the campaign turned on. The rest
+of the list stands as written for anyone re-running it.
 
 **Regression - nothing should have changed:**
 1. `NewShell CCON:` opens, type, Tab-complete, Up/Down history, Ctrl+R.
