@@ -119,6 +119,7 @@ HISTORY
       the three measured at both accelerated and stock timing -
       and the one whose fast numbers ARE its honest numbers
 
+
   1.2.2
     - The speed release: rendering is model-first (at most one
       scroll blit per write, none for a screenful), erasing the
@@ -130,6 +131,7 @@ HISTORY
 
     - conbench, written to measure all this, is its own tool in
       the collection now
+
 
   1.2.1
     - An iconified window comes back at the size and place it
