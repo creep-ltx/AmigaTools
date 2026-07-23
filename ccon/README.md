@@ -10,8 +10,13 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.** Every milestone boot-verified on an AmigaOS 3.2
-install (FS-UAE, 68030). New in 1.2: **iconify** a window to a
+**Status: 1.2.1.** Every milestone boot-verified on an AmigaOS 3.2
+install (FS-UAE, 68030). 1.2.1 is a point release with no new
+features: a third read of the source, applied — two fixes for memory
+the console could corrupt (an iconified window restored at the wrong
+size and read its scrollback at the wrong width; a tall window with a
+small `LINES` could write past its own ring), several smaller ones,
+and a faster render loop. New in 1.2: **iconify** a window to a
 Workbench icon (RightAmiga+I; click it to bring the window back
 exactly as you left it), and clean full-screen paging — a form feed
 now replaces the page the way `CON:` does instead of scrolling it, so

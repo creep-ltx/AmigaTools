@@ -6,7 +6,57 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1 and 1.2 are released and tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2 and 1.2.1 are released and
+tagged.
+
+---
+
+## [1.2.1] — 2026-07-23 (tag `ccon-1.2.1`)
+
+A point release with no new features: the findings of a third read of
+the source (`audit3.md`, worked per `audit3-roadmap.md`), applied. Two
+of them could corrupt memory.
+
+### Fixed
+- **An iconified window came back at the wrong size, and could corrupt
+  its own scrollback doing it.** Restoring rebuilt the window from the
+  size in the original open string rather than the size it actually had,
+  so a window you had resized returned to its first shape — and the
+  transcript, which is stored at the old width, was then read at the new
+  one. Restore now returns the window exactly as you left it, position
+  and all.
+- **A tall window with a small `LINESn` could write past its own
+  scrollback buffer.** The ring is now always kept larger than the
+  window is tall; a `LINESn` too small for the window is quietly raised
+  to fit. Growing a window beyond its ring leaves the extra rows blank
+  rather than showing recycled text.
+- **Clicking an AppIcon whose console had just closed** could touch
+  freed memory. The console is validated first, as it already was
+  everywhere else.
+- **A malformed clipboard could send the paste parser off the end of
+  its buffer.** Chunk sizes are now bounded in both directions, not just
+  against negatives.
+- **Pasting more than about 2000 bytes into a raw fullscreen program**
+  (Ed) silently lost the tail. It still stops there, but the window now
+  beeps instead of dropping it in silence — see the manual, section 17.
+- **A failed window restore left a console with no window and no icon**,
+  unreachable. The icon goes back up so you can try again.
+- **Output arriving during a scrollback search** left the search half
+  on, so the next keypress jumped the view back to the match.
+- **`diskfont.library` was opened and never closed** by any handler that
+  had loaded a `FONT`, so it could never be flushed from memory.
+- A one-row window could hang the line editor in a loop.
+
+### Changed
+- **Faster output.** The render loop no longer re-reads the window
+  geometry through a global for every character, and sets its pens once
+  per run instead of once per screen row — the same treatment three
+  drawing routines already had.
+
+### Internal
+- New test harness `tests/sbmaxtest.e`, which reproduced the scrollback
+  overrun as a computed index and corrected the fix's own reasoning
+  about where the boundary lies.
 
 ---
 

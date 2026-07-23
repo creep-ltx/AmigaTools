@@ -1,0 +1,22 @@
+.key NAME/A
+.bra {
+.ket }
+; ccon-speed - run the console benchmark with IDENTICAL settings every
+; time, so three runs in three consoles are actually comparable.
+;
+;   Execute S:ccon-speed CCON
+;   Execute S:ccon-speed CON
+;   Execute S:ccon-speed ViNCEd
+;
+; Run each one INSIDE the console you are measuring - open a shell on
+; that console first, then run this in it. Results append to
+; RAM:conbench.txt, all three in the one file.
+;
+; The point of the script rather than typing the command: REPS and the
+; output file must not drift between runs. A benchmark compared against
+; a differently-configured benchmark is worse than no benchmark.
+;
+; Takes a couple of minutes per console. The screen will flood - that
+; is the test.
+Echo "conbench: measuring {NAME} - this floods the window, give it a minute"
+conbench {NAME} TO RAM:conbench.txt REPS 3

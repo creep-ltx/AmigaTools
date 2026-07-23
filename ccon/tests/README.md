@@ -80,6 +80,82 @@ and the edit anchor lands after its prompt. Written for B7 (fixed in
 touched - it caught four defects during development, including a
 destination row not cleared on ring wraparound.
 
+## conbench.e - runs on the Amiga, IN the console being measured
+
+A console speed benchmark that can be pointed at CCON:, stock CON: and
+ViNCEd in turn, appending all three results to one file.
+
+```
+NewShell CCON:          (then, in that window)
+Execute S:ccon-speed CCON
+NewShell CON:           (then, in that window)
+Execute S:ccon-speed CON
+                        (and once more in a ViNCEd shell)
+Execute S:ccon-speed ViNCEd
+```
+
+`S:ccon-speed` just runs `conbench` with fixed settings — the point is
+that REPS and the output file cannot drift between runs. Results land in
+`RAM:conbench.txt`. To drive it directly:
+
+```
+conbench NAME <label> [TO file] [REPS n] [SCALE n] [SYNC] [FORCE]
+```
+
+Nine workloads, each timed separately, best of REPS (default 3):
+`plain-lines` (one write per line, the ordinary shape of command
+output), `block-4k` (the *same bytes and line count* in 4K writes — the
+pair separates per-packet cost from per-character drawing),
+`bytewise` (one write per character, nearly pure packet round-trip),
+`scroll-nl`, `wrap-long` (auto-wrap), `sgr-colour`, `cursor-pos`
+(absolute positioning, the editor shape), `clear-page` (the More
+page-flip path), and `erase-eol` (the progress-bar idiom).
+
+**What it can and cannot see.** Write() to a console blocks until the
+handler replies, so this times "how long the handler takes to accept and
+acknowledge the output". For a console that draws before replying that
+IS drawing time — CCON: works this way, with no deferred flush left in
+it since double buffering was removed in 1.2. A console that replies
+first and draws later would look faster here than it feels, and a client
+cannot ask for a cross-console render barrier to rule that out. The
+`SYNC` switch is a partial probe rather than a fix: it adds a
+`WaitForChar(fh, 0)` packet after each test, and if a console's numbers
+move noticeably between a plain run and a SYNC run, that console is
+deferring something and its plain numbers are optimistic. Run both ways
+before concluding anything.
+
+Comparisons are only meaningful at the **same window size, screen depth
+and font** — conbench asks the console for its size and records it in
+the file, so check the three headers match. Anything finishing under half
+a second is flagged `?`; raise `SCALE` and re-run rather than trusting
+it.
+
+## sbmaxtest.e - runs on Linux
+
+Carries `visrow()`'s two lines of ring-index arithmetic verbatim and
+sweeps every `(sbtop, row)` pair, reporting the worst index each
+geometry can produce against the plane's real bounds.
+
+```
+ecompile sbmaxtest.e sbmaxtest
+vamos sbmaxtest
+```
+
+Written for audit3 C1: `openwin()` floored the model depth at 100 lines
+and never compared it to the window's row count, while every ring
+accessor corrects its wrap with a single subtraction. The harness
+reproduces the escape as a computed index - `sbmax=100, rows=126`
+reaches 124 in a plane whose legal range is 0..99 - and then pins the
+boundary: the escape begins at `rows >= sbmax + 2`.
+
+That result **corrected the fix's own reasoning**, which is why the
+harness exists rather than an argument. The index minimum is
+`sbmax >= rows - 1`, not the `rows + 1` first claimed; the shipped
+floor is `rows + 2` for a different reason, namely that `sbmax - rows`
+is also the scrollback capacity, so the bare index minimum would buy a
+safe ring with no history in it. Re-run it if the floor in `openwin()`,
+the clamp in `doresize()`, or any of the ring accessors change.
+
 ## ccon-b1, ccon-b1-fill, ccon-b1-off - run on the Amiga
 
 The same bug, on real hardware. Copy all three into `S:` on the Amiga

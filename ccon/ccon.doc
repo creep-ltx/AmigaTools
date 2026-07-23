@@ -39,7 +39,8 @@
   has none, and cannot be given any from the outside: commands talk
   to the handler, so a terminal program cannot bolt scrollback on.
   CCON: keeps 512 lines of history behind every window by
-  default (LINES=n asks for more, up to 5000).
+  default (LINESn sets it per window - up to 5000 for a deep
+  transcript, or down to 100 on a tight machine).
 
   Around that core it grew into a full console with a modern shell
   feel:
@@ -204,6 +205,11 @@
              (default 512, floor 100, ceiling 5000). Raise it for
              a deep transcript, lower it on a tight machine - see
              section 17 for the cost per line.
+             The ring is always kept a little larger than the
+             window is tall, so on a very tall window a small
+             LINESn is quietly raised to fit: a window with more
+             text rows than the ring holds would have nowhere to
+             scroll back to.
 
   Not implemented: SMART, SIMPLE, ALT. (Iconify is a key - RightAmiga+I,
   section 14 - not an open option.)
@@ -425,10 +431,14 @@
 
     RAMIGA-V   paste the clipboard as typed input. In raw mode the
                program receives the bytes as they are (pasting into
-               Ed works). In COOKED mode, only the FIRST line lands
-               live - looking exactly like anything you typed, no
-               markers, no symbols. If the clip has more lines, a
-               grey hint appears below the prompt: "N more lines
+               Ed works), up to about 2000 bytes in one go - past
+               that the tail is dropped and the window beeps, so
+               paste a long file in pieces. In COOKED mode, only
+               the FIRST line lands live - looking exactly like
+               anything you typed, no markers, no symbols. There
+               is no size cap in cooked mode; the rest queues.
+               If the clip has more lines, a grey hint appears
+               below the prompt: "N more lines
                queued - Enter runs this one, Esc cancels all." Each
                Enter runs the line on screen and loads the next;
                nothing later in the paste ever runs on its own, and
@@ -506,7 +516,10 @@
   Press RIGHT-AMIGA + I in any CCON: window and it vanishes to an
   icon on the Workbench. Double-click the icon and the window comes
   straight back, exactly as you left it - the same scrollback, a
-  half-typed command line, the cursor and colours all intact.
+  half-typed command line, the cursor and colours all intact, at the
+  size and position it had when it went away (so a window you had
+  resized or dragged returns where you left it, not where it first
+  opened).
 
   The console keeps running while iconified: a program still printing
   simply pauses (its next write waits) until you restore the window,
@@ -615,8 +628,18 @@
 --------------------------------------------------------------------------
 
   - The scrollback model costs about 120K per window at 80 columns
-    and the default 512 lines (LINES=n scales this up to 5000,
+    and the default 512 lines (LINESn scales this up to 5000,
     or down to a floor of 100).
+  - A window is at most 255 text columns wide. On a very wide
+    screen in a small font the columns past 255 are unused.
+  - Growing a window taller than its own LINESn ring leaves the
+    extra rows blank: the ring cannot show more lines at once
+    than it holds. Open the window with a larger LINESn if you
+    mean to grow it a lot.
+  - Pasting into a raw fullscreen program (Ed) is capped at about
+    2000 bytes per paste; the window beeps if the rest was
+    dropped. Cooked-mode pasting has no such limit - it queues
+    line by line (section 11).
   - CSI K under a coloured background erases to black.
   - Completion: no quoted words, one menu page, no volume-name
     completion for a bare word.
