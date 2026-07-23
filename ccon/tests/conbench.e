@@ -273,11 +273,22 @@ PROC stampticks(a:PTR TO datestamp, b:PTR TO datestamp)
 ENDPROC Mul(dm, 3000) + (b.tick - a.tick)
 
 PROC timetest(id, scale)
-  DEF t0:datestamp, t1:datestamp, n
+  DEF t0:datestamp, t1:datestamp, n, ban[48]:STRING
   -> start every test from a cleared screen and default colours, so
   -> one test cannot leave the console in a state that changes the
   -> next one's cost (a left-over colour, a scrolled-up prompt)
   Write(out, [27,"[","0","m",12]:CHAR, 5)
+  -> 2.3: name the running test IN the window, after the clear and
+  -> BEFORE the stopwatch - untimed, and it answers the "is it hung?"
+  -> stare that scroll-nl and insdel-line otherwise earn: both write
+  -> nothing visible BY DESIGN (blank lines over a cleared screen,
+  -> insert/delete of empty rows), and before the 1.2.2 handler work
+  -> scroll-nl was three straight minutes of exactly that. The banner
+  -> costs one line of start-state, identical for every console and
+  -> every test; scrolling tests shed it in the first instants, the
+  -> mid-screen tests keep it visible for their whole run.
+  StringF(ban, 'conbench: \s ...\n', testname(id))
+  Write(out, ban, StrLen(ban))
   DateStamp(t0)
   n := dotest(id, scale)
   IF dosync THEN WaitForChar(out, 0)
@@ -631,7 +642,7 @@ PROC report(label:PTR TO CHAR, reps, scale, ds:PTR TO datestamp)
   ENDIF
 
   addres('==========================================================\n')
-  StringF(scratch, 'console : \s   (conbench 2.2)\n', label)
+  StringF(scratch, 'console : \s   (conbench 2.3)\n', label)
   addres(scratch)
   StringF(scratch, 'when    : \s \s\n', d, tm)
   addres(scratch)
