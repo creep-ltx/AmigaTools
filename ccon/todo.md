@@ -3509,6 +3509,76 @@ Boot checklist (REBOOT FIRST):
       1.9x of stock. Remaining gap = plain-lines/scroll-nl/clear-page
       blit floor (S5 territory).
 
+### 1.2.2b3 + b4 — S5, accept-then-render (23.7.26, his green light:
+### "I'm confident that you will absolutely own this!")
+
+The last lever. After S1-S3, the whole remaining gap to stock CON:
+(47.16 vs 24.86) is one synchronous 31-34ms ScrollRaster per
+line-bearing packet in plain-lines/scroll-nl/clear-page. And there is
+no half measure available: DOS Write() BLOCKS its caller until the
+reply, so a single-threaded client can never queue two writes - the
+only way k lines reach one render pass is to reply BEFORE rendering.
+That is what stock con-handler has always done; now CCON does too.
+
+Mechanism: a per-console 4K write-behind buffer (console.wob).
+dowrite copies the payload (client's buffer is only valid until the
+reply), replies at once, and flushout() renders from OUR copy.
+- b3 (WODEFER=FALSE): flush immediately after the reply. Semantics
+  change, render pattern bit-identical to b2 - one packet per pass.
+  Proves the ordering plumbing in isolation.
+- b4 (WODEFER=TRUE): flush on a 20ms one-shot (second timerequest on
+  tport, device cloned from treq), on buffer-full, or at any choke
+  point. A burst pools 15-25 lines per flush -> ONE blit through the
+  S3 engine for all of them. This is the payoff build.
+Big writes (>4K) and wob=NIL consoles keep the b2 synchronous path.
+
+The choke points (every path that must see settled output flushes
+first; flushout is one compare when empty): ACTION_READ (More's
+CSI-6n handshake: the flush parses the 6n and queues the report
+before the read looks), WAIT_CHAR (conbench's SYNC probe stays
+honest), SCREEN_MODE (bytes render under the mode they were written
+in), END, dovanilla/dorawkey (transcript before keystroke),
+selmouse (anchor math; during a drag writes park AND flushexpired
+holds that console's bytes - the stock output-freeze, kept),
+dopaste, doresize (reflow reads the model), doclosew, doiconify,
+conclose. Screen and model always lag TOGETHER, so screen/model
+coherence is untouched by construction; what moved is only when
+pixels land relative to the reply.
+
+Boot plan (two boots, the A/B ladder):
+1) REBOOT into b3 (live now). Everything should look and feel
+   EXACTLY like b2 - any difference is an ordering bug:
+   - [ ] type/dir/list, More (pages+q), Ed (arrows/insert/resize/
+         menus), Ctrl+C break mid-list
+   - [ ] select/copy during output (freeze still holds), paste,
+         iconify mid-type + restore, second window
+   - [ ] conbench: expect roughly b2 numbers (maybe a hair better -
+         client compute now overlaps render)
+2) `Copy L:ccon-handler-1.2.2b4 L:ccon-handler`, REBOOT. Same
+   checklist AGAIN, plus:
+   - [ ] output latency feel: prompt/echo appear instantly (20ms is
+         under perception); NO visible lag or stutter in Ed/More
+   - [ ] conbench sync-off: plain-lines and scroll-nl should
+         COLLAPSE (~2s each), clear-page ~1s, TOTAL somewhere near
+         12-15s = FASTER THAN STOCK's 24.86
+   - [ ] conbench WITH SYNC once on each of CCON/CON:/ViNCEd - the
+         honest comparison now that all three defer (CCON's SYNC
+         flush is real: WAIT_CHAR renders everything first)
+Revert points: L:ccon-handler-1.2.2b3, .bak = b2.
+
+**BOOT-GREEN BOTH RUNGS (his boots, 23.7.26 13:36 + 13:39, results4/5):**
+b3 conbench 47.18 vs b2's 47.16 - statistically identical, plumbing
+proven, More/Ed/Iconify/Ctrl+R all smooth. b4: TOTAL 2.42s sync-off -
+10x FASTER than stock CON:'s 24.86 - plain-lines 0.56 (8 buffer-full
+dffull flushes x ~38ms + round trips: the render is real, just
+pooled), scroll-nl 0.10?, everything else '?'-fast. Same smooth
+canaries. NOTE for any published claim: b4 sync-off carries the same
+deferred-reply optimism as ViNCEd/stock always did (that was the
+point) - the honest cross-console comparison is now a SYNC campaign,
+still to be run. CAMPAIGN CLOSED: 288.68s (1.2.1) -> 2.42s sync-off /
+render throughput at block-4k economics; S1+S2+S3+S5 all shipped,
+committed after this green.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

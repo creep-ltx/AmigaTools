@@ -116,11 +116,24 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> console.device's 0 - menu operations arrive
                         -> already digested into IECLASS_MENULIST
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F,
-      DFROWS=256        -> S3 deferred-blit engine: dirty-row bookkeeping
+      DFROWS=256,       -> S3 deferred-blit engine: dirty-row bookkeeping
                         -> arrays, one slot per view row. cols is already
                         -> clamped to 255 (gridcalc), rows is not - a
                         -> window taller than DFROWS rows just runs the
                         -> legacy immediate path (dfstart declines)
+      WOBSZ=4096,       -> S5 write-behind buffer, bytes per console.
+                        -> Writes larger than this stay fully
+                        -> synchronous (flush, render, reply after)
+      WOFLUSHUS=20000,  -> S5 flush latency: one PAL frame. Sparse
+                        -> output lands within 20ms (imperceptible);
+                        -> burst producers fill ~15-25 lines per flush,
+                        -> which is the whole aggregation win
+      WODEFER=TRUE      -> S5 staging (B7 discipline): FALSE = b3,
+                        -> accept+reply early but flush IMMEDIATELY
+                        -> (semantics change, render pattern identical
+                        -> - proves the ordering plumbing alone);
+                        -> TRUE = b4, flush on timer/full/forcing
+                        -> packet (aggregation ON, the payoff)
 
 -> one captured input event (M6). The ring stride is 32 (Shl, no Mul
 -> in the input.device context); addr carries ie_EventAddress, which
@@ -311,6 +324,15 @@ OBJECT console
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
+  -> S5 (1.2.2b3): the write-behind buffer. ACTION_WRITE copies its
+  -> payload here and replies AT ONCE - the client runs on while the
+  -> handler renders behind it, and under WODEFER consecutive writes
+  -> pool here until a flush trigger (timer, buffer full, or any
+  -> packet/event that must see settled output) renders them as ONE
+  -> pass through the S3 engine: one blit for a whole burst. NIL is
+  -> survivable: the console runs the old synchronous write path.
+  wob:PTR TO CHAR,
+  wolen,
   appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
                                 -> AppIcon while iconified (NIL = not
                                 -> iconified). RightAmiga+I zips the window
@@ -336,6 +358,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     tport=NIL:PTR TO mp,        -> timer.device plumbing for WAIT_CHAR
     treq=NIL:PTR TO timerequest,
     timerarmed=FALSE,
+    -> S5: the flush timer - a SECOND request on the same port and the
+    -> same opened device (io_Device/io_Unit copied from treq, the
+    -> standard clone; only treq's CloseDevice closes the device). One
+    -> global one-shot serves every console: expiry walks conlist and
+    -> flushes every write-behind buffer that has bytes.
+    ftreq=NIL:PTR TO timerequest,
+    flusharmed=FALSE,
     rawdef=FALSE,               -> Startup="RAW": streams open raw (M9)
     devname[32]:ARRAY OF CHAR,  -> the mounted device NAME (CON/RAW/CCON/
                                 -> CRAW) read from dol_Name at startup, so
@@ -510,6 +539,16 @@ PROC main()
         DeleteIORequest(treq)
         treq := NIL
       ENDIF
+    ENDIF
+  ENDIF
+  -> S5: the flush timer clones treq's opened device (io_Device/io_Unit
+  -> copy - the standard second-request pattern; only treq CloseDevices).
+  -> ftreq = NIL is survivable: armflush degrades to immediate flush.
+  IF treq
+    ftreq := CreateIORequest(tport, SIZEOF timerequest)
+    IF ftreq
+      ftreq.io.device := treq.io.device
+      ftreq.io.unit := treq.io.unit
     ENDIF
   ENDIF
 
@@ -751,13 +790,19 @@ PROC main()
       ENDIF
       c := cnext
     ENDWHILE
-    -> drain the timer port: an expiry times out the head WAIT_CHAR
+    -> drain the timer port: an expiry times out the head WAIT_CHAR;
+    -> the S5 flush request rides the same port, told apart by pointer
     IF tport
       REPEAT
         msg := GetMsg(tport)
         IF msg
-          timerarmed := FALSE
-          timerexpired()
+          IF msg = ftreq
+            flusharmed := FALSE
+            flushexpired()
+          ELSE
+            timerarmed := FALSE
+            timerexpired()
+          ENDIF
         ENDIF
       UNTIL msg = NIL
     ENDIF
@@ -858,6 +903,15 @@ PROC killhandler()
     DeleteMsgPort(clipport)
     clipport := NIL
   ENDIF
+  IF ftreq                      -> S5: the flush clone goes FIRST, and
+    IF flusharmed               -> a pending one-shot is reeled in
+      AbortIO(ftreq)            -> before its request is deleted
+      WaitIO(ftreq)
+      flusharmed := FALSE
+    ENDIF
+    DeleteIORequest(ftreq)      -> no CloseDevice: treq owns the open
+    ftreq := NIL
+  ENDIF
   IF treq                       -> timer.device
     CloseDevice(treq)
     DeleteIORequest(treq)
@@ -900,6 +954,7 @@ PROC coninit(c:PTR TO console)
   c.tctmp := String(416)
   c.tctail := String(404)
   c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
+  c.wob := New(WOBSZ)           -> S5: NIL survivable too - synchronous writes
   c.srbuf := String(64)
   c.srstash := String(404)
   c.sridx := -1
@@ -1047,6 +1102,7 @@ PROC condispose(c:PTR TO console)
   IF c.altm THEN Dispose(c.altm)
   IF c.alta THEN Dispose(c.alta)
   IF c.alts THEN Dispose(c.alts)
+  IF c.wob THEN Dispose(c.wob)  -> S5: the write-behind buffer
   Dispose(c)
 ENDPROC
 
@@ -1057,6 +1113,8 @@ ENDPROC
 PROC conclose(c:PTR TO console)
   DEF e:PTR TO ihev, n
   curcon := c
+  flushout(c)                   -> S5: the console's last words render
+                                -> before the window goes
   closewin()                    -> replies parked writers/reads/waits
   conrm(c)
   -> Theme B: belt-and-suspenders - every command already flushes
@@ -1178,6 +1236,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    flushout(c)                 -> S5: last output lands before close
     c.opens := c.opens - 1
     -> b11 safety net: a client that DIED on the alternate screen
     -> (Ctrl+C'd More) never sends ?47l - its closing handle
@@ -1219,6 +1278,11 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    flushout(c)                 -> S5: a read observes settled output -
+                                -> More writes CSI 6n then READS the
+                                -> answer; the flush parses the 6n and
+                                -> queues the report before the read
+                                -> looks (the instant-page handshake)
     ensurewin()                 -> an AUTO window appears on read too
     sender := pkt.port          -> the reader owns the break signal now
     curcon.breaktask := sender.sigtask -> (the AROS con-handler does the same)
@@ -1236,6 +1300,9 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    flushout(c)                 -> S5: WAIT_CHAR is conbench's SYNC
+                                -> probe - it must dequeue AFTER the
+                                -> writes it follows, honestly
     ensurewin()
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
@@ -1256,6 +1323,8 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
+    flushout(c)                 -> S5: pending bytes render under the
+                                -> mode they were written in
     ensurewin()                 -> mode changes imply a console soon
     -> arg1: DOSTRUE = raw, 0 = cooked. Raw parks the line editor -
     -> keys become bytes, the client owns echo and screen
@@ -1386,17 +1455,106 @@ PROC dowrite(pkt:PTR TO dospacket)
   clearsel()                    -> output takes the highlight with it
   snaplive()                    -> new output pulls the view back to live
   tcclose()                     -> and closes an open completion menu
+  -> S5 (1.2.2b3): accept-then-render. DOS Write() blocks its caller
+  -> until we reply, so a single-threaded client - every client - can
+  -> never have two writes in flight: the ONLY way k lines ever reach
+  -> one render pass is to release the writer BEFORE rendering. Copy
+  -> the payload (the client's buffer is only guaranteed until the
+  -> reply), ReplyPkt at once, and let flushout() render from OUR
+  -> copy. Under WODEFER the render is further deferred to the flush
+  -> triggers (timer / buffer full / any packet or event that must
+  -> see settled output - the choke points), and a burst pools 15-25
+  -> lines per flush: one blit through the S3 engine for all of them.
+  -> The screen and the model always lag TOGETHER (render writes
+  -> both), so screen/model coherence is untouched; the only thing
+  -> that moves is when the pixels land relative to the reply - the
+  -> same bargain stock con-handler has always made. Big writes
+  -> (> WOBSZ) and no-buffer consoles keep the 1.2.2b2 synchronous
+  -> path: flush older bytes first, render, reply after.
+  IF (curcon.wob = NIL) OR (len > WOBSZ)
+    flushout(curcon)            -> older buffered bytes render first
+    dorender(pkt.arg2, len)
+    ReplyPkt(pkt, len, 0)
+    RETURN
+  ENDIF
+  IF (curcon.wolen + len) > WOBSZ THEN flushout(curcon)
+  CopyMem(pkt.arg2, curcon.wob + curcon.wolen, len)
+  curcon.wolen := curcon.wolen + len
+  ReplyPkt(pkt, len, 0)
+  IF WODEFER
+    armflush()
+  ELSE
+    flushout(curcon)            -> b3: prove the plumbing, keep the
+  ENDIF                         -> render pattern of b2 exactly
+ENDPROC
+
+-> the editor/cursor bracket around render() - dowrite's old body,
+-> shared now by the synchronous path and flushout()
+PROC dorender(buf, len)
   IF curcon.rawmode
     curserase()                 -> raw: the app owns the screen, no blip
-    render(pkt.arg2, len)       -> - but the console owns the block
+    render(buf, len)            -> - but the console owns the block
     cursdraw()                  -> cursor (Ed's only position marker)
   ELSE
     eraseedit()
-    render(pkt.arg2, len)
+    render(buf, len)
     reanchor()
     drawedit()
   ENDIF
-  ReplyPkt(pkt, len, 0)
+ENDPROC
+
+-> S5: render a console's write-behind buffer. THE choke point - every
+-> path that must observe settled output calls this first (reads,
+-> WAIT_CHAR, mode switches, closes, keys, mouse, resize, iconify,
+-> paste, menus). Cheap when empty: one compare. curcon is saved and
+-> restored because the flush timer walks consoles outside any
+-> dispatch boundary. snaplive() inside mirrors dowrite's accept-time
+-> call: if the user scrolled back between accept and flush, output
+-> still pulls the view live before it renders (the key paths flush
+-> BEFORE touching viewoff, so this is belt-and-braces).
+PROC flushout(c:PTR TO console)
+  DEF old:PTR TO console
+  IF c = NIL THEN RETURN
+  IF c.wolen = 0 THEN RETURN
+  IF c.win = NIL
+    c.wolen := 0                -> hidden or never-opened: nowhere to
+    RETURN                      -> draw - accept + discard, the parked-
+  ENDIF                         -> write overflow policy
+  old := curcon
+  curcon := c
+  snaplive()
+  dorender(c.wob, c.wolen)
+  c.wolen := 0
+  curcon := old
+ENDPROC
+
+PROC armflush()
+  IF ftreq = NIL                -> no timer.device: degrade to the b3
+    flushout(curcon)            -> immediate flush, never sit on bytes
+    RETURN
+  ENDIF
+  IF flusharmed THEN RETURN
+  ftreq.io.command := TR_ADDREQUEST
+  ftreq.time.secs := 0
+  ftreq.time.micro := WOFLUSHUS
+  SendIO(ftreq)
+  flusharmed := TRUE
+ENDPROC
+
+PROC flushexpired()
+  DEF c:PTR TO console, again=FALSE
+  c := conlist
+  WHILE c
+    IF c.wolen > 0
+      IF c.selon
+        again := TRUE           -> a drag holds the screen still (the
+      ELSE                      -> stock freeze) - hold its bytes too,
+        flushout(c)             -> try again next tick
+      ENDIF
+    ENDIF
+    c := c.next
+  ENDWHILE
+  IF again THEN armflush()
 ENDPROC
 
 PROC flushwq()
@@ -1904,6 +2062,7 @@ PROC doiconify()
   IF curcon.win = NIL THEN RETURN
   IF curcon.fwin THEN RETURN
   IF curcon.appicon THEN RETURN         -> already iconified
+  flushout(curcon)              -> S5: nothing buffered survives hidewin
   IF wbensure() = FALSE THEN RETURN
   curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0, iconobj, NIL)
   IF curcon.appicon THEN hidewin()      -> only vanish if the icon really went up
@@ -2702,6 +2861,8 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed
   IF curcon.win = NIL THEN RETURN
+  flushout(curcon)              -> S5: the reflow reads the model -
+                                -> pending bytes land first
   altdrop()                     -> a resize orphans the raw snapshot
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
@@ -2842,6 +3003,7 @@ ENDPROC
 -> a lingering WAIT window (no opens left) dies on the click. The
 -> actual CloseWindow is deferred past the event drain (closereq).
 PROC doclosew()
+  flushout(curcon)              -> S5: settle before teardown decisions
   IF curcon.opens <= 0
     curcon.closereq := TRUE
   ELSE
@@ -3283,6 +3445,10 @@ ENDPROC
 
 PROC selmouse(cd, csec, cmic)
   DEF c, lo, hi, plo, phi, r
+  flushout(curcon)              -> S5: anchor math needs the screen and
+                                -> model current before the drag starts
+                                -> (once selon holds, writes park and
+                                -> flushexpired skips this console)
   IF curcon.sb = NIL THEN RETURN       -> no model, no selection
   IF cd = IECODE_LBUTTON
     clearsel()
@@ -3437,6 +3603,8 @@ PROC dopaste(forceexec)
   DEF got, i, id, sz, take, c, scr[32]:ARRAY OF CHAR,
       lw:PTR TO LONG, b:PTR TO CHAR, exec, trunc=FALSE
   IF curcon.selon THEN RETURN
+  flushout(curcon)              -> S5: paste renders through the editor
+                                -> against settled output
   IF clipopen() = FALSE THEN RETURN
   clipreq.command := CMD_READ
   clipreq.data := clipbuf
@@ -5689,6 +5857,8 @@ ENDPROC
 
 PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, k
+  flushout(curcon)              -> S5: the transcript lands before the
+                                -> keystroke that follows it acts
   -> Theme B: scrollback content search - deliberately BEFORE
   -> snaplive() and the raw-mode bypass below, since it has to work
   -> while viewing a raw client's (Ed, More) scrolled-away output
@@ -5970,6 +6140,9 @@ ENDPROC TRUE
 -> ignores the result - vanilla bytes arrive as their own events there
 PROC dorawkey(code, qual)
   DEF s:PTR TO CHAR, l, avail, sh, idx, slot
+  flushout(curcon)              -> S5: same rule as dovanilla - keys
+                                -> (incl. scrollback entry) see settled
+                                -> output and a current model
   sh := qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
   -> Tab can arrive as a RAW key when the keymap has no vanilla
   -> mapping for its shifted form: dispatch it to completion too
@@ -7305,4 +7478,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.2b2 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.2b4 (23.7.26) CCON: LTX console handler', 0
