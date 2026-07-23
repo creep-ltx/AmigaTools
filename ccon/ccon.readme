@@ -117,10 +117,10 @@ HISTORY
       instead of scrolling it
     - Ed fixed: cursor keys navigate (raw keys back to 8-bit
       $9B), and resizing the window re-measures and repaints
-    - Two static-audit passes: a narrowed window now re-wraps
-      the transcript instead of losing it, paste can't overflow
-      the clipboard buffer, clean handler unmount, history
-      stores each command once, plus assorted hardening
+    - Bug fixes: a narrowed window now re-wraps the transcript
+      instead of losing it, paste can't overflow the clipboard
+      buffer, clean handler unmount, history stores each command
+      once, plus assorted hardening
 
   1.1
     - Per-window FONT and real italic/underline/inverse styles
