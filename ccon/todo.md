@@ -3579,6 +3579,116 @@ still to be run. CAMPAIGN CLOSED: 288.68s (1.2.1) -> 2.42s sync-off /
 render throughput at block-4k economics; S1+S2+S3+S5 all shipped,
 committed after this green.
 
+## 1.2.3 — plane-masked rendering (the sync-line hunt, 23.7.26)
+
+The last measured gap to stock: one full-window ScrollRaster costs
+~34ms against stock's ~17 per line under barriers. srbench 0.2 ruled
+out every primitive theory (direct BltBitMap = 34.8, ScrollRasterBF =
+35.2, no layer overhead exists); the 3.2 ROM's console.device 46.1,
+split out with romtool and read with machine68k, gave up the real
+trick at site $2592: it pokes a used-planes byte into rp_Mask before
+its ONE ScrollRaster call, so the blitter skips planes the text never
+touched. Maintenance at $3c00: pens OR'd, snapped to %0001/%0011/$FF,
+floored via GetBitMapAttr(BMA_FLAGS) (BMF_STANDARD -> 1, else $FF =
+RTG safety), reset on clear. Measured on our machine: 34.8 full /
+17.4 mask-3 (= stock TO THE DECIMAL) / 8.8 mask-1.
+
+1.2.3b1 (deployed live + staged, .bak = 1.2.2): the same trick, CCON
+shape. Per-console mpens/mmask/mfloor; penuse() grows the mask in
+setpens() and curattr() - the only two transcript pen sources (the
+erase fills are pen 0) - BEFORE the first draw with any new pen;
+gridcalc probes the floor (idempotent, resize/reopen-safe; mpens
+deliberately survives - we have scrollback, stock does not, so
+stock's clear-time reset is structurally wrong here: any ring row can
+come back on screen). Applied as a bracket around render() ONLY -
+which is overlay-free by construction (eraseedit/curserase run before
+it), so the pen-8 ghost, the completion menu, the Ctrl+R banner and
+the paste hint all draw AND erase at full depth: they can neither
+pollute the mask nor leave plane droppings a masked blit would skip.
+A bare transcript (pens 0-1) rides tier 1: every scroll, fill and
+glyph in render at ~quarter blit cost.
+
+Harness: tests/masktest.e - the invariant simulated at the plane
+level (masked ops touch only masked planes, reference runs full
+depth, recompose-and-compare after every op). Run 1 (rules kept):
+clean over 4000 ops. Control A (grow-after-draw) and control B
+(overlay left standing across a masked scroll - the ghost-droppings
+shape, handler-position drifting with the text while the plane bits
+stay) BOTH corrupt, proving the harness can see. PASS.
+
+Boot checklist (REBOOT FIRST) - the risk surface is COLOURS, so look
+at everything with colour-suspicious eyes:
+
+- [ ] plain boot, type, dir, type ccon.doc - text correct, and
+      noticeably snappier under sync-heavy shapes
+- [ ] ls (colours!) - correct colours; then MORE plain output after -
+      still correct (mask went wide and stays, = 1.2.2 behaviour)
+- [ ] scrollback through the coloured history and back - colours
+      intact in both directions (mpens never reset is what makes
+      this safe - watch it prove itself)
+- [ ] ghost suggestion over a busy screen - grey ghost renders,
+      output erases it clean, NO grey droppings anywhere (the
+      pen-8-outside-the-mask case, control B's real-world twin)
+- [ ] Ctrl+R banner in/out; completion menu open/close over output
+- [ ] More + Ed (Ed uses pens 2/3 - tier 3) - pages, arrows,
+      insert/delete lines, resize, quit clean
+- [ ] selection over coloured text, copy, paste back
+- [ ] iconify mid-ls, restore - colours intact (mpens survives with
+      the model)
+- [ ] CTerm borrowed window - floor probe on ITS screen, all of the
+      above briefly
+- [ ] conbench CCON SYNC rerun - sync-line is the number: ~3.9s if
+      the session touched pens 2-3, ~2.1s pure transcript (stock:
+      3.40)
+
+### 1.2.3b2 — narrowing + THE b1 bug (23.7.26, his sync run 16:11)
+
+His b1 SYNC run proved the mask works (plain-lines 1.22 -> 0.32?,
+rep-1 tier-1 blits) and exposed the design's cost in one table:
+conbench's OWN sgr tests run before sync-line, the never-reset mask
+went $FF, and sync-line sat unchanged at 6.70. An order artifact of
+the benchmark - and the real limitation (one ls = wide forever).
+
+Analysing that interaction found a REAL b1 bug: penuse grows mmask
+mid-packet, but the render bracket had already loaded the OLD mask
+into rp_Mask - so the FIRST coloured output after a plain session
+drew with its planes masked off (wrong colours for one packet, self-
+healing on the next repaint; the masktest sim missed it by modelling
+one mask variable where the code has two).
+
+b2 (deployed live + staged; .bak still = 1.2.2):
+- maskcalc pushes mmask into rp_Mask whenever the bracket is open
+  (maskon global) - mask changes reach the blitter the moment they
+  are computed. The bug fix.
+- NARROWING, rule (c): the mask may shrink only immediately after
+  the whole visible region was repainted/cleared at the OLD mask.
+  maskscan() (visible attrs + live SGR pens, ~2KB, microseconds)
+  runs at: form feed (legacy = right after the fill; deferred = after
+  dfflush's dffull redraw, via the dfnarrow flag), doresize (reflow
+  can pull coloured HISTORY into view - scan goes BOTH directions),
+  altrestore (widen BEFORE repainting the restored transcript),
+  reopenwin. History rows do not bind the mask: scrollback repaints
+  unmasked and snaplive full-redraws before any masked render.
+- masktest extended: rule (c) ops in the kept-rules soak + control C
+  (restore without rescan) + control D (narrow before the clear) -
+  4000 ops clean, ALL FOUR controls corrupt as they must. PASS.
+
+Boot checklist (REBOOT FIRST):
+- [ ] FRESH window, ls IMMEDIATELY - colours correct from the very
+      first line (the b1 bug's exact shape)
+- [ ] ls, then More a file - page flips narrow the mask; paging feel
+- [ ] ls, then clear, then dir - colours gone, speed back (narrow)
+- [ ] resize wider after coloured output has scrolled up - the
+      history that comes into view keeps its colours (control C's
+      real-world twin)
+- [ ] Ed: open on coloured transcript, quit - transcript colours
+      intact (altrestore rescan)
+- [ ] iconify a coloured window, restore - colours intact
+- [ ] ghost/banner/menu over everything, as b1's list
+- [ ] conbench SYNC rerun - per-test FFs now narrow between tests:
+      sync-line should read ~2.1-2.5s (stock: 3.40) IN the standard
+      run, no fresh window needed
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

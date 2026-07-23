@@ -333,6 +333,19 @@ OBJECT console
   -> survivable: the console runs the old synchronous write path.
   wob:PTR TO CHAR,
   wolen,
+  -> 1.2.3: plane-masked rendering - console.device 46.1's own trick,
+  -> decoded from the 3.2 ROM (site $2592/$3c00) and measured at
+  -> 34.8/17.4/8.8 ms per scroll for full/2-plane/1-plane masks.
+  -> mpens is the OR of every pen the TRANSCRIPT has ever drawn with
+  -> (monotone - never reset: unlike stock we have scrollback, and any
+  -> ring row can come back on screen, so a clear-time reset would be
+  -> structurally wrong). mmask derives from it by stock's own tier
+  -> scheme: <=1 -> %0001, <=3 -> %0011, else $FF - OR'd with mfloor,
+  -> which is 1 on a standard planar bitmap and $FF anywhere else
+  -> (RTG: never mask what isn't planes).
+  mpens,
+  mmask,
+  mfloor,
   appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
                                 -> AppIcon while iconified (NIL = not
                                 -> iconified). RightAmiga+I zips the window
@@ -471,6 +484,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     dfd[DFROWS]:ARRAY OF CHAR,  -> per view row: dirty this packet?
     dfx0[DFROWS]:ARRAY OF CHAR, -> dirty span, first col...
     dfx1[DFROWS]:ARRAY OF CHAR, -> ...and last col, INCLUSIVE
+    -> 1.2.3: the masked-render bracket state. maskon = render() is
+    -> running and rp_Mask carries mmask (penuse/maskcalc keep the two
+    -> synchronous while it is TRUE - the b2 bug fix); dfnarrow = a
+    -> form feed passed this packet, narrow the mask after dfflush's
+    -> dffull redraw has cleared the old content at the OLD mask.
+    maskon=FALSE,
+    dfnarrow=FALSE,
     dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE
 
 PROC main()
@@ -955,6 +975,9 @@ PROC coninit(c:PTR TO console)
   c.tctail := String(404)
   c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
   c.wob := New(WOBSZ)           -> S5: NIL survivable too - synchronous writes
+  c.mpens := 0                  -> 1.2.3: masked rendering - defaults
+  c.mmask := $FF                -> stay FULL until gridcalc probes the
+  c.mfloor := $FF               -> real bitmap and seeds the pens
   c.srbuf := String(64)
   c.srstash := String(404)
   c.sridx := -1
@@ -1938,6 +1961,17 @@ PROC gridcalc()
   IF curcon.cols > 255 THEN curcon.cols := 255      -> redraw's row buffer is 256
   IF curcon.cols < 2 THEN curcon.cols := 2
   IF curcon.rows < 1 THEN curcon.rows := 1
+  -> 1.2.3 masked rendering: the floor, probed the way the ROM does it
+  -> (GetBitMapAttr(BMA_FLAGS=12), BMF_STANDARD=bit 3, from the 46.1
+  -> disassembly's own init at $2a1a): standard planar bitmap -> floor 1,
+  -> anything else (RTG) -> $FF, masking off. Runs on every gridcalc
+  -> (open, reopen, resize) - idempotent, and mpens is deliberately NOT
+  -> touched here: it survives resize and iconify with the model whose
+  -> pens it describes. penuse seeds deffg; maskcalc folds the floor in
+  -> even when the pens did not change.
+  curcon.mfloor := IF GetBitMapAttr(curcon.win.rport.bitmap, 12) AND 8 THEN 1 ELSE $FF
+  penuse(curcon.deffg, 0)
+  maskcalc()
 ENDPROC
 
 -> ---------- disk fonts (v1.1b2) ----------
@@ -2211,6 +2245,9 @@ PROC reopenwin()
            curcon.win.height - curcon.win.borderbottom - 1)
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
+  maskscan()                    -> b2: gridcalc reseeded from garbage-free
+                                -> defaults; the RESTORED model knows the
+                                -> real pens - scan before the repaint
   redraw()
   settitle()
   IF curcon.rawmode THEN cursdraw() ELSE drawedit()
@@ -2978,6 +3015,10 @@ PROC doresize()
            curcon.win.width - curcon.win.borderright - 1,    -> repaint from the
            curcon.win.height - curcon.win.borderbottom - 1)  -> model
   SetAPen(curcon.rp, curcon.deffg)
+  maskscan()                    -> b2: reflow can pull coloured HISTORY
+                                -> into the visible rows (widening shows
+                                -> more of the past) - rescan before the
+                                -> repaint, in both directions
   redraw()
   settitle()
   IF curcon.rawmode
@@ -3086,6 +3127,88 @@ ENDPROC
 -> any other screen bold+explicit-3x goes through the
 -> ObtainBestPen table instead (real colours on the user's
 -> palette), and bare bold recolours nothing.
+-> ---------- 1.2.3: plane-masked rendering (the sync-line hunt) ----------
+-> The invariant that makes this sound: within the window's inner
+-> region, every plane OUTSIDE mmask is all-zero. It holds because
+-> (a) the mask only ever GROWS, and it grows BEFORE the first draw
+-> with any new pen (penuse sits in setpens and curattr, the only two
+-> sources of transcript pens; the erase fills use pen 0, inside any
+-> mask); (b) only render() runs masked, and render() is overlay-free
+-> by construction - dowrite/flushout erase the blip/ghost/menu
+-> pixels (eraseedit / curserase) BEFORE render and repaint them
+-> after, and those overlay procs run at full mask, so a pen-8 ghost
+-> can neither pollute mpens nor leave plane droppings a masked blit
+-> would skip. Skipping an all-zero plane in a scroll, fill or JAM2
+-> glyph write is the identity - which is the entire speedup: the
+-> blitter simply does not touch planes the transcript never used.
+-> Proven by tests/masktest.e (plane-level simulation; its control
+-> run breaks rule (a) on purpose and must corrupt), measured by
+-> srbench 0.2 (34.8 -> 17.4 -> 8.8 ms full/tier-3/tier-1).
+
+PROC maskcalc()
+  DEF u, m
+  u := curcon.mpens
+  IF u <= 1
+    m := 1                      -> stock's own tiers, verbatim from the
+  ELSEIF u <= 3                 -> ROM's $3c00 routine: pen 1 text, the
+    m := 3                      -> pens-0-3 world, or everything
+  ELSE
+    m := $FF
+  ENDIF
+  curcon.mmask := m OR curcon.mfloor
+  -> b2, THE b1 BUG: penuse can grow the mask MID-PACKET (the first
+  -> red run of an ls), but the bracket loaded rp_Mask at render
+  -> entry - so the new pen's planes were still masked OFF for its
+  -> own first draw. Wrong colours until the next repaint. While the
+  -> bracket is open, a mask change must reach the live rastport the
+  -> moment it is computed. (The masktest sim missed it by modelling
+  -> ONE mask variable where the code has two; this line makes the
+  -> two synchronous inside the bracket, which restores the sim's
+  -> honesty too.)
+  IF maskon THEN curcon.rp.mask := curcon.mmask
+ENDPROC
+
+PROC penuse(f, b)
+  DEF u
+  u := curcon.mpens OR f OR b
+  IF u <> curcon.mpens
+    curcon.mpens := u
+    maskcalc()
+  ENDIF
+ENDPROC
+
+-> b2: NARROWING. b1's mask only ever grew, so one colourful ls left
+-> a window at $FF forever (and left conbench's sync-line unmasked -
+-> its own sgr tests poisoned every test after them). Narrowing is
+-> safe at exactly one kind of moment: RIGHT AFTER the entire visible
+-> region has been repainted or cleared at the OLD mask (which by the
+-> invariant covered every plane holding content) - a form feed, a
+-> resize reflow, an alt-screen switch, an iconify restore. At such a
+-> boundary the visible planes outside the NEW mask are provably
+-> zero again, so the mask may shrink to what the visible model (plus
+-> the live SGR state) actually needs. History rows do NOT bind the
+-> mask: scrollback excursions repaint unmasked (redraw runs outside
+-> the render bracket) and snaplive's full redraw restores the live
+-> rows - at full depth - before any masked render can run. The scan
+-> is rows x cols attr bytes, ~2KB: microseconds.
+PROC maskscan()
+  DEF r, i, a:PTR TO CHAR, u, v
+  u := curcon.deffg OR fgpen() OR curcon.curbg
+  IF curcon.sb
+    FOR r := 0 TO curcon.rows - 1
+      a := sarow(r)
+      FOR i := 0 TO curcon.cols - 1
+        v := a[i]
+        u := u OR (v AND 15) OR (Shr(v, 4) AND 7)
+      ENDFOR
+    ENDFOR
+  ELSE
+    u := $FF                    -> no model: cannot know, stay wide
+  ENDIF
+  curcon.mpens := u
+  maskcalc()
+ENDPROC
+
 PROC fgpen()
   IF curcon.bold AND (curcon.curfg < 8)
     IF curcon.wbpens
@@ -3096,7 +3219,11 @@ PROC fgpen()
   ENDIF
 ENDPROC curcon.curfg
 
-PROC curattr() IS fgpen() OR Shl(curcon.curbg, 4)
+PROC curattr()
+  DEF f
+  f := fgpen()
+  penuse(f, curcon.curbg)       -> 1.2.3: a pen is masked-in BEFORE the
+ENDPROC f OR Shl(curcon.curbg, 4)  -> first cell stores it (rule (a))
 
 -> v1.1 soft styles: point the rastport at a cell's style bits only
 -> when they change (SetSoftStyle is a call per run otherwise).
@@ -3116,11 +3243,14 @@ ENDPROC
 
 -> live-output pens from the SGR state: inverse (SGR 7) swaps
 PROC setpens()
+  DEF f
+  f := fgpen()
+  penuse(f, curcon.curbg)       -> 1.2.3: grow-before-draw, rule (a)
   IF curcon.cursty AND 4
     SetAPen(curcon.rp, curcon.curbg)
-    SetBPen(curcon.rp, fgpen())
+    SetBPen(curcon.rp, f)
   ELSE
-    SetAPen(curcon.rp, fgpen())
+    SetAPen(curcon.rp, f)
     SetBPen(curcon.rp, curcon.curbg)
   ENDIF
 ENDPROC
@@ -4049,6 +4179,11 @@ PROC altrestore()
   curcon.ancy := curcon.altancy
   altdrop()
   curcon.viewoff := 0
+  maskscan()                    -> b2: the restored transcript may be
+                                -> wider-penned than the alt page the
+                                -> mask narrowed to (this runs INSIDE
+                                -> the render bracket - ?47l - so the
+                                -> repaint below draws full-and-true)
   redraw()
   settitle()
 ENDPROC TRUE
@@ -4133,6 +4268,7 @@ PROC dfstart()
   dfon := TRUE
   dfpend := 0
   dffull := FALSE
+  dfnarrow := FALSE
   FOR r := 0 TO curcon.rows - 1
     dfd[r] := 0
   ENDFOR
@@ -4215,6 +4351,10 @@ PROC dfflush()
     FOR r := 0 TO curcon.rows - 1  -> spans from before the rebuild
       dfd[r] := 0                  -> tripped are stale - drop them
     ENDFOR
+    IF dfnarrow                    -> b2: the redraw above repainted every
+      maskscan()                   -> visible cell at the old mask; the
+      dfnarrow := FALSE            -> page is truthful, narrow to it
+    ENDIF
   ELSE
     IF dfpend > 0
       ScrollRaster(curcon.rp, 0, Mul(dfpend, curcon.ch),
@@ -4717,6 +4857,10 @@ PROC render(buf, len)
   IF curcon.win = NIL THEN RETURN
   dfstart()                     -> S3: arm the deferred-blit engine (or
                                 -> not - sb=NIL/oversize runs legacy)
+  maskon := TRUE                -> 1.2.3: the masked bracket - render()
+  curcon.rp.mask := curcon.mmask  -> is overlay-free (see the maskcalc
+                                -> block), so every blit, fill and glyph
+                                -> in here may skip the untouched planes
   s := buf
   WHILE i < len
     c := s[i]
@@ -4849,6 +4993,8 @@ PROC render(buf, len)
         curcon.cy := 0
         dffull := TRUE
         dfpend := 0
+        dfnarrow := TRUE        -> b2: narrow AFTER dfflush's redraw has
+                                -> cleared the old page at the old mask
       ELSE
         SetAPen(curcon.rp, 0)
         RectFill(curcon.rp, curcon.left, curcon.topy,
@@ -4862,6 +5008,9 @@ PROC render(buf, len)
         ENDIF
         curcon.cx := 0
         curcon.cy := 0
+        maskscan()              -> b2: the fill above ran at the OLD mask
+                                -> (which covered the old content); the
+                                -> page is blank, narrow to what remains
       ENDIF
       i := i + 1
     ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
@@ -4960,6 +5109,8 @@ PROC render(buf, len)
   ENDWHILE
   dfflush()         -> S3: the packet's one catch-up blit + span repaints
   dfon := FALSE     -> nothing deferred ever survives a render() call
+  maskon := FALSE   -> 1.2.3: bracket closed - overlays (ghost pen 8!)
+  curcon.rp.mask := $FF  -> and everything outside render draw at full depth
   setsoft(0)        -> the editor and cursor draw plain, always
 ENDPROC
 
@@ -7478,4 +7629,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.2 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.3b2 (23.7.26) CCON: LTX console handler', 0
