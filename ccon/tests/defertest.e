@@ -1,5 +1,10 @@
 /* defertest.e -- S2+S3 harness: the deferred-blit engine against the
-   legacy immediate engine, cell for cell.
+   legacy immediate engine, cell for cell. v2 (E1, 1.2.4): the eight
+   region escapes (K J @ P L M S T) join the streams as model ops
+   with dirty marks in the deferred engine, against their legacy
+   immediate forms - plus cursor positioning so they land anywhere.
+   Op bytes in the test alphabet: 2=K 3=J 4=@ 5=P 6=L 7=M 14=S 15=T
+   16=cursor-jump (both engines alike, no flush).
 
    The claim under test: for any byte stream cut into any packets, the
    1.2.2 deferred engine (model-first, dirty spans, one catch-up blit
@@ -55,6 +60,13 @@ DEF -> legacy engine: model+attr+wrap ring, screen grid, cursor
     dpend=0, dfull=FALSE,
     dfd[ROWS]:ARRAY OF CHAR, dfx0[ROWS]:ARRAY OF CHAR,
     dfx1[ROWS]:ARRAY OF CHAR,
+    dgen=0, dblo=0, dbhi=-1,    -> E2a/b mirror: generation-counter
+                                -> dirty flags + the dirty row range
+    dvblank=TRUE,               -> E5: deferred engine's blank-screen
+                                -> flag - skip the catch-up shift when
+                                -> the screen is provably blank
+    forcevb=FALSE,              -> control: force dvblank TRUE always
+                                -> (a lie) - must make the grids diverge
     -> the current attr both engines stamp on writes; varied per packet
     -> so a span painted from the wrong row or column shows up in the
     -> attr plane even when the glyphs happen to match
@@ -143,6 +155,114 @@ PROC lff()
   lcy := 0
 ENDPROC
 
+-> the legacy region ops: model change + IMMEDIATE screen mirror,
+-> the 1.2.3 shapes (clamps included)
+PROC lk()
+  DEF j
+  IF lcx >= COLS THEN RETURN
+  FOR j := lcx TO COLS - 1
+    lm[Mul(lrow(lcy), COLS) + j] := 0
+    la[Mul(lrow(lcy), COLS) + j] := 0
+    lsm[Mul(lcy, COLS) + j] := 0
+    lsa[Mul(lcy, COLS) + j] := 0
+  ENDFOR
+  IF (lcy + 1) <= (ROWS - 1) THEN lw[lrow(lcy + 1)] := 0  -> B7 shape
+ENDPROC
+
+PROC lj()
+  DEF r, j
+  lk()
+  FOR r := lcy + 1 TO ROWS - 1
+    lclearrow(r)
+    FOR j := 0 TO COLS - 1
+      lsm[Mul(r, COLS) + j] := 0
+      lsa[Mul(r, COLS) + j] := 0
+    ENDFOR
+  ENDFOR
+ENDPROC
+
+PROC lich(n)
+  DEF j, mo, so
+  IF lcx >= COLS THEN RETURN
+  IF n > (COLS - lcx) THEN n := COLS - lcx
+  mo := Mul(lrow(lcy), COLS)
+  so := Mul(lcy, COLS)
+  FOR j := COLS - 1 TO lcx + n STEP -1
+    lm[mo + j] := lm[mo + j - n]
+    la[mo + j] := la[mo + j - n]
+    lsm[so + j] := lsm[so + j - n]
+    lsa[so + j] := lsa[so + j - n]
+  ENDFOR
+  FOR j := lcx TO lcx + n - 1
+    lm[mo + j] := 0
+    la[mo + j] := 0
+    lsm[so + j] := 0
+    lsa[so + j] := 0
+  ENDFOR
+ENDPROC
+
+PROC ldch(n)
+  DEF j, mo, so
+  IF lcx >= COLS THEN RETURN
+  IF n > (COLS - lcx) THEN n := COLS - lcx
+  mo := Mul(lrow(lcy), COLS)
+  so := Mul(lcy, COLS)
+  FOR j := lcx TO COLS - 1 - n
+    lm[mo + j] := lm[mo + j + n]
+    la[mo + j] := la[mo + j + n]
+    lsm[so + j] := lsm[so + j + n]
+    lsa[so + j] := lsa[so + j + n]
+  ENDFOR
+  FOR j := COLS - n TO COLS - 1
+    lm[mo + j] := 0
+    la[mo + j] := 0
+    lsm[so + j] := 0
+    lsa[so + j] := 0
+  ENDFOR
+ENDPROC
+
+-> row-content moves between visible slots, top = row `top`, count n
+PROC lrmove(top, n, down)
+  DEF r, j
+  IF n > (ROWS - top) THEN n := ROWS - top
+  FOR r := top TO ROWS - 1
+    lw[lrow(r)] := 0                 -> B7: dropwrapf across the region
+  ENDFOR
+  IF down
+    FOR r := ROWS - 1 TO top + n STEP -1
+      FOR j := 0 TO COLS - 1
+        lm[Mul(lrow(r), COLS) + j] := lm[Mul(lrow(r - n), COLS) + j]
+        la[Mul(lrow(r), COLS) + j] := la[Mul(lrow(r - n), COLS) + j]
+        lsm[Mul(r, COLS) + j] := lsm[Mul(r - n, COLS) + j]
+        lsa[Mul(r, COLS) + j] := lsa[Mul(r - n, COLS) + j]
+      ENDFOR
+    ENDFOR
+    FOR r := top TO top + n - 1
+      lclearrow(r)
+      FOR j := 0 TO COLS - 1
+        lsm[Mul(r, COLS) + j] := 0
+        lsa[Mul(r, COLS) + j] := 0
+      ENDFOR
+    ENDFOR
+  ELSE
+    FOR r := top TO ROWS - 1 - n
+      FOR j := 0 TO COLS - 1
+        lm[Mul(lrow(r), COLS) + j] := lm[Mul(lrow(r + n), COLS) + j]
+        la[Mul(lrow(r), COLS) + j] := la[Mul(lrow(r + n), COLS) + j]
+        lsm[Mul(r, COLS) + j] := lsm[Mul(r + n, COLS) + j]
+        lsa[Mul(r, COLS) + j] := lsa[Mul(r + n, COLS) + j]
+      ENDFOR
+    ENDFOR
+    FOR r := ROWS - n TO ROWS - 1
+      lclearrow(r)
+      FOR j := 0 TO COLS - 1
+        lsm[Mul(r, COLS) + j] := 0
+        lsa[Mul(r, COLS) + j] := 0
+      ENDFOR
+    ENDFOR
+  ENDIF
+ENDPROC
+
 PROC lbyte(c)
   IF c = 10
     lnl()
@@ -156,6 +276,25 @@ PROC lbyte(c)
     UNTIL (Mod(lcx, 8) = 0) OR (lcx >= COLS)
   ELSEIF c = 12
     lff()
+  ELSEIF c = 2
+    lk()
+  ELSEIF c = 3
+    lj()
+  ELSEIF c = 4
+    lich(2)
+  ELSEIF c = 5
+    ldch(2)
+  ELSEIF c = 6
+    lrmove(lcy, 1, TRUE)              -> L: insert line at cursor
+  ELSEIF c = 7
+    lrmove(lcy, 1, FALSE)             -> M: delete line at cursor
+  ELSEIF c = 14
+    lrmove(0, 1, FALSE)               -> S: whole region up
+  ELSEIF c = 15
+    lrmove(0, 1, TRUE)                -> T: whole region down
+  ELSEIF (c >= 20) AND (c <= 25)
+    lcy := c - 20
+    lcx := Mod(Mul(c - 20, 7) + c, COLS)
   ELSEIF c >= 32
     lputc(c)
   ENDIF                             -> byte 1: legacy no-op
@@ -187,12 +326,16 @@ PROC dscroll()
     dpend := 0
     RETURN
   ENDIF
-  FOR r := 0 TO ROWS - 2
-    dfd[r] := dfd[r + 1]
-    dfx0[r] := dfx0[r + 1]
-    dfx1[r] := dfx1[r + 1]
-  ENDFOR
-  dfd[ROWS - 1] := 0
+  IF dbhi >= 0                  -> E2b mirror: bounded shift
+    FOR r := Max(dblo - 1, 0) TO dbhi - 1
+      dfd[r] := dfd[r + 1]
+      dfx0[r] := dfx0[r + 1]
+      dfx1[r] := dfx1[r + 1]
+    ENDFOR
+    dfd[dbhi] := 0
+    dblo := Max(dblo - 1, 0)
+    dbhi := dbhi - 1
+  ENDIF
 ENDPROC
 
 PROC dnl()
@@ -210,22 +353,15 @@ PROC dwrapnl()
   dw[drow(dcy)] := 1
 ENDPROC
 
-PROC dmark(r, x0, x1)
-  IF dfull THEN RETURN
-  IF (r < 0) OR (r > (ROWS - 1)) THEN RETURN
-  IF dfd[r]
-    IF x0 < dfx0[r] THEN dfx0[r] := x0
-    IF x1 > dfx1[r] THEN dfx1[r] := x1
-  ELSE
-    dfd[r] := 1
-    dfx0[r] := x0
-    dfx1[r] := x1
-  ENDIF
-ENDPROC
+PROC dmark(r, x0, x1) IS dmark2(r, x0, x1)  -> v1's mark, forwarded:
+  -> the E2a patch converted dmark2 and this one kept writing boolean
+  -> dirt the gen-aware flush no longer accepts - the harness caught
+  -> its own split-brain within four packets
 
 PROC dputc(c)
   DEF off
   IF dcx >= COLS THEN dwrapnl()
+  dvblank := FALSE                  -> E5: a glyph on screen
   off := Mul(drow(dcy), COLS) + dcx
   dm[off] := c
   da[off] := curat
@@ -242,6 +378,7 @@ PROC dff()
   dcy := 0
   dfull := TRUE
   dpend := 0
+  dvblank := TRUE                   -> E5: the page is blank now
 ENDPROC
 
 PROC dflush()
@@ -256,33 +393,149 @@ PROC dflush()
       ENDFOR
     ENDFOR
     dfull := FALSE
+  ELSE
+    IF dpend > 0                    -> the ONE catch-up ScrollRaster
+      IF (forcevb = FALSE) AND (dvblank = FALSE)  -> E5: skip when blank.
+        FOR i := 0 TO SCELLS - Mul(dpend, COLS) - 1  -> forcevb forces the
+          dsm[i] := dsm[i + Mul(dpend, COLS)]        -> flag TRUE (a lie) =
+          dsa[i] := dsa[i + Mul(dpend, COLS)]        -> always-skip, which
+        ENDFOR                                        -> MUST diverge from
+        FOR i := SCELLS - Mul(dpend, COLS) TO SCELLS - 1  -> the always-
+          dsm[i] := 0                                     -> shifting legacy
+          dsa[i] := 0                                     -> on real content
+        ENDFOR
+      ENDIF
+      dpend := 0
+    ENDIF
+    IF dbhi >= dblo                 -> E2b mirror: scan the range only
+      FOR r := dblo TO dbhi
+        IF dfd[r] = dgen
+          soff := Mul(r, COLS)
+          moff := Mul(drow(r), COLS)
+          FOR x := dfx0[r] TO dfx1[r]
+            dsm[soff + x] := dm[moff + x]
+            dsa[soff + x] := da[moff + x]
+          ENDFOR
+        ENDIF
+      ENDFOR
+    ENDIF
+  ENDIF
+  dgen := dgen + 1                  -> E2a mirror: O(1) invalidation
+  IF dgen > 255
     FOR r := 0 TO ROWS - 1
       dfd[r] := 0
     ENDFOR
+    dgen := 1
+  ENDIF
+  dblo := ROWS
+  dbhi := -1
+ENDPROC
+
+-> E1: the deferred region ops - the SAME model changes as the l*
+-> twins, dirty marks instead of screen writes. dmarkrows = the
+-> handler's dfmarkrows.
+PROC dmark2(r, x0, x1)
+  IF dfull THEN RETURN
+  IF (r < 0) OR (r > (ROWS - 1)) THEN RETURN
+  IF dfd[r] = dgen              -> E2a mirror
+    IF x0 < dfx0[r] THEN dfx0[r] := x0
+    IF x1 > dfx1[r] THEN dfx1[r] := x1
   ELSE
-    IF dpend > 0                    -> the ONE catch-up ScrollRaster
-      FOR i := 0 TO SCELLS - Mul(dpend, COLS) - 1
-        dsm[i] := dsm[i + Mul(dpend, COLS)]
-        dsa[i] := dsa[i + Mul(dpend, COLS)]
+    dfd[r] := dgen
+    dfx0[r] := x0
+    dfx1[r] := x1
+  ENDIF
+  IF r < dblo THEN dblo := r    -> E2b mirror
+  IF r > dbhi THEN dbhi := r
+ENDPROC
+
+PROC dmarkrows(r0, r1)
+  DEF r
+  FOR r := r0 TO r1
+    dmark2(r, 0, COLS - 1)
+  ENDFOR
+ENDPROC
+
+PROC dk()
+  DEF j
+  IF dcx >= COLS THEN RETURN
+  FOR j := dcx TO COLS - 1
+    dm[Mul(drow(dcy), COLS) + j] := 0
+    da[Mul(drow(dcy), COLS) + j] := 0
+  ENDFOR
+  IF (dcy + 1) <= (ROWS - 1) THEN dw[drow(dcy + 1)] := 0
+  dmark2(dcy, dcx, COLS - 1)
+ENDPROC
+
+PROC dj()
+  DEF r
+  dk()
+  FOR r := dcy + 1 TO ROWS - 1
+    dclearrow(r)
+  ENDFOR
+  IF (dcy + 1) <= (ROWS - 1) THEN dmarkrows(dcy + 1, ROWS - 1)
+ENDPROC
+
+PROC dich(n)
+  DEF j, mo
+  IF dcx >= COLS THEN RETURN
+  IF n > (COLS - dcx) THEN n := COLS - dcx
+  mo := Mul(drow(dcy), COLS)
+  FOR j := COLS - 1 TO dcx + n STEP -1
+    dm[mo + j] := dm[mo + j - n]
+    da[mo + j] := da[mo + j - n]
+  ENDFOR
+  FOR j := dcx TO dcx + n - 1
+    dm[mo + j] := 0
+    da[mo + j] := 0
+  ENDFOR
+  dmark2(dcy, dcx, COLS - 1)
+ENDPROC
+
+PROC ddch(n)
+  DEF j, mo
+  IF dcx >= COLS THEN RETURN
+  IF n > (COLS - dcx) THEN n := COLS - dcx
+  mo := Mul(drow(dcy), COLS)
+  FOR j := dcx TO COLS - 1 - n
+    dm[mo + j] := dm[mo + j + n]
+    da[mo + j] := da[mo + j + n]
+  ENDFOR
+  FOR j := COLS - n TO COLS - 1
+    dm[mo + j] := 0
+    da[mo + j] := 0
+  ENDFOR
+  dmark2(dcy, dcx, COLS - 1)
+ENDPROC
+
+PROC drmove(top, n, down)
+  DEF r, j
+  IF n > (ROWS - top) THEN n := ROWS - top
+  FOR r := top TO ROWS - 1
+    dw[drow(r)] := 0
+  ENDFOR
+  IF down
+    FOR r := ROWS - 1 TO top + n STEP -1
+      FOR j := 0 TO COLS - 1
+        dm[Mul(drow(r), COLS) + j] := dm[Mul(drow(r - n), COLS) + j]
+        da[Mul(drow(r), COLS) + j] := da[Mul(drow(r - n), COLS) + j]
       ENDFOR
-      FOR i := SCELLS - Mul(dpend, COLS) TO SCELLS - 1
-        dsm[i] := 0                 -> the vacated strip, blit-cleared
-        dsa[i] := 0
+    ENDFOR
+    FOR r := top TO top + n - 1
+      dclearrow(r)
+    ENDFOR
+  ELSE
+    FOR r := top TO ROWS - 1 - n
+      FOR j := 0 TO COLS - 1
+        dm[Mul(drow(r), COLS) + j] := dm[Mul(drow(r + n), COLS) + j]
+        da[Mul(drow(r), COLS) + j] := da[Mul(drow(r + n), COLS) + j]
       ENDFOR
-      dpend := 0
-    ENDIF
-    FOR r := 0 TO ROWS - 1          -> drawmodelcells per dirty span
-      IF dfd[r]
-        soff := Mul(r, COLS)
-        moff := Mul(drow(r), COLS)
-        FOR x := dfx0[r] TO dfx1[r]
-          dsm[soff + x] := dm[moff + x]
-          dsa[soff + x] := da[moff + x]
-        ENDFOR
-        dfd[r] := 0
-      ENDIF
+    ENDFOR
+    FOR r := ROWS - n TO ROWS - 1
+      dclearrow(r)
     ENDFOR
   ENDIF
+  dmarkrows(top, ROWS - 1)
 ENDPROC
 
 PROC dbyte(c)
@@ -299,7 +552,27 @@ PROC dbyte(c)
   ELSEIF c = 12
     dff()
   ELSEIF c = 1
-    dflush()                        -> the CSI-J/K/... stand-in
+    dflush()                        -> a forcing packet (read/mode/key)
+  ELSEIF c = 2
+    dk()
+  ELSEIF c = 3
+    dj()
+  ELSEIF c = 4
+    dich(2)
+  ELSEIF c = 5
+    ddch(2)
+  ELSEIF c = 6
+    drmove(dcy, 1, TRUE)
+  ELSEIF c = 7
+    drmove(dcy, 1, FALSE)
+  ELSEIF c = 14
+    drmove(0, 1, FALSE)
+  ELSEIF c = 15
+    drmove(0, 1, TRUE)
+  ELSEIF (c >= 20) AND (c <= 25)
+    dcy := c - 20                   -> cursor jump, coords a pure
+    dcx := Mod(Mul(c - 20, 7) + c, COLS)  -> function of the byte -
+                                    -> identical in both replay loops
   ELSEIF c >= 32
     dputc(c)
   ENDIF
@@ -313,9 +586,15 @@ PROC feed(buf:PTR TO CHAR, n, tag)
   -> exactly render()'s bracket
   dpend := 0
   dfull := FALSE
-  FOR r := 0 TO ROWS - 1
-    dfd[r] := 0
-  ENDFOR
+  dgen := dgen + 1                  -> dfstart's E2a/b arming, mirrored
+  IF dgen > 255
+    FOR r := 0 TO ROWS - 1
+      dfd[r] := 0
+    ENDFOR
+    dgen := 1
+  ENDIF
+  dblo := ROWS
+  dbhi := -1
   FOR i := 0 TO n - 1
     dbyte(buf[i])
   ENDFOR
@@ -438,20 +717,38 @@ PROC main()
     n := 1 + rnd(PKMAX - 1)
     FOR i := 0 TO n - 1
       c := rnd(100)
-      IF c < 52
+      IF c < 40
         pkt[i] := 33 + rnd(90)      -> printable
-      ELSEIF c < 74
+      ELSEIF c < 56
         pkt[i] := 10                -> LF - scroll pressure is the point
-      ELSEIF c < 80
+      ELSEIF c < 60
         pkt[i] := 13
-      ELSEIF c < 86
+      ELSEIF c < 63
         pkt[i] := 9
-      ELSEIF c < 90
+      ELSEIF c < 65
         pkt[i] := 8
-      ELSEIF c < 94
+      ELSEIF c < 68
         pkt[i] := 12
+      ELSEIF c < 71
+        pkt[i] := 1                 -> mid-packet flush (forcing packet)
+      ELSEIF c < 74
+        pkt[i] := 2                 -> E1: K
+      ELSEIF c < 76
+        pkt[i] := 3                 -> J
+      ELSEIF c < 79
+        pkt[i] := 4                 -> @
+      ELSEIF c < 82
+        pkt[i] := 5                 -> P
+      ELSEIF c < 85
+        pkt[i] := 6                 -> L
+      ELSEIF c < 88
+        pkt[i] := 7                 -> M
+      ELSEIF c < 90
+        pkt[i] := 14                -> S
+      ELSEIF c < 92
+        pkt[i] := 15                -> T
       ELSE
-        pkt[i] := 1                 -> mid-packet flush
+        pkt[i] := 20 + rnd(6)       -> cursor jump
       ENDIF
     ENDFOR
     feed(pkt, n, 100 + p)
@@ -460,10 +757,50 @@ PROC main()
       RETURN
     ENDIF
   ENDFOR
-  IF fails = 0
-    WriteF('PASS: \d directed + \d random packets, engines identical\n',
-           10, PACKETS)
-  ELSE
-    WriteF('\d FAILURES\n', fails)
+  IF fails > 0
+    WriteF('\d FAILURES in the honest run\n', fails)
+    RETURN
   ENDIF
+  WriteF('honest run PASS: 10 directed + \d random packets identical\n', PACKETS)
+  -> E5 control: force the blank-skip flag TRUE always (claim every
+  -> screen is blank, even mid-content). A correct harness MUST now
+  -> diverge - if it does not, the blank-skip test proves nothing.
+  forcevb := TRUE
+  fails := 0
+  seed := $1234
+  dtop := 0; dcx := 0; dcy := 0; ltop := 0; lcx := 0; lcy := 0
+  FOR i := 0 TO MCELLS - 1
+    lm[i] := 0; la[i] := 0; dm[i] := 0; da[i] := 0
+  ENDFOR
+  FOR i := 0 TO SCELLS - 1
+    lsm[i] := 0; lsa[i] := 0; dsm[i] := 0; dsa[i] := 0
+  ENDFOR
+  FOR i := 0 TO SBMAX - 1
+    lw[i] := 0; dw[i] := 0
+  ENDFOR
+  dvblank := TRUE
+  FOR p := 0 TO PACKETS - 1
+    curat := 1 + Mod(p, 7)
+    n := 1 + rnd(PKMAX - 1)
+    -> alternate: a glyph packet lays down content, the NEXT packet is
+    -> pure newlines that scroll it WITHOUT rewriting - exactly the
+    -> case the model-repaint cannot mask, so a wrong skip must show
+    IF Mod(p, 2) = 0
+      FOR i := 0 TO n - 1
+        pkt[i] := 33 + rnd(90)
+      ENDFOR
+    ELSE
+      FOR i := 0 TO n - 1
+        pkt[i] := 10
+      ENDFOR
+    ENDIF
+    feed(pkt, n, 200 + p)
+    IF fails > 0
+      WriteF('control (forced-blank lie) correctly DIVERGES at packet \d - harness can see\n', 200 + p)
+      WriteF('PASS\n')
+      RETURN
+    ENDIF
+  ENDFOR
+  WriteF('control did NOT diverge - the harness is BLIND, blank-skip unproven\n')
+  WriteF('FAIL\n')
 ENDPROC

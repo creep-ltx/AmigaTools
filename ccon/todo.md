@@ -3689,6 +3689,171 @@ Boot checklist (REBOOT FIRST):
       sync-line should read ~2.1-2.5s (stock: 3.40) IN the standard
       run, no fresh window needed
 
+## 1.2.4 — the 15/15 hunt (his call, 23.7.26 evening: beat both
+## competitors in EVERY test; no asm, no file split - pure E)
+
+Roadmap in the perf notes (outside repo). The stock-timing scoreboard
+to beat: 10 rows lost, all reducing to (A) per-packet CPU cost at
+14MHz and (B) the choke-flush conservatism for pixel escapes.
+
+### 1.2.4b1 — E1: the eight escapes join the engine (23.7.26)
+
+CSI K/J/@/P/L/M/S/T are model ops with dirty marks now. The old
+procs' model code is UNTOUCHED - under dfon they just skip their
+pixel op (ScrollRaster/RectFill/drawmrow) and mark the affected
+rows/spans; dfflush repaints from the model with everything else the
+packet did. The eight dfflush() calls in csidispatch are gone, plus
+RI's top-margin flush. Legacy (sb=NIL) consoles keep immediate blits.
+Consequences: no per-op blit, full S5 pooling for escape-heavy
+streams, and ops that cancel inside a flush window (Ed's L+M pairs)
+cost only the model moves - the same deferral dividend console.device
+has always collected. The ?47 alt-screen switches KEEP their flush
+(they swap the whole model; rare; correct).
+
+Harness: defertest v2 - both engines grew the eight ops (same model
+semantics, immediate screen mirror vs dirty marks) plus cursor-jump
+ops whose coordinates are a pure function of the op byte (identical
+across both replay loops - no RNG desync, the burst() lesson).
+PASS: 10 directed + 4000 random packets, engines identical, first run.
+
+Boot checklist (REBOOT FIRST) - the risk surface is the ESCAPE
+CLIENTS, so Ed and More carry this one:
+
+- [ ] Ed: open a file, arrows everywhere, PAGE up/down, insert and
+      delete lines mid-screen, join/split lines, menus, resize,
+      save+quit - the full workout; Ed is the L/M/S/@/P client
+- [ ] Ed scroll feel: line-scroll (CSI S) latency - should feel THE
+      SAME or snappier (ops pool ≤20ms; if it feels laggy, say so)
+- [ ] More: pages, /search (uses erase ops), q - page content
+      complete every flip
+- [ ] shell: a \r progress bar with CSI K (erase-eol shape) renders
+      clean; type during output
+- [ ] ls colours + scrollback + everything from the 1.2.3 list once,
+      quickly (mask interactions with the new deferred ops)
+- [ ] conbench SYNC stock config: erase-eol / insdel-char /
+      insdel-line / vt-frame are the rows E1 targets - expect all
+      four to flip or near-flip
+- [ ] conbench SYNC dev config once too (regression watch on the
+      already-won rows)
+
+### 1.2.4b2 — E2, the CPU diet (23.7.26, boot-green, his runs)
+
+All five courses in one build: (a) generation-counter dirty flags
+(one ++ invalidates every mark; the per-packet O(rows) clear+scan
+loops are GONE, array swept once per 255 arms); (b) dirty lo/hi
+bounds (dfscroll shifts and dfflush scans only live rows); (c)
+blank runs are masked RectFills in drawmrow AND drawmodelcells, not
+Text-ed spaces; (d) long attr/style mirror fills ride exec CopyMem
+from prefilled run buffers (short runs keep the loop - sgr-perchar
+must not pay 256-byte refills per 8-cell run); (e) printable-class
+table + the printable branch hoisted FIRST in render's dispatch
+(was bottom of a ten-compare cascade). defertest sim mirrored the
+gen+bounds bookkeeping and promptly caught its own v1/v2 split
+brain (two mark procs, one still writing boolean dirt - the
+handler's single dfmark was never wrong); unified, PASS 4010.
+
+RESULTS (his runs): stock TOTAL 121.70 -> 106.76, SEVEN of 15 rows
+won (insdel-char FLIPPED past CON:'s 2.88 at 2.72; erase-eol held;
+sync-line 6.00 -> 5.38); dev TOTAL 4.42. DIAGNOSIS of the remaining
+eight: cadence, not CPU - at 14MHz the CLIENT's write rate outruns
+the 20ms timer's pooling, so flushes run near-per-packet and every
+flush pays its blit; the dev config pools 60 packets a window and
+collapses the same rows to 0.04?. Stock CON: wins those rows via
+device-queue backpressure pooling. Hence:
+
+### 1.2.4b3 — E4: drain-on-flush (23.7.26, deployed, awaiting boot)
+
+When the flush timer fires, swaccept() sweeps the port for
+consecutive ACTION_WRITEs that can legally join a write-behind
+buffer (conok, no selection drag, not iconified, fits) - accepting
+them with dowrite's exact state resets and replies - and STOPS at
+the first packet it cannot take, stashing it untouched; the main
+loop dispatches the stash through normal dopkt AFTER the flush.
+Batch size now grows with load (the ROM's own backpressure trick at
+our layer); idle latency stays the 20ms timer. Sweeping happens
+ONLY on the timer path - choke flushes (reads, keys, modes, close)
+are byte-identical to b2, which is the whole ordering argument.
+
+Boot checklist (REBOOT FIRST):
+- [ ] the full canary lap: Ed workout, More, ls colours +
+      scrollback, Ctrl+R, ghost, selection DURING heavy output
+      (parked writes + stash interplay), iconify mid-output,
+      TWO windows with interleaved output (the sweep feeds foreign
+      consoles' buffers - cross-window ordering eyes)
+- [ ] Ctrl+C mid-list (breaktask set at sweep-accept too)
+- [ ] conbench SYNC stock: scroll-nl vs 4.06 is the headline;
+      insdel-line vs 3.02, vt-frame vs 3.44, clear-page vs 8.54,
+      sgr-colour vs 16.52, sgr-perchar vs 7.90, cursor-pos vs 3.44
+- [ ] conbench SYNC dev once (regression watch)
+
+**b3 VERDICT (his runs 19:5x): stock 106.94 / dev 4.38 - IDENTICAL
+to b2. The sweep was a no-op by construction: main's drain has
+already emptied the port into the buffers before the timer is seen.
+AND his catch: "Ed feels kinda sluggish with 1.2.4b3" - E1 removed
+the choke-flushes that had made Ed accidentally synchronous, and
+Ed parks its read BEFORE painting, so the read-choke never fires:
+every paint waited for the 20ms timer.**
+
+### 1.2.4b4 — E4 second draft + Ed's feel (23.7.26, deployed)
+
+- E4c, the Ed fix: a console with a PARKED read or WaitForChar is
+  interactive - dowrite flushes eagerly instead of arming the
+  timer. Pending input = latency beats batching; dir/type have no
+  parked read and keep full pooling.
+- E4 rounds: flushexpired is a bounded backpressure loop now
+  (render, sweep what arrived DURING the render, render again, max
+  4 rounds; a stashed non-joiner ends the burst) - the packets
+  that matter arrive while a flush renders, not before it.
+- E4b: clearrow's three 77-iteration E loops are three CopyMems
+  (ROM asm). At chip-ram-effective 14MHz those loops were ~1ms per
+  scrolled LINE - ten per scroll-nl packet, the row's real cost.
+
+Boot: the b3 checklist above, plus ED FEEL FIRST - it should be
+back to 1.2.3 snappiness (pending-read flush = per-keystroke
+rendering); if it still drags, say so before anything else.
+
+### 1.2.4b6 — E5: blank-scroll skip (23.7.26, real-HW-driven)
+
+His A1200+PiStorm (real AGA) exposed what emulation hid: scroll-nl
+5.60 vs stock CON: 0.18 (31x) - we ScrollRaster BLANK scrolls on a
+big 82x53 window at real silicon speed; CON skips them. One row =
+5.4 of CCON's 13.4 real-HW total; fixing it flips a 5% overall LOSS
+to a 38% win.
+
+The fix: per-console curcon.vblank - TRUE = the visible model region
+is provably all-blank, so a scroll moves blank->blank and clears an
+already-blank strip = a pixel no-op the blitter skips (both
+screenscroll and dfflush's catch-up). Sound because at scroll time
+both modes have ALREADY erased the cursor/blip (curserase/eraseedit
+run before render), so visible-model-blank == visible-pixels-blank.
+Tracking is O(1): TRUE on form feed, FALSE on any glyph to the
+visible region (the printable run, outchr, dfputc), and recomputed
+accurately at the ONE chokepoint every full repaint flows through -
+vblankscan() at the end of redraw() (resize/reopen/altrestore/
+scrollback/dffull all route through it; scrolled-back views report
+FALSE since visrow addresses live rows not history). A TRUE is never
+a lie - only a real clear sets it.
+
+Harness: defertest gained the flag + skip in the deferred engine
+(legacy always-blits = reference); honest run 4010 packets identical
+(skip is transparent when it fires), and a CONTROL forcing the flag
+TRUE-always diverges at the first content-then-scroll packet - the
+harness can see, so the PASS is real.
+
+Boot checklist (REBOOT FIRST):
+- [ ] scroll-nl feel: a file of blank lines / conbench scroll-nl -
+      should be near-instant now (was the 5.6s real-HW dog)
+- [ ] REGRESSION WATCH - content scrolling must still be perfect:
+      dir SYS: ALL, type a long file, ls - text scrolls correctly,
+      nothing frozen or stale at the top
+- [ ] Ed: page up/down through a document - the disappearing-rows
+      thing he noticed; blank regions skip, content regions blit
+- [ ] clear then output then scroll - the vblank TRUE->FALSE flip
+- [ ] scrollback up into history then back (viewoff path -> FALSE)
+- [ ] iconify/restore, resize, More, colours - vblankscan chokepoint
+- [ ] REAL HARDWARE conbench if available: scroll-nl vs 0.18 is the
+      whole point; expect CCON total ~8s vs CON 12.8
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

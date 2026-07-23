@@ -346,6 +346,19 @@ OBJECT console
   mpens,
   mmask,
   mfloor,
+  -> E5 (1.2.4b6): blank-scroll skip. TRUE = the visible model region
+  -> is provably all-blank, so a scroll of it moves blank->blank and
+  -> clears an already-blank strip - a pixel no-op the blitter need not
+  -> perform. Real hardware (PiStorm/AGA, 82x53) priced scroll-nl's
+  -> blank blits at 5.6s vs stock CON:'s 0.18 - CON skips them, and on
+  -> real silicon a big-window ScrollRaster is expensive. Sound because
+  -> at scroll time both modes have ALREADY erased the cursor/blip
+  -> (curserase / eraseedit run before render), so visible-model-blank
+  -> equals visible-pixels-blank exactly. Set TRUE on form feed, FALSE
+  -> on any glyph written to the visible region, conservative FALSE on
+  -> every full-redraw path (resize/reopen/altrestore/scrollback) - the
+  -> flag only goes TRUE via a real clear, so a TRUE is never a lie.
+  vblank,
   appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
                                 -> AppIcon while iconified (NIL = not
                                 -> iconified). RightAmiga+I zips the window
@@ -378,6 +391,16 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> flushes every write-behind buffer that has bytes.
     ftreq=NIL:PTR TO timerequest,
     flusharmed=FALSE,
+    -> E4 (1.2.4b3): drain-on-flush. When the flush timer fires, the
+    -> port is swept for consecutive ACTION_WRITEs that can join the
+    -> batch before the render - backpressure-driven pooling, the same
+    -> effect console.device gets from its device queue. The first
+    -> packet the sweep cannot take is stashed UNTOUCHED and re-enters
+    -> the normal dispatch after the flush, so ordering and every
+    -> special case (selection parking, iconify, reads, modes) run
+    -> through the exact code they always did. Sweeping happens ONLY
+    -> on the timer path - never inside choke flushes.
+    sweepstash=NIL:PTR TO dospacket,
     rawdef=FALSE,               -> Startup="RAW": streams open raw (M9)
     devname[32]:ARRAY OF CHAR,  -> the mounted device NAME (CON/RAW/CCON/
                                 -> CRAW) read from dol_Name at startup, so
@@ -491,6 +514,23 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> dffull redraw has cleared the old content at the OLD mask.
     maskon=FALSE,
     dfnarrow=FALSE,
+    -> E2 (1.2.4b2), the CPU diet's state:
+    dfgen=0,                    -> E2a: dirty = (dfd[r] = dfgen); a ++
+                                -> invalidates every mark in O(1), the
+                                -> array is only swept on wrap (1/255)
+    dflo=0, dfhi=-1,            -> E2b: the dirty row range - flush
+                                -> scans and dfscroll shifts ONLY this
+    prtbl[256]:ARRAY OF CHAR,   -> E2e: printable-class table, one
+                                -> lookup where the render loop paid a
+                                -> three-compare cascade per byte
+    atrun[256]:ARRAY OF CHAR,   -> E2d: prefilled attr/style runs -
+    atrunv=-1,                  -> long mirror fills become one exec
+    styrun[256]:ARRAY OF CHAR,  -> CopyMem (ROM asm) instead of an E
+    styrunv=-1,                 -> byte loop per cell
+    zerorun[256]:ARRAY OF CHAR, -> E4b: clearrow's three 77-iteration
+                                -> E loops become three CopyMems - at
+                                -> chip-ram-effective CPU speed those
+                                -> loops were ~1ms per scrolled LINE
     dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE
 
 PROC main()
@@ -591,6 +631,13 @@ PROC main()
   -> exists yet at this point in main() for it to scratch through)
   FOR tmp := 0 TO HISTMAX - 1
     ghist[tmp] := String(LINEMAX)
+  ENDFOR
+
+  -> E2e: the printable-class table - exactly render()'s old predicate,
+  -> ((c >= 32 AND c <= 126) OR c >= 160), built once
+  FOR tmp := 0 TO 255
+    prtbl[tmp] := IF ((tmp >= 32) AND (tmp <= 126)) OR (tmp >= 160) THEN 1 ELSE 0
+    zerorun[tmp] := 0           -> E globals start as garbage
   ENDFOR
 
   -> v1.1b2: the disk-font loader plumbing. The helper's entry is
@@ -825,6 +872,11 @@ PROC main()
           ENDIF
         ENDIF
       UNTIL msg = NIL
+      IF sweepstash             -> E4: the packet the sweep declined
+        pkt := sweepstash       -> rides back into the normal dispatch,
+        sweepstash := NIL       -> AFTER the flush it queued behind
+        dopkt(pkt)
+      ENDIF
     ENDIF
     -> ICONIFY: drain Workbench's AppMessages (AppIcon double-clicks)
     IF wbport
@@ -978,6 +1030,7 @@ PROC coninit(c:PTR TO console)
   c.mpens := 0                  -> 1.2.3: masked rendering - defaults
   c.mmask := $FF                -> stay FULL until gridcalc probes the
   c.mfloor := $FF               -> real bitmap and seeds the pens
+  c.vblank := TRUE              -> E5: a fresh console draws on blank
   c.srbuf := String(64)
   c.srstash := String(404)
   c.sridx := -1
@@ -1505,7 +1558,21 @@ PROC dowrite(pkt:PTR TO dospacket)
   curcon.wolen := curcon.wolen + len
   ReplyPkt(pkt, len, 0)
   IF WODEFER
-    armflush()
+    IF (curcon.rdn > 0) OR (curcon.wcn > 0)
+      flushout(curcon)          -> E4c (his catch: "Ed feels kinda
+                                -> sluggish"): a client with a read or
+                                -> WaitForChar PARKED is interactive -
+                                -> it paints, then waits for the next
+                                -> key, and never sends the read that
+                                -> would choke-flush. Before E1 its
+                                -> escape traffic flushed by accident;
+                                -> now we flush ON PURPOSE: pending
+                                -> input = latency beats batching.
+                                -> Batch producers (dir, type) have no
+                                -> parked read and keep full pooling.
+    ELSE
+      armflush()
+    ENDIF
   ELSE
     flushout(curcon)            -> b3: prove the plumbing, keep the
   ENDIF                         -> render pattern of b2 exactly
@@ -1564,17 +1631,91 @@ PROC armflush()
   flusharmed := TRUE
 ENDPROC
 
+-> E4: the sweep. Pull every immediately-available ACTION_WRITE that
+-> can legally join a write-behind buffer off the port, accept+reply
+-> it (the same accept dowrite performs, state resets included), and
+-> stop at the first packet that cannot join - stashed for the main
+-> loop to dispatch after the flush. At 14MHz the client's own write
+-> cadence outruns any fixed timer's pooling; this makes batch size
+-> grow with load instead, which is exactly how the ROM console wins
+-> its scroll rows.
+PROC swaccept()
+  DEF msg:PTR TO mn, pkt:PTR TO dospacket, c2:PTR TO console,
+      sender:PTR TO mp, old:PTR TO console
+  IF sweepstash THEN RETURN     -> one stash slot; occupied = no sweep
+  old := curcon
+  WHILE TRUE
+    msg := GetMsg(port)
+    IF msg = NIL
+      curcon := old
+      RETURN
+    ENDIF
+    pkt := msg.ln.name
+    IF pkt.type = ACTION_WRITE
+      c2 := pkt.arg1
+      IF conok(c2) = FALSE
+        ReplyPkt(pkt, -1, ERROR_OBJECT_NOT_FOUND)  -> dopkt's own answer
+      ELSEIF (c2.selon = FALSE) AND (c2.appicon = NIL) AND
+             (c2.wob <> NIL) AND (c2.win <> NIL) AND
+             (pkt.arg3 >= 0) AND ((c2.wolen + pkt.arg3) <= WOBSZ)
+        curcon := c2            -> the accept-time state resets, exactly
+        sender := pkt.port      -> dowrite's: break owner, search exit,
+        c2.breaktask := sender.sigtask  -> selection, live view, menu
+        IF c2.sbsrch THEN sbexit()
+        clearsel()
+        snaplive()
+        tcclose()
+        CopyMem(pkt.arg2, c2.wob + c2.wolen, pkt.arg3)
+        c2.wolen := c2.wolen + pkt.arg3
+        ReplyPkt(pkt, pkt.arg3, 0)
+      ELSE
+        sweepstash := pkt       -> can't join (parked window, full
+        curcon := old           -> buffer, oversize): hold the line
+        RETURN                  -> HERE - ordering is sacred
+      ENDIF
+    ELSE
+      sweepstash := pkt         -> not a write: everything after it
+      curcon := old             -> waits until it has been dispatched
+      RETURN
+    ENDIF
+  ENDWHILE
+ENDPROC
+
 PROC flushexpired()
-  DEF c:PTR TO console, again=FALSE
+  DEF c:PTR TO console, again=FALSE, round, work
+  -> E4 second draft: the b3 sweep-before-render was a no-op - the
+  -> main loop has ALREADY drained the port into the buffers by the
+  -> time the timer is seen. The packets that matter arrive WHILE a
+  -> flush renders (the client is unblocked and writing); so: render,
+  -> sweep what bred during the render, render again - a bounded
+  -> backpressure loop, which is the console.device queue shape for
+  -> real. Four rounds caps the latency a sustained burst can add to
+  -> input handling; a stashed (non-joinable) packet ends the burst
+  -> so ordering never waits on it.
+  round := 0
+  WHILE round < 4
+    work := FALSE
+    c := conlist
+    WHILE c
+      IF (c.wolen > 0) AND (c.selon = FALSE)
+        swaccept()              -> what arrived during the last render
+        flushout(c)
+        work := TRUE
+      ENDIF
+      c := c.next
+    ENDWHILE
+    IF (work = FALSE) OR (sweepstash <> NIL)
+      round := 4
+    ELSE
+      swaccept()                -> one more look before deciding the
+      round := round + 1        -> burst is over
+    ENDIF
+  ENDWHILE
   c := conlist
   WHILE c
     IF c.wolen > 0
-      IF c.selon
-        again := TRUE           -> a drag holds the screen still (the
-      ELSE                      -> stock freeze) - hold its bytes too,
-        flushout(c)             -> try again next tick
-      ENDIF
-    ENDIF
+      again := TRUE             -> selon holds, or a burst outran the
+    ENDIF                       -> four rounds - next tick collects it
     c := c.next
   ENDWHILE
   IF again THEN armflush()
@@ -3256,17 +3397,11 @@ PROC setpens()
 ENDPROC
 
 PROC clearrow(r)
-  DEF i, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR
-  m := visrow(r)
-  a := sarow(r)
-  stp := ssrow(r)
-  FOR i := 0 TO curcon.cols - 1
-    m[i] := 0
-    a[i] := 0
-    stp[i] := 0
-  ENDFOR
-  setwrapf(r, 0)                -> B7: an empty row continues nothing
-ENDPROC
+  CopyMem(zerorun, visrow(r), curcon.cols)  -> E4b: ROM asm, not three
+  CopyMem(zerorun, sarow(r), curcon.cols)   -> stores per cell in an E
+  CopyMem(zerorun, ssrow(r), curcon.cols)   -> loop - this runs once per
+  setwrapf(r, 0)                -> B7        scrolled line, ~1ms at
+ENDPROC                         -> chip-ram-effective 14MHz before
 
 -> paint one MODEL ring row (by ring index) at pixel row y, in
 -> attr-batched runs - the piece redraw, drawmodelrow and the menu
@@ -3305,19 +3440,30 @@ PROC drawmrow(idx, y)
     WHILE (j < cols) AND (a[j] = at) AND (stp[j] = sy)
       j++
     ENDWHILE
-    fg := at AND 15
-    bg := Shr(at, 4) AND 7
-    IF sy AND 4                 -> inverse cell: the drawselrow swap
-      IF fg = bg THEN fg := dfg
-      SetAPen(rp, bg)
-      SetBPen(rp, fg)
+    IF (at = 0) AND (sy = 0)
+      -> E2c: a blank run is a FILL, not a Text of spaces. Attr 0 is
+      -> fg 0 on bg 0 - all-black cells whatever the glyph bytes say -
+      -> and at 14MHz Text-ing 77 spaces per empty row was the single
+      -> biggest cost of scroll-heavy flushes. RectFill rides the
+      -> plane mask like everything else.
+      SetAPen(rp, 0)
+      RectFill(rp, left + Mul(i, cw), ybase - k.baseline,
+               left + Mul(j, cw) - 1, ybase - k.baseline + k.ch - 1)
     ELSE
-      SetAPen(rp, fg)
-      SetBPen(rp, bg)
+      fg := at AND 15
+      bg := Shr(at, 4) AND 7
+      IF sy AND 4               -> inverse cell: the drawselrow swap
+        IF fg = bg THEN fg := dfg
+        SetAPen(rp, bg)
+        SetBPen(rp, fg)
+      ELSE
+        SetAPen(rp, fg)
+        SetBPen(rp, bg)
+      ENDIF
+      setsoft(sy)
+      Move(rp, left + Mul(i, cw), ybase)
+      Text(rp, rowbuf + i, j - i)
     ENDIF
-    setsoft(sy)
-    Move(rp, left + Mul(i, cw), ybase)
-    Text(rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
   setsoft(0)
@@ -4032,6 +4178,35 @@ PROC redraw()
   ENDFOR
   SetAPen(curcon.rp, curcon.deffg)
   SetBPen(curcon.rp, 0)
+  vblankscan()                  -> E5: redraw is the chokepoint EVERY
+                                -> full repaint flows through (resize,
+                                -> reopen, altrestore, scrollback,
+                                -> dffull) - recompute vblank here once
+                                -> and no path can leave it stale
+ENDPROC
+
+-> E5: is the LIVE visible region all-blank? Cheap (rows x cols byte
+-> reads, next to redraw's rows x cols Text()s). Scrolled-back views
+-> show history, not the live rows visrow() addresses - and vblank is
+-> only read for the OUTPUT scroll blit, which runs at viewoff = 0 -
+-> so a scrolled-back redraw conservatively reports FALSE.
+PROC vblankscan()
+  DEF r, i, m:PTR TO CHAR
+  IF curcon.sb = NIL THEN RETURN
+  IF curcon.viewoff > 0
+    curcon.vblank := FALSE
+    RETURN
+  ENDIF
+  FOR r := 0 TO curcon.rows - 1
+    m := visrow(r)
+    FOR i := 0 TO curcon.cols - 1
+      IF m[i] <> 0
+        curcon.vblank := FALSE
+        RETURN
+      ENDIF
+    ENDFOR
+  ENDFOR
+  curcon.vblank := TRUE
 ENDPROC
 
 -> the title bar doubles as the scroll-position indicator. The buffer
@@ -4179,12 +4354,18 @@ PROC altrestore()
   curcon.ancy := curcon.altancy
   altdrop()
   curcon.viewoff := 0
-  maskscan()                    -> b2: the restored transcript may be
-                                -> wider-penned than the alt page the
-                                -> mask narrowed to (this runs INSIDE
-                                -> the render bracket - ?47l - so the
-                                -> repaint below draws full-and-true)
+  -> b5, HIS CATCH (Ed garbage in the restored transcript + a corrupted
+  -> first command): the b2 shape here was maskscan-BEFORE-redraw,
+  -> written for the restore-widens case (colourful transcript behind a
+  -> plain alt page) - but quitting Ed is the restore-NARROWS case: the
+  -> alt page used pens 2/3 (plane 1), the transcript is pen 1, the
+  -> scan shrank the mask to one plane and the repaint could not CLEAR
+  -> Ed's plane-1 bits. Stale planes over restored text. Rule (c) done
+  -> properly: the restore repaint runs at FULL depth - correct against
+  -> any glass, both directions - and the scan narrows AFTERWARDS.
+  IF maskon THEN curcon.rp.mask := $FF
   redraw()
+  maskscan()
   settitle()
 ENDPROC TRUE
 
@@ -4204,10 +4385,12 @@ ENDPROC
 -> scroll the whole screen up one line: pixels, model, edit anchor.
 -> The old top row becomes history - just advance the ring, no copying.
 PROC screenscroll()
-  ScrollRaster(curcon.rp, 0, curcon.ch,
-               curcon.win.borderleft, curcon.win.bordertop,
-               curcon.win.width - curcon.win.borderright - 1,
-               curcon.win.height - curcon.win.borderbottom - 1)
+  IF curcon.vblank = FALSE       -> E5: skip the blit on an all-blank
+    ScrollRaster(curcon.rp, 0, curcon.ch,   -> screen (moves nothing)
+                 curcon.win.borderleft, curcon.win.bordertop,
+                 curcon.win.width - curcon.win.borderright - 1,
+                 curcon.win.height - curcon.win.borderbottom - 1)
+  ENDIF
   IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1       -> the edit anchor scrolled with the rest
   IF curcon.sb
     curcon.sbtop := curcon.sbtop + 1
@@ -4247,7 +4430,7 @@ ENDPROC
 ->   flag/span arrays up one row, so a row marked at position r is
 ->   repainted where its model cells ACTUALLY are at flush time.
 -> - Escapes that read or move pixels (CSI J/K/L/M/S/T/@/P, the ?47
-->   alternate screen, RI's top-margin insert) dfflush() FIRST, then run
+->   alternate screen; E1 retired the rest of the old list) dfflush() FIRST, then run
 ->   their 1.2.1 bodies against a truthful screen. Ed and More therefore
 ->   see the exact same per-op behaviour as before, just with the
 ->   sequential stretches between their escapes batched.
@@ -4269,9 +4452,15 @@ PROC dfstart()
   dfpend := 0
   dffull := FALSE
   dfnarrow := FALSE
-  FOR r := 0 TO curcon.rows - 1
-    dfd[r] := 0
-  ENDFOR
+  dfgen := dfgen + 1            -> E2a: one increment invalidates every
+  IF dfgen > 255                -> stale mark; the array sweep happens
+    FOR r := 0 TO DFROWS - 1    -> once per 255 arms, not once per
+      dfd[r] := 0               -> packet
+    ENDFOR
+    dfgen := 1
+  ENDIF
+  dflo := curcon.rows           -> E2b: empty range (lo > hi)
+  dfhi := -1
 ENDPROC
 
 PROC dfscroll()
@@ -4289,12 +4478,16 @@ PROC dfscroll()
     dfpend := 0                 -> keeping - switch to rebuild mode
     RETURN
   ENDIF
-  FOR r := 0 TO curcon.rows - 2 -> dirt scrolls with the content
-    dfd[r] := dfd[r + 1]
-    dfx0[r] := dfx0[r + 1]
-    dfx1[r] := dfx1[r + 1]
-  ENDFOR
-  dfd[curcon.rows - 1] := 0
+  IF dfhi >= 0                  -> E2b: dirt scrolls with the content,
+    FOR r := Max(dflo - 1, 0) TO dfhi - 1  -> but only LIVE dirt - the
+      dfd[r] := dfd[r + 1]      -> old loop walked every row per scroll
+      dfx0[r] := dfx0[r + 1]
+      dfx1[r] := dfx1[r + 1]
+    ENDFOR
+    dfd[dfhi] := 0              -> the vacated top of the range
+    dflo := Max(dflo - 1, 0)
+    dfhi := dfhi - 1            -> hi < lo again = range empty
+  ENDIF
 ENDPROC
 
 -> outnl()/outwrapnl(), deferred: same cursor and wrap-flag mechanics,
@@ -4317,14 +4510,25 @@ ENDPROC
 PROC dfmark(r, x0, x1)
   IF dffull THEN RETURN         -> rebuild repaints everything anyway
   IF (r < 0) OR (r > (curcon.rows - 1)) THEN RETURN
-  IF dfd[r]
+  IF dfd[r] = dfgen             -> E2a: dirty means CURRENT generation
     IF x0 < dfx0[r] THEN dfx0[r] := x0
     IF x1 > dfx1[r] THEN dfx1[r] := x1
   ELSE
-    dfd[r] := 1
+    dfd[r] := dfgen
     dfx0[r] := x0
     dfx1[r] := x1
   ENDIF
+  IF r < dflo THEN dflo := r    -> E2b
+  IF r > dfhi THEN dfhi := r
+ENDPROC
+
+-> E1 (1.2.4): full-width row marks for the region operations - the
+-> escapes' shape when they join the engine
+PROC dfmarkrows(r0, r1)
+  DEF r
+  FOR r := r0 TO r1
+    dfmark(r, 0, curcon.cols - 1)
+  ENDFOR
 ENDPROC
 
 -> outchr(), deferred: model cell + dirty mark, no Text. Only TAB needs
@@ -4332,6 +4536,7 @@ ENDPROC
 PROC dfputc(c)
   DEF m:PTR TO CHAR
   IF curcon.cx >= curcon.cols THEN dfwrapnl()
+  curcon.vblank := FALSE        -> E5: see the printable run
   m := visrow(curcon.cy)
   m[curcon.cx] := c
   m := sarow(curcon.cy)
@@ -4348,28 +4553,37 @@ PROC dfflush()
   IF dffull
     redraw()
     dffull := FALSE
-    FOR r := 0 TO curcon.rows - 1  -> spans from before the rebuild
-      dfd[r] := 0                  -> tripped are stale - drop them
-    ENDFOR
     IF dfnarrow                    -> b2: the redraw above repainted every
       maskscan()                   -> visible cell at the old mask; the
       dfnarrow := FALSE            -> page is truthful, narrow to it
     ENDIF
   ELSE
     IF dfpend > 0
-      ScrollRaster(curcon.rp, 0, Mul(dfpend, curcon.ch),
-                   curcon.win.borderleft, curcon.win.bordertop,
-                   curcon.win.width - curcon.win.borderright - 1,
-                   curcon.win.height - curcon.win.borderbottom - 1)
+      IF curcon.vblank = FALSE    -> E5: no blit when nothing to move
+        ScrollRaster(curcon.rp, 0, Mul(dfpend, curcon.ch),
+                     curcon.win.borderleft, curcon.win.bordertop,
+                     curcon.win.width - curcon.win.borderright - 1,
+                     curcon.win.height - curcon.win.borderbottom - 1)
+      ENDIF
       dfpend := 0
     ENDIF
-    FOR r := 0 TO curcon.rows - 1
-      IF dfd[r]
-        drawmodelcells(r, dfx0[r], dfx1[r])
-        dfd[r] := 0
-      ENDIF
-    ENDFOR
+    IF dfhi >= dflo                -> E2b: scan the dirty RANGE only
+      FOR r := dflo TO dfhi
+        IF dfd[r] = dfgen
+          drawmodelcells(r, dfx0[r], dfx1[r])
+        ENDIF
+      ENDFOR
+    ENDIF
   ENDIF
+  dfgen := dfgen + 1               -> E2a: O(1) invalidation of every
+  IF dfgen > 255                   -> mark (stale spans after dffull
+    FOR r := 0 TO DFROWS - 1       -> included - the old explicit drop
+      dfd[r] := 0                  -> loop is subsumed)
+    ENDFOR
+    dfgen := 1
+  ENDIF
+  dflo := curcon.rows
+  dfhi := -1
 ENDPROC
 
 PROC outnl()
@@ -4397,6 +4611,7 @@ ENDPROC
 PROC outchr(c)
   DEF b[2]:ARRAY OF CHAR, m:PTR TO CHAR
   IF curcon.cx >= curcon.cols THEN outwrapnl()  -> B7: margin wrap, not a newline
+  curcon.vblank := FALSE        -> E5: see the printable run
   b[0] := c
   setpens()
   setsoft(curcon.cursty)
@@ -4456,16 +4671,12 @@ PROC csidispatch(c)
     IF curcon.cx < 0 THEN curcon.cx := 0
     IF curcon.cx > curcon.cols THEN curcon.cx := curcon.cols
   ELSEIF c = "J"
-    dfflush()                   -> S3: these read/move LIVE pixels -
-    erasebelow()                -> settle the deferred debt first, then
-  ELSEIF c = "K"                -> run the 1.2.1 bodies unchanged (a
-    dfflush()                   -> no-op when nothing is pending, and
-    eraseeol()                  -> always a no-op on legacy consoles)
-  ELSEIF c = "L"
-    dfflush()
-    inslines(n)
-  ELSEIF c = "M"
-    dfflush()
+    erasebelow()                -> E1 (1.2.4): no flush - these eight are
+  ELSEIF c = "K"                -> model ops with dirty marks now, pooled
+    eraseeol()                  -> and repainted at dfflush like all other
+  ELSEIF c = "L"                -> output (S3's choke-flush was
+    inslines(n)                 -> conservatism, not necessity: the model
+  ELSEIF c = "M"                -> is the truth, nothing reads pixels)
     dellines(n)
   ELSEIF c = "S"
     -> SU (Scroll Up, v1.1b38): the ACTUAL sequence Ed sends for
@@ -4477,17 +4688,13 @@ PROC csidispatch(c)
     -> CSI L/M (cursor-row-relative), SU/SD scroll the WHOLE region
     -> regardless of cursor row - we don't track DECSTBM margins,
     -> so the region is the whole window, always row 0.
-    dfflush()                   -> S3 (see the J/K note)
     scrollup(n)
   ELSEIF c = "T"
     -> SD (Scroll Down): the up-arrow half of the same pair.
-    dfflush()
     scrolldown(n)
   ELSEIF c = "@"
-    dfflush()
     inschars(n)                 -> v1.1: ICH, the L/M pattern sideways
   ELSEIF c = "P"
-    dfflush()
     delchars(n)                 -> v1.1: DCH
   ELSEIF c = "h"
     -> CSI ?47h - ENTER the alternate screen (b11: the client
@@ -4618,27 +4825,40 @@ PROC erasebelow()
   DEF r
   eraseeol()                    -> (clears cy+1's flag itself, B7)
   IF curcon.cy < (curcon.rows - 1)
-    SetAPen(curcon.rp, 0)
-    RectFill(curcon.rp, curcon.left, curcon.topy + Mul(curcon.cy + 1, curcon.ch),
-             curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
-    SetAPen(curcon.rp, curcon.deffg)
+    IF dfon = FALSE             -> E1: see eraseeol
+      SetAPen(curcon.rp, 0)
+      RectFill(curcon.rp, curcon.left, curcon.topy + Mul(curcon.cy + 1, curcon.ch),
+               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+      SetAPen(curcon.rp, curcon.deffg)
+    ENDIF
     IF curcon.sb
       FOR r := curcon.cy + 1 TO curcon.rows - 1
         clearrow(r)
       ENDFOR
+      IF dfon THEN dfmarkrows(curcon.cy + 1, curcon.rows - 1)
     ENDIF
   ENDIF
 ENDPROC
 
 -> L/M shift rows only inside the visible region, so the model copies
 -> row CONTENTS between visible slots - the history above stays intact
+-> E1 (1.2.4): the region operations join the model-first engine.
+-> Under dfon the pixel op is SKIPPED - the model moves exactly as it
+-> always did (that code is untouched below), the affected rows are
+-> marked dirty full-width, and dfflush repaints them from the model
+-> with everything else the packet did: no per-op blit, no flush, and
+-> ops that cancel within a flush window (Ed's insert+delete pairs)
+-> cost nothing but the model moves. The legacy (sb=NIL) path keeps
+-> the 1.2.3 immediate blits - dfon is never TRUE without a model.
 PROC inslines(n)
   DEF r
   IF n < 1 THEN n := 1
   IF n > (curcon.rows - curcon.cy) THEN n := curcon.rows - curcon.cy
-  ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
-               curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
-               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF dfon = FALSE
+    ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
+                 curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  ENDIF
   IF curcon.sb
     FOR r := curcon.rows - 1 TO curcon.cy + n STEP -1
       CopyMem(visrow(r - n), visrow(r), curcon.cols)
@@ -4649,6 +4869,7 @@ PROC inslines(n)
       clearrow(r)
     ENDFOR
     dropwrapf(curcon.cy, curcon.rows - 1)   -> B7
+    IF dfon THEN dfmarkrows(curcon.cy, curcon.rows - 1)
   ENDIF
 ENDPROC
 
@@ -4656,9 +4877,11 @@ PROC dellines(n)
   DEF r
   IF n < 1 THEN n := 1
   IF n > (curcon.rows - curcon.cy) THEN n := curcon.rows - curcon.cy
-  ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
-               curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
-               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF dfon = FALSE                           -> E1: see inslines
+    ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
+                 curcon.left, curcon.topy + Mul(curcon.cy, curcon.ch),
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  ENDIF
   IF curcon.sb
     FOR r := curcon.cy TO curcon.rows - 1 - n
       CopyMem(visrow(r + n), visrow(r), curcon.cols)
@@ -4669,6 +4892,7 @@ PROC dellines(n)
       clearrow(r)
     ENDFOR
     dropwrapf(curcon.cy, curcon.rows - 1)   -> B7
+    IF dfon THEN dfmarkrows(curcon.cy, curcon.rows - 1)
   ENDIF
 ENDPROC
 
@@ -4679,9 +4903,11 @@ PROC scrollup(n)
   DEF r
   IF n < 1 THEN n := 1
   IF n > curcon.rows THEN n := curcon.rows
-  ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
-               curcon.left, curcon.topy,
-               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF dfon = FALSE                           -> E1: see inslines
+    ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),
+                 curcon.left, curcon.topy,
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  ENDIF
   IF curcon.sb
     FOR r := 0 TO curcon.rows - 1 - n
       CopyMem(visrow(r + n), visrow(r), curcon.cols)
@@ -4692,6 +4918,7 @@ PROC scrollup(n)
       clearrow(r)
     ENDFOR
     dropwrapf(0, curcon.rows - 1)           -> B7
+    IF dfon THEN dfmarkrows(0, curcon.rows - 1)
   ENDIF
 ENDPROC
 
@@ -4699,9 +4926,11 @@ PROC scrolldown(n)
   DEF r
   IF n < 1 THEN n := 1
   IF n > curcon.rows THEN n := curcon.rows
-  ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
-               curcon.left, curcon.topy,
-               curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  IF dfon = FALSE                           -> E1: see inslines
+    ScrollRaster(curcon.rp, 0, -Mul(n, curcon.ch),
+                 curcon.left, curcon.topy,
+                 curcon.left + Mul(curcon.cols, curcon.cw) - 1, curcon.topy + Mul(curcon.rows, curcon.ch) - 1)
+  ENDIF
   IF curcon.sb
     FOR r := curcon.rows - 1 TO n STEP -1
       CopyMem(visrow(r - n), visrow(r), curcon.cols)
@@ -4712,6 +4941,7 @@ PROC scrolldown(n)
       clearrow(r)
     ENDFOR
     dropwrapf(0, curcon.rows - 1)           -> B7
+    IF dfon THEN dfmarkrows(0, curcon.rows - 1)
   ENDIF
 ENDPROC
 
@@ -4742,9 +4972,13 @@ PROC inschars(n)
       stp[j] := 0
     ENDFOR
     setwrapf(curcon.cy + 1, 0)  -> B7: the row tail shifted off
-    idx := curcon.sbtop + curcon.cy
-    IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
-    drawmrow(idx, y)
+    IF dfon
+      dfmark(curcon.cy, curcon.cx, curcon.cols - 1)  -> E1: repaint at flush
+    ELSE
+      idx := curcon.sbtop + curcon.cy
+      IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
+      drawmrow(idx, y)
+    ENDIF
   ELSE
     ScrollRaster(curcon.rp, -Mul(n, curcon.cw), 0,
                  curcon.left + Mul(curcon.cx, curcon.cw), y,
@@ -4773,9 +5007,13 @@ PROC delchars(n)
       stp[j] := 0
     ENDFOR
     setwrapf(curcon.cy + 1, 0)  -> B7: the row no longer fills to the
-    idx := curcon.sbtop + curcon.cy         -> margin
-    IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
-    drawmrow(idx, y)
+    IF dfon                     -> margin
+      dfmark(curcon.cy, curcon.cx, curcon.cols - 1)  -> E1: repaint at flush
+    ELSE
+      idx := curcon.sbtop + curcon.cy
+      IF idx >= curcon.sbmax THEN idx := idx - curcon.sbmax
+      drawmrow(idx, y)
+    ENDIF
   ELSE
     ScrollRaster(curcon.rp, Mul(n, curcon.cw), 0,
                  curcon.left + Mul(curcon.cx, curcon.cw), y,
@@ -4831,9 +5069,11 @@ PROC eraseeol()
   DEF y, m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, j
   IF curcon.cx >= curcon.cols THEN RETURN   -> inverted RectFill = wild writes
   y := curcon.topy + Mul(curcon.cy, curcon.ch)
-  SetAPen(curcon.rp, 0)
-  RectFill(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), y, curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
-  SetAPen(curcon.rp, curcon.deffg)
+  IF dfon = FALSE                           -> E1: deferred = model + mark;
+    SetAPen(curcon.rp, 0)                   -> the flush paints attr-0 cells
+    RectFill(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), y, curcon.left + Mul(curcon.cols, curcon.cw) - 1, y + curcon.ch - 1)
+    SetAPen(curcon.rp, curcon.deffg)        -> black, same as this fill did
+  ENDIF
   IF curcon.sb
     m := visrow(curcon.cy)
     a := sarow(curcon.cy)
@@ -4844,6 +5084,7 @@ PROC eraseeol()
       stp[j] := 0
     ENDFOR
     setwrapf(curcon.cy + 1, 0)  -> B7: this row no longer reaches the
+    IF dfon THEN dfmark(curcon.cy, curcon.cx, curcon.cols - 1)  -> E1
   ENDIF                         -> margin, so nothing continues it
 ENDPROC
 
@@ -4864,7 +5105,142 @@ PROC render(buf, len)
   s := buf
   WHILE i < len
     c := s[i]
-    IF curcon.cesc = 1    -> after ESC: '[' opens a CSI, ']' an OSC
+    -> E2e: the printable test comes FIRST - it is the overwhelmingly
+    -> common byte class, and it used to sit at the bottom of a ten-
+    -> compare cascade. prtbl is the exact old predicate as a table
+    -> (built once in main); every control byte is 0 there, so the
+    -> cascade below sees exactly the bytes it always saw.
+    IF (curcon.cesc = 0) AND (prtbl[c] = 1)
+      -> printable run: ASCII and Latin-1; $7F-$9F are controls.
+      -> Batched Text() calls - dir listings are many bytes per write
+      j := i
+      WHILE (j < len) AND (prtbl[s[j]] = 1)   -> E2e: one lookup, not
+        j := j + 1                            -> three compares, per byte
+      ENDWHILE
+      run := j - i
+      curcon.vblank := FALSE     -> E5: real glyphs on screen now - any
+                                 -> scroll from here moves real pixels
+      -> audit P1: the attr and style a run's cells all get, resolved
+      -> ONCE. curattr() calls fgpen(), so the old per-cell form was a
+      -> nested call per character on the hottest loop in the file -
+      -> 80 of them for a full-width line. Nothing inside the run can
+      -> move the SGR state (outnl scrolls, it does not recolour), so
+      -> one evaluation out here is the same answer every cell got.
+      at := curattr()
+      sty := curcon.cursty
+      IF dfon
+        -> S3: the deferred printable run - the model mirror EXACTLY as
+        -> the legacy loop below keeps it (CopyMem the glyphs, fill the
+        -> attr and style planes), a dirty-span mark instead of the
+        -> Move+Text, and no pen calls at all: dfflush's drawmodelcells
+        -> resolves pens from the attr plane per run, the same way every
+        -> other model repaint does
+        WHILE run > 0
+          IF curcon.cx >= curcon.cols THEN dfwrapnl()
+          fit := curcon.cols - curcon.cx
+          IF fit > run THEN fit := run
+          CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
+          -> E2d: long mirror fills ride exec's CopyMem (ROM asm) from
+          -> a prefilled run buffer; short ones keep the direct loop -
+          -> a 256-byte refill per ATTR CHANGE would be a net loss on
+          -> sgr-perchar's 8-cell runs
+          IF fit >= 16
+            IF at <> atrunv
+              FOR j2 := 0 TO 255
+                atrun[j2] := at
+              ENDFOR
+              atrunv := at
+            ENDIF
+            CopyMem(atrun, sarow(curcon.cy) + curcon.cx, fit)
+            IF sty <> styrunv
+              FOR j2 := 0 TO 255
+                styrun[j2] := sty
+              ENDFOR
+              styrunv := sty
+            ENDIF
+            CopyMem(styrun, ssrow(curcon.cy) + curcon.cx, fit)
+          ELSE
+            m := sarow(curcon.cy) + curcon.cx
+            FOR j2 := 0 TO fit - 1
+              m[j2] := at
+            ENDFOR
+            m := ssrow(curcon.cy) + curcon.cx
+            FOR j2 := 0 TO fit - 1
+              m[j2] := sty
+            ENDFOR
+          ENDIF
+          dfmark(curcon.cy, curcon.cx, curcon.cx + fit - 1)
+          curcon.cx := curcon.cx + fit
+          i := i + fit
+          run := run - fit
+        ENDWHILE
+      ELSE
+      -> audit3 P2: the same treatment audit2-P4 gave drawmrow, drawselrow
+      -> and drawmodelcells, finally applied to the proc that needed it
+      -> most. E reloads the curcon GLOBAL and then the field on every
+      -> single `curcon.x`, and cannot hoist that itself - and this is the
+      -> loop every byte of client output passes through, so it was paying
+      -> seven of those per wrap chunk for values that cannot move.
+      -> What is safe to hoist and why: rp/left/cw/topy/ch/baseline/cols are
+      -> pure GEOMETRY, and geometry only changes in gridcalc(), which runs
+      -> from openwin/reopenwin/doresize - never from inside a write. What
+      -> is NOT hoisted: cx and cy, because outwrapnl() moves both, and sb/
+      -> sbtop, because the screenscroll() inside it advances the ring - so
+      -> visrow/sarow/ssrow must still resolve per chunk.
+      rp := curcon.rp
+      rleft := curcon.left
+      rcw := curcon.cw
+      rtopy := curcon.topy
+      rch := curcon.ch
+      rbase := curcon.baseline
+      rcols := curcon.cols
+      -> and the pens once per RUN, not once per wrap chunk: the same
+      -> argument audit P1 used for `at`/`sty` just above - nothing inside
+      -> this loop can move the SGR state, so setting them per chunk was
+      -> re-answering a settled question (setsoft already self-caches;
+      -> setpens did two real SetAPen/SetBPen calls every time).
+      setpens()
+      setsoft(sty)
+      WHILE run > 0
+        IF curcon.cx >= rcols THEN outwrapnl()  -> B7: margin wrap, not a newline
+        fit := rcols - curcon.cx
+        IF fit > run THEN fit := run
+        Move(rp, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase)
+        Text(rp, s + i, fit)
+        IF curcon.sb
+          CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
+          IF fit >= 16                    -> E2d, as in the deferred path
+            IF at <> atrunv
+              FOR j2 := 0 TO 255
+                atrun[j2] := at
+              ENDFOR
+              atrunv := at
+            ENDIF
+            CopyMem(atrun, sarow(curcon.cy) + curcon.cx, fit)
+            IF sty <> styrunv
+              FOR j2 := 0 TO 255
+                styrun[j2] := sty
+              ENDFOR
+              styrunv := sty
+            ENDIF
+            CopyMem(styrun, ssrow(curcon.cy) + curcon.cx, fit)
+          ELSE
+            m := sarow(curcon.cy) + curcon.cx
+            FOR j2 := 0 TO fit - 1
+              m[j2] := at
+            ENDFOR
+            m := ssrow(curcon.cy) + curcon.cx
+            FOR j2 := 0 TO fit - 1
+              m[j2] := sty
+            ENDFOR
+          ENDIF
+        ENDIF
+        curcon.cx := curcon.cx + fit
+        i := i + fit
+        run := run - fit
+      ENDWHILE
+      ENDIF           -> (closes the S3 dfon fork around the run loop)
+    ELSEIF curcon.cesc = 1    -> after ESC: '[' opens a CSI, ']' an OSC
       IF c = "["
         csistart()
       ELSEIF c = "]"
@@ -4896,8 +5272,7 @@ PROC render(buf, len)
         IF curcon.cy > 0
           curcon.cy := curcon.cy - 1
         ELSE
-          dfflush()             -> S3: inslines blits live pixels
-          inslines(1)
+          inslines(1)           -> E1: a model op now - no flush needed
         ENDIF
         curcon.cesc := 0
       ELSEIF c = "E"
@@ -4981,6 +5356,8 @@ PROC render(buf, len)
       -> handled byte 12, so More's page appended and SCROLLED instead of
       -> replacing: THE whole "More scrolls under CCON, flips under CON:"
       -> complaint. list, which does not send ^L, correctly kept scrolling.
+      curcon.vblank := TRUE     -> E5: the page is now provably blank -
+                                -> the very state scroll-nl lives in
       IF dfon
         -> S3: no RectFill at all - clear the model, flag the rebuild;
         -> dfflush's redraw() paints every row full-width from the model
@@ -5013,96 +5390,6 @@ PROC render(buf, len)
                                 -> page is blank, narrow to what remains
       ENDIF
       i := i + 1
-    ELSEIF ((c >= 32) AND (c <= 126)) OR (c >= 160)
-      -> printable run: ASCII and Latin-1; $7F-$9F are controls.
-      -> Batched Text() calls - dir listings are many bytes per write
-      j := i
-      WHILE (j < len) AND (((s[j] >= 32) AND (s[j] <= 126)) OR (s[j] >= 160))
-        j := j + 1
-      ENDWHILE
-      run := j - i
-      -> audit P1: the attr and style a run's cells all get, resolved
-      -> ONCE. curattr() calls fgpen(), so the old per-cell form was a
-      -> nested call per character on the hottest loop in the file -
-      -> 80 of them for a full-width line. Nothing inside the run can
-      -> move the SGR state (outnl scrolls, it does not recolour), so
-      -> one evaluation out here is the same answer every cell got.
-      at := curattr()
-      sty := curcon.cursty
-      IF dfon
-        -> S3: the deferred printable run - the model mirror EXACTLY as
-        -> the legacy loop below keeps it (CopyMem the glyphs, fill the
-        -> attr and style planes), a dirty-span mark instead of the
-        -> Move+Text, and no pen calls at all: dfflush's drawmodelcells
-        -> resolves pens from the attr plane per run, the same way every
-        -> other model repaint does
-        WHILE run > 0
-          IF curcon.cx >= curcon.cols THEN dfwrapnl()
-          fit := curcon.cols - curcon.cx
-          IF fit > run THEN fit := run
-          CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
-          m := sarow(curcon.cy) + curcon.cx
-          FOR j2 := 0 TO fit - 1
-            m[j2] := at
-          ENDFOR
-          m := ssrow(curcon.cy) + curcon.cx
-          FOR j2 := 0 TO fit - 1
-            m[j2] := sty
-          ENDFOR
-          dfmark(curcon.cy, curcon.cx, curcon.cx + fit - 1)
-          curcon.cx := curcon.cx + fit
-          i := i + fit
-          run := run - fit
-        ENDWHILE
-      ELSE
-      -> audit3 P2: the same treatment audit2-P4 gave drawmrow, drawselrow
-      -> and drawmodelcells, finally applied to the proc that needed it
-      -> most. E reloads the curcon GLOBAL and then the field on every
-      -> single `curcon.x`, and cannot hoist that itself - and this is the
-      -> loop every byte of client output passes through, so it was paying
-      -> seven of those per wrap chunk for values that cannot move.
-      -> What is safe to hoist and why: rp/left/cw/topy/ch/baseline/cols are
-      -> pure GEOMETRY, and geometry only changes in gridcalc(), which runs
-      -> from openwin/reopenwin/doresize - never from inside a write. What
-      -> is NOT hoisted: cx and cy, because outwrapnl() moves both, and sb/
-      -> sbtop, because the screenscroll() inside it advances the ring - so
-      -> visrow/sarow/ssrow must still resolve per chunk.
-      rp := curcon.rp
-      rleft := curcon.left
-      rcw := curcon.cw
-      rtopy := curcon.topy
-      rch := curcon.ch
-      rbase := curcon.baseline
-      rcols := curcon.cols
-      -> and the pens once per RUN, not once per wrap chunk: the same
-      -> argument audit P1 used for `at`/`sty` just above - nothing inside
-      -> this loop can move the SGR state, so setting them per chunk was
-      -> re-answering a settled question (setsoft already self-caches;
-      -> setpens did two real SetAPen/SetBPen calls every time).
-      setpens()
-      setsoft(sty)
-      WHILE run > 0
-        IF curcon.cx >= rcols THEN outwrapnl()  -> B7: margin wrap, not a newline
-        fit := rcols - curcon.cx
-        IF fit > run THEN fit := run
-        Move(rp, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase)
-        Text(rp, s + i, fit)
-        IF curcon.sb
-          CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
-          m := sarow(curcon.cy) + curcon.cx
-          FOR j2 := 0 TO fit - 1
-            m[j2] := at
-          ENDFOR
-          m := ssrow(curcon.cy) + curcon.cx
-          FOR j2 := 0 TO fit - 1
-            m[j2] := sty
-          ENDFOR
-        ENDIF
-        curcon.cx := curcon.cx + fit
-        i := i + fit
-        run := run - fit
-      ENDWHILE
-      ENDIF           -> (closes the S3 dfon fork around the run loop)
     ELSE
       i := i + 1    -> other control bytes
     ENDIF
@@ -5387,19 +5674,25 @@ PROC drawmodelcells(r, x0, x1)
     WHILE (j <= x1) AND (a[j] = at) AND (stp[j] = sy)
       j++
     ENDWHILE
-    fg := at AND 15
-    bg := Shr(at, 4) AND 7
-    IF sy AND 4
-      IF fg = bg THEN fg := dfg
-      SetAPen(rp, bg)
-      SetBPen(rp, fg)
+    IF (at = 0) AND (sy = 0)
+      SetAPen(rp, 0)            -> E2c: see drawmrow - erased tails
+      RectFill(rp, left + Mul(i, cw), ybase - k.baseline,  -> (CSI K's
+               left + Mul(j, cw) - 1, ybase - k.baseline + k.ch - 1)  -> shape) fill, not Text
     ELSE
-      SetAPen(rp, fg)
-      SetBPen(rp, bg)
+      fg := at AND 15
+      bg := Shr(at, 4) AND 7
+      IF sy AND 4
+        IF fg = bg THEN fg := dfg
+        SetAPen(rp, bg)
+        SetBPen(rp, fg)
+      ELSE
+        SetAPen(rp, fg)
+        SetBPen(rp, bg)
+      ENDIF
+      setsoft(sy)
+      Move(rp, left + Mul(i, cw), ybase)
+      Text(rp, rowbuf + i, j - i)
     ENDIF
-    setsoft(sy)
-    Move(rp, left + Mul(i, cw), ybase)
-    Text(rp, rowbuf + i, j - i)
     i := j
   ENDWHILE
   setsoft(0)
@@ -7629,4 +7922,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.3 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.4b6 (23.7.26) CCON: LTX console handler', 0
