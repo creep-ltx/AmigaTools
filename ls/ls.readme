@@ -5,9 +5,10 @@ WHAT IT IS
 
   ls lists directories the way Unix fingers expect: multi-column,
   alphabetical, with `-la` and friends as bundled flags. It comes as
-  two implementations with identical behaviour: one in Amiga E
-  (ls.e, 10936 bytes) and one in 68000 assembly (ls.asm, 5136
-  bytes). Build whichever you prefer and install it as C:ls.
+  two implementations: one in Amiga E (ls.e, 11452 bytes) and one
+  in 68000 assembly (ls.asm, 5284 bytes). The E build is the
+  reference and carries the latest fixes; the assembly twin
+  currently tracks 0.2. Install either as C:ls.
 
   Requires Kickstart 2.04 or newer.
 

@@ -142,7 +142,7 @@ EXCEPT DO
 ENDPROC
 
 PROC usage()
-  WriteF('cp 0.1 -- Unix-style copy\n')
+  WriteF('cp 0.1.1 -- Unix-style copy\n')
   WriteF('usage: cp [-fr] FROM ... TO\n')
   WriteF('  -f  force: replace an existing target file\n')
   WriteF('  -r  copy directories recursively\n')
@@ -414,7 +414,7 @@ PROC copytree(srctop:PTR TO CHAR, dsttop:PTR TO CHAR)
     pendhead := node.next
     IF pendhead=NIL THEN pendtail := NIL
     copydir(node.src, node.dst)
-    Dispose(node)
+    END node                                 -> NEW'd: END, never Dispose
   ENDWHILE
 ENDPROC
 
@@ -559,12 +559,16 @@ PROC mkent(fib:PTR TO fileinfoblock)
   e.isdir := IF fib.direntrytype > 0 THEN TRUE ELSE FALSE
 ENDPROC e
 
+-> cents are NEW'd: free with END, never Dispose(). A NEW under 257
+-> bytes is FastNew - chunk-carved, headerless, off the New() memlist -
+-> and Dispose() on the first cent of a chunk FreeMem()s the WHOLE
+-> chunk under the live ones (ls BUGS.md B1, the -R freeze root cause).
 PROC freecents(head:PTR TO cent)
   DEF e:PTR TO cent
   WHILE head
     e := head
     head := head.next
-    Dispose(e)
+    END e
   ENDWHILE
 ENDPROC
 
@@ -582,4 +586,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: cp 0.1 (20.7.26) E build',0
+version: CHAR '$VER: cp 0.1.1 (24.7.26) E build',0

@@ -112,7 +112,7 @@ PROC main() HANDLE
     node := pendhead
     pendhead := node.next
     listdir(node.path)
-    Dispose(node)
+    END node                                 -> NEW'd: END, never Dispose (B1)
   ENDWHILE
 
 EXCEPT DO
@@ -143,7 +143,7 @@ PROC checkbreak()
 ENDPROC
 
 PROC usage()
-  WriteF('ls 0.3 -- Unix-style directory lister\n')
+  WriteF('ls 0.3.1 -- Unix-style directory lister\n')
   WriteF('usage: ls [-1ahlrRSt] [path | pattern ...]\n')
   WriteF('  -l  long listing (protection, size, date, filenote)\n')
   WriteF('  -a  show .info files and hidden (h-bit) entries\n')
@@ -359,7 +359,7 @@ PROC listsingle(path:PTR TO CHAR)
   arr[0] := e
   output(arr, 1, FALSE)
   Dispose(arr)
-  Dispose(e)
+  END e                                      -> NEW'd: END, never Dispose (B1)
 ENDPROC
 
 /* Pattern argument: MatchFirst/MatchNext, matches listed as
@@ -529,12 +529,20 @@ PROC sortout(head:PTR TO dent, count, isdirlist, path:PTR TO CHAR)
   Dispose(arr)
 ENDPROC
 
+-> BUGS.md B1 root cause lived HERE: these dents are NEW'd, and NEW
+-> under 257 bytes is FastNew - carved from a shared 5000-byte chunk,
+-> headerless, NOT on the New() memlist. Dispose() on one is usually a
+-> silent no-op (leak), but on the FIRST dent carved from a chunk,
+-> ptr-8 IS the chunk's own memlist header - Dispose() then FreeMem()s
+-> the WHOLE chunk out from under every live dent in it, and FastNew
+-> keeps carving new dents from the freed region. NEW pairs with END;
+-> Dispose() is only for New()/String()/List().
 PROC freelist(head:PTR TO dent)
   DEF e:PTR TO dent
   WHILE head
     e := head
     head := head.next
-    Dispose(e)
+    END e
   ENDWHILE
 ENDPROC
 
@@ -821,4 +829,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.3 (22.7.26) E build',0
+version: CHAR '$VER: ls 0.3.1 (24.7.26) E build',0

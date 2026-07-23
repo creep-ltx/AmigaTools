@@ -148,3 +148,59 @@ independently.
 
 `ls -a`/`ls -1` on a single directory are unaffected (no recursion); only
 `-R` reaches any of this.
+
+**ROOT-CAUSED AND FIXED - ls 0.3.1 (24.7.26). `Dispose()` on NEW'd
+dents frees a live FastNew chunk.** Every paragraph above was wrong
+about one premise: it DOES reproduce under vamos - the 27-entry test
+was simply too small. `ls -R` over any big host tree (the FS-UAE
+system-drive directory, ~2800 entries) dies under vamos with
+`Invalid Memory Access W(4): 100000` - a wild WRITE off the top of
+RAM. With that reproducer the whole mechanism fell out of E-VO's own
+source (`E-VO.S`, the runtime the binary carries):
+
+- `NEW e` on an object under 257 bytes compiles to FastNew: the block
+  is CARVED from a shared 5000-byte chunk (FMEMSIZE), headerless, and
+  NOT linked on the New() memlist. Only the chunk itself is.
+- `Dispose(p)` walks the New() memlist comparing against `p-8`. For a
+  chunk-carved dent that usually matches nothing - silent no-op, the
+  dent just leaks. But the FIRST block carved from a chunk sits
+  exactly 8 bytes past the chunk's own header, so `p-8` IS a memlist
+  node: Dispose unlinks it and FreeMem()s the ENTIRE 5008-byte chunk
+  while every other dent inside is still live - and FastNew's chop
+  pointer keeps carving NEW dents from the freed region.
+- Chunk #1 opens with the 28-byte `gdt`, then holds 22 dents; the
+  23rd cumulative small NEW rolls chunk #2, whose first carve IS a
+  dent. That is why small trees never corrupted (the 27-entry test:
+  only 5 dents in chunk #2, all already dead when freelist() freed
+  the chunk - vamos leaves freed memory untouched, so it LOOKED
+  clean) and why real listings blanked intermittently: on the Amiga
+  the FreeMem'd chunk is recycled immediately - by ls itself and by
+  every other task - which is the observed heap-overwrite drift, the
+  blank names, and eventually the machine-killing wild write. The
+  "Amiga-specific" verdict above was a scale artifact, nothing more.
+
+The fix is one rule: NEW pairs with END; Dispose() is only for
+New()/String()/List() (the exact sentence already sitting in the
+handler-tricks notes). `freelist()` and `listsingle()` now `END e`,
+main's work-list loop `END node`s its pnodes. Verified at three
+levels: FastNew/Dispose read in E-VO.S, both templates found in the
+compiled binary (no FastDispose copy existed in 0.3 - nothing ever
+legally freed a dent), and A/B under vamos on the real system-drive
+tree: 0.3 crashes after 167 lines, 0.3.1 walks all 138 directories -
+zero blank names, zero duplicate groups, zero self-recursion, entry
+set exactly matching the host's `find`, stable across repeated runs.
+The B1 empty-name guard in sortout stays as cheap defense in depth.
+
+**Same bug, same day, in cp**: `cp -r` frees its NEW'd `cent`s (214
+bytes - chunk-carved) with Dispose() too. Old cp -r over the 700-file
+Locale tree under vamos ran away (lock-slot exhaustion, 60 files
+copied, whole directories silently missing); cp 0.1.1 with the END
+fix copies it `diff -r`-clean. mv only leaks (its snodes are never
+freed until exit - benign); ccon and cfile allocate their disposed
+objects with New() and are clean.
+
+**Still worth doing, unchanged**: the visited-directory cycle guard
+(fix 2) for real soft-link cycles. Note also the asm twin `ls-asm`
+is still 0.2 - it predates even the B1 guard (its own allocator, not
+E's, so THIS bug doesn't apply to it, but the -R self-recursion
+guard was never ported).
