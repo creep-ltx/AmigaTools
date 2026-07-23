@@ -6509,9 +6509,10 @@ PROC dobookmark()
   ENDIF
 ENDPROC
 
--> one page of the find-results list: visrows rows from `vtop`, the selected
--> one inverted. A long path shows its tail (the filename end).
-PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel)
+-> one page of a results list: visrows rows from `vtop`, the selected one
+-> inverted. tail TRUE = a long row shows its END (find-file: the filename);
+-> FALSE = its START (content search: the path:line prefix).
+PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel, tail)
   DEF r, ln, s:PTR TO CHAR, l, y, ww
   ww := ncols
   FOR r := 0 TO visrows - 1
@@ -6523,7 +6524,7 @@ PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel)
       s := res[ln]
       l := StrLen(s)
       IF l > ww
-        s := s + (l - ww)    -> show the tail (filename end) of a long path
+        IF tail THEN s := s + (l - ww)    -> tail: show the end; else the start
         l := ww
       ENDIF
       IF ln = sel
@@ -6542,15 +6543,16 @@ PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel)
   ENDFOR
 ENDPROC
 
--> show the find results as a selectable, scrollable list; Up/Down move
+-> show a results list as a selectable, scrollable page; Up/Down move
 -> (Shift = page, Ctrl = ends), Enter picks (returns the index), Esc = -1.
-PROC findlist(res:PTR TO LONG, cnt)
+-> tail controls the long-row truncation direction (see drawfindpage).
+PROC findlist(res:PTR TO LONG, cnt, tail, verb)
   DEF sel=0, vtop=0, ns, class, code, qual, done=FALSE, pick=-1, hb[130]:STRING
   drawviewframe(TRUE)
-  StringF(hb, '\d match\s - Up/Down, Enter jumps, Esc cancels', cnt,
-          IF cnt = 1 THEN '' ELSE 'es')
+  StringF(hb, '\d match\s - Up/Down, Enter \s, Esc cancels', cnt,
+          IF cnt = 1 THEN '' ELSE 'es', verb)
   promptrow(hb)
-  drawfindpage(res, cnt, vtop, sel)
+  drawfindpage(res, cnt, vtop, sel, tail)
   WHILE done = FALSE
     class := WaitIMessage(win)
     code := MsgCode()
@@ -6590,7 +6592,7 @@ PROC findlist(res:PTR TO LONG, cnt)
       sel := ns
       IF sel < vtop THEN vtop := sel
       IF sel >= (vtop + visrows) THEN vtop := sel - visrows + 1
-      drawfindpage(res, cnt, vtop, sel)
+      drawfindpage(res, cnt, vtop, sel, tail)
     ENDIF
   ENDWHILE
 ENDPROC pick
@@ -6656,7 +6658,7 @@ PROC dofind()
     showmsg('nothing found')
     RETURN
   ENDIF
-  pick := findlist(res, cnt)
+  pick := findlist(res, cnt, TRUE, 'jumps')    -> tail: show the filename end
   IF pick >= 0 THEN StrCopy(hit, res[pick])
   FOR i := 0 TO cnt - 1
     IF res[i] THEN DisposeLink(res[i])
@@ -6671,6 +6673,166 @@ PROC dofind()
     IF gotopath(p, dir)
       StrCopy(prevname, nm)
       selectbyname(p)
+    ENDIF
+  ENDIF
+ENDPROC
+
+-> recursively grep every TEXT file under `dir` for `needle` (case-insensitive
+-> substring, per line). Each matching line records a full path in paths[] and
+-> a "relpath:line: text" display string in disp[], up to FINDMAX. `root` is
+-> the search start, trimmed off for the display. scanbuf (VIEWMAX) holds one
+-> file at a time. Cancellable; heap path buffers.
+PROC grepwalk(dir, depth, needle, root, scanbuf:PTR TO CHAR,
+              paths:PTR TO LONG, disp:PTR TO LONG, cnt:PTR TO LONG)
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, child=NIL, full=NIL,
+      fh, n, i, ls, lineno, ty, e, sp, s, s2, rel:PTR TO CHAR, rl,
+      ltxt[210]:STRING, dstr[400]:STRING
+  IF depth > 20 THEN RETURN
+  IF cnt[0] >= FINDMAX THEN RETURN
+  IF checkabort() THEN RETURN
+  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN
+  child := String(CPATHLEN)
+  full := String(CPATHLEN)
+  IF (child = NIL) OR (full = NIL)
+    IF child THEN DisposeLink(child)
+    IF full THEN DisposeLink(full)
+    FreeDosObject(DOS_FIB, fib)
+    RETURN
+  ENDIF
+  IF lock := Lock(dir, SHARED_LOCK)
+    IF Examine(lock, fib)
+      more := ExNext(lock, fib)
+      WHILE more AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
+        StrCopy(full, dir)
+        AddPart(full, fib.filename, CPATHLEN - 4)
+        SetStr(full, StrLen(full))
+        IF fib.direntrytype > 0
+          StrCopy(child, full)
+          grepwalk(child, depth + 1, needle, root, scanbuf, paths, disp, cnt)
+        ELSEIF (fib.size > 0) AND (fib.size <= VIEWMAX)
+          ty := sniff(full)
+          IF (ty = TY_TEXT) OR (ty = TY_ANSI)
+            IF fh := Open(full, OLDFILE)
+              n := Read(fh, scanbuf, VIEWMAX)
+              Close(fh)
+              IF n < 0 THEN n := 0
+              -> scan line by line (LF-delimited; a trailing CR is trimmed)
+              ls := 0
+              lineno := 1
+              i := 0
+              WHILE (i <= n) AND (cnt[0] < FINDMAX)
+                IF (i = n) OR (scanbuf[i] = 10)
+                  e := i - ls
+                  IF e > 200 THEN e := 200
+                  StrCopy(ltxt, IF e > 0 THEN scanbuf + ls ELSE '', e)
+                  sp := EstrLen(ltxt)
+                  IF (sp > 0) AND (ltxt[sp - 1] = 13) THEN SetStr(ltxt, sp - 1)
+                  IF nchas(ltxt, needle)
+                    -> display the path relative to the search root
+                    rel := full
+                    rl := StrLen(root)
+                    IF (StrLen(full) > rl) AND ncprefix(full, root, rl)
+                      rel := full + rl
+                      IF rel[0] = "/" THEN rel := rel + 1
+                    ENDIF
+                    StringF(dstr, '\s:\d: \s', rel, lineno, ltxt)
+                    s := String(EstrLen(dstr) + 1)
+                    s2 := String(EstrLen(full) + 1)
+                    IF s AND s2
+                      StrCopy(s, dstr)
+                      StrCopy(s2, full)
+                      disp[cnt[0]] := s
+                      paths[cnt[0]] := s2
+                      cnt[0] := cnt[0] + 1
+                    ELSE
+                      IF s THEN DisposeLink(s)
+                      IF s2 THEN DisposeLink(s2)
+                    ENDIF
+                  ENDIF
+                  lineno := lineno + 1
+                  ls := i + 1
+                ENDIF
+                i := i + 1
+              ENDWHILE
+            ENDIF
+          ENDIF
+        ENDIF
+        more := ExNext(lock, fib)
+      ENDWHILE
+    ENDIF
+    UnLock(lock)
+  ENDIF
+  DisposeLink(child)
+  DisposeLink(full)
+  FreeDosObject(DOS_FIB, fib)
+ENDPROC
+
+-> t: recursive text search - grep every text file under the active pane's
+-> directory for a substring; the matching lines list as "relpath:line: text"
+-> and Enter opens the file in the viewer. Esc during the search stops it.
+PROC docontent()
+  DEF p, paths:PTR TO LONG, disp:PTR TO LONG, scanbuf=NIL:PTR TO CHAR, cnt=0,
+      i, ty, needle[42]:STRING, pick, hit[CPATHLEN]:STRING, nm[120]:STRING
+  p := active
+  IF inarchive(p)
+    showmsg('text search works in real directories - Left out first')
+    RETURN
+  ENDIF
+  IF involume(p)
+    showmsg('enter a volume first, then search')
+    RETURN
+  ENDIF
+  IF efail[p] THEN RETURN
+  StrCopy(needle, '')
+  IF lineinput('search files for: ', needle, 40, FALSE) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  IF EstrLen(needle) = 0
+    drawpaths()
+    RETURN
+  ENDIF
+  paths := New(FINDMAX * 4)
+  disp := New(FINDMAX * 4)
+  scanbuf := New(VIEWMAX)
+  IF (paths = NIL) OR (disp = NIL) OR (scanbuf = NIL)
+    IF paths THEN Dispose(paths)
+    IF disp THEN Dispose(disp)
+    IF scanbuf THEN Dispose(scanbuf)
+    showmsg('not enough memory to search')
+    RETURN
+  ENDIF
+  showmsg('searching text - Esc to stop')
+  cancelok := TRUE
+  abort := FALSE
+  grepwalk(ppath[p], 0, needle, ppath[p], scanbuf, paths, disp, {cnt})
+  cancelok := FALSE
+  abort := FALSE
+  Dispose(scanbuf)
+  IF cnt = 0
+    Dispose(paths)
+    Dispose(disp)
+    showmsg('no matches')
+    RETURN
+  ENDIF
+  pick := findlist(disp, cnt, FALSE, 'opens')    -> show the line start
+  IF pick >= 0 THEN StrCopy(hit, paths[pick])
+  FOR i := 0 TO cnt - 1
+    IF paths[i] THEN DisposeLink(paths[i])
+    IF disp[i] THEN DisposeLink(disp[i])
+  ENDFOR
+  Dispose(paths)
+  Dispose(disp)
+  drawall()
+  IF pick >= 0
+    StrCopy(nm, FilePart(hit))
+    ty := sniff(hit)
+    IF ty = TY_ANSI
+      viewfile(hit, nm, 2, FALSE)
+    ELSE
+      IF viewfile(hit, nm, 0, FALSE) = 1    -> 'e' in the viewer: edit it
+        IF editfile(hit, nm) = 1 THEN refreshall() ELSE drawall()
+      ENDIF
     ENDIF
   ENDIF
 ENDPROC
@@ -7708,6 +7870,7 @@ PROC helpscreen()
             'Right/Left . enter dir/lha/lzx archive / parent, volumes',
             'g .......... go to a typed path',
             'f .......... find by name or #? pattern (recursive)',
+            't .......... text search inside files (recursive grep)',
             'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
             '/ .......... filter: type to narrow, Space marks a match',
             'F5 ......... rescan: re-read both panes from disk',
@@ -7844,6 +8007,8 @@ PROC eventloop()
         dogoto()
       ELSEIF (code = "f") OR (code = "F")    -> find files by name, recursively
         dofind()
+      ELSEIF (code = "t") OR (code = "T")    -> text search inside files (grep)
+        docontent()
       ELSEIF (code = "b") OR (code = "B")    -> set a bookmark (b then a digit)
         dobookmark()
       ELSEIF (code >= "0") AND (code <= "9")    -> jump to bookmark slot (digit)
