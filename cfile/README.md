@@ -19,6 +19,10 @@ ANSI, text), and each verb does the natural thing for the type.
 | `Tab` | switch the active pane |
 | `Up` / `Down` | move the selection (`Shift` = page, `Ctrl` = first/last) |
 | `/` | filter the pane live — type to narrow to matching names, `Up`/`Down` walk the matches, `Space` marks one, `Enter` keeps the cursor on the match, `Esc` restores the full listing |
+| `g` | go to a typed path — the active pane jumps straight there |
+| `b` + `0`-`9` | bookmark this location in a slot; a bare digit jumps back to it. Session-only unless `SAVEBOOKMARKS ON` keeps them across runs |
+| `f` | find files by name, recursively from here — a plain substring or a `#?`/`*` pattern; the matches list is selectable and `Enter` jumps to one |
+| `t` | text search — grep every text file under here for a substring; the matching lines list as `path:line: text` and `Enter` opens the file |
 | `Right` | enter the selected directory, volume, or lha/lzx archive |
 | `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
 | `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
@@ -40,15 +44,35 @@ ANSI, text), and each verb does the natural thing for the type.
 | `u` | unpack the selected archive — or every marked archive — into the other pane |
 | `p` | pack the selection or marked set into an archive in the other pane |
 | `:` | run a shell command in the active pane's directory |
-| `?` / `Help` / `h` | help screen |
-| `Esc` | quit (asks first) |
+| `?` / `Help` / `h` | help screen (scrolls with `Up`/`Down` if it is taller than the window) |
+| `Esc` | cancel a running copy/move/delete, otherwise quit (asks first) |
 
-In every text prompt the cursor walks with `Left`/`Right`, and
-`Shift+Left`/`Shift+Right` jump to the start and end of the line.
+In every text prompt the cursor walks with `Left`/`Right`,
+`Shift+Left`/`Shift+Right` jump to the start and end of the line, and
+`Shift+Backspace`/`Ctrl+Backspace` delete to the start / back to the
+nearest `/` or `:`.
 
 ![The built-in help screen listing every key](help_screen.png)
 
+## Getting around
+
+Besides `Right`/`Left` and the volume list, **`g`** takes a typed path
+and jumps the active pane straight to it. Ten **bookmark** slots remember
+places you keep returning to — `b` then a digit sets one to the current
+location, a bare digit jumps back, and `SAVEBOOKMARKS ON` in the config
+keeps them across runs.
+
+**`f`** searches by name recursively from here — a plain fragment matches
+as a substring, a `#?`/`*` pattern matches the whole name. **`t`** searches
+*inside* files, grepping every text file under here for a substring. Both
+present their hits in a selectable list: `Enter` jumps to a found file (`t`
+opens it), `Esc` backs out, and `Esc` during a long search stops it and
+shows what turned up.
+
 ## File operations
+
+Copy, move and delete can be **cancelled mid-run with `Esc`** — it leaves
+what's already done (no half-undo) and reports how far it got.
 
 Copy and move ask about name collisions per file —
 `(s)kip (o)verwrite (r)ename?` — and all questions are asked *before*

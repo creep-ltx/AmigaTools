@@ -2,6 +2,39 @@
 
 A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
+## 0.4 (2026-07-23)
+
+Getting around and finding things — go straight to a path, keep ten
+bookmarks, search by name or inside files, and cancel a long copy or
+delete part-way.
+
+**Go-to-path (`g`).** Type a path and the active pane jumps straight
+there, no walking the tree. An empty entry goes to the volume list.
+
+**Bookmarks (`b` + a digit).** Ten slots remember places you keep coming
+back to: `b` then `0`–`9` sets a slot to the current location, and a bare
+digit jumps back to it. Session-only by default; `SAVEBOOKMARKS ON` in the
+config keeps them across runs.
+
+**Find by name (`f`).** Searches recursively from the current directory.
+A plain fragment matches as a substring; a `#?` or `*` pattern matches the
+whole name (`ltx-#?.lha`). The hits come back in a selectable list —
+`Enter` jumps to one, `Esc` backs out.
+
+**Text search (`t`).** Greps every text file under the current directory
+for a substring and lists the matching lines as `path:line: text`;
+`Enter` opens the file, `Esc` backs out. Binaries are skipped.
+
+**Cancel a running operation (`Esc`).** A long copy, move or delete now
+stops on `Esc` — it leaves what is already done (no half-undo) and reports
+how far it got. `Esc` also stops a running `f`/`t` search and shows what
+turned up so far. With nothing running, `Esc` still quits.
+
+**Scrollable help.** The `?`/`Help` screen now lists every key including
+the new ones, and scrolls with `Up`/`Down` when it is taller than the
+window. Text prompts also gained `Shift+Backspace` (delete to start) and
+`Ctrl+Backspace` (delete back to the nearest `/` or `:`).
+
 ## 0.3.2 (2026-07-23)
 
 Going inside an archive now works for lzx as well as lha — the same

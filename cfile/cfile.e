@@ -7863,7 +7863,7 @@ ENDPROC
 PROC helpscreen()
   DEF lines:PTR TO LONG, nlines=0, vtop=0, maxv, nv, hindent, over=FALSE,
       class, code, qual
-  lines := ['CFile 0.3.2',
+  lines := ['CFile 0.4',
             '',
             'Tab ........ switch the active pane',
             'Up/Down .... move (Shift = page, Ctrl = first/last)',
@@ -8172,4 +8172,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.3.2 (23.7.26) E build',0
+version: CHAR '$VER: CFile 0.4 (23.7.26) E build',0
