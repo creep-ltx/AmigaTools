@@ -10,21 +10,52 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.1.** Every milestone boot-verified on an AmigaOS 3.2
-install (FS-UAE, 68030). 1.2.1 is a point release with no new
-features: a third read of the source, applied — two fixes for memory
-the console could corrupt (an iconified window restored at the wrong
-size and read its scrollback at the wrong width; a tall window with a
-small `LINES` could write past its own ring), several smaller ones,
-and a faster render loop. New in 1.2: **iconify** a window to a
-Workbench icon (RightAmiga+I; click it to bring the window back
-exactly as you left it), and clean full-screen paging — a form feed
-now replaces the page the way `CON:` does instead of scrolling it, so
-More and any program that repaints flips pages properly. 1.1 brought
-per-window FONT and soft styles, an alternate-screen contract for
-Ed/More (no console had that before), shared persistent history, safe
-multi-line paste, scrollback content search, and the KingCON-style
+**Status: 1.2.2.** Every milestone boot-verified on an AmigaOS 3.2
+install (FS-UAE, 68030). 1.2.2 is **the speed release** — the render
+engine rebuilt in one benchmarked campaign: model-first rendering
+(at most one scroll blit per write, none for a screenful), a
+one-cell prompt erase, and accept-then-render write buffering.
+Four times faster than stock CON: with render barriers on; the
+suite that took 1.2.1 288 seconds takes 2.4 (see **Speed**, below).
+Before it: 1.2.1 applied a third read of the source (two
+memory-corruption fixes among nine); 1.2 brought **iconify** to a
+Workbench icon (RightAmiga+I) and clean full-screen page flips;
+1.1 brought per-window FONT and soft styles, an alternate-screen
+contract for Ed/More, shared persistent history, safe multi-line
+paste, scrollback content search, and the KingCON-style
 `CON:`/`RAW:` takeover.
+
+## Speed
+
+Measured, not vibed: the 1.2.2 engine was built in a single
+benchmarked campaign, and [conbench](../conbench/) — written for it,
+now its own tool — keeps the receipts. Same A1200/030, AmigaOS 3.2,
+same window geometry, same day. The honest table first: the full
+suite with **render barriers** (`SYNC`), which no write-behind
+buffering can hide from:
+
+| console | full suite, barriers ON |
+|---|---|
+| **CCON 1.2.2** | **18.46 s** |
+| stock CON: | 74.16 s |
+| ViNCEd | 111.68 s |
+
+CCON's barrier total sits within 2% of its unbarriered total — its
+fast numbers and its honest numbers are the same numbers. For
+contrast, ViNCEd's unbarriered total is 0.18 s against its 111.68
+above; unbarriered console benchmarks measure how quickly a console
+says "done", not how quickly it draws.
+
+Against its own past: the original nine-test suite took CCON 1.2.1
+**288.68 s** and takes 1.2.2 **2.42 s**. The engine is three ideas
+stacked — render into the scrollback model first and let the screen
+catch up with at most one blit per write (zero for a screenful or a
+page flip), erase one prompt cell instead of repainting the row
+under every write, and release the writer as soon as its bytes are
+copied so bursts pool into batched blits — the same bargain every
+fast console on this platform makes, made with the ordering kept
+honest: reads, mode switches, keystrokes, selection, paste, resize,
+iconify and close all settle pending output first.
 
 ## Screenshots
 

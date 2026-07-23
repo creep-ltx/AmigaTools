@@ -22,6 +22,13 @@ FEATURES
     with the found line ready to edit or run, n/N re-walk the
     same matches if you scroll back again later
 
+  - Fast: output renders model-first - at most one scroll blit
+    per write, none at all for a screenful or a page flip - and
+    writes are answered ahead of the pixels (a frame at most, the
+    stock console's own bargain). Under render barriers, the
+    honest measure, 4x faster than stock CON: and 6x faster than
+    ViNCEd (conbench, also in this collection)
+
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0xADDR, NOBORDER, ...) per window
 
@@ -101,6 +108,18 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.2.2
+    - The speed release: rendering is model-first (at most one
+      scroll blit per write, none for a screenful), erasing the
+      prompt cursor costs one cell instead of a row repaint, and
+      writes are answered as soon as their bytes are copied so
+      bursts of output pool into batched blits. The benchmark
+      suite that took 1.2.1 288 seconds takes 2.4; with render
+      barriers on, 4x faster than stock CON:, 6x than ViNCEd
+
+    - conbench, written to measure all this, is its own tool in
+      the collection now
 
   1.2.1
     - An iconified window comes back at the size and place it

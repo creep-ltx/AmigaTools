@@ -6,10 +6,61 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1, 1.2 and 1.2.1 are released and
-tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1 and 1.2.2 are
+released and tagged.
 
 ---
+
+## [1.2.2] — 2026-07-23 (tag `ccon-1.2.2`)
+
+The speed release. It opened with a benchmark reading CCON at 11.6x
+slower than stock CON: and closed, the same day, with CCON 4x FASTER
+than stock under render barriers — and the only console tested whose
+barrier numbers match its unbarriered ones. Three engine changes,
+each proven by a Linux-side harness before it touched the machine,
+each boot-verified after (builds 1.2.2b1–b4). The benchmark written
+to measure it, conbench, grew into its own tool in this collection.
+
+### Changed
+- **Rendering is model-first now** (b1). A write's bytes land in the
+  scrollback model, and the screen catches up with at most ONE
+  scroll blit per write — or none at all when a whole screenful (or
+  a form feed) went past, in which case the grid is rebuilt from the
+  model and the form feed's full-window clear is simply gone. 1.2.1
+  paid one full-window blit per scrolled ROW, at ~34ms each on the
+  measured target; a 4K burst paid fifty-one of them, now it pays
+  zero.
+- **The prompt no longer taxes every write** (b2). Erasing the
+  editor's cursor blip used to repaint the whole prompt row under
+  each arriving write; when the input line is empty it now repaints
+  exactly the one cell the blip occupies. The per-write overhead
+  dropped from 1.85ms to 0.55ms — More's keystroke echo territory.
+- **Writes are answered ahead of the pixels** (b3/b4). A write's
+  bytes are copied and the writer released at once; rendering
+  follows within a frame (20ms), and bursts pool so many lines share
+  one blit. This is the bargain stock CON: and ViNCEd have always
+  made, made here with the ordering kept honest: reads (More's
+  cursor-position handshake included), mode switches, keystrokes,
+  selection, paste, resize, iconify and close all settle pending
+  output first. Writes over 4K, and consoles mounted with no
+  scrollback model, keep the fully synchronous path. Output still
+  freezes while you drag a selection.
+
+### Numbers
+On the same A1200/030, same 640x246 window, same day: the original
+nine-test conbench suite took 1.2.1 288.68 seconds and takes 1.2.2
+2.42. With full render barriers — the measure no write-behind buffer
+can hide from — the extended suite reads CCON 18.46s, stock CON:
+74.16s, ViNCEd 111.68s.
+
+### Notes
+- Unbarriered benchmark numbers are now optimistic for CCON exactly
+  as they always were for stock and ViNCEd; conbench's SYNC mode is
+  the honest comparison.
+- The measured remaining gap to stock is a single number: one
+  full-window ScrollRaster costs ~34ms against stock's ~17ms
+  per-line render under barriers. Invisible in use (bursts batch),
+  and a candidate for a future look at the scroll primitive itself.
 
 ## [1.2.1] — 2026-07-23 (tag `ccon-1.2.1`)
 

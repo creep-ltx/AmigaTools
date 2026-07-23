@@ -1,5 +1,5 @@
 ==========================================================================
-                                CCON: 1.2
+                               CCON: 1.2.2
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -608,6 +608,21 @@
   inverse is a pen swap at paint time, never a stored colour).
   Redraws, scrollback, selection repaints, menu restores and the
   Ctrl+R prompt restore all read from it.
+
+  Output is rendered model-first (1.2.2): a write's bytes land in
+  the scrollback model, and the screen catches up with at most ONE
+  scroll blit per write - or none at all, when a whole screenful
+  (or a form feed) went past and the grid is simply rebuilt from
+  the model. The write itself is answered as soon as its bytes are
+  safely copied; the pixels follow within a frame (20 ms), and
+  bursts of output pool so that many lines share one blit - which
+  is why a long listing no longer runs at the blitter's pace.
+  Anything that must see settled output settles it first, in
+  order: reads (More's cursor-position handshake included), mode
+  switches, keystrokes, selection, paste, resizing, iconify and
+  closing. Output still freezes while you drag a selection, as
+  stock does. Writes larger than 4K, and consoles mounted without
+  a scrollback model, take the fully synchronous path.
 
   A window with no FONT option opens in whatever font Font Prefs
   has set as "System Default Text" - the same font stock CON:
