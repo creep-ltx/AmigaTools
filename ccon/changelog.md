@@ -6,12 +6,11 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0 and 1.1 are released and tagged;
-1.2 is in development.
+Dates are release/build dates. 1.0, 1.1 and 1.2 are released and tagged.
 
 ---
 
-## [Unreleased] — 1.2
+## [1.2] — 2026-07-23 (tag `ccon-1.2`)
 
 ### Added
 - **Iconify.** `RightAmiga+I` sends a window to the Workbench as an
@@ -50,11 +49,6 @@ Dates are release/build dates. 1.0 and 1.1 are released and tagged;
   seen for a raw-mode client (B8). (Ed doesn't re-wrap text to a
   narrower window, the same as under `CON:` — that's the editor's own
   behaviour.)
-
-### Known limitations
-- `fscall` (Tab completion and the history file) has no timeout, so a
-  wedged or still-spinning-up filesystem blocks the handler until it
-  replies (P6).
 
 ### Fixed — first audit (a full static read of the handler)
 - Edit-line erase no longer leaves a stale paint extent at a

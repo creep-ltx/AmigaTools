@@ -205,7 +205,8 @@
              a deep transcript, lower it on a tight machine - see
              section 17 for the cost per line.
 
-  Not implemented: SMART, SIMPLE, ALT, ICONIFY.
+  Not implemented: SMART, SIMPLE, ALT. (Iconify is a key - RightAmiga+I,
+  section 14 - not an open option.)
 
   A WARNING WORTH BOLD: the AmigaDOS shell eats an unquoted '='
   from ANY command line before CCON: ever sees it - so a FONT or

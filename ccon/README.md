@@ -129,7 +129,7 @@ design notes. A running handler keeps its seglist: after updating
 - `ccon.readme` — short-form readme for the release archive.
 - `ccon.doc` — the full plain-text manual (Amiga-width lines).
 - [`changelog.md`](changelog.md) — the version history, 0.1 to now.
-- `ltx-cc11.lha` — the release archive (`L/`, `DEVS/`, docs).
+- `ltx-cc12.lha` — the release archive (`L/`, `DEVS/`, docs).
 - `todo.md` — the complete build history: every milestone, every
   verified protocol fact, every disassembly finding, every latent
   bug the boots flushed out. The project's lab notebook.
