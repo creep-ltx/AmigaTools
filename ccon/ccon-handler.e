@@ -519,6 +519,21 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> dffull redraw has cleared the old content at the OLD mask.
     maskon=FALSE,
     dfnarrow=FALSE,
+    -> 1.2.5b6, the Ed exit blank line (EDDBG-proven, 24.7.26): Ed's
+    -> exit packet is "?47l ESC8 \n" in ONE write - the trailing LF is
+    -> its politeness for consoles WITHOUT alt-screen restore (3.1:
+    -> the UI stays on the glass, the prompt must not glue to it).
+    -> After OUR restore the cursor already sits at the transcript's
+    -> continuation point, so that LF is redundant by construction -
+    -> it walked the prompt one row down (his screenshots: prompt row
+    -> 2, blank row 1). One-shot: armed only by a SUCCESSFUL ?47l
+    -> restore, eats exactly the first LF in the REMAINDER of that
+    -> render call, cleared by any printable first and unconditionally
+    -> at render exit - a later packet can never lose a real newline.
+    -> (Stock V47 shows the same blank: ESC8 lands the cursor on the
+    -> same cell before the LF. This is a deliberate nicety over
+    -> stock, same family as the transcript restore itself.)
+    alteat=FALSE,
     -> E2 (1.2.4b2), the CPU diet's state:
     dfgen=0,                    -> E2a: dirty = (dfd[r] = dfgen); a ++
                                 -> invalidates every mark in O(1), the
@@ -537,6 +552,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
                                 -> chip-ram-effective CPU speed those
                                 -> loops were ~1ms per scrolled LINE
     dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE
+
 
 PROC main()
   DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
@@ -3089,11 +3105,35 @@ ENDPROC TRUE
 -> re-measures itself.
 PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
-      reflowed
+      reflowed, wasalt
   IF curcon.win = NIL THEN RETURN
   flushout(curcon)              -> S5: the reflow reads the model -
                                 -> pending bytes land first
-  altdrop()                     -> a resize orphans the raw snapshot
+  -> 1.2.5b7, his find (screenshots 24.7.26 evening: "the readme in my
+  -> scrollback"): a resize DURING an alt session used to altdrop() and
+  -> then reflow ED'S PAGE as if it were transcript - re-wrapped client
+  -> UI rows were ARCHIVED into scrollback history (sbcnt grew through
+  -> the reflow), invisible until a later grow-taller pulled them back
+  -> above the live rows. The "nknown command" sighting was the same
+  -> wound: a wrapped fragment of Ed's own status line, clipped at a
+  -> reflow boundary. This is exactly the hole v1.1b10 closed for
+  -> scrolling ("pager bars archived in scrollback") reopened by the
+  -> resize path. Now: put the TRANSCRIPT back first (altrestore - the
+  -> proven proc, cursor and sbtop/sbcnt rewind included), let the
+  -> reflow below work on the real transcript, and RE-SNAPSHOT at the
+  -> new geometry at the end - the class-12 report (B8) makes Ed
+  -> repaint its whole UI onto the fresh page anyway. Bonus: quitting
+  -> Ed after a mid-session resize now restores the transcript, where
+  -> it used to be simply lost with the dropped snapshot.
+  wasalt := FALSE
+  IF curcon.altvalid
+    IF altpop() THEN wasalt := TRUE  -> b8: the MODEL half only - the
+                                -> paint half runs at the OLD grid and
+                                -> overdrew the resized window's border
+                                -> (doresize repaints at the new grid
+                                -> below anyway)
+    altdrop()                   -> belt: a mismatch already dropped
+  ENDIF
   tcclose()                     -> restores rows at the OLD geometry
   clearsel()
   curcon.selon := FALSE                -> a drag dies with the old grid
@@ -3219,6 +3259,15 @@ PROC doresize()
   ELSE
     drawedit()
   ENDIF
+  IF wasalt
+    altsave()                   -> b7: re-arm the snapshot AT THE NEW
+                                -> geometry (rawscr resets inside); the
+                                -> reflowed transcript stays on the
+                                -> glass until the client's class-12
+                                -> repaint covers it - honest, brief,
+                                -> and nothing of the client's page
+                                -> ever touches the ring
+  ENDIF
   IF curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW)
     e := evb
     e.cls := IECLASS_SIZEWINDOW
@@ -3233,14 +3282,37 @@ PROC doresize()
   flushwq()                     -> any writers parked by a dying drag
 ENDPROC
 
--> the close gadget: EOF to the reader (stock CON: CLOSE semantics);
--> a lingering WAIT window (no opens left) dies on the click. The
--> actual CloseWindow is deferred past the event drain (closereq).
+-> the close gadget, V47-faithful three ways (1.2.5b5, the Ed
+-> close-gadget zombie - always Ed): a client that REQUESTED class 11
+-> (CSI 11{ - Ed does, read straight from its binary alongside its
+-> 10{ menus and 12{ resize) gets the CLOSE-GADGET REPORT and decides
+-> for itself, exactly the B8 shape doresize uses for class 12; a
+-> cooked reader gets EOF (stock CLOSE semantics - the shell's
+-> EndCLI); a RAW client that never asked gets NOTHING (stock
+-> discards - the gadget is not ours to translate into EOF for a raw
+-> stream; More requests no classes and quits on q). The old
+-> unconditional EOF injected a 0-read into Ed's raw loop and Ed
+-> abandoned the session: screen wiped, menus dead, input loop gone,
+-> gadget inert - the zombie. A lingering WAIT window (no opens left)
+-> still dies on the click; the actual CloseWindow is deferred past
+-> the event drain (closereq).
 PROC doclosew()
+  DEF evb[8]:ARRAY OF LONG, e:PTR TO ihev
   flushout(curcon)              -> S5: settle before teardown decisions
   IF curcon.opens <= 0
     curcon.closereq := TRUE
-  ELSE
+  ELSEIF curcon.evmask AND Shl(1, IECLASS_CLOSEWINDOW)
+    e := evb
+    e.cls := IECLASS_CLOSEWINDOW
+    e.sub := 0
+    e.code := 0
+    e.qual := 0
+    e.addr := curcon.win
+    e.secs := 0
+    e.mics := 0
+    ihreport(e)                 -> inputarrived inside wakes a parked
+                                -> read or WAIT_CHAR - Ed idles there
+  ELSEIF curcon.rawmode = FALSE
     curcon.eofpend := TRUE
     satisfyreads()
   ENDIF
@@ -4399,7 +4471,15 @@ ENDPROC
 
 -> TRUE = the pre-raw screen is back on model and glass; the caller
 -> skips reanchor (the saved anchor is part of the restoration)
-PROC altrestore()
+-> b8: the model/register half of the restore, split out for doresize
+-> (his find: "the border disappears, in Ed only"): the paint half of
+-> altrestore runs at the grid the SNAPSHOT knows - the OLD one - and
+-> inside doresize the window has already changed size, so old-grid
+-> rows painted straight across the new window's BORDER pixels (one
+-> layer covers border and inner region alike; only our coordinates
+-> keep us off the frame). doresize repaints everything at the NEW
+-> grid anyway - it needs the model back, not the pixels.
+PROC altpop()
   DEF r, over
   IF curcon.altvalid = FALSE THEN RETURN FALSE
   IF (curcon.altrows <> curcon.rows) OR (curcon.altcols <> curcon.cols)
@@ -4428,6 +4508,12 @@ PROC altrestore()
   curcon.ancy := curcon.altancy
   altdrop()
   curcon.viewoff := 0
+ENDPROC TRUE
+
+-> TRUE = the pre-raw screen is back on model AND glass; the caller
+-> skips reanchor (the saved anchor is part of the restoration)
+PROC altrestore()
+  IF altpop() = FALSE THEN RETURN FALSE
   -> b5, HIS CATCH (Ed garbage in the restored transcript + a corrupted
   -> first command): the b2 shape here was maskscan-BEFORE-redraw,
   -> written for the restore-widens case (colourful transcript behind a
@@ -4782,8 +4868,10 @@ PROC csidispatch(c)
   ELSEIF c = "l"
     IF curcon.cpriv AND (n = 47)
       dfflush()
-      altrestore()
-    ENDIF
+      IF altrestore() THEN alteat := TRUE  -> b6: arm the exit-LF eater
+    ENDIF                       -> only when the screen really came
+                                -> back; a dropped snapshot (resize)
+                                -> means the client's LF does real work
   ELSEIF c = "m"
     -> SGR (M5d): reset, bold (bright pens on a 16-pen screen),
     -> 30-37 fg, 39 default fg, 40-47 bg, 49 default bg
@@ -5194,6 +5282,8 @@ PROC render(buf, len)
       run := j - i
       curcon.vblank := FALSE     -> E5: real glyphs on screen now - any
                                  -> scroll from here moves real pixels
+      alteat := FALSE            -> b6: glyphs after a restore = the
+                                 -> next LF is a real one
       -> audit P1: the attr and style a run's cells all get, resolved
       -> ONCE. curattr() calls fgpen(), so the old per-cell form was a
       -> nested call per character on the hottest loop in the file -
@@ -5410,7 +5500,11 @@ PROC render(buf, len)
       oscstart()          -> the 8-bit OSC introducer
       i := i + 1
     ELSEIF c = 10
-      IF dfon THEN dfnl() ELSE outnl()  -> S2: the scroll defers
+      IF alteat
+        alteat := FALSE         -> b6: the client's post-restore tidy
+      ELSE                      -> LF - redundant after a restore, see
+        IF dfon THEN dfnl() ELSE outnl()  -> the flag's block comment
+      ENDIF
       i := i + 1
     ELSEIF c = 13
       curcon.cx := 0
@@ -5470,6 +5564,7 @@ PROC render(buf, len)
   ENDWHILE
   dfflush()         -> S3: the packet's one catch-up blit + span repaints
   dfon := FALSE     -> nothing deferred ever survives a render() call
+  alteat := FALSE   -> b6: the eater never outlives its own packet
   maskon := FALSE   -> 1.2.3: bracket closed - overlays (ghost pen 8!)
   curcon.rp.mask := $FF  -> and everything outside render draw at full depth
   setsoft(0)        -> the editor and cursor draw plain, always
@@ -6522,6 +6617,20 @@ PROC dovanilla(code, qual)
     curcon.cpos := 0
     IF curcon.pasteq THEN SetStr(curcon.pasteq, 0)
     drawedit()
+  ELSEIF (code = 8) AND (qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT))
+    -> Shift+Backspace (1.2.5b3, his ask): kill from line start to the
+    -> cursor - the Amiga-native spelling of Ctrl+U below (CFile's
+    -> prompts already speak it). Keymaps leave Backspace at code 8
+    -> under Shift, so the qualifier is the only tell; checked BEFORE
+    -> the plain branch, which now only sees unshifted presses.
+    IF curcon.cpos > 0
+      FOR j := curcon.cpos TO l - 1
+        s[j - curcon.cpos] := s[j]
+      ENDFOR
+      SetStr(curcon.ebuf, l - curcon.cpos)
+      curcon.cpos := 0
+      drawedit()
+    ENDIF
   ELSEIF code = 8
     -> Backspace: delete before the cursor, close the gap
     IF curcon.cpos > 0
@@ -6530,6 +6639,16 @@ PROC dovanilla(code, qual)
       ENDFOR
       SetStr(curcon.ebuf, l - 1)
       curcon.cpos := curcon.cpos - 1
+      drawedit()
+    ENDIF
+  ELSEIF (code = 127) AND (qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT))
+    -> Shift+Del (1.2.5b4, his ask): kill from the cursor to line end -
+    -> the Amiga-native spelling of Ctrl+K below, the b3 Shift+Backspace
+    -> sibling. Same tell (keymaps leave Del at 127 under Shift), same
+    -> branch-order rule: checked BEFORE the plain branch
+    IF curcon.cpos < l
+      SetStr(curcon.ebuf, curcon.cpos)
+      s[curcon.cpos] := 0
       drawedit()
     ENDIF
   ELSEIF code = 127
@@ -8002,4 +8121,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.5b2 (24.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.5b8 (24.7.26) CCON: LTX console handler', 0

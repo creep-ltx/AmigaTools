@@ -3929,6 +3929,154 @@ Boot checklist (REBOOT FIRST) - ALL PASSED on the real A1200 24.7.26:
       pessimised the write path; it is only called from editor room
       procs, never from render)
 
+## 1.2.5b3+b4 — Shift+Backspace / Shift+Del, the Amiga spellings (24.7.26)
+
+His ask: "I know we have Ctrl+*, but for Amiga users we use
+Shift+key." In the line editor: Shift+Backspace = kill from line
+start to the cursor (Ctrl+U's body, b3), Shift+Del = kill from the
+cursor to line end (Ctrl+K's body, b4) - CFile's prompts already
+speak the idiom. One new ELSEIF ahead of each plain branch in
+dovanilla; keymaps leave Backspace/Del at 8/127 under Shift, so the
+qualifier is the only tell - the same proven plumbing Shift+Tab
+already uses. The Ctrl+R / scrollback-search fragment editors
+deliberately untouched (they edit a match fragment, not a line).
+
+Boot checklist (REBOOT FIRST):
+- [ ] type a line, cursor in the middle (Left a few times),
+      Shift+Backspace - head of the line gone, tail intact, cursor
+      at column 0
+- [ ] same setup, Shift+Del - tail gone, head intact, cursor stays
+- [ ] plain Backspace / plain Del still single-char (branch order)
+- [ ] Ctrl+U / Ctrl+K unchanged (same bodies, both spellings agree)
+- [ ] the no-op edges: Shift+Backspace at column 0, Shift+Del at line
+      end, both on an empty line - nothing happens, no flicker
+
+## 1.2.5b5 — the Ed close-gadget zombie (24.7.26, "always Ed")
+
+His report: close gadget on an Ed session wipes the text, menus stay
+but do nothing, typing dead, gadget dead. Root cause: doclosew()
+translated EVERY opens>0 click into EOF-to-reader - the COOKED close
+semantics - and a 0-read injected into Ed's raw loop made Ed abandon
+the session. The V47 protocol is three-way and Ed says so itself:
+its binary requests CSI 10{ (menus), 11{ (CLOSE GADGET) and 12{
+(resize) as raw event reports. Fix: class-11 requested -> ihreport
+the close-gadget event (the same B8 shape as doresize's class-12,
+inputarrived wakes Ed's parked read/WAIT_CHAR, Ed runs its OWN quit
+flow); cooked reader -> EOF as before (shell's EndCLI); raw client
+that never asked -> the click is DISCARDED, stock parity (More
+requests no classes - q quits it, the gadget never did).
+
+Boot checklist (REBOOT FIRST):
+- [x] Ed a file, click the close gadget - Ed reacts like its Quit
+      menu item (CONFIRMED 24.7.26: "now it work") (asks about unsaved changes / exits cleanly), the
+      transcript comes back, NO zombie
+- [ ] Ed with unsaved edits, close gadget, cancel the quit - session
+      continues: typing, menus, resize all still alive
+- [ ] shell window close gadget: still EndCLI (cooked EOF unchanged)
+- [ ] More a file, click close - NOTHING happens (stock parity),
+      q still quits, transcript restores
+- [ ] WAIT window (no opens): close gadget still closes it
+
+## 1.2.5b6 — Ed's exit blank line (24.7.26, EDDBG-proven)
+
+His report + screenshots: quitting Ed leaves one empty row between
+the old command line and the new prompt. Hunted with a throwaway
+telemetry build (1.2.5b5-EDDBG, dbglog to L:ccon-dbg.log, stripped
+before commit as always): Ed's exit packet is literally
+`CSI 12} 2} 10} >?18w >?19w >?25w >?30w ?47l ESC8 \n` - ONE write,
+and the trailing LF is Ed's politeness for consoles WITHOUT
+alt-screen restore (3.1: its UI stays on the glass). Our ?47l
+restore already parks the cursor at the transcript's continuation
+point (log: restore cy=1, after-LF cy=2), so the LF is redundant by
+construction. Stock V47 shows the same blank (ESC8 lands the cursor
+on the same cell first) - this is a nicety OVER stock, same family
+as the transcript restore itself.
+
+Fix: `alteat`, a render-scoped one-shot - armed only by a
+SUCCESSFUL ?47l restore, eats exactly the first LF in the remainder
+of that render call, cleared by any printable and unconditionally
+at render exit. A dropped snapshot (resize during raw) never arms
+it, so the client's LF does real work there. A later packet can
+never lose a newline.
+
+Boot checklist (REBOOT FIRST):
+- [x] ed a file, Q - new prompt DIRECTLY under the old command line,
+      no blank row (EDDBG2-confirmed 24.7.26: restored=-1, ateLF,
+      prompt at cy=1 - his run 1)
+- [ ] More a file, q - exit layout unchanged-or-better, transcript
+      intact (More's own exit shape rides the same ?47l path)
+- [ ] echo/type/dir flood: every newline still lands (the eater is
+      packet-scoped - this is the paranoia row)
+
+## 1.2.5b7 — mid-alt resize archived the client's page (24.7.26)
+
+His three-run session with EDDBG2 telemetry + screenshots told the
+whole story. Run 1 (plain ed+quit): b6 works - restored=-1, ateLF,
+prompt directly under the command. Run 2 (resize DURING ed): the old
+doresize altdrop()'d the snapshot and then REFLOWED ED'S PAGE as
+transcript - re-wrapped client UI rows were ARCHIVED into scrollback
+history (sbcnt grew through the reflow). Run 3 (clean quit, THEN
+grow the window): correct grow behavior faithfully showed the
+polluted history - "the readme came back". The earlier
+"nknown command" was the same wound: a wrapped fragment of Ed's own
+"Unknown command" status row, clipped at a reflow boundary. Exactly
+the v1.1b10 hole ("pager bars archived in scrollback") reopened by
+the resize path.
+
+Fix: doresize with altvalid now altrestore()s FIRST - transcript
+rows, cursor, sbtop/sbcnt rewind, the proven proc - so the reflow
+below works on the real transcript; at the end altsave() re-arms the
+snapshot AT THE NEW geometry (rawscr resets inside) and the class-12
+report makes Ed repaint its UI onto the fresh page. Bonus: quitting
+Ed after a mid-session resize now RESTORES the transcript (was:
+simply lost with the dropped snapshot), and b6's eater arms there
+too - no blank line on that path either.
+
+Boot checklist (REBOOT FIRST):
+- [x] the run-2 case: ed, resize (narrower AND wider), keep editing,
+      Q - transcript comes back reflowed to the new width, prompt
+      directly under the command, NO Ed rows anywhere (CONFIRMED
+      24.7.26: "quit ed and resize without artifacts")
+- [x] the run-3 case: after the above quit, grow the window tall -
+      history above is REAL transcript only, no readme resurrection
+      (CONFIRMED same session)
+- [ ] mid-resize glass: after the drag, the transcript flashes until
+      Ed's class-12 repaint lands - brief is fine, stuck is a bug
+      (Ed must repaint; B8 machinery unchanged)
+- [ ] More: resize mid-page - blank-ish page until the next keypress
+      repaints is acceptable (More has no class-12), q afterwards
+      restores the transcript clean
+- [ ] plain cooked resize (no ed): reflow behavior unchanged
+      (reflowtest territory - eyes only)
+
+## 1.2.5b8 — b7's own seam: the vanishing border (24.7.26)
+
+His find, with screenshots: after b7, resizing DURING Ed left the
+window border invisible (still clickable - pixels only). Cause: b7
+reused altrestore() inside doresize, and its paint half runs at the
+grid the SNAPSHOT knows - the OLD one - into a window that has
+already changed size. One layer covers border and inner region
+alike; only our coordinates keep us off the frame, and old-grid rows
+in a shrunken window land ON it. Intuition draws the frame, our
+stale paint rolls over it, and doresize's own repaint only fills the
+inner region.
+
+Fix: split altrestore() into altpop() (model, cursor, sbtop/sbcnt
+rewind - NO painting) + altrestore() (altpop + the b5 full-depth
+repaint + maskscan + settitle). doresize uses altpop() - it repaints
+everything at the NEW grid anyway. ?47l and the END net keep the
+full altrestore(), untouched.
+
+Boot checklist (REBOOT FIRST):
+- [x] ed, resize smaller then larger - border VISIBLE the whole way,
+      Ed repaints, session continues (CONFIRMED 24.7.26 FS-UAE "now
+      everything works" + REAL A1200 "no problems")
+- [x] quit after the resizes - transcript back, reflowed, no blank
+      line, no Ed rows in history (the b7 wins must survive b8)
+- [x] run-3 replay: quit clean, grow tall - history clean
+- [x] plain shell resize - unchanged (the split touches only the
+      alt path)
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
