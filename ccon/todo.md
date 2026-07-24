@@ -3912,17 +3912,17 @@ the perf campaign's new surface. Three fixes, all deployed as b2:
   (1) merged noise spans into the first packets after mount. Now
   zeroed in main()'s existing table loop.
 
-Boot checklist (REBOOT FIRST):
-- [ ] plain regression eyes: dir/list/type flow, Ed session, More
+Boot checklist (REBOOT FIRST) - ALL PASSED on the real A1200 24.7.26:
+- [x] plain regression eyes: dir/list/type flow, Ed session, More
       paging, resize, iconify/restore - nothing moved (D1/D3 are
       guards, D2 only fires on a provably-blank page)
-- [ ] D2 case: fresh window, `type` a file that ends with a form feed
-      (or Ctrl+L an empty shell), then type a line at the bottom row
-      until it wraps - the line must SCROLL UP, not duplicate/stay
-- [ ] D2 menu case: same blank-page state, type a partial path, Tab -
-      completion menu appears with the edit line scrolled correctly
-      above it
-- [ ] D3 eyes: first commands after reboot show NO garbage flicker in
+- [x] D2 case: `type s:ccon-d2blank` (one FF byte) behind a glyph-free
+      positioning prompt (`prompt "*e[99;1H"` - a normal prompt's own
+      glyphs clear vblank and hide the bug), then type a line at the
+      bottom row until it wraps - the line SCROLLS UP cleanly
+- [x] D2 menu case: same blank-page state, `c:d` + Tab - completion
+      menu appears with the edit line scrolled correctly above it
+- [x] D3 eyes: first commands after reboot show NO garbage flicker in
       the right margin (was always subtle/rare - absence is the pass)
 - [ ] conbench quick pass on 1.2.5b2: scroll-nl still ~CON-beating
       (the E5 skip must still fire - vbrecheck must NOT have
