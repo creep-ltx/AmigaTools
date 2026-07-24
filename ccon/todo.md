@@ -4077,6 +4077,45 @@ Boot checklist (REBOOT FIRST):
 - [x] plain shell resize - unchanged (the split touches only the
       alt path)
 
+## 1.2.6b1 — the REAL iconify gadget (25.7.26): the v1.2 dead end, undone
+
+Research session (full story: ~/Projects/AmigaReferences/
+intuition-iconify.md): the v1.2 "title-bar gadgets are UNHOOKABLE"
+verdict was wrong on both halves. (1) The V47.4+ standard gadget
+(WA_ICONIFYGADGET) reports its click as **IDCMP_CLOSEWINDOW with
+Code=1** (a true close is Code 0) — straight from the NDK3.2
+intuition release notes, the one channel the v1.2 hunt (GADGETUP,
+CHANGEWINDOW, layer poll) never inspected. (2) The Stage-1 custom
+gadget (4782224) most likely DID get its GADGETUPs — its dogadget()
+guard compared against `{curcon.igad}`, the E-VO off-by-24
+address-of bug found later the same session and never connected
+back.
+
+Implementation, six lines against soak-tested machinery:
+WA_ICONIFYGADGET,TRUE in both OpenWindowTagList sites (owned windows
+only; borrowed windows can't be tagged) + the drain's CLOSEWINDOW
+dispatch branches on code: 1 -> doiconify(), else doclosew(). Frame
+classes always act (the B8 rule), so the gadget works over raw
+fullscreen clients (Ed) like RA+I does. Pre-V47 intuition ignores
+the unknown tag: no gadget, no Code=1, unchanged behavior. RA+I
+stays (borrowed windows, muscle memory).
+
+Boot checklist (REBOOT FIRST):
+- [x] shell window: iconify gadget appears in the title bar (left of
+      depth/zoom, V47's own imagery), close gadget unchanged beside it
+      (CONFIRMED 25.7.26: "It works, of course it does")
+- [x] click it - window vanishes to the CCON AppIcon, double-click
+      restores exactly as left (the RA+I path, new trigger)
+- [ ] the close gadget still closes/EOFs (Code 0 branch untouched)
+- [ ] iconify gadget OVER Ed - parks and restores like RA+I over Ed
+      (frame classes act while input classes park)
+- [ ] restore, then gadget again - reopened window carries the
+      gadget too (reopenwin tag list)
+- [ ] WAIT window: iconify parks it, restore brings it back, close
+      gadget still kills it
+- [ ] RA+I still works everywhere, incl. a borrowed CTerm frame
+      (which has NO gadget - can't be tagged)
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

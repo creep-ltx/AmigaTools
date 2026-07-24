@@ -877,7 +877,18 @@ PROC main()
               IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
             ENDIF
             IF class = IDCMP_NEWSIZE THEN doresize()
-            IF class = IDCMP_CLOSEWINDOW THEN doclosew()
+            IF class = IDCMP_CLOSEWINDOW
+              -> 1.2.6b1: the REAL iconify gadget. V47.4+ reports its
+              -> click as CLOSEWINDOW with Code=1 (a true close is
+              -> Code 0) - the one channel the v1.2 hunt never
+              -> inspected (NDK3.2 intuition relnotes; the whole story
+              -> in AmigaReferences/intuition-iconify.md). Frame
+              -> classes always act, so like NEWSIZE (B8) this works
+              -> over a raw fullscreen client (Ed) too - parity with
+              -> RightAmiga+I. Pre-V47 intuition never sends Code=1
+              -> (the tag is unknown there, no gadget appears).
+              IF code = 1 THEN doiconify() ELSE doclosew()
+            ENDIF
           ENDIF
         UNTIL im = NIL
         IF c.closereq             -> deferred: never CloseWindow while
@@ -2349,6 +2360,9 @@ PROC reopenwin()
      WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
      WA_ACTIVATE, TRUE,
      WA_CLOSEGADGET, curcon.closegad,
+     WA_ICONIFYGADGET, TRUE,     -> 1.2.6b1: V47 draws + reports it
+                                 -> (CLOSEWINDOW Code=1); older
+                                 -> intuition ignores the tag
      WA_SIZEGADGET, IF curcon.pnosize THEN FALSE ELSE TRUE,
      WA_BORDERLESS, curcon.pnoborder,
      WA_BACKDROP, curcon.pbackdrop,
@@ -2525,6 +2539,7 @@ PROC openwin()
        WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
        WA_ACTIVATE, IF curcon.pinactive THEN FALSE ELSE TRUE,
        WA_CLOSEGADGET, curcon.closegad,
+       WA_ICONIFYGADGET, TRUE,   -> 1.2.6b1: see reopenwin
        WA_SIZEGADGET, IF curcon.pnosize THEN FALSE ELSE TRUE,
        WA_BORDERLESS, curcon.pnoborder,
        WA_BACKDROP, curcon.pbackdrop,
@@ -8121,4 +8136,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.5 (24.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b1 (25.7.26) CCON: LTX console handler', 0
