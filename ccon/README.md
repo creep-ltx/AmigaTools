@@ -10,23 +10,30 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.4.** Every milestone boot-verified on AmigaOS 3.2 —
-and, as of 1.2.4, on real hardware (A1200 + PiStorm). 1.2.4 is **the
-tuning release**: on a real accelerated Amiga it runs the whole
-benchmark suite **five times faster than stock `CON:`** and faster on
-essentially every test (see **Speed**, below). It builds on 1.2.3's
-plane-masked rendering (CCON masks its drawing to the bitplanes the
-text actually occupies — the trick read out of the 3.2 ROM's own
-console.device) and 1.2.2's model-first engine (at most one scroll
-blit per write, accept-then-render buffering), and adds the change
-that mattered most on real silicon: **it never scrolls a blank
-screen.** Before them: 1.2.1 applied a third read of the source (two
-memory-corruption fixes among nine); 1.2 brought **iconify** to a
-Workbench icon (RightAmiga+I) and clean full-screen page flips; 1.1
-brought per-window FONT and soft styles, an alternate-screen contract
-for Ed/More, shared persistent history, safe multi-line paste,
-scrollback content search, and the KingCON-style `CON:`/`RAW:`
-takeover.
+**Status: 1.2.5.** Every milestone boot-verified on AmigaOS 3.2 —
+and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.5 is **the
+Ed-and-deep-screens release**: autosuggestion ghosts and
+completion-menu colours now appear on 32+ colour and RTG screens,
+Shift+Backspace/Shift+Del join Ctrl+U/K as the Amiga spellings of
+kill-to-start/end, the close gadget speaks the full V47 protocol (Ed
+quits properly from it instead of dying mid-session), quitting Ed
+leaves no stray blank line, and resizing during an Ed session no
+longer leaks the edited file into your scrollback — the transcript
+now survives such a resize to the exit. Plus the hardening from a
+fourth full source audit. Before it: 1.2.4 was **the tuning
+release** — on a real accelerated Amiga the whole benchmark suite
+runs **five times faster than stock `CON:`** (see **Speed**, below),
+building on 1.2.3's plane-masked rendering (the trick read out of
+the 3.2 ROM's own console.device), 1.2.2's model-first engine (at
+most one scroll blit per write, accept-then-render buffering), and
+the change that mattered most on real silicon: **it never scrolls a
+blank screen.** Before them: 1.2.1 applied a third read of the
+source (two memory-corruption fixes among nine); 1.2 brought
+**iconify** to a Workbench icon (RightAmiga+I) and clean full-screen
+page flips; 1.1 brought per-window FONT and soft styles, an
+alternate-screen contract for Ed/More, shared persistent history,
+safe multi-line paste, scrollback content search, and the
+KingCON-style `CON:`/`RAW:` takeover.
 
 ## Speed
 
@@ -123,15 +130,18 @@ the real prompt comes back from the scrollback model:
   disk if needed) or scrollback depth; unset FONT follows your
   Font Prefs default instead of a hardcoded topaz 8.
 - **fish-style autosuggestions**: history's continuation as grey
-  ghost text; Right accepts all, Ctrl+Right/Tab word by word.
+  ghost text; Right accepts all, Ctrl+Right/Tab word by word — on
+  any screen depth, 32+ colours and RTG included.
 - **bash-style Ctrl+R**: incremental history search; the prompt
   becomes an inverse `(search: …)` banner and is restored
   pixel-perfect from the scrollback model afterwards.
 - **zsh-style Tab completion** with a cycling menu, on hand-rolled
   filesystem packets (a handler must not call packet-sending
   dos.library functions — the no-DOS rule).
-- **readline surgery**: Ctrl+W/U/K, and Ctrl+L clearing the screen
-  *into history* — Shift+Up undoes the clear.
+- **readline surgery**: Ctrl+W/U/K — with Shift+Backspace and
+  Shift+Del as the Amiga spellings of kill-to-start and kill-to-end
+  — and Ctrl+L clearing the screen *into history* — Shift+Up undoes
+  the clear.
 - **Copy & paste** both ways with the stock console family
   (IFF FTXT): drag with output frozen mid-drag like stock,
   double-click word, triple-click line. RAMIGA-V pastes safely —
@@ -148,11 +158,15 @@ the real prompt comes back from the scrollback model:
 - **Fullscreen programs work**: Ed with working menus (picks travel
   the same IECLASS_MENULIST route as on stock CON: — read out of
   Ed's disassembled parser), block cursor, class-12 resize
-  re-measure, and proper whole-view scrolling (ANSI Scroll Up/Down
-  honoured, not just the one changed row); More with real
-  timer.device WAIT_CHARs, and it restores your scrollback
-  transcript on exit exactly as xterm's alternate screen does —
-  paged content never enters your history.
+  re-measure, proper whole-view scrolling (ANSI Scroll Up/Down
+  honoured, not just the one changed row), a close gadget that
+  quits it properly (the class-11 report Ed actually requests —
+  also read out of its binary), no stray blank line after quitting,
+  and mid-session resize that neither leaks the page into
+  scrollback nor loses the transcript; More with real timer.device
+  WAIT_CHARs, and it restores your scrollback transcript on exit
+  exactly as xterm's alternate screen does — paged content never
+  enters your history.
 - **xterm-style window titles** (OSC) that survive scrollback.
 - **CRAW:** — the same binary mounted raw-from-byte-one, the
   `RAW:` counterpart.

@@ -44,7 +44,9 @@ FEATURES
     built into the handler. Works over a fullscreen client (Ed) too
 
   - fish-style autosuggestions: history's continuation as grey
-    ghost text; Right accepts, Ctrl+Right/Tab take it word by word
+    ghost text; Right accepts, Ctrl+Right/Tab take it word by word;
+    the ghost (and the menu's blue/grey) shows on any screen depth,
+    32+ colours and RTG included
 
   - zsh-style Tab completion with a cycling candidate menu
 
@@ -52,8 +54,10 @@ FEATURES
     becomes an inverse (search: ...) banner and is restored
     pixel-perfect from the scrollback model afterwards
 
-  - readline line surgery: Ctrl+W/U/K, and Ctrl+L clearing into
-    HISTORY (Shift+Up undoes the clear)
+  - readline line surgery: Ctrl+W/U/K - with Shift+Backspace and
+    Shift+Del as the Amiga spellings of kill-to-start and
+    kill-to-end - and Ctrl+L clearing into HISTORY (Shift+Up
+    undoes the clear)
 
   - Copy & paste with the stock console family, both directions
     (IFF FTXT); drag, double-click word, triple-click line;
@@ -74,9 +78,14 @@ FEATURES
   - Fullscreen programs work: Ed with working MENUS, block
     cursor, resize re-measure, and proper whole-view scrolling
     (ANSI Scroll Up/Down honoured, not just the one changed line);
-    More with real timed paging, and it restores your scrollback
-    transcript on exit exactly as xterm's alternate screen does -
-    paged content never enters your history
+    its close gadget quits it properly (reported the V47 way, Ed
+    runs its own quit flow); quitting leaves no stray blank line,
+    the prompt lands directly under your command; and resizing
+    mid-session is safe - the page never leaks into scrollback,
+    and the transcript survives to the exit, re-wrapped. More with
+    real timed paging, and it restores your scrollback transcript
+    on exit exactly as xterm's alternate screen does - paged
+    content never enters your history
 
   - xterm-style window titles (OSC) that survive scrollback
 
@@ -107,11 +116,43 @@ LIMITATIONS
 
   - SMART/SIMPLE and ALT not implemented
 
+  - ls-style ANSI colours fall back to the default pen on 32+
+    colour / RTG screens (the model stores 16 pens per cell; the
+    ghost and menu colours are exempt and do show there)
+
   - Tab completion and the history file have no filesystem
     timeout; a wedged or spinning-up disk blocks the window
 
 
 HISTORY
+
+  1.2.5
+    - Ghost text and completion-menu colours now show on 32+
+      colour and RTG screens (they vanished above 16 colours)
+
+    - Shift+Backspace / Shift+Del delete to line start / end -
+      the Amiga spellings of Ctrl+U / Ctrl+K
+
+    - Ed and the close gadget make peace: the click is reported
+      to Ed the V47 way and Ed quits properly, instead of the
+      session being cut off with a dead screen. Shells still end
+      on the click; raw programs that never asked get nothing,
+      as on stock
+
+    - Quitting Ed no longer leaves an empty line before the next
+      prompt (Ed's tidy newline is redundant once the transcript
+      is restored - dropped, exactly once, only there)
+
+    - Resizing during an Ed session no longer leaks the edited
+      file into scrollback history, keeps the window border
+      drawn, and the transcript now survives to the exit -
+      re-wrapped to the new width - where it used to be lost
+
+    - Hardening from a fourth source audit: a malformed
+      negative-length write could crash the machine (regression,
+      never seen in the wild); a blank-page scroll could be
+      skipped wrongly at three line-editor corners; first-mount
+      renders ran on uninitialized dirty-marks (cosmetic)
 
   1.2.4
     - The tuning release: on a real accelerated A1200 the whole

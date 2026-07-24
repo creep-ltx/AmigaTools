@@ -11,6 +11,70 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3 and
 
 ---
 
+## [1.2.5] — 2026-07-24
+
+The Ed release, and the deep-screen release. A fourth source audit
+opened it; an evening of testing against Ed on the real machine
+closed it. Every fix was root-caused by reading the actual bytes —
+Ed's own binary gave up its console protocol requests and its exact
+exit sequence, and a throwaway telemetry build logged the handler's
+packet stream to settle what no amount of staring could.
+
+### Added
+- **Ghost text and menu colours on deep screens.** fish-style
+  autosuggestions and the completion menu's grey and blue now appear
+  on 32+ colour and RTG screens — previously they silently vanished
+  above 16 colours, because every best-match pen on a deep screen
+  comes back above the scrollback model's 16-pen cap. The ghost and
+  the menu are pixels-only and never enter the model, so they now
+  use their own uncapped pens. (`ls` colours on such screens still
+  fall back to the default pen — that one *is* a model constraint,
+  and lifting it is 1.3-scale work.)
+- **Shift+Backspace and Shift+Del** delete to line start and line
+  end — the Amiga-native spellings of Ctrl+U and Ctrl+K, both of
+  which still work.
+
+### Fixed
+- **Clicking Ed's close gadget no longer wrecks the session.** The
+  gadget used to send end-of-file to whatever was reading — correct
+  for a shell, wrong for Ed, which abandoned the session: screen
+  wiped, menus dead, keyboard dead. The close gadget now speaks the
+  full V47 console protocol three ways: a raw-mode program that
+  requested close-gadget reports (Ed does — it asks for menus,
+  close and resize alike) receives the report and decides for
+  itself, so Ed now runs its own quit flow; a shell still gets
+  end-of-file (the click still ends it, as on stock); and a raw
+  program that never asked gets what stock gives it — nothing.
+- **No more empty line after quitting Ed.** Ed ends every session
+  with a tidy newline, meant for consoles that cannot restore the
+  screen behind it. CCON restores the transcript exactly, so that
+  newline only pushed the new prompt one row down. It is dropped
+  now — exactly one newline, only immediately after a successful
+  restore, never from any later output. (Stock V47 still shows the
+  blank line; this is CCON being deliberately nicer.)
+- **Resizing the window while Ed runs is safe now.** It used to
+  re-wrap Ed's on-screen page as if it were shell output and file
+  pieces of it into the scrollback — surfacing later as "the file I
+  was editing is in my history". Now the real transcript is put
+  back before the resize re-wraps anything, and the fullscreen
+  session is re-snapshotted at the new size. Two bonuses: quitting
+  Ed after a mid-session resize now restores your transcript
+  (re-wrapped to the new width) where it used to be lost entirely,
+  and the window border no longer vanishes during the dance.
+- **Hardening from the fourth audit**: a malformed write with a
+  negative length could take down the machine (a 1.2.2 regression,
+  never seen in the wild — the guard now matches the rest of the
+  file); the blank-screen scroll optimization could skip a real
+  scroll at three line-editor seams, visible only when typing on a
+  provably blank page; and the render engine's dirty-row marks ran
+  their first packets after mount against uninitialized memory
+  (cosmetic at worst).
+
+### Notes
+- Built as beta ladder 1.2.5b1–b8, every step boot-verified in
+  FS-UAE before the next, the audit fixes and the final build
+  confirmed on a real A1200 (PiStorm).
+
 ## [1.2.4] — 2026-07-23 (tag `ccon-1.2.4`)
 
 The tuning release. 1.2.2/1.2.3 made CCON fast in emulation; 1.2.4

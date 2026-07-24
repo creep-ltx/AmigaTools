@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.4
+                               CCON: 1.2.5
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -151,8 +151,14 @@
 --------------------------------------------------------------------------
 
   CLOSE      Put a close gadget on the window. The gadget is ON by
-             default (like a 3.2 shell window); clicking it sends
-             end-of-file to the program reading the window.
+             default (like a 3.2 shell window). Clicking it follows
+             the V47 console protocol: a shell (cooked reader) gets
+             end-of-file - the click ends it, as on stock; a raw
+             fullscreen program that ASKED for close-gadget reports
+             gets the report and decides for itself - Ed asks, so
+             the click runs Ed's own quit flow; a raw program that
+             never asked gets nothing, exactly as stock gives it
+             (quit More with its own keys).
 
   NOCLOSE    Remove the close gadget.
 
@@ -245,13 +251,17 @@
     Shift+Left/Right  jump to start / end of line
     Backspace         delete before the cursor
     Del               delete under the cursor
+    Shift+Backspace   delete from line start to the cursor
+    Shift+Del         delete from the cursor to line end
     Esc               clear the line
     Return            commit the line
     Up / Down         walk the history (32 entries; the half-typed
                       line is stashed and comes back)
     Ctrl+W            delete the word before the cursor
     Ctrl+U            delete from line start to the cursor
+                      (same as Shift+Backspace)
     Ctrl+K            delete from the cursor to line end
+                      (same as Shift+Del)
     Ctrl+L            clear the screen, keeping the line - the
                       cleared rows scroll into HISTORY, so Shift+Up
                       brings them back; nothing is destroyed
@@ -504,6 +514,22 @@
       do not enter your history, and quitting snaps back to your
       prompt instantly, pixel for pixel. Any client that sends the
       same sequence gets the same treatment.
+    - Ed quits from its close gadget: the click is reported to Ed
+      the way V47 defines it (Ed requests close-gadget reports at
+      startup, alongside its menus and resize), so Ed runs its own
+      quit flow instead of being cut off mid-session.
+    - Quitting Ed leaves no stray empty line: Ed ends its session
+      with a tidy newline meant for consoles that cannot restore
+      the screen behind it; CCON: restores your transcript exactly,
+      so that one redundant newline is dropped and the new prompt
+      lands directly under your command. (Stock V47 shows the blank
+      line; this is CCON: being deliberately nicer.)
+    - Resizing the window WHILE Ed runs is safe: the fullscreen
+      page is never re-wrapped into your scrollback, the window
+      border stays drawn, Ed re-measures and repaints at the new
+      size - and if you then quit, your transcript comes back
+      re-wrapped to the new width (stock, and earlier CCON:,
+      simply lost it).
 
   And unlike stock CON:, Ctrl+Up/Down and the wheel still scroll
   the view while these programs run - except on the alternate
@@ -685,6 +711,13 @@
   - SMART/SIMPLE and ALT are not implemented.
   - A borrowed window (WINDOW0xADDR) keeps its owner's font; FONT
     only applies to windows CCON: opens itself.
+  - On 32+ colour and RTG screens, ls-style ANSI colours fall back
+    to the default pen: the scrollback model stores one 16-pen
+    nibble per cell, and deep-screen best-match pens land above
+    that. (The autosuggestion ghost and the completion menu ARE
+    coloured on such screens as of 1.2.5 - they live outside the
+    model.) Lifting the cap for text colours means widening the
+    model - planned, 1.3-scale.
   - Tab completion and the history file talk to the filesystem
     with no timeout, so a wedged or still-spinning-up disk can
     block the window until that filesystem answers.
