@@ -643,6 +643,15 @@ PROC main()
   FOR tmp := 0 TO 255
     prtbl[tmp] := IF ((tmp >= 32) AND (tmp <= 126)) OR (tmp >= 160) THEN 1 ELSE 0
     zerorun[tmp] := 0           -> E globals start as garbage
+    dfd[tmp] := 0               -> audit4 D3 (1.2.5b2): same rule - a
+                                -> garbage byte equal to the FIRST live
+                                -> dfgen (1) made dfmark merge heap
+                                -> noise from dfx0/dfx1 into a span, and
+                                -> the flush repainted it (reads past
+                                -> the row, garbage glyphs in the right
+                                -> margin, first packets after mount
+                                -> only). dfx0/dfx1 need no init: dfd is
+                                -> the only gate that reads them
   ENDFOR
 
   -> v1.1b2: the disk-font loader plumbing. The helper's entry is
@@ -1524,6 +1533,17 @@ PROC dowrite(pkt:PTR TO dospacket)
                                 -> this line is what makes Ctrl+C reach it
                                 -> (AROS con-handler does the same)
   len := pkt.arg3
+  -> audit4 D1 (1.2.5b2): a NEGATIVE length sailed past both size guards
+  -> below ((len > WOBSZ) and (wolen + len > WOBSZ) are both false) and
+  -> reached CopyMem, whose size is UNSIGNED - a ~4GB copy through the
+  -> heap. A regression the accept path introduced: 1.2.1 handed len
+  -> straight to render(), whose WHILE i < len made it a harmless no-op.
+  -> swaccept() always had this guard (pkt.arg3 >= 0); now both accept
+  -> sites agree.
+  IF len < 0
+    ReplyPkt(pkt, -1, ERROR_BAD_NUMBER)
+    RETURN
+  ENDIF
   -> audit3 C9: client output ends a scrollback CONTENT search. snaplive()
   -> below resets viewoff and repaints live, but left sbsrch TRUE - so the
   -> next keystroke took dovanilla's sbsrch branch and sbfind() yanked the
@@ -4149,6 +4169,7 @@ ENDPROC n
 -> the edit line's own last row) - same scroll-until-it-fits shape
 -> dotab's completion menu already uses for the same problem
 PROC pastehintroom(l)
+  vbrecheck()                   -> audit4 D2: editor paint is live here
   WHILE ((edlastrow(l) + 1) > (curcon.rows - 1)) AND (curcon.ancy > 0)
     screenscroll()
     IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1
@@ -4239,6 +4260,27 @@ PROC vblankscan()
     ENDFOR
   ENDFOR
   curcon.vblank := TRUE
+ENDPROC
+
+-> audit4 D2 (1.2.5b2): re-earn the E5 flag at the three screenscroll
+-> callers that run OUTSIDE the dorender bracket - edroom, the dotab
+-> menu room, pastehintroom. Inside the bracket the flag is sound
+-> because erase-before-render makes model-blank equal pixels-blank;
+-> those three scroll while editor paint is LIVE, and drawedit paints
+-> IN PLACE (b9: no pre-erase) and mirrors into the model without
+-> touching vblank - so a stale TRUE skipped a blit with real pixels
+-> to move: ring and anchor advanced, the painted line stayed put
+-> (7893's own comment promises "its pixels scroll along"). The
+-> mirrored cells ARE model cells, so vblankscan answers honestly and
+-> early-exits on the first glyph; no model = nothing can verify =
+-> conservative FALSE. Cheap: only a TRUE flag (rare - a provably
+-> blank page) is ever rechecked, FALSE already forces the blit.
+-> Deliberately NOT fixed in drawedit: clearing the flag after every
+-> cooked write's blip repaint would leave it permanently FALSE and
+-> silently disable E5's whole scroll-nl win.
+PROC vbrecheck()
+  IF curcon.vblank = FALSE THEN RETURN
+  IF curcon.sb THEN vblankscan() ELSE curcon.vblank := FALSE
 ENDPROC
 
 -> the title bar doubles as the scroll-position indicator. The buffer
@@ -5466,6 +5508,7 @@ PROC edlastrow(n) IS curcon.ancy + ((curcon.ancx + n) / curcon.cols)
 
 -> scroll until that fits on screen (the dotab menu loop's pattern)
 PROC edroom(n)
+  vbrecheck()                   -> audit4 D2: editor paint is live here
   WHILE (edlastrow(n) > (curcon.rows - 1)) AND (curcon.ancy > 0)
     screenscroll()
     IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1
@@ -7888,6 +7931,8 @@ PROC dotab(back)
   ENDIF
   IF curcon.sb = NIL THEN RETURN   -> no model = no way to restore the rows
   tcmenucalc()              -> under a menu; prefix-only completion
+  vbrecheck()               -> audit4 D2: the edit line is painted and
+                            -> must really scroll with the blit below
   WHILE ((edlastrow(StrLen(curcon.ebuf)) + curcon.tcmrows) > (curcon.rows - 1)) AND (curcon.ancy > 0)
     screenscroll()          -> make room below the (wrapped) edit
     IF curcon.cy > 0 THEN curcon.cy := curcon.cy - 1     -> line; its pixels scroll along, anchor
@@ -7957,4 +8002,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.5b1 (24.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.5b2 (24.7.26) CCON: LTX console handler', 0

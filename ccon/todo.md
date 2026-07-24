@@ -3887,6 +3887,48 @@ Boot checklist (REBOOT FIRST):
       rule) - EXPECTED still default-pen there; NOT a regression,
       lifting that needs an attr-plane widening (a 1.3 thing)
 
+## 1.2.5b2 — the audit4 fixes (24.7.26)
+
+Fourth audit (ccon/audit4.md, D-series) over everything since 1.2.1:
+the perf campaign's new surface. Three fixes, all deployed as b2:
+
+- **D1** `dowrite` accepted a NEGATIVE pkt.arg3 into CopyMem (unsigned
+  size = ~4GB copy, machine gone) - a regression the S5 accept path
+  introduced; 1.2.1's render() made negative len a harmless no-op, and
+  swaccept always had the `arg3 >= 0` guard. Now: reply -1 /
+  ERROR_BAD_NUMBER, both accept sites agree.
+- **D2** E5's vblank flag never saw editor paint: drawedit paints IN
+  PLACE (b9, no pre-erase) and mirrors into the model without touching
+  the flag, so the three screenscroll callers OUTSIDE the dorender
+  bracket (edroom, dotab menu room, pastehintroom) could skip a blit
+  with real pixels to move - line stays, ring/anchor advance. Fix =
+  vbrecheck() at the three seams: TRUE flag is re-earned via
+  vblankscan (mirrored cells are model cells, so it answers honestly),
+  sb=NIL goes conservative FALSE. NOT fixed in drawedit - that would
+  clear the flag after every cooked write's blip repaint and kill the
+  whole E5 scroll-nl win.
+- **D3** dfd[] never initialized (the E-globals-are-garbage rule the
+  file states twice) - a garbage byte equal to the first live dfgen
+  (1) merged noise spans into the first packets after mount. Now
+  zeroed in main()'s existing table loop.
+
+Boot checklist (REBOOT FIRST):
+- [ ] plain regression eyes: dir/list/type flow, Ed session, More
+      paging, resize, iconify/restore - nothing moved (D1/D3 are
+      guards, D2 only fires on a provably-blank page)
+- [ ] D2 case: fresh window, `type` a file that ends with a form feed
+      (or Ctrl+L an empty shell), then type a line at the bottom row
+      until it wraps - the line must SCROLL UP, not duplicate/stay
+- [ ] D2 menu case: same blank-page state, type a partial path, Tab -
+      completion menu appears with the edit line scrolled correctly
+      above it
+- [ ] D3 eyes: first commands after reboot show NO garbage flicker in
+      the right margin (was always subtle/rare - absence is the pass)
+- [ ] conbench quick pass on 1.2.5b2: scroll-nl still ~CON-beating
+      (the E5 skip must still fire - vbrecheck must NOT have
+      pessimised the write path; it is only called from editor room
+      procs, never from render)
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
