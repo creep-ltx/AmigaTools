@@ -3854,6 +3854,39 @@ Boot checklist (REBOOT FIRST):
 - [ ] REAL HARDWARE conbench if available: scroll-nl vs 0.18 is the
       whole point; expect CCON total ~8s vs CON 12.8
 
+## 1.2.5b1 — overlay pens: ghosts on 32+ colour / RTG screens
+
+His real-A1200 report (24.7.26): fish autosuggestions never appear on
+the 720p 32-bit Workbench; testing pinned the boundary EXACTLY at the
+pen count — works up to 16 colours, dead at 32 and up. Root cause is
+the `IF v > 15` guard on the ObtainBestPen table (anstab): on a 32+
+colour screen the best grey/blue come back as pens >15, the guard
+releases them (rightly - the model's attr plane stores fg/bg as one
+NIBBLE per cell), anstab[0] stays -1, and drawedit() never even runs
+sgfind() - so Right had nothing to accept, matching his "if it was
+just invisible I could have pressed Right" observation precisely.
+
+Fix: two per-console OVERLAY pens (ovgrey $555, ovblue $88F) obtained
+beside anstab with NO cap - the ghost and the completion menu are
+pixels-only (drawn full-depth, erased full-depth, never stored in the
+model), so the nibble rule was never theirs to obey. ghostpen() and
+menupen() fall back to them only after the existing branches, so
+screens that work today resolve pens exactly as before. Obtained in
+both openwin sites, released in both teardown sites with anstab.
+
+Boot checklist (REBOOT FIRST):
+- [ ] 16-colour WB (default): ghost + menu colours unchanged - the
+      no-regression check, pens resolve through anstab as before
+- [ ] ScreenMode to 32+ colours: type a command, retype its prefix -
+      GREY GHOST APPEARS, Right accepts whole, Ctrl+Right one word
+- [ ] same screen: Tab menu shows blue dirs / grey hidden entries
+- [ ] iconify/restore + resize on the deep screen (reopen re-obtains,
+      teardown releases - no pen leak, colours survive the cycle)
+- [ ] REAL HARDWARE 720p 32-bit: the reported case itself
+- [ ] ls colours on the deep screen: still via anstab (capped, model
+      rule) - EXPECTED still default-pen there; NOT a regression,
+      lifting that needs an attr-plane widening (a 1.3 thing)
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

@@ -287,6 +287,11 @@ OBJECT console
   cursgr                        -> an explicit 3x is in effect
   anstab[8]:ARRAY OF LONG       -> foreign screens: ObtainBestPen picks
   anscm                         -> the colormap they came from
+  ovgrey, ovblue                -> overlay pens (ghost grey, menu blue):
+                                -> pixels-only, never in the attr plane,
+                                -> so no nibble cap - a 32-colour or RTG
+                                -> screen hands back pens >15 and these
+                                -> two are the one place that is fine
   -> per-open window spec (M5c/M9), parsed from the open name
   pwx, pwy, pww, pwh
   waitmode, closegad
@@ -2261,6 +2266,10 @@ PROC hidewin()
       IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
       curcon.anstab[i] := -1
     ENDFOR
+    IF curcon.ovgrey >= 0 THEN ReleasePen(curcon.anscm, curcon.ovgrey)
+    IF curcon.ovblue >= 0 THEN ReleasePen(curcon.anscm, curcon.ovblue)
+    curcon.ovgrey := -1
+    curcon.ovblue := -1
     curcon.anscm := NIL
   ENDIF
   -> audit3 C2: SNAPSHOT the live geometry before the window goes. pwx/pwy/
@@ -2325,6 +2334,8 @@ PROC reopenwin()
     IF curcon.rp.bitmap.depth >= 4 THEN curcon.can16 := TRUE
   ENDIF
   curcon.anscm := NIL
+  curcon.ovgrey := -1
+  curcon.ovblue := -1
   FOR i := 0 TO 7
     curcon.anstab[i] := -1
   ENDFOR
@@ -2345,6 +2356,15 @@ PROC reopenwin()
           ENDIF
           curcon.anstab[i] := v
         ENDFOR
+        -> the overlay pens ride the same colormap UNCAPPED: the
+        -> ghost and the menu are pixels-only (drawn and erased at
+        -> full depth, never stored in the model), so the nibble
+        -> rule above does not apply and pen 200 serves them as
+        -> well as pen 8 - what brings suggestions to 32+ colours
+        curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
+               Mul($5, $11111111), Mul($5, $11111111), NIL)
+        curcon.ovblue := ObtainBestPenA(curcon.anscm, Mul($8, $11111111),
+               Mul($8, $11111111), Mul($F, $11111111), NIL)
       ENDIF
     ENDIF
   ENDIF
@@ -2646,6 +2666,8 @@ PROC openwin()
   -> Pens above 15 will not fit the attr plane's nibble and are
   -> released on the spot; -1 falls back to the default pen.
   curcon.anscm := NIL
+  curcon.ovgrey := -1
+  curcon.ovblue := -1
   FOR i := 0 TO 7
     curcon.anstab[i] := -1             -> E global arrays start as garbage
   ENDFOR
@@ -2669,6 +2691,12 @@ PROC openwin()
           ENDIF
           curcon.anstab[i] := v
         ENDFOR
+        -> overlay pens, UNCAPPED - pixels-only users (ghost, menu),
+        -> see openwin: the nibble rule is a model rule, not theirs
+        curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
+               Mul($5, $11111111), Mul($5, $11111111), NIL)
+        curcon.ovblue := ObtainBestPenA(curcon.anscm, Mul($8, $11111111),
+               Mul($8, $11111111), Mul($F, $11111111), NIL)
       ENDIF
     ENDIF
   ENDIF
@@ -2774,6 +2802,10 @@ PROC closewin()
       IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
       curcon.anstab[i] := -1
     ENDFOR
+    IF curcon.ovgrey >= 0 THEN ReleasePen(curcon.anscm, curcon.ovgrey)
+    IF curcon.ovblue >= 0 THEN ReleasePen(curcon.anscm, curcon.ovblue)
+    curcon.ovgrey := -1
+    curcon.ovblue := -1
     curcon.anscm := NIL
   ENDIF
   IF curcon.fwin
@@ -6194,7 +6226,8 @@ ENDPROC
 PROC ghostpen()
   IF curcon.wbpens AND curcon.can16 THEN RETURN 8
   IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
-ENDPROC -1
+ENDPROC curcon.ovgrey   -> the uncapped overlay grey (32+ colours,
+                        -> RTG); -1 when even that failed = no ghost
 
 -> newest history entry strictly longer than ebuf that ebuf
 -> prefixes, case-folded; result in curcon.sghost
@@ -7683,11 +7716,13 @@ PROC menupen(flag)
   IF flag AND 2                 -> hidden-class grey
     IF curcon.wbpens THEN RETURN 8
     IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
+    IF curcon.ovgrey >= 0 THEN RETURN curcon.ovgrey
     RETURN curcon.deffg
   ENDIF
   IF flag AND 1                 -> directory blue
     IF curcon.wbpens THEN RETURN 12
     IF curcon.anstab[4] >= 0 THEN RETURN curcon.anstab[4]
+    IF curcon.ovblue >= 0 THEN RETURN curcon.ovblue
     RETURN 3                    -> the classic WB blue pen
   ENDIF
 ENDPROC curcon.deffg
@@ -7922,4 +7957,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.4 (23.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.5b1 (24.7.26) CCON: LTX console handler', 0
