@@ -718,6 +718,11 @@
     coloured on such screens as of 1.2.5 - they live outside the
     model.) Lifting the cap for text colours means widening the
     model - planned, 1.3-scale.
+  - Resizing while a fullscreen program is showing a page is safe
+    (see section 13), but a program that does not watch for resize
+    reports - More does not; Ed does - will not know to repaint:
+    the window shows your transcript until its next repaint (in
+    More, any paging key).
   - Tab completion and the history file talk to the filesystem
     with no timeout, so a wedged or still-spinning-up disk can
     block the window until that filesystem answers.
