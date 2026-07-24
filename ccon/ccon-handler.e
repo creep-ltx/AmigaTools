@@ -8121,4 +8121,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.5b8 (24.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.5 (24.7.26) CCON: LTX console handler', 0
