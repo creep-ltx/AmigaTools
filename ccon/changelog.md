@@ -6,12 +6,12 @@ stock V47 `CON:` cannot do — **output scrollback**. It can also be
 mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
-Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3 and
-1.2.4 are released and tagged.
+Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
+1.2.4 and 1.2.5 are released and tagged.
 
 ---
 
-## [1.2.5] — 2026-07-24
+## [1.2.5] — 2026-07-24 (tag `ccon-1.2.5`)
 
 The Ed release, and the deep-screen release. A fourth source audit
 opened it; an evening of testing against Ed on the real machine
