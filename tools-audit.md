@@ -286,8 +286,10 @@ vamos-green, deployed to FS-UAE C:, committed individually.)
    landing, existing-dst refusal, mid-tree abandon (dst wiped,
    source diff-identical), root refusal, all green. The trigger
    condition itself (RENAME_ACROSS_DEVICES on dirs) is real-DOS
-   behaviour, boot-proven by 0.4's refusal message. Boot row: one
-   real cross-volume dir move (RAM: -> FFS) incl. a filenote check.
+   behaviour, boot-proven by 0.4's refusal message. Boot row GREEN 27.7.26:
+   real cross-volume dir move on the Amiga, both files and the
+   filenote survived ("mv boot test green"). LADDER CLOSED 1-6,
+   every row proven.
 
 Boot deck: **ALL GREEN 27.7.26** ("All tests green!") — rm's d-bit
 pair, the protected-leaf-parents-survive row, in-use refusal and
