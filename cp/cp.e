@@ -33,7 +33,14 @@
    directory is merged into. Files inside the tree follow the same
    skip/-f rule as a top-level target. Without -r a directory source
    is refused (reported; the batch carries on). Copying a directory
-   into its own subtree is NOT guarded against -- don't.
+   into itself or its own subtree is refused (0.1.2 - it used to be
+   merely documented as "don't"; it would re-copy its own output
+   until the disk filled).
+
+   -f is delete-then-copy, the Unix cp shape: if the copy then FAILS
+   (source unreadable, disk full), the old target is already gone.
+   Documented as a known trade (audit C2) - a safer temp-and-swap
+   was weighed and parked; -f means what it says.
 
    Ctrl-C is honoured between files and between copy chunks; a broken
    or failed copy removes the partial target file.
@@ -134,6 +141,9 @@ EXCEPT DO
   ELSEIF exception="ARG"
     WriteF('cp: unknown option (cp ? for usage)\n')
     setrc(RETURN_ERROR)
+  ELSEIF exception="MAX"
+    WriteF('cp: too many arguments (max \d)\n', MAXARGS)
+    setrc(RETURN_ERROR)
   ELSEIF exception
     WriteF('\s\n', exceptioninfo)
     setrc(RETURN_ERROR)
@@ -142,7 +152,7 @@ EXCEPT DO
 ENDPROC
 
 PROC usage()
-  WriteF('cp 0.1.1 -- Unix-style copy\n')
+  WriteF('cp 0.1.2 -- Unix-style copy\n')
   WriteF('usage: cp [-fr] FROM ... TO\n')
   WriteF('  -f  force: replace an existing target file\n')
   WriteF('  -r  copy directories recursively\n')
@@ -214,12 +224,14 @@ PROC parseargs(paths:PTR TO LONG)
       ELSEIF (t[0] = "?") AND (tl = 1)
         Throw("USG", 0)
       ELSE
-        IF np < MAXARGS
-          s := String(tl)
-          StrCopy(s, t)
-          paths[np] := s
-          np++
-        ENDIF
+        -> 0.1.2 A1: never silently drop an argument - with 33+ the
+        -> dropped one was TO and the 32nd SOURCE was promoted to
+        -> target, sending the whole batch somewhere never named
+        IF np >= MAXARGS THEN Throw("MAX", 0)
+        s := String(tl)
+        StrCopy(s, t)
+        paths[np] := s
+        np++
       ENDIF
     ENDIF
   ENDWHILE
@@ -291,6 +303,15 @@ PROC copyone(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock)
   IF ifib.direntrytype > 0
     IF recursive = FALSE
       WriteF('cp: omitting directory \s (use -r)\n', srcpath)
+      setrc(RETURN_ERROR)
+      RETURN
+    ENDIF
+    -> 0.1.2 C1: refuse to copy a directory into itself or its own
+    -> subtree - copydir would scan src while the growing copy sits
+    -> inside it and re-copy the copies until the disk fills. The
+    -> header used to say "don't"; now the tool says it.
+    IF intodst(srcpath, gtarget)
+      WriteF('cp: cannot copy \s into itself\n', srcpath)
       setrc(RETURN_ERROR)
       RETURN
     ENDIF
@@ -399,6 +420,57 @@ EXCEPT
     ReThrow()
   ENDIF
 ENDPROC
+
+-> 0.1.2 C1: case fold for canonical-path comparison (AmigaDOS
+-> names compare case-insensitively; ASCII + the Latin-1 lower half)
+PROC pfold(c)
+  IF (c >= "a") AND (c <= "z") THEN RETURN c - 32
+  IF (c >= 224) AND (c <= 254) AND (c <> 247) THEN RETURN c - 32
+ENDPROC c
+
+/* 0.1.2 C1: TRUE when dst is src itself or anywhere inside it.
+   Identity via NameFromLock canonical paths (volume-rooted, assigns
+   resolved), then a case-folded prefix test: dst is inside src when
+   src's whole canonical path heads dst's and the next dst char is
+   '/' or the end - or src is a volume root (ends ':'). SameLock or
+   diskkey matching would have been the classic route, but neither
+   expresses object identity under vamos (SameLock always DOSTRUE,
+   keys per-lock-instance - probed 27.7.26), and the canonical-path
+   test is exact in both worlds. Failure to resolve anything returns
+   FALSE: the copy then reports its own failure properly. */
+PROC intodst(src:PTR TO CHAR, dst:PTR TO CHAR)
+  DEF slock, dlock, ok, i, hit, pp:PTR TO CHAR
+  DEF sp[PATHLEN]:ARRAY OF CHAR, dp[PATHLEN]:ARRAY OF CHAR
+  DEF w[PATHLEN]:ARRAY OF CHAR
+  slock := Lock(src, ACCESS_READ)
+  IF slock = NIL THEN RETURN FALSE
+  ok := NameFromLock(slock, sp, PATHLEN)
+  UnLock(slock)
+  IF ok = FALSE THEN RETURN FALSE
+  dlock := Lock(dst, ACCESS_READ)
+  IF dlock = NIL
+    -> dst doesn't exist yet: judge by the directory it lands in
+    AstrCopy(w, dst, PATHLEN)
+    pp := PathPart(w)
+    pp[0] := 0
+    dlock := Lock(w, ACCESS_READ)
+  ENDIF
+  IF dlock = NIL THEN RETURN FALSE   -> missing parent: ensuredir reports
+  ok := NameFromLock(dlock, dp, PATHLEN)
+  UnLock(dlock)
+  IF ok = FALSE THEN RETURN FALSE
+  hit := TRUE
+  i := 0
+  WHILE (sp[i] <> 0) AND hit
+    IF pfold(sp[i]) <> pfold(dp[i]) THEN hit := FALSE
+    i++
+  ENDWHILE
+  IF hit
+    IF (dp[i] <> 0) AND (dp[i] <> "/")
+      IF sp[i-1] <> ":" THEN hit := FALSE  -> a volume-root src owns
+    ENDIF                                  -> everything on the volume
+  ENDIF
+ENDPROC hit
 
 /* Copies a whole directory tree src -> dst with an explicit FIFO
    work list. The top pair is queued, then drained: each pop
@@ -586,4 +658,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: cp 0.1.1 (24.7.26) E build',0
+version: CHAR '$VER: cp 0.1.2 (27.7.26) E build',0
