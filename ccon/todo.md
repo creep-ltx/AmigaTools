@@ -4184,6 +4184,55 @@ Boot checklist (REBOOT FIRST):
 - [ ] masktest/defertest harness decks still green (mask invariant:
       fills erased before any masked render)
 
+## 1.2.6b3 — drag and drop (27.7.26): the last of Timm's three KingCON asks
+
+His spec: a dropped icon writes volume:directory/filename, a dropped
+drawer volume:directory/ (trailing slash), at the cursor as if typed.
+
+Implementation:
+- Every owned window registers as an AppWindow (AddAppWindowA beside
+  the existing AppIcon plumbing — same wbport, same wbensure;
+  borrowed frames are not ours to register). Deregistered in hidewin
+  and closewin BEFORE the window closes; reopenwin re-registers, so
+  iconify round-trips keep the drop target.
+- doappmsg grew the AMTYPE_APPWINDOW branch — C3 pointer discipline
+  (conok before touching), paths resolve before ReplyMsg since the
+  arglist locks are only good while we hold the message.
+- lockpath(): NameFromLock at packet level (the no-DOS rule) — walks
+  ACTION_PARENT to the root over fscall, EXAMINEs each hop's name,
+  frees the intermediate locks it makes, assembles
+  "Volume:d1/d2/" always separator-terminated. Fails whole: a hop
+  that errors or a path that outgrows the buffers inserts NOTHING
+  rather than something wrong.
+- droppath(): parent path + leaf; dir-or-file answered honestly via
+  LOCATE+EXAMINE of the leaf (failure = file, path still inserts);
+  drawers get the trailing '/', disks come out "Volume:" bare.
+  Quoted when the path carries a blank or '=' (the shell's
+  unquoted-'=' trap, the four-blind-boots lesson). One trailing
+  blank per drop so several icons line up as arguments.
+- Injection: cooked = pasteinsert (literal at the cursor, paste
+  rules, one drawedit for the whole drop); raw = whole-or-nothing
+  into the input queue + inputarrived (a drop that does not fit
+  beeps, the C5 audibility rule — Ed sees the path typed).
+- dodrop flushes output first and snaplives a scrolled view (a drop
+  is input, same manners as a keystroke).
+
+Boot checklist (REBOOT FIRST):
+- [x] drop a file icon on the shell window — full path appears at
+      the cursor, trailing space, prompt line intact (CONFIRMED
+      27.7.26: "seems to work as it should as far as I can see" —
+      general pass, edge rows below not individually reported)
+- [ ] drop a drawer — path ends '/'; drop a disk icon — "Volume:"
+- [ ] drop something with a space in its name — comes out quoted
+- [ ] drop several icons in one drag — all paths, space-separated
+- [ ] type half a command first, drop mid-line — path inserts at the
+      cursor, not the end; editing continues normally
+- [ ] drop onto Ed (raw) — the path types itself into the text
+- [ ] iconify, restore, drop again — target survives the round-trip
+- [ ] drop while scrolled back — view snaps live first, then inserts
+- [ ] CTerm borrowed frame: no drop target (not ours), nothing breaks
+- [ ] RAM: and a floppy/other volume both resolve correct full paths
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

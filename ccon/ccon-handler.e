@@ -71,7 +71,9 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        -> workbenchbase; 'workbench/workbench' = the diskobject/appmessage
        -> structs + WBTOOL/AMTYPE_APPICON consts. The AppIcon is baked in
        -> (bicondo), so no icon.library. AddAppIcon/RemoveAppIcon are exec.
-       'wb','workbench/workbench'
+       -> 1.2.6b3: 'workbench/startup' = the wbarg OBJECT (lock+name
+       -> pairs inside a drop's AppMessage arglist)
+       'wb','workbench/workbench','workbench/startup'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -367,6 +369,9 @@ OBJECT console
   -> every full-redraw path (resize/reopen/altrestore/scrollback) - the
   -> flag only goes TRUE via a real clear, so a TRUE is never a lie.
   vblank,
+  appwin                        -> 1.2.6b3: AddAppWindowA handle - the
+                                -> window is a Workbench drop target
+                                -> (owned windows only; NIL = none)
   appicon:PTR TO appicon        -> v1.2 ICONIFY: this console's desktop
                                 -> AppIcon while iconified (NIL = not
                                 -> iconified). RightAmiga+I zips the window
@@ -2304,9 +2309,175 @@ PROC doappmsg(am:PTR TO appmessage)
       curcon := oldcur
      ENDIF
     ENDIF
+  ELSEIF am.type = AMTYPE_APPWINDOW
+    -> 1.2.6b3: icons dropped on a console window. Same C3 pointer
+    -> discipline as the icon branch: am_UserData can outlive its
+    -> console, validate before touching. Paths resolve BEFORE the
+    -> ReplyMsg below - the locks in the arglist are Workbench's and
+    -> only good while we hold the message.
+    c := am.userdata
+    IF conok(c)
+      IF c.win
+        oldcur := curcon
+        curcon := c
+        dodrop(am)
+        curcon := oldcur
+      ENDIF
+    ENDIF
   ENDIF
   ReplyMsg(am)
 ENDPROC
+
+-> 1.2.6b3: DRAG AND DROP (his spec, 27.7.26, the KingCON feature Timm
+-> missed): every icon dropped on the window becomes its full path,
+-> inserted at the cursor as if typed - "Volume:dir/name" for a file,
+-> "Volume:dir/name/" for a drawer, "Volume:" for a disk - quoted when
+-> the shell would mangle it bare, one trailing blank each so several
+-> drops line up as arguments. Cooked = the edit line (literal insert,
+-> the paste rules); raw = the client's input queue (Ed types it).
+PROC dodrop(am:PTR TO appmessage)
+  DEF i, wa:PTR TO wbarg
+  IF curcon.win = NIL THEN RETURN
+  flushout(curcon)              -> settle output; the editor draws next
+  snaplive()                    -> a drop is input: scrolled view snaps
+  IF am.numargs <= 0 THEN RETURN
+  wa := am.arglist
+  FOR i := 0 TO am.numargs - 1
+    droppath(wa[i])
+  ENDFOR
+  IF curcon.rawmode
+    inputarrived()              -> wake the blocked reader
+  ELSE
+    drawedit()                  -> one paint for the whole drop
+  ENDIF
+ENDPROC
+
+-> one dropped icon -> its injected path. The dir-or-file question is
+-> answered the only honest way at packet level: lock the leaf under
+-> its parent and Examine (failure = treat as file, the path still
+-> inserts). Whole-or-nothing into a raw queue, the C5 audibility
+-> rule: a drop that does not fit beeps instead of half-arriving.
+PROC droppath(wa:PTR TO wbarg)
+  DEF pb[620]:ARRAY OF CHAR, tb[560]:ARRAY OF CHAR, p, n, i, isdir,
+      fl:PTR TO filelock, ol, needq
+  IF wa.lock = 0 THEN RETURN    -> no lock, no path (left-out volumes)
+  IF lockpath(wa.lock, tb, 548) = FALSE THEN RETURN
+  n := StrLen(tb)
+  isdir := FALSE
+  IF wa.name
+    IF wa.name[0]
+      IF (n + StrLen(wa.name) + 2) > 558 THEN RETURN
+      i := 0
+      WHILE wa.name[i]
+        tb[n] := wa.name[i]
+        n++
+        i++
+      ENDWHILE
+      tb[n] := 0
+      fl := Shl(wa.lock, 2)
+      ol := fscall(fl.task, ACTION_LOCATE_OBJECT, wa.lock, tcbstr(wa.name), -2)
+      IF ol
+        IF fscall(fl.task, ACTION_EXAMINE_OBJECT, ol, Shr(fsfib, 2), 0)
+          IF fsfib.direntrytype > 0 THEN isdir := TRUE
+        ENDIF
+        fscall(fl.task, ACTION_FREE_LOCK, ol, 0, 0)
+      ENDIF
+      IF isdir                  -> his spec: a dropped drawer ends '/'
+        tb[n] := "/"
+        n++
+        tb[n] := 0
+      ENDIF
+    ENDIF
+  ENDIF
+  needq := FALSE                -> the shell eats unquoted '=' (the
+  FOR i := 0 TO n - 1           -> four-blind-boots lesson) and splits
+    IF (tb[i] = 32) OR (tb[i] = "=") THEN needq := TRUE  -> on blanks
+  ENDFOR
+  p := 0
+  IF needq
+    pb[p] := 34
+    p++
+  ENDIF
+  FOR i := 0 TO n - 1
+    pb[p] := tb[i]
+    p++
+  ENDFOR
+  IF needq
+    pb[p] := 34
+    p++
+  ENDIF
+  pb[p] := 32                   -> the separating blank
+  p++
+  pb[p] := 0
+  IF curcon.rawmode
+    IF inqroom(p)
+      FOR i := 0 TO p - 1 DO enqueue(pb[i])
+    ELSE
+      DisplayBeep(NIL)
+    ENDIF
+  ELSE
+    pasteinsert(pb, p)          -> literal at the cursor, paste rules;
+  ENDIF                         -> dodrop draws once at the end
+ENDPROC
+
+-> full path of a LOCK, packet-level (fscall - the no-DOS rule bars
+-> NameFromLock; this is the same plumbing tab completion trusts).
+-> Walks ACTION_PARENT to the root, examining each hop's name, then
+-> assembles "Volume:d1/d2/" - ALWAYS separator-terminated, so the
+-> caller just appends a leaf. Intermediate parent locks are OURS and
+-> freed; the argument lock is the caller's and is not. FALSE = a hop
+-> failed or the path outgrew its buffers - insert nothing rather
+-> than something wrong.
+PROC lockpath(blk, out:PTR TO CHAR, cap)
+  DEF fl:PTR TO filelock, cur, par, res, n, i, k, p, ok, segn, sp,
+      segb[400]:ARRAY OF CHAR, sgo[24]:ARRAY OF LONG,
+      sgl[24]:ARRAY OF LONG, nb[110]:ARRAY OF CHAR
+  out[0] := 0
+  IF blk = 0 THEN RETURN FALSE
+  ok := TRUE
+  segn := 0
+  sp := 0
+  cur := blk
+  WHILE cur
+    fl := Shl(cur, 2)
+    res := fscall(fl.task, ACTION_EXAMINE_OBJECT, cur, Shr(fsfib, 2), 0)
+    par := 0
+    IF res
+      tcfibname(nb)
+      n := StrLen(nb)
+      IF ((sp + n) > 398) OR (segn >= 24)
+        ok := FALSE             -> deeper/longer than any sane path
+      ELSE
+        CopyMem(nb, segb + sp, n)
+        sgo[segn] := sp
+        sgl[segn] := n
+        sp := sp + n
+        segn++
+        par := fscall(fl.task, ACTION_PARENT, cur, 0, 0)
+      ENDIF
+    ELSE
+      ok := FALSE
+    ENDIF
+    IF cur <> blk THEN fscall(fl.task, ACTION_FREE_LOCK, cur, 0, 0)
+    cur := par                  -> par = 0 on the root: the walk ends
+  ENDWHILE
+  IF ok = FALSE THEN RETURN FALSE
+  IF segn = 0 THEN RETURN FALSE
+  -> segments run child -> root; emit root + ':', then back down,
+  -> each dir + '/' - the result always ends with its separator
+  p := 0
+  FOR i := segn - 1 TO 0 STEP -1
+    n := sgl[i]
+    IF (p + n + 2) >= cap THEN RETURN FALSE
+    FOR k := 0 TO n - 1
+      out[p] := segb[sgo[i] + k]
+      p++
+    ENDFOR
+    out[p] := IF i = (segn - 1) THEN ":" ELSE "/"
+    p++
+  ENDFOR
+  out[p] := 0
+ENDPROC TRUE
 
 -> RightAmiga+I: iconify this console. The window TRULY vanishes (closed via
 -> hidewin, which keeps the whole console - model, font, geometry, cursor,
@@ -2362,6 +2533,10 @@ PROC hidewin()
   curcon.pwy := curcon.win.topedge
   curcon.pww := curcon.win.width
   curcon.pwh := curcon.win.height
+  IF curcon.appwin              -> 1.2.6b3: deregister the drop target
+    RemoveAppWindow(curcon.appwin)  -> BEFORE its window goes
+    curcon.appwin := NIL
+  ENDIF
   CloseWindow(curcon.win)
   curcon.win := NIL
   curcon.rp := NIL
@@ -2490,6 +2665,10 @@ PROC reopenwin()
   redraw()
   settitle()
   IF curcon.rawmode THEN cursdraw() ELSE drawedit()
+  -> 1.2.6b3: the restored window is a drop target again
+  IF (curcon.fwin = FALSE) AND (curcon.appwin = NIL)
+    IF wbensure() THEN curcon.appwin := AddAppWindowA(0, curcon, curcon.win, wbport, NIL)
+  ENDIF
   setidcmp()
   ReportMouse(TRUE, curcon.win)
   curcon.armed := TRUE
@@ -2814,6 +2993,12 @@ PROC openwin()
   ELSE
     drawedit()                  -> the blip stands from the start
   ENDIF
+  -> 1.2.6b3: DRAG AND DROP - the window registers as a Workbench drop
+  -> target (owned only; a borrowed frame is not ours to register).
+  -> NIL is survivable: drops just do nothing, everything else works.
+  IF (curcon.fwin = FALSE) AND (curcon.appwin = NIL)
+    IF wbensure() THEN curcon.appwin := AddAppWindowA(0, curcon, curcon.win, wbport, NIL)
+  ENDIF
   setidcmp()                    -> selection's MOUSEBUTTONS joins the
   ReportMouse(TRUE, curcon.win)        -> set (evmask is 0 here) and motion
                                 -> events exist when a drag asks
@@ -2890,6 +3075,10 @@ PROC closewin()
     curcon.ovgrey := -1
     curcon.ovblue := -1
     curcon.anscm := NIL
+  ENDIF
+  IF curcon.appwin              -> 1.2.6b3: owned windows only ever set
+    RemoveAppWindow(curcon.appwin)  -> it, but the guard costs nothing
+    curcon.appwin := NIL
   ENDIF
   IF curcon.fwin
     ReportMouse(FALSE, curcon.win)     -> hand the flag back the way the
@@ -8213,4 +8402,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b2 (27.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b3 (27.7.26) CCON: LTX console handler', 0
