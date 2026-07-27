@@ -49,9 +49,9 @@ mv -b config work:app             (existing target -> config.mvbak)
   backups), so `-bf` is allowed and means "replace the stale `.mvbak`"
   — `-f` consistently sanctions destroying exactly one thing: alone
   it's the target, with `-b` it's the old backup.
-- Cross-volume moves preserve the protection bits and datestamp, and
-  a failed copy deletes the partial target rather than leaving half a
-  file behind. If the copy succeeds but the source can't be deleted
+- Cross-volume moves preserve the protection bits, datestamp and
+  filenote (the note since 0.4.1), and a failed copy deletes the
+  partial target rather than leaving half a file behind. If the copy succeeds but the source can't be deleted
   (e.g. delete-protected), that's reported and the return code is 5.
 - Moving a *directory* across volumes works too (0.5): the tree is
   copied — full metadata carried — and the source deleted only after
@@ -81,7 +81,7 @@ copy-then-delete, and `Rename()` fails there with
 `ERROR_RENAME_ACROSS_DEVICES`. So `mv` simply tries `Rename()` first
 for every file, and only when it fails with exactly that error does
 it fall back to copying the data (32KB chunks), carrying over the
-protection bits and datestamp, and deleting the source.
+protection bits, datestamp and filenote, and deleting the source.
 
 Plain names and patterns are handled uniformly: every `FROM` argument
 runs through `MatchFirst()`/`MatchNext()`, which expands wildcards
@@ -105,8 +105,8 @@ pattern expansion, multiple sources into a directory, skip-and-list-at-
 end, `-f` replacement, and `-b` rescue to `.mvbak`. The underlying
 behaviours it inherits unchanged — cross-volume copy+delete with
 datestamp and protection bits intact across repeated moves, the
-`mv -f file file` self-move guard, existing-target and cross-volume-
-directory refusals, Ctrl-C mid-copy, and same-volume directory moves —
+`mv -f file file` self-move guard, existing-target refusals, Ctrl-C
+mid-copy, and same-volume directory moves —
 were verified earlier on an AmigaOS 3.2 install (FS-UAE) under the
 previous keyword build. A fresh FS-UAE boot-test of the `-f`/`-b` build
 is worth doing before relying on it, since the self-move guard depends

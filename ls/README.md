@@ -33,9 +33,14 @@ How ls semantics map onto AmigaDOS:
   entries (h-bit or `.info`) grey — grey wins when both apply.
 - A pattern argument (`ls #?.e`) lists the matches themselves;
   a directory argument lists its contents.
+- `-R` never descends soft-links (they list, like Unix `ls -R`),
+  and a visited-directory set catches hard-link cycles — a linked
+  ancestor gets "directory cycle, skipped" instead of a loop
+  (0.3.3).
 
 Return codes: 0 clean, 5 a path could not be accessed, 10 bad
-arguments, 20 break (Ctrl+C is honoured mid-listing).
+arguments, 20 break (Ctrl+C is honoured mid-listing). More than
+32 path arguments is a hard error, never a silent truncation.
 
 ## Files
 
@@ -58,7 +63,12 @@ evo ls.e
 Boot-verified on an AmigaOS 3.2 install (FS-UAE): columns and the
 width probe against both the stock CON: console and the CCON:
 handler, colors, window-resize adaptation, redirect fallback,
-Ctrl+C.
+Ctrl+C. 0.3.3 (the family audit): a Ctrl+C during pattern output
+could double-free the match anchor — fixed; soft-links are no
+longer descended by `-R` and hard-link cycles are skipped
+(boot-verified against a real `MakeLink SOFT` loop on FFS); the
+row buffer sizes itself from the real console width, so very wide
+RTG shells can't clip a colour-off code mid-row.
 
 Found while building: E's `Mod()` with a divisor over 64K raises
 a CPU exception (the same 16-bit DIVU floor as `/`) — the

@@ -53,9 +53,11 @@ that path. The device/volume head (everything up to `:`) is stepped
 over, never created, and empty pieces from a leading or doubled `/`
 (AmigaDOS parent-hops) are skipped too.
 
-The last component is special: under `-p` an existing directory there
-is success, but an existing *file* of that name is reported as "exists
-and is not a directory" rather than silently accepted.
+An existing *file* anywhere along the way is reported as "exists and
+is not a directory" at the component actually in the way — the last
+one and, since 0.1.1, the intermediates too (they used to "succeed"
+and let the next step fail with a generic fault naming the wrong
+component).
 
 One shared subtlety across this tool set: `IoErr()` is read *before* the
 error message is written, because a successful `Write()` zeroes it on

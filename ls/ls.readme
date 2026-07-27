@@ -34,6 +34,9 @@ USAGE
   rwxrwxrwx, plus byte size (or the K/M/G tiers with -h), the DOS
   datestamp, and the filenote on a continuation line.
 
+  -R never descends soft-links (they list, like Unix ls -R), and a
+  visited-directory set skips hard-link cycles instead of looping.
+
   Ctrl-C is honoured mid-listing. Return code: 0 clean, 5 a path
   could not be accessed, 10 bad arguments, 20 break.
 

@@ -71,7 +71,8 @@ HOW IT WORKS
 
   When the target is on a different volume, Rename() fails with
   ERROR_RENAME_ACROSS_DEVICES, and mv falls back to copying the data
-  in 32KB chunks, carrying over the protection bits and datestamp,
+  in 32KB chunks, carrying over the protection bits, datestamp and
+  filenote,
   then deleting the source.
 
   Plain names and patterns are handled uniformly: every FROM argument

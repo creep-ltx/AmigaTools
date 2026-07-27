@@ -41,8 +41,16 @@ cp -f old.iff pics:             (replace an existing target)
   stack: each directory is recreated at the destination, its files
   copied, its subdirectories queued. An existing target directory is
   merged into, and files inside follow the same skip/`-f` rule.
-  Without `-r`, a directory source is refused. (Copying a directory
-  into its own subtree is not guarded against — don't.)
+  Without `-r`, a directory source is refused. Copying a directory
+  into itself or its own subtree is refused (since 0.1.2 — it would
+  re-copy its own output until the disk filled).
+- A note on `-f`: it replaces by delete-then-copy, the Unix `cp`
+  shape. If the copy itself then fails (unreadable source, full
+  disk), the old target is already gone — keep that in mind before
+  `-f`'ing the only copy of something.
+- More than 32 arguments is a hard error, never a silent truncation
+  (with 33+, the dropped one used to be `TO` — and the 32nd *source*
+  quietly became the destination).
 - Ctrl-C is honoured between files and between copy chunks; a broken
   or failed copy removes the partial target rather than leaving half a
   file behind.

@@ -28,8 +28,9 @@ USAGE
   `mkdir -p work:a/b/c` makes a, then a/b, then a/b/c -- and an
   already-existing directory is NOT an error (the whole point of -p).
   A path component that already exists as a file is an error: you can't
-  descend through it. Device/volume names (the part before ':') are
-  never created, only descended into.
+  descend through it -- reported at the component actually in the way
+  (since 0.1.1, intermediates included). Device/volume names (the part
+  before ':') are never created, only descended into.
 
   DIR names are literal, no pattern expansion: `mkdir "#?"` makes a
   directory called "#?", not one per match.
