@@ -275,12 +275,22 @@ vamos-green, deployed to FS-UAE C:, committed individually.)
 5. **rm 0.1** — DONE @3161ff7. The plan below, built as planned;
    vamos deck green incl. post-order tree delete and volume-root
    refusal. d-bit ±-f rows need real FFS = the boot deck.
-6. **mv 0.5** — OPEN: cross-volume directory move (cp's copytree +
-   rm's delete engine), only after rm's post-order delete is
-   boot-proven on real FFS.
+6. **mv 0.5** — DONE 27.7.26 (post boot-green): cross-volume
+   directory move, all-or-nothing per tree (any copy failure wipes
+   the partial destination and leaves the source untouched; clean
+   landing required; roots and link-bearing trees refused). vamos
+   caveat discovered en route: Rename never fails ACROSS_DEVICES
+   there (os.rename on one host fs; ALL failures map to
+   OBJECT_IN_USE), so the deck ran through a force-the-tree-path
+   test build + a FAIL.txt-throw injection — full move, renamed
+   landing, existing-dst refusal, mid-tree abandon (dst wiped,
+   source diff-identical), root refusal, all green. The trigger
+   condition itself (RENAME_ACROSS_DEVICES on dirs) is real-DOS
+   behaviour, boot-proven by 0.4's refusal message. Boot row: one
+   real cross-volume dir move (RAM: -> FFS) incl. a filenote check.
 
-Boot deck for the whole batch (his side): ls -R over a soft-link
-loop on FFS (the cycle guard's real test), cp -r self-subtree
-refusal on FFS, mv cross-volume filenote check (List <file> shows
-the note), mkdir -p through a file, rm's full deck (esp. d-bit file
-± -f, in-use file, protected leaf leaving parents standing).
+Boot deck: **ALL GREEN 27.7.26** ("All tests green!") — rm's d-bit
+pair, the protected-leaf-parents-survive row, in-use refusal and
+volume-root refusal, ls Ctrl+C pattern break and the FFS soft-link
+loop, cp self-subtree refusal, mv cross-volume filenote, mkdir
+wrong-component fix. The batch is boot-proven; step 6 unblocked.

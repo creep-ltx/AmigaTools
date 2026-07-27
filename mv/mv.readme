@@ -52,8 +52,15 @@ USAGE
   reported and the rest of the batch still runs. Return code is the
   worst that happened: 0 clean, 5 skips, 10 errors, 20 break.
 
-  Moving a directory across volumes would need a recursive copy and
-  is refused.
+  Moving a DIRECTORY across volumes works too (0.5): the tree is
+  copied over -- every file with its protection bits, datestamp and
+  filenote -- and the source deleted only after the ENTIRE tree
+  copied clean, deepest directory first. All-or-nothing: any copy
+  failure abandons the move, wipes the partial destination and
+  leaves the source untouched. The destination must not already
+  exist, volume roots are refused, and a tree containing a soft
+  link (or a hard directory link) is refused whole -- links can't
+  be recreated faithfully on another volume.
 
 HOW IT WORKS
 

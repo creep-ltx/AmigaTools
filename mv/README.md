@@ -53,8 +53,14 @@ mv -b config work:app             (existing target -> config.mvbak)
   a failed copy deletes the partial target rather than leaving half a
   file behind. If the copy succeeds but the source can't be deleted
   (e.g. delete-protected), that's reported and the return code is 5.
-- Moving a *directory* across volumes would need a recursive copy and
-  is refused.
+- Moving a *directory* across volumes works too (0.5): the tree is
+  copied — full metadata carried — and the source deleted only after
+  the entire tree copied clean, deepest directory first.
+  All-or-nothing: any copy failure abandons the move, wipes the
+  partial destination, and leaves the source untouched. The
+  destination must not already exist, volume roots are refused, and
+  a tree containing a soft link (or hard directory link) is refused
+  whole — links can't be recreated faithfully on another volume.
 - Ctrl-C is honoured between files and between copy chunks; a break
   mid-copy removes the partial target file.
 - Errors on one file are reported and the rest of the batch still
