@@ -15,7 +15,10 @@ they are the utils that live in `C:`.
 | [rm](rm.doc) | [0.1](../../../releases/tag/rm-v0.1) | delete — `-r` trees deepest-first, `-f` strips the d-bit the Amiga way, roots refused unconditionally |
 
 Each command keeps its own version and its own release; this
-directory is the family home. Per-command reference docs live in
+directory is the family home. The Aminet archive (`ltx-cutils.lha`)
+carries a single **pack version** of its own — pack 0.1.0 =
+ls 0.3.3 / cp 0.1.2 / mv 0.5 / mkdir 0.1.1 / rm 0.1 — bumped
+whenever the archive is repacked with newer commands. Per-command reference docs live in
 the `<command>.doc` files (AmigaDOS command-doc style, readable
 with `More` on the Amiga); the full code audit that shaped the
 current versions is [tools-audit.md](tools-audit.md).
