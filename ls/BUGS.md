@@ -207,3 +207,19 @@ objects with New() and are clean.
 the Dispose bug never applied to it, but no fix since 0.2 was ever
 ported either). The few-KB size win wasn't worth hand-porting every
 change; git history and the old release archives keep it.
+
+**Cycle guard SHIPPED + one suspect retired — ls 0.3.3 (27.7.26, the
+family audit, repo tools-audit.md).** Fix 2 is in: `-R` never descends
+`ST_SOFTLINK` entries (they list, like Unix ls -R), and a visited set
+keyed (fl_Volume, fib_DiskKey) skips any directory already listed —
+"directory cycle, skipped", rc 5 — covering hard-linked dirs. Keys of 0
+(dir-mounted drives don't fill fib_DiskKey) never enter the set, so the
+guard stands down exactly where an all-zero key would have false-matched
+every directory to the first. Real-FFS soft-link boot test still wanted.
+Also in 0.3.3: the audit's L1 (Ctrl+C during pattern output double-freed
+the match anchor — ap never NIL'd after the normal-path Dispose), L4
+(gline sized from the real console width), A1 (33+ arguments now a hard
+error instead of a silent drop). And the third suspect in B1's original
+list is RETIRED by code reading: `AstrCopy(e.comm, fib.comment, 80)`
+clamps to 79+NUL — no overrun ever existed there. A/B under vamos on the
+system-drive tree (2920 output lines): 0.3.2 vs 0.3.3 byte-identical.

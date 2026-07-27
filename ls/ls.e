@@ -49,6 +49,9 @@ OBJECT dent
   minute:LONG
   tick:LONG
   isdir:LONG
+  etype:LONG                    -> 0.3.3 L2: the raw fib_DirEntryType -
+                                -> a soft-link (ST_SOFTLINK) lists like
+                                -> a dir but is never DESCENDED
   name[NAMELEN]:ARRAY OF CHAR
   comm[80]:ARRAY OF CHAR
 ENDOBJECT
@@ -56,6 +59,22 @@ ENDOBJECT
 OBJECT pnode
   next:PTR TO pnode
   path[PATHLEN]:ARRAY OF CHAR
+ENDOBJECT
+
+-> 0.3.3 L2: the -R visited set - one node per directory already
+-> listed, keyed on the volume (fl_Volume BPTR) + fib_DiskKey (the
+-> header block number on a real filesystem). A directory whose key
+-> is already in the set is a cycle (hard-linked dir, or anything
+-> else that makes the tree a graph) and is skipped with a message.
+-> Keys of 0 never enter the set: FFS/SFS dir keys are real block
+-> numbers (never 0), but dir-mounted drives (vamos, FS-UAE host
+-> dirs) may not fill the field at all - an all-zero key would have
+-> matched EVERY directory to the first one and silently truncated
+-> -R exactly where it must not.
+OBJECT vnode
+  next:PTR TO vnode
+  vol:LONG
+  key:LONG
 ENDOBJECT
 
 DEF rc
@@ -69,6 +88,7 @@ DEF gtmp=NIL:PTR TO CHAR                    -> estring, size field
 DEF gdate=NIL:PTR TO CHAR, gtime=NIL:PTR TO CHAR
 DEF gpatbuf[1030]:ARRAY OF CHAR
 DEF pendhead=NIL:PTR TO pnode               -> -R work list, depth-first
+DEF vishead=NIL:PTR TO vnode                -> 0.3.3 L2: -R visited set
 DEF seqdir[8]:ARRAY OF CHAR                 -> CSI 1;34m, dirs: blue
 DEF seqhid[8]:ARRAY OF CHAR                 -> CSI 1;30m, hidden: grey
 DEF seqoff[8]:ARRAY OF CHAR                 -> CSI 0m
@@ -81,7 +101,6 @@ PROC main() HANDLE
   rc := RETURN_OK
   NEW gfib
   NEW gdt
-  gline := String(700)
   gtmp  := String(64)
   gdate := String(LEN_DATSTRING)
   gtime := String(LEN_DATSTRING)
@@ -98,6 +117,15 @@ PROC main() HANDLE
   IF tinter
     IF (flong = FALSE) AND (fone = FALSE) THEN twidth := termwidth()
   ENDIF
+
+  -> 0.3.3 L4: size the row buffer from the REAL console width -
+  -> ~12 bytes/entry covers name+padding+colour CSI. The old fixed
+  -> 700 clamped on wide RTG shells (many short names), and an
+  -> E-string clamp that eats a colour-OFF mid-row bleeds grey into
+  -> every row after it.
+  i := Mul(twidth, 12) + 64
+  IF i < 700 THEN i := 700
+  gline := String(i)
 
   headers := frec OR (npaths > 1)
 
@@ -122,6 +150,9 @@ EXCEPT DO
   ELSEIF exception = "ARG"
     WriteF('ls: unknown option (ls ? for usage)\n')
     setrc(RETURN_ERROR)
+  ELSEIF exception = "MAX"
+    WriteF('ls: too many arguments (max \d)\n', MAXARGS)
+    setrc(RETURN_ERROR)
   ELSEIF exception = "USG"
     usage()
   ELSEIF exception = "DOS"
@@ -143,7 +174,7 @@ PROC checkbreak()
 ENDPROC
 
 PROC usage()
-  WriteF('ls 0.3.2 -- Unix-style directory lister\n')
+  WriteF('ls 0.3.3 -- Unix-style directory lister\n')
   WriteF('usage: ls [-1ahlrRSt] [path | pattern ...]\n')
   WriteF('  -l  long listing (protection, size, date, filenote)\n')
   WriteF('  -a  show .info files and hidden (h-bit) entries\n')
@@ -220,12 +251,14 @@ PROC parseargs(paths:PTR TO LONG)
       ELSEIF (t[0] = "?") AND (tl = 1)
         Throw("USG", 0)
       ELSE
-        IF np < MAXARGS
-          s := String(tl)
-          StrCopy(s, t)
-          paths[np] := s
-          np++
-        ENDIF
+        -> 0.3.3 A1: never silently drop an argument. ls only loses
+        -> listings to it, but the family rule is one rule: a path
+        -> list that doesn't fit is an error, not a truncation.
+        IF np >= MAXARGS THEN Throw("MAX", 0)
+        s := String(tl)
+        StrCopy(s, t)
+        paths[np] := s
+        np++
       ENDIF
     ENDIF
   ENDWHILE
@@ -392,6 +425,10 @@ PROC listmatches(spec:PTR TO CHAR) HANDLE
   ENDIF
   MatchEnd(ap)
   Dispose(ap)
+  ap := NIL          -> 0.3.3 L1: sortout below can Throw("BRK") via
+                     -> checkbreak - without this the EXCEPT arm ran
+                     -> MatchEnd+Dispose a SECOND time on the freed
+                     -> anchor (double-free, the B1 corruption class)
 
   IF count = 0
     IF res = ERROR_NO_MORE_ENTRIES
@@ -432,6 +469,19 @@ PROC listdir(path:PTR TO CHAR) HANDLE
     WriteF('ls: cannot examine \s\n', path)
     setrc(RETURN_WARN)
     RETURN
+  ENDIF
+
+  -> 0.3.3 L2: the -R cycle guard - a directory whose (volume,
+  -> diskkey) was already listed is a cycle (hard-linked dir); skip
+  -> it with a warning instead of walking the graph forever. Soft-
+  -> links never get here (not queued); this is defense in depth.
+  IF frec
+    IF visited(lock, gfib.diskkey)
+      UnLock(lock)
+      WriteF('ls: \s: directory cycle, skipped\n', path)
+      setrc(RETURN_WARN)
+      RETURN
+    ENDIF
   ENDIF
 
   -> gfib is reused by every ExNext below -- the dir's own name
@@ -515,7 +565,10 @@ PROC sortout(head:PTR TO dent, count, isdirlist, path:PTR TO CHAR)
       -> console-independent: froze CCON and ViNCEd identically). This
       -> guard stops the runaway regardless of WHY the name blanked; the
       -> blanking itself is a separate, still-open bug (needs a harness).
-      IF e.isdir AND (e.name[0] <> 0)
+      -> 0.3.3 L2: soft-links list but never DESCEND (Unix ls -R
+      -> manners, and the loop a linked ancestor would cause dies
+      -> in the same line - MakeLink SOFT is the half-broken corner)
+      IF e.isdir AND (e.name[0] <> 0) AND (e.etype <> ST_SOFTLINK)
         NEW node
         AstrCopy(node.path, path, PATHLEN)
         AddPart(node.path, e.name, PATHLEN)
@@ -554,6 +607,27 @@ PROC freelist(head:PTR TO dent)
   ENDWHILE
 ENDPROC
 
+-> 0.3.3 L2: membership-test-and-record in one walk. Key 0 = the
+-> filesystem didn't fill fib_DiskKey (dir-mounted drives) - never
+-> recorded, never matched, the guard simply stands down there
+-> (no links exist on those handlers anyway). vnodes live until
+-> exit; E frees the heap wholesale at CleanUp.
+PROC visited(lock, key)
+  DEF fl:PTR TO filelock, v:PTR TO vnode
+  IF key = 0 THEN RETURN FALSE
+  fl := Shl(lock, 2)
+  v := vishead
+  WHILE v
+    IF (v.vol = fl.volume) AND (v.key = key) THEN RETURN TRUE
+    v := v.next
+  ENDWHILE
+  NEW v
+  v.vol := fl.volume
+  v.key := key
+  v.next := vishead
+  vishead := v
+ENDPROC FALSE
+
 PROC keepentry(fib:PTR TO fileinfoblock)
   DEF l, n:PTR TO CHAR
   IF fall THEN RETURN TRUE
@@ -591,6 +665,7 @@ PROC mkent(fib:PTR TO fileinfoblock)
   e.minute := ds.minute
   e.tick := ds.tick
   e.isdir := IF fib.direntrytype > 0 THEN TRUE ELSE FALSE
+  e.etype := fib.direntrytype
 ENDPROC e
 
 /* ---- sorting ---- */
@@ -837,4 +912,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.3.2 (24.7.26) E build',0
+version: CHAR '$VER: ls 0.3.3 (27.7.26) E build',0
