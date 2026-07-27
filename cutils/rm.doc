@@ -1,0 +1,62 @@
+RM                                                                    RM
+
+NAME
+    rm - delete files and directories, Unix-style
+
+FORMAT
+    rm [-rfv] FILE | PATTERN ...
+
+TEMPLATE
+    none - flags are hand-parsed Unix bundles; `rm ?` prints usage
+
+PATH
+    C:rm
+
+FUNCTION
+    Deletes files, pattern matches, and (with -r) whole directory
+    trees. C:Delete exists; rm is the muscle memory - with this
+    family's manners and its safety model:
+
+    A directory is refused without -r, like Unix (and unlike
+    Delete ALL's promptless enthusiasm). With -r the tree is walked
+    with an explicit work list: every directory is scanned to
+    completion BEFORE anything inside it is deleted, files go as
+    they are met, and the directories themselves are removed
+    deepest-first once their contents are gone. A child that
+    refuses to go leaves its whole parent chain standing, each
+    parent reporting "not empty" honestly.
+
+    A delete-protected file (the d bit - the Amiga's own safety
+    catch) is SKIPPED by default and listed under "not deleted:".
+    A file another task holds open always refuses.
+
+    VOLUME ROOTS ARE REFUSED UNCONDITIONALLY. `rm -rf dh0:` answers
+    "refusing to remove a volume root" and does nothing else; no
+    flag overrides it. Format and Delete ALL exist for the one day
+    a decade that is really meant.
+
+    Links - soft links, and hard links to directories - are
+    deleted as LINKS, never followed: the entry goes, the target
+    stays, and a linked ancestor can never turn -r into a cycle.
+
+OPTIONS
+    -r  delete directories and their contents (also accepted: -R)
+    -f  force, the Amiga way: strip the delete protection and
+        retry; also silences "no match" for arguments that match
+        nothing
+    -v  list each object as it is deleted (default silent)
+
+RESULTS
+    Return code 0 when clean, 5 when something was skipped (and
+    listed under "not deleted:"), 10 when something failed, 20 on
+    Ctrl-C, which is honoured between entries.
+
+EXAMPLES
+    rm old.txt
+    rm #?.bak
+    rm -r work:tmpdir
+    rm -f locked.dat
+    rm -rv ram:t
+
+SEE ALSO
+    ls.doc, cp.doc, mv.doc, mkdir.doc, tools-audit.md

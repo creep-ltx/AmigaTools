@@ -1,0 +1,63 @@
+CP                                                                    CP
+
+NAME
+    cp - copy files and directories, Unix-style
+
+FORMAT
+    cp [-fr] FROM ... TO
+
+TEMPLATE
+    none - flags are hand-parsed Unix bundles; `cp ?` prints usage
+
+PATH
+    C:cp
+
+FUNCTION
+    Copies files, pattern matches, and (with -r) whole directory
+    trees. The last path is TO, everything before it is a source.
+    With several sources or a pattern, TO must be an existing
+    directory; a single plain source may name its copy directly.
+
+    cp is non-destructive by default: an existing target file is
+    SKIPPED and listed under "not copied:" at the end (return code
+    5). -f deletes and replaces it instead - after checking with
+    SameLock() that source and target are not the same object, so
+    `cp -f file file` can never destroy the only copy. A directory
+    is never replaced by a file.
+
+    Metadata is preserved by default - protection bits, datestamp
+    and filenote travel with the copy, the way Copy CLONE does.
+    There is no -p flag: preserving is the sensible Amiga default.
+
+OPTIONS
+    -f  force: replace an existing target file (delete-then-copy,
+        the Unix shape - if the copy itself then fails, the old
+        target is already gone)
+    -r  copy directories recursively (also accepted: -R)
+
+RESULTS
+    Return code 0 when clean, 5 when something was skipped (and
+    listed), 10 when something failed, 20 on Ctrl-C. A broken or
+    failed copy removes the partial target file. More than 32
+    arguments is an error, never a silent truncation.
+
+EXAMPLES
+    cp file newname
+    cp file work:archive/
+    cp -r dir work:backup
+    cp #?.txt ram:
+    cp a b c work:stuff
+
+NOTES
+    -r walks the tree with an explicit work list, never native
+    recursion, so a deep tree cannot blow the stack. Each directory
+    is recreated at the destination, its files copied, its
+    subdirectories queued; an existing target directory is merged
+    into, files inside following the same skip/-f rule.
+
+    Copying a directory into itself or its own subtree is refused
+    ("cannot copy X into itself") - it would re-copy its own output
+    until the disk filled.
+
+SEE ALSO
+    ls.doc, mv.doc, mkdir.doc, rm.doc, tools-audit.md

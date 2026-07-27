@@ -1,0 +1,66 @@
+LS                                                                    LS
+
+NAME
+    ls - list directory contents, Unix-style
+
+FORMAT
+    ls [-1ahlrRSt] [path | pattern ...]
+
+TEMPLATE
+    none - flags are hand-parsed Unix bundles (deliberately not
+    ReadArgs); `ls ?` prints usage
+
+PATH
+    C:ls
+
+FUNCTION
+    Lists directories the way Unix fingers expect: multi-column,
+    alphabetical, case-insensitive, dirs and files mixed. A plain
+    directory argument lists its contents, a pattern argument lists
+    the matches themselves (like ls -d), a plain file lists itself,
+    and no argument lists the current directory. Several arguments
+    (or -R) get `path:` group headers.
+
+    Multi-column output is sized by asking the console (the CSI
+    `0 q` window-bounds request, the same exchange C:Dir uses), so
+    it adapts to any conforming console and any window size.
+    Redirected or piped output falls back to one entry per line
+    with no color codes, so `ls >file` stays parseable.
+
+    On interactive output, directories print blue and hidden-class
+    entries (h-bit or .info) grey - grey wins when both apply.
+
+OPTIONS
+    -l  long listing: hsparwed protection bits, byte size, DOS
+        datestamp, and the filenote on a continuation line
+    -a  show .info files and h-bit entries (the Amiga's dotfile
+        class - hidden by default)
+    -h  human-readable sizes, tiered bytes / K / M / G
+    -t  sort by date, newest first
+    -S  sort by size, largest first
+    -r  reverse the sort order
+    -R  recurse into directories, depth-first, with group headers
+    -1  one entry per line
+
+RESULTS
+    Return code 0 when clean, 5 when a path could not be accessed,
+    10 on bad arguments, 20 on Ctrl-C. More than 32 path arguments
+    is an error, never a silent truncation.
+
+EXAMPLES
+    ls -la work:
+    ls -lhS sys:c
+    ls #?.e
+    ls -R work: >ram:tree.txt
+
+NOTES
+    -R never descends soft-links (they list, as Unix ls -R does),
+    and a visited-directory set skips hard-link cycles with
+    "directory cycle, skipped" instead of looping.
+
+    Empty-named directory entries are never queued by -R (a guard
+    from the 0.3.x heap-corruption investigation - see ls-bugs.md
+    for that story).
+
+SEE ALSO
+    cp.doc, mv.doc, mkdir.doc, rm.doc, tools-audit.md

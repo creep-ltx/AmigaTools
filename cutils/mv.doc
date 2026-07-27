@@ -1,0 +1,62 @@
+MV                                                                    MV
+
+NAME
+    mv - move or rename files and directories, Unix-style
+
+FORMAT
+    mv [-fb] FROM ... TO
+
+TEMPLATE
+    none - flags are hand-parsed Unix bundles; `mv ?` prints usage
+
+PATH
+    C:mv
+
+FUNCTION
+    Moves files, pattern matches, and directories. AmigaDOS
+    Rename() is secretly most of mv already - a rename is a
+    directory-entry relink, so anything moves anywhere on the SAME
+    volume in one cheap call, and mv tries that first, per file.
+
+    When the target is on a DIFFERENT volume, Rename() fails with
+    ERROR_RENAME_ACROSS_DEVICES and mv falls back to copy+delete,
+    carrying protection bits, datestamp and filenote.
+
+    That fallback covers whole DIRECTORY trees too (since 0.5),
+    all-or-nothing per tree: the source is deleted only after the
+    ENTIRE tree has copied clean, deepest directory first; any copy
+    failure abandons the move, wipes the partial destination, and
+    leaves the source untouched. The destination must not already
+    exist (merging is cp's business), volume roots are refused as
+    sources, and a tree containing a soft link or a hard directory
+    link is refused whole - a link cannot be recreated faithfully
+    on another volume.
+
+    mv is non-destructive by default: an existing target is
+    skipped and listed under "not moved:" (return code 5).
+
+OPTIONS
+    -f  force: delete and replace an existing target - SameLock()
+        checked first, so `mv -f file file` cannot delete the only
+        copy
+    -b  back up an existing target as <name>.mvbak first; if that
+        backup name is taken the file is refused untouched. -bf
+        means "replace the stale .mvbak" - -f always sanctions
+        destroying exactly one thing
+
+RESULTS
+    Return code 0 when clean, 5 when something was skipped (and
+    listed) or a moved source could not be fully deleted, 10 when
+    something failed, 20 on Ctrl-C. A break or failure mid-copy
+    removes the partial target. More than 32 arguments is an
+    error, never a silent truncation.
+
+EXAMPLES
+    mv oldname newname
+    mv work:file work:archive
+    mv work:somedir ram:            (whole tree, cross-volume)
+    mv #?.mod mods:
+    mv -b config work:app
+
+SEE ALSO
+    ls.doc, cp.doc, mkdir.doc, rm.doc, tools-audit.md

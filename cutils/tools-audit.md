@@ -1,5 +1,9 @@
 # tools-audit.md — ls / cp / mv / mkdir code audit + rm plan
 
+> Since 27.7.26 the five tools live together in `cutils/` — file
+> references below (`ls/ls.e:367` style) are from the audit date,
+> when each had its own directory.
+
 Audited 27.7.26 against ls 0.3.2, cp 0.1.1, mv 0.4, mkdir 0.1 (all
 sources read end-to-end, 2174 lines, plus ls/BUGS.md history). Verdicts:
 CONFIRMED = the defect is provable from the code as read; PLAUSIBLE =

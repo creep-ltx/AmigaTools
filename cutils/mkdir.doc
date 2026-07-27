@@ -1,0 +1,50 @@
+MKDIR                                                              MKDIR
+
+NAME
+    mkdir - make directories, Unix-style
+
+FORMAT
+    mkdir [-p] DIR ...
+
+TEMPLATE
+    none - flags are hand-parsed Unix bundles; `mkdir ?` prints
+    usage
+
+PATH
+    C:mkdir
+
+FUNCTION
+    Creates directories - several at once if asked. Without -p each
+    DIR is created directly: its parent must already exist, and an
+    existing DIR is an error, like Unix mkdir.
+
+    With -p every missing directory along the path is created in
+    turn - `mkdir -p work:a/b/c` makes a, then a/b, then a/b/c -
+    and an already-existing directory is NOT an error (the whole
+    point of -p). A path component that already exists as a FILE is
+    an error, reported at the component actually in the way.
+    Device/volume names (the part before ':') are never created,
+    only descended into.
+
+    DIR names are literal - no pattern expansion. `mkdir "#?"`
+    makes a directory called #?, not one per match. (The shell
+    doesn't expand patterns either; on AmigaDOS each command
+    matches its own, and mkdir has nothing to match against.)
+
+OPTIONS
+    -p  create missing parent directories; an existing directory
+        is not an error
+
+RESULTS
+    Return code 0 when clean, 10 when a directory failed, 20 on
+    Ctrl-C. Errors on one DIR are reported and the rest still run.
+    More than 32 arguments is an error, never a silent truncation.
+
+EXAMPLES
+    mkdir work:newdir
+    mkdir a b c
+    mkdir -p work:a/b/c
+    mkdir -p ram:deep/nested/dir
+
+SEE ALSO
+    ls.doc, cp.doc, mv.doc, rm.doc, tools-audit.md

@@ -1,0 +1,65 @@
+CUtils - Unix-style file commands for AmigaDOS
+==============================================
+
+WHAT IT IS
+
+  Five small commands - ls, cp, mv, mkdir and rm - for fingers that
+  type `ls -la` faster than they can think `List`. Written in Amiga
+  E, one standalone binary each; copy them into C: and go. The name
+  works twice: they are the core utils your muscle memory expects,
+  and they are the utils that live in C:.
+
+  Requires Kickstart 2.04 or newer.
+
+THE COMMANDS
+
+  ls [-1ahlrRSt] [path | pattern ...]
+    Multi-column listing sized by asking the console itself, colors
+    on interactive output, .info files hidden like dotfiles (-a
+    reveals), hsparwed long format with filenotes, human sizes,
+    date/size sorts, safe -R recursion (soft-links never descended,
+    hard-link cycles skipped).
+
+  cp [-fr] FROM ... TO
+    Patterns, multiple sources, recursive trees. Skips existing
+    targets by default (-f replaces, SameLock-guarded); protection
+    bits, datestamp and filenote carried like Copy CLONE. Copying a
+    directory into its own subtree is refused.
+
+  mv [-fb] FROM ... TO
+    Rename() on the same volume - files AND directories, one cheap
+    call. Across volumes: copy+delete with full metadata, whole
+    directory trees too, all-or-nothing (a failed copy wipes the
+    partial destination and leaves the source untouched). -b backs
+    an existing target up as <name>.mvbak first.
+
+  mkdir [-p] DIR ...
+    -p builds every missing parent in place; an existing directory
+    is not an error, a file in the way is reported at the component
+    actually blocking.
+
+  rm [-rfv] FILE | PATTERN ...
+    Directories need -r; trees delete contents-first, deepest
+    directory first. -f strips the d-bit protection and retries -
+    force, the Amiga way. Volume roots are refused unconditionally;
+    links are deleted as links, never followed.
+
+SHARED MANNERS
+
+  Bundled Unix flags, hand-parsed on purpose; `cmd ?` prints usage.
+  Every command matches its own AmigaDOS patterns. Non-destructive
+  by default - skips are listed at the end, and nothing ever
+  silently clobbers. One bad item never kills a batch; return code
+  is the worst that happened: 0 clean, 5 skipped, 10 failed, 20
+  break. Ctrl-C honoured throughout. Trees are always walked with
+  explicit work lists, never native recursion.
+
+  Each command keeps its own version (see the $VER strings);
+  per-command reference docs ride along as <command>.doc, readable
+  with More.
+
+ABOUT
+
+  Part of the AmigaTools collection, written in Amiga E:
+
+    https://github.com/creep-ltx/AmigaTools
