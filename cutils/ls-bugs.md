@@ -1,8 +1,26 @@
--> BUGS.md - ls known bugs. Logged, not yet fixed.
--> ls 0.2 (20.7.26). Evidence lives in the entries; reproduce before
--> fixing, root-cause before trusting.
+-> ls-bugs.md - the ls -R investigation, July '26. Everything in
+-> this file is CLOSED; see the status table. The chronology below
+-> is kept unedited as a lab notebook - it is the story of how the
+-> family's allocator discipline (NEW pairs with END) was learned,
+-> and it deliberately preserves verdicts that later turned out
+-> wrong, marked as such where the story corrects itself.
 
 # ls bugs
+
+## Status at a glance (current: ls 0.3.3 - NO OPEN BUGS)
+
+| Bug | Status |
+|-----|--------|
+| `-R` self-recursion freeze (empty-named dir entries) | **FIXED** — guarded in 0.3, root cause eliminated in 0.3.1 |
+| Name corruption / heap overwrite (the root cause: `Dispose()` on `NEW`'d entries frees a live allocator chunk) | **FIXED** in 0.3.1, verified three ways (runtime source, compiled binary, A/B over a full system drive) |
+| `comm[80]` overrun suspect | **NEVER EXISTED** — retired by code reading in the 27.7.26 family audit (`AstrCopy` clamps) |
+| No cycle guard: `-R` loops on a directory link | **FIXED** in 0.3.3 — soft-links are never descended, a (volume, diskkey) visited set skips hard-link cycles; boot-verified against a real `MakeLink SOFT` loop on FFS |
+
+Reading guide for the chronology: the 22.7 entries describe the
+freeze as open and speculate at suspects - that was true then. The
+0.3.1 entry ("ROOT-CAUSED AND FIXED") is where the real mechanism
+falls out, and it explicitly overturns several earlier paragraphs.
+The 0.3.3 entry closes the last item. Nothing below is a to-do.
 
 ## B1 - `ls -R` recurses into itself forever (empty-named entries)
 
