@@ -68,6 +68,9 @@ EXCEPT DO
   ELSEIF exception="ARG"
     WriteF('mkdir: unknown option (mkdir ? for usage)\n')
     setrc(RETURN_ERROR)
+  ELSEIF exception="MAX"
+    WriteF('mkdir: too many arguments (max \d)\n', MAXARGS)
+    setrc(RETURN_ERROR)
   ELSEIF exception
     WriteF('\s\n', exceptioninfo)
     setrc(RETURN_ERROR)
@@ -76,7 +79,7 @@ EXCEPT DO
 ENDPROC
 
 PROC usage()
-  WriteF('mkdir 0.1 -- Unix-style make directory\n')
+  WriteF('mkdir 0.1.1 -- Unix-style make directory\n')
   WriteF('usage: mkdir [-p] DIR ...\n')
   WriteF('  -p  create parent directories as needed; existing is not an error\n')
 ENDPROC
@@ -146,12 +149,14 @@ PROC parseargs(paths:PTR TO LONG)
       ELSEIF (t[0] = "?") AND (tl = 1)
         Throw("USG", 0)
       ELSE
-        IF np < MAXARGS
-          s := String(tl)
-          StrCopy(s, t)
-          paths[np] := s
-          np++
-        ENDIF
+        -> 0.1.1 A1: never silently drop an argument (family rule) -
+        -> a directory list that doesn't fit is an error, not a
+        -> silently shorter batch
+        IF np >= MAXARGS THEN Throw("MAX", 0)
+        s := String(tl)
+        StrCopy(s, t)
+        paths[np] := s
+        np++
       ENDIF
     ENDIF
   ENDWHILE
@@ -234,8 +239,11 @@ PROC makeparents(path:PTR TO CHAR)
   IF len > start THEN makefinal(w)         -> the last component
 ENDPROC
 
-/* An intermediate directory under -p: already-exists is success.
-   Returns FALSE (after reporting) only on a real failure. */
+/* An intermediate directory under -p: an already-existing DIRECTORY
+   is success; an existing FILE is reported here, at the component
+   that is actually in the way (0.1.1 K1 - it used to "succeed" and
+   let the NEXT step fail with a generic fault naming the wrong
+   component). Returns FALSE (after reporting) on a real failure. */
 PROC makestep(path:PTR TO CHAR)
   DEF lock, err
   lock := CreateDir(path)
@@ -244,7 +252,12 @@ PROC makestep(path:PTR TO CHAR)
     RETURN TRUE
   ENDIF
   err := IoErr()
-  IF err = ERROR_OBJECT_EXISTS THEN RETURN TRUE
+  IF err = ERROR_OBJECT_EXISTS
+    IF isdir(path) THEN RETURN TRUE
+    WriteF('mkdir: \s: exists and is not a directory\n', path)
+    setrc(RETURN_ERROR)
+    RETURN FALSE
+  ENDIF
   WriteF('mkdir: \s: ', path)
   PrintFault(err, NIL)
   setrc(RETURN_ERROR)
@@ -285,4 +298,4 @@ PROC isdir(path:PTR TO CHAR)
   ENDIF
 ENDPROC r
 
-version: CHAR '$VER: mkdir 0.1 (20.7.26) E build',0
+version: CHAR '$VER: mkdir 0.1.1 (27.7.26) E build',0
