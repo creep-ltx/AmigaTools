@@ -18,6 +18,7 @@ A collection of small tools for AmigaOS.
 | [ls](ls/) | Unix-style directory lister — bundled `-la` flags, `.info` files hidden like dotfiles, hsparwed long format with filenotes, human-readable sizes, sorts, recursion, patterns, and multi-column output sized by asking the console (colors included, redirect-safe). |
 | [cp](cp/) | Unix-style copy with pattern support, recursive directory copy, and collision handling. |
 | [mkdir](mkdir/) | Unix-style make-directory command with `-p` parent creation. |
+| [rm](rm/) | Unix-style delete with pattern support — `-r` tree delete (contents-first, deepest-first), `-f` strips the d-bit protection the Amiga way, links deleted as links and never followed, volume roots refused unconditionally. |
 
 Each tool lives in its own subdirectory with its own README covering
 usage, how it works, and how to build it. Prebuilt binaries are
