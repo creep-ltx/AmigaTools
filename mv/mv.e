@@ -122,6 +122,9 @@ EXCEPT DO
   ELSEIF exception="ARG"
     WriteF('mv: unknown option (mv ? for usage)\n')
     setrc(RETURN_ERROR)
+  ELSEIF exception="MAX"
+    WriteF('mv: too many arguments (max \d)\n', MAXARGS)
+    setrc(RETURN_ERROR)
   ELSEIF exception
     WriteF('\s\n', exceptioninfo)
     setrc(RETURN_ERROR)
@@ -130,7 +133,7 @@ EXCEPT DO
 ENDPROC
 
 PROC usage()
-  WriteF('mv 0.4 -- Unix-style move\n')
+  WriteF('mv 0.4.1 -- Unix-style move\n')
   WriteF('usage: mv [-fb] FROM ... TO\n')
   WriteF('  -f  force: replace an existing target\n')
   WriteF('  -b  back up an existing target as <name>.mvbak first\n')
@@ -202,12 +205,14 @@ PROC parseargs(paths:PTR TO LONG)
       ELSEIF (t[0] = "?") AND (tl = 1)
         Throw("USG", 0)
       ELSE
-        IF np < MAXARGS
-          s := String(tl)
-          StrCopy(s, t)
-          paths[np] := s
-          np++
-        ENDIF
+        -> 0.4.1 A1: never silently drop an argument - with 33+ the
+        -> dropped one was TO and the 32nd SOURCE was promoted to
+        -> target, relocating the whole batch somewhere never named
+        IF np >= MAXARGS THEN Throw("MAX", 0)
+        s := String(tl)
+        StrCopy(s, t)
+        paths[np] := s
+        np++
       ENDIF
     ENDIF
   ENDWHILE
@@ -404,6 +409,10 @@ PROC copymove(srcpath:PTR TO CHAR, ifib:PTR TO fileinfoblock) HANDLE
   -> best-effort: a filesystem that can't store these shouldn't fail the move
   SetProtection(gtarget, ifib.protection)
   SetFileDate(gtarget, {ifib.datestamp})
+  -> 0.4.1 M1: the filenote too - a same-volume mv (pure Rename)
+  -> keeps it, so the cross-volume path silently stripping it was
+  -> an inconsistency (cp has carried it all along)
+  IF ifib.comment[0] THEN SetComment(gtarget, ifib.comment)
 
   IF DeleteFile(srcpath)=FALSE
     err := IoErr()
@@ -454,4 +463,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: mv 0.4 (20.7.26) E build',0
+version: CHAR '$VER: mv 0.4.1 (27.7.26) E build',0
