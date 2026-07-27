@@ -180,6 +180,9 @@ OBJECT console
   left, topy, cols, rows        -> the text grid inside the window
   cx, cy                        -> output cursor, in cells
   cursx, cursy                  -> raw block cursor; -1 = not painted
+  winact                        -> 1.2.6b2: window active? TRUE = solid
+                                -> cursor, FALSE = checkerboard ghost
+                                -> (IDCMP_ACTIVE/INACTIVEWINDOW keep it)
   -> copy & paste (M7)
   selon                         -> a drag is in progress
   selanc, selcur                -> anchor/current cell, row*cols+x
@@ -551,7 +554,12 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
                                 -> E loops become three CopyMems - at
                                 -> chip-ram-effective CPU speed those
                                 -> loops were ~1ms per scrolled LINE
-    dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE
+    dieing=FALSE, mydnode=NIL:PTR TO devicenode, ihdevopen=FALSE,
+    -> 1.2.6b2: the ghost-cursor checkerboard ($5555/$AAAA, the ROM's
+    -> own inactive-cursor pattern) - AreaPtrn data the blitter reads,
+    -> so it MUST live in chip RAM (AllocMem, freed in killhandler).
+    -> NIL is survivable: inactive windows just keep a solid cursor.
+    gpat=NIL:PTR TO INT
 
 
 PROC main()
@@ -631,6 +639,14 @@ PROC main()
       ftreq.io.device := treq.io.device
       ftreq.io.unit := treq.io.unit
     ENDIF
+  ENDIF
+
+  -> 1.2.6b2: the ghost-cursor pattern, chip RAM for the blitter
+  -> ($2 = MEMF_CHIP; exec/memory is not among the modules)
+  gpat := AllocMem(4, 2)
+  IF gpat
+    gpat[0] := $5555
+    gpat[1] := $AAAA
   ENDIF
 
   -> tab-completion plumbing (M5b): a private reply port and one
@@ -877,6 +893,10 @@ PROC main()
               IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
             ENDIF
             IF class = IDCMP_NEWSIZE THEN doresize()
+            -> 1.2.6b2: frame classes like NEWSIZE - they act even for
+            -> a parked raw client, so Ed's block cursor ghosts too
+            IF class = IDCMP_ACTIVEWINDOW THEN doactive(TRUE)
+            IF class = IDCMP_INACTIVEWINDOW THEN doactive(FALSE)
             IF class = IDCMP_CLOSEWINDOW
               -> 1.2.6b1: the REAL iconify gadget. V47.4+ reports its
               -> click as CLOSEWINDOW with Code=1 (a true close is
@@ -996,6 +1016,10 @@ PROC killhandler()
     CloseLibrary(workbenchbase)
     workbenchbase := NIL
   ENDIF
+  IF gpat
+    FreeMem(gpat, 4)            -> 1.2.6b2: the chip checkerboard
+    gpat := NIL
+  ENDIF
   IF ihsigbit >= 0
     FreeSignal(ihsigbit)
     ihsigbit := -1
@@ -1048,6 +1072,9 @@ ENDPROC
 -> than run half-built.
 PROC coninit(c:PTR TO console)
   c.cursx := -1                 -> no block cursor painted
+  c.winact := TRUE              -> 1.2.6b2: solid until Intuition says
+                                -> otherwise (openwin refines from
+                                -> the real window flags)
   c.selanc := -1
   c.selcur := -1
   c.sello := -1                 -> no standing highlight
@@ -2374,6 +2401,7 @@ PROC reopenwin()
   IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   IF curcon.win = NIL THEN RETURN        -> reopen failed; stays hidden
   curcon.rp := curcon.win.rport
+  curcon.winact := IF curcon.win.flags AND WFLG_WINDOWACTIVE THEN TRUE ELSE FALSE
   IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
   curcon.cw := curcon.rp.txwidth
   curcon.ch := curcon.rp.txheight
@@ -2565,6 +2593,10 @@ PROC openwin()
     RETURN
   ENDIF
   curcon.rp := curcon.win.rport
+  -> 1.2.6b2: ground truth from Intuition, not a guess - covers the
+  -> INACTIVE open option and a borrowed frame alike; the activation
+  -> IDCMP classes (setidcmp) keep it current from here on
+  curcon.winact := IF curcon.win.flags AND WFLG_WINDOWACTIVE THEN TRUE ELSE FALSE
   IF curcon.fwin = FALSE
     -> topaz 8: a ROM font - OpenFont sends no packets, OpenDiskFont
     -> would not be safe. A BORROWED window keeps the font its owner
@@ -3611,37 +3643,53 @@ ENDPROC
 -> the raw-mode block cursor: stock console.device always shows a
 -> filled cell at the cursor, and Ed draws no marker of its own -
 -> it relies on the console's. Cooked mode has the blip instead.
--> The block is the cell from the model in inverse video; an empty
--> cell (attr 0, fg=bg) gets deffg so the block is never invisible.
+-> 1.2.6b2, the Timm/amiga-news cursor-colour finding (console.device
+-> 46.1 disassembled - AmigaReferences/graphics-and-performance.md):
+-> the ROM cursor is NOT inverse-video pens, it is ONE RectFill in
+-> COMPLEMENT mode over the cell - the block's colour is the bitwise
+-> complement of whatever pens sit under it (default WB: pen 0
+-> background -> pen 3, the blue "FillPen look"; glyph pixels stay
+-> visible complemented). Our old inverse-Text block collapsed to
+-> deffg-on-empty = the always-white cursor he called sterile. Now
+-> we draw the ROM's way; curfill below is the shared primitive.
 -> Discipline: curserase() before anything repaints or scrolls the
 -> grid, cursdraw() after - the write path wraps render() with the
 -> pair, so interior ScrollRasters never smear a painted cursor.
-PROC cursdraw()
-  DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, x, c, at, sy,
-      fg, bg, t, b[2]:ARRAY OF CHAR
-  IF (curcon.win = NIL) OR (curcon.sb = NIL) OR (curcon.viewoff > 0) THEN RETURN
-  x := IF curcon.cx >= curcon.cols THEN curcon.cols - 1 ELSE curcon.cx
-  m := visrow(curcon.cy)
-  a := sarow(curcon.cy)
-  stp := ssrow(curcon.cy)
-  c := m[x]
-  b[0] := IF c < 32 THEN 32 ELSE c
-  at := a[x]
-  sy := stp[x]
-  fg := at AND 15
-  bg := Shr(at, 4) AND 7
-  IF sy AND 4                   -> an inverse cell shows its EFFECTIVE
-    t := fg                     -> video first; the cursor inverts that
-    fg := bg
-    bg := t
+-> Erase stays repaint-from-model, NOT a second XOR fill: repaint is
+-> idempotent against a missed or doubled erase, a second XOR is not.
+
+-> the complement block, shared by the raw cursor and the edit blip:
+-> COMPLEMENT-mode RectFill of one cell, checkerboard-ghosted through
+-> the chip AreaPtrn while the window is inactive (the ROM's own
+-> $5555/$AAAA inactive dress - the KingCON look Timm asked after).
+-> Runs OUTSIDE the masked render bracket only (rp_Mask = $FF there),
+-> so the flip reaches every plane exactly like stock; both callers'
+-> paint is erased by full-depth repaints before any masked render
+-> touches those cells, so the mask invariant (planes outside mmask
+-> all-zero over the visible region) is never violated by a standing
+-> block.
+PROC curfill(cx, cy)
+  DEF x0, y0, om
+  x0 := curcon.left + Mul(cx, curcon.cw)
+  y0 := curcon.topy + Mul(cy, curcon.ch)
+  om := curcon.rp.drawmode
+  SetDrMd(curcon.rp, RP_COMPLEMENT)
+  IF (curcon.winact = FALSE) AND (gpat <> NIL)
+    curcon.rp.areaptrn := gpat
+    curcon.rp.areaptsz := 1     -> 2^1 pattern rows = the two words
   ENDIF
-  IF fg = bg THEN fg := curcon.deffg
-  SetAPen(curcon.rp, bg)               -> inverse video: glyph in the cell's
-  SetBPen(curcon.rp, fg)               -> background, block in its foreground
-  setsoft(sy)
-  Move(curcon.rp, curcon.left + Mul(x, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
-  Text(curcon.rp, b, 1)
-  setsoft(0)
+  RectFill(curcon.rp, x0, y0, x0 + curcon.cw - 1, y0 + curcon.ch - 1)
+  curcon.rp.areaptrn := NIL
+  curcon.rp.areaptsz := 0
+  SetDrMd(curcon.rp, om)
+ENDPROC
+
+PROC cursdraw()
+  DEF x
+  IF (curcon.win = NIL) OR (curcon.sb = NIL) OR (curcon.viewoff > 0) THEN RETURN
+  IF curcon.cursx >= 0 THEN curserase()  -> XOR-safe: never stack two fills
+  x := IF curcon.cx >= curcon.cols THEN curcon.cols - 1 ELSE curcon.cx
+  curfill(x, curcon.cy)
   curcon.cursx := x
   curcon.cursy := curcon.cy
 ENDPROC
@@ -3674,6 +3722,28 @@ PROC curserase()
     setsoft(0)
   ENDIF
   curcon.cursx := -1
+ENDPROC
+
+-> 1.2.6b2: window activation flip - repaint the standing cursor in
+-> its new dress (solid <-> ghosted), the stock/KingCON behaviour.
+-> Cooked redraws the whole edit line (b9 paints in place, identical
+-> glyphs repaint invisibly, so no flicker) - but only live: drawedit
+-> has never been viewoff-aware (the b33 lesson), and scrolled back
+-> there is no blip on the glass to redress anyway.
+PROC doactive(on)
+  IF curcon.winact = on THEN RETURN
+  curcon.winact := on
+  IF curcon.win = NIL THEN RETURN
+  IF curcon.viewoff > 0 THEN RETURN  -> scrolled: no cursor on the
+                                -> glass (and curserase would repaint
+                                -> a LIVE cell onto the scrolled view);
+                                -> snaplive redraws in the new dress
+  IF curcon.rawmode
+    curserase()
+    cursdraw()
+  ELSE
+    drawedit()
+  ENDIF
 ENDPROC
 
 -> ---------- copy & paste (M7) ----------
@@ -3808,7 +3878,8 @@ ENDPROC
 PROC setidcmp()
   DEF idc
   IF curcon.win = NIL THEN RETURN
-  idc := IDCMP_CLOSEWINDOW OR IDCMP_NEWSIZE
+  idc := IDCMP_CLOSEWINDOW OR IDCMP_NEWSIZE OR
+         IDCMP_ACTIVEWINDOW OR IDCMP_INACTIVEWINDOW  -> 1.2.6b2: ghost
   IF ihon = FALSE
     idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
   ENDIF
@@ -6002,11 +6073,17 @@ PROC drawedit()
     cc := m[bc - Mul(r, curcon.cols)]
     IF cc >= 32 THEN cch[0] := cc
   ENDIF
-  SetAPen(curcon.rp, 0)
-  SetBPen(curcon.rp, curcon.deffg)
+  -> 1.2.6b2: the blip is a complement block now, same as the raw
+  -> cursor (see curfill) - the glyph paints NORMAL video first, the
+  -> fill inverts the cell's planes. The Text also fully overwrites
+  -> any previous fill on this cell (JAM2 at full depth), so painting
+  -> in place stays self-cleaning exactly as b9 relies on.
+  SetAPen(curcon.rp, curcon.deffg)
+  SetBPen(curcon.rp, 0)
   Move(curcon.rp, curcon.left + Mul(bc - Mul(r, curcon.cols), curcon.cw),
        curcon.topy + Mul(curcon.ancy + r, curcon.ch) + curcon.baseline)
   Text(curcon.rp, cch, 1)
+  curfill(bc - Mul(r, curcon.cols), curcon.ancy + r)
   gext := 0
   IF curcon.sghost
     g := curcon.sghost
@@ -8136,4 +8213,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b1 (25.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b2 (27.7.26) CCON: LTX console handler', 0

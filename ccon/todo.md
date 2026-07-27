@@ -4116,6 +4116,74 @@ Boot checklist (REBOOT FIRST):
 - [ ] RA+I still works everywhere, incl. a borrowed CTerm frame
       (which has NO gadget - can't be tagged)
 
+## 1.2.6b2 — the complement cursor (27.7.26): Timm's colour question, answered from the ROM
+
+The amiga-news thread asked what colour the KingCON/3.1-CON cursor
+is ("vielleicht Fillpen?"). Disassembled console.device 46.1 again
+(fresh ROM split; full write-up: ~/Projects/AmigaReferences/
+graphics-and-performance.md): the stock cursor has NO colour — it is
+ONE RectFill in COMPLEMENT draw mode over the cell, rp_Mask forced
+to $FF for the fill, i.e. a bitwise invert of whatever pens are
+under it. Default 4-colour WB: pen-0 background -> pen 3 (the blue
+"FillPen look" — Timm's guess was an optical coincidence), glyph
+pixels -> pen 2. Inactive windows: the SAME fill through a $5555/
+$AAAA checkerboard AreaPtrn — the ghosting he missed. And KingCON
+1.3 doesn't render at all — it OpenDevice's console.device (string
+in the handler binary), so its cursor IS the ROM cursor. One target,
+not two.
+
+Ours was inverse-video Text with a deffg fallback on empty cells =
+the "always white, a bit sterile" block he compared against.
+
+Implementation:
+- curfill(cx,cy): the shared primitive — save rp DrawMode, SetDrMd
+  COMPLEMENT, RectFill the cell, restore; when winact=FALSE and the
+  chip pattern allocated, the fill runs through rp_AreaPtrn (areaptsz
+  1 = the two words) — ghosted. Pattern = 4 bytes MEMF_CHIP (blitter
+  reads area patterns), allocated in main, freed in killhandler,
+  NIL survivable (solid cursor always).
+- cursdraw(): curfill instead of the inverse Text; self-guards with
+  curserase() if a block is already standing (a second complement
+  would ERASE it — XOR is not idempotent, repaint-from-model is,
+  which is also why curserase stays exactly as it was).
+- drawedit's blip: the cell now paints NORMAL video + curfill over
+  it. Same erase machinery — every blip eraser is a full-depth
+  repaint (JAM2 at rp_Mask $FF), which removes a complement block
+  as completely as it removed the white one. Both fills run OUTSIDE
+  the masked render bracket only, and both are erased before any
+  masked render touches their cells, so the mmask invariant holds.
+- winact per console: seeded from win.flags WFLG_WINDOWACTIVE at
+  both open sites (covers INACTIVE opens and borrowed frames),
+  kept current by IDCMP_ACTIVEWINDOW/INACTIVEWINDOW — frame classes
+  in setidcmp and the drain, they act even for a parked raw client
+  (Ed's block ghosts too, stock behaviour). doactive() redresses the
+  standing cursor: raw = curserase+cursdraw, cooked = drawedit (live
+  only — viewoff guard, the b33 lesson; snaplive redraws anyway).
+
+Boot checklist (REBOOT FIRST):
+- [x] shell prompt: cursor block is no longer white — on default WB
+      pens it reads blue-ish (complement), glyph visible inside it
+      (CONFIRMED 27.7.26: "cursor looks exactly like in con and
+      vinced" — the identity was the whole point)
+- [ ] cursor keeps its look over coloured text (ls output, SGR demo
+      deck) — block = inverted cell, not a fixed pen
+- [ ] click another window: the cursor GHOSTS (checkerboard), click
+      back: solid again — shell blip AND a raw client (Ed) both
+- [ ] Ed: block cursor complement too, arrows/typing leave no
+      droppings, quit restores transcript clean
+- [ ] More: page/quit unchanged (cursor discipline around render
+      untouched)
+- [ ] scrollback: scroll up (no cursor painted), click other window
+      while scrolled, come back, snap live — cursor correct dress,
+      no stray inverted cell on the scrolled view
+- [ ] resize with cursor standing — no smear (curserase discipline
+      unchanged); iconify/restore — cursor comes back right
+- [ ] drag-select across the cursor cell, release — no residue
+- [ ] deep/RTG-ish screen (CTerm frame): complement = colour-invert
+      look, same as stock there; ghost pattern renders
+- [ ] masktest/defertest harness decks still green (mask invariant:
+      fills erased before any masked render)
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
