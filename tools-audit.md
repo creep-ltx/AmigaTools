@@ -257,16 +257,30 @@ refusal / 33-argument line (A1).
 
 ## Suggested ladder
 
-1. **ls 0.3.3** — L1 (ap := NIL), L2 (softlink no-descend + diskkey
-   set), L4 (gline sizing), A1. The only tool with a crash window;
-   goes first.
-2. **cp 0.2** — A1, C1 (self-subtree guard), C2 decision + readme.
-3. **mv 0.4.1** — A1, M1 (filenote). Small.
-4. **mkdir 0.1.1** — A1, K1. Smallest.
-5. **rm 0.1** — the plan above; its own boot deck.
-6. **mv 0.5** — cross-volume directory move (copytree + rm's engine),
-   only after rm's post-order delete is boot-proven.
+(Version rule, his call 27.7.26: one +0.0.1 per tool for the whole
+fix batch — 0.x bumps are for features. Steps 1–5 DONE 27.7.26, all
+vamos-green, deployed to FS-UAE C:, committed individually.)
 
-Each step compiles via ecompile + vamos smoke (ls/cp already have the
-system-drive-tree A/B precedent from B1), then the Amiga boot deck.
-BUGS.md gets L3's retirement note when ls 0.3.3 lands.
+1. **ls 0.3.3** — DONE @e4810f9. L1 (ap := NIL), L2 (softlink
+   no-descend + diskkey set, zero keys stand down), L4 (gline from
+   twidth), A1. A/B vs 0.3.2 on the system-drive tree: byte-identical
+   across 2920 lines.
+2. **cp 0.1.2** — DONE @da00c83. A1, C1 (self-subtree refusal — via
+   NameFromLock canonical-path prefix, NOT SameLock/diskkey: both
+   probed unusable under vamos, SameLock always DOSTRUE and keys
+   per-lock-instance), C2 documented in cp.readme (decided: document
+   the Unix shape, no temp-and-swap).
+3. **mv 0.4.1** — DONE @dd89a08. A1, M1 (filenote).
+4. **mkdir 0.1.1** — DONE @f612fcb. A1, K1.
+5. **rm 0.1** — DONE @3161ff7. The plan below, built as planned;
+   vamos deck green incl. post-order tree delete and volume-root
+   refusal. d-bit ±-f rows need real FFS = the boot deck.
+6. **mv 0.5** — OPEN: cross-volume directory move (cp's copytree +
+   rm's delete engine), only after rm's post-order delete is
+   boot-proven on real FFS.
+
+Boot deck for the whole batch (his side): ls -R over a soft-link
+loop on FFS (the cycle guard's real test), cp -r self-subtree
+refusal on FFS, mv cross-volume filenote check (List <file> shows
+the note), mkdir -p through a file, rm's full deck (esp. d-bit file
+± -f, in-use file, protected leaf leaving parents standing).
