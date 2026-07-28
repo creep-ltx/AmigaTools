@@ -38,9 +38,13 @@
 -> batches boot-green in one day (b4-b8). Perf-note coda: the SGR
 -> numbers were 256-colour WB (his ghost-text test setting, never
 -> reverted) vs the 16-colour baseline - his find, no code involved.
--> WHAT REMAINS: the 1.2.6 RELEASE LADDER (clean $VER, changelog,
--> README/doc/readme, tag ccon-1.2.6, GH release, .lha from his
--> staging) - his call on timing.
+-> THEN AUDIT6 (his call: fixes get audited too) - the after-pass
+-> over b4-b8, findings F1-F7 in audit.md's Audit6 section; F1
+-> (pre-existing rawscr accounting hole, cooked-alt corner) + four
+-> comment repairs = 1.2.6b9, BUILT + DEPLOYED, awaiting its boot
+-> test (scroll-heavy checklist, todo.md b9). b9 green = the 1.2.6
+-> RELEASE LADDER (clean $VER, changelog, README/doc/readme, tag
+-> ccon-1.2.6, GH release, .lha from his staging) - his call.
 
 # Fix roadmap, fifth pass
 

@@ -24,8 +24,9 @@
 ** The handler process is created on first reference, not at Mount.
 ** (The E runtime swaps to its own 10000-byte stack at startup, so
 ** StackSize only needs to cover the startup prologue. The deepest
-** handler path - drop resolution, dodrop/dropbuild/lockpath - peaks
-** around 2.2 KB of that 10000: ample headroom.)
+** handler path - the history save, savehistfile/tcresolve with its
+** 2KB line buffer - peaks around 2.5 KB of that 10000; the drop
+** resolution chain is next at ~2.1 KB: ample headroom.)
 */
 
 CCON:

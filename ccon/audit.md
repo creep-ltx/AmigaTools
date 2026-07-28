@@ -37,8 +37,13 @@ A3 repro healed on the glass, conbench A/B b4-vs-b5 identical).
 **A4 in 1.2.6b6, A5+A6 in 1.2.6b7, and A9+A10+A11 (both arms) +
 X2–X5 in 1.2.6b8 — all boot-verified 28.7.26. THIS AUDIT IS
 CLOSED: every finding fixed or written down, five batches
-boot-green in one day (b4–b8).** What remains is the 1.2.6 release
-ladder, not audit work.
+boot-green in one day (b4–b8).** The campaign itself was then
+audited before release — **Audit6, the after-fixes pass, at the
+bottom of this document** (fresh F-series vs 1.2.6b8 @380f8ec):
+one narrow pre-existing accounting hole (F1) and four comment
+repairs shipped as **1.2.6b9, boot-verified 28.7.26** — F4/F5 are
+recorded behaviour. **Audit6 is closed.** The 1.2.6 release ladder
+is what remains.
 
 ---
 
@@ -630,3 +635,137 @@ pass is one flag or one line from closed.
 9. The P-notes stay notes — except the fscall-timeout re-decide,
    which now has three trigger families and deserves its sentence
    in todo.md.
+
+---
+
+# Audit6 — the after-fixes pass (28.7.26, vs 1.2.6b8 @380f8ec)
+
+The audit5 fix campaign (b4–b8, five batches, one day) audited before
+it ships — the same discipline every prior campaign got. Method:
+two independent review passes run in parallel (an adversarial
+fix-verifier working item-by-item against audit5's prescriptions,
+and an exhaustive caller-sweeper over every proc the campaign
+touched: pasteinsert's new return, fscall's delegation — all 25
+sites — acceptreset's four constituents from three contexts,
+alteat's new clears against Ed's real exit packet, iconreq's
+lifecycle, altsave's moved call), plus an author pass focused on b4
+(written by a session that died before its code was ever re-read).
+Every finding below re-verified against the cited lines before it
+was written down. Fresh series: **F1..F7**.
+
+## Findings
+
+### F1 — cooked scrolls while a snapshot is armed were never counted: `rawscr` is fed only under `rawmode`
+
+**Where:** `screenscroll()` 4940, `dfscroll()` 5013; the accounting
+they starve: `altpop()`/`altrestore()`'s `over` computation (4871).
+
+`altpop()`'s content restore is index-self-consistent (the saved
+rows are copied back at the restored `sbtop`), so `rawscr` guards
+exactly one thing: the ring-WRAP overflow — scrolls during an alt
+session that recycled ring rows far enough to eat the oldest
+history, which must shrink `sbcnt` on restore. Both scroll sites
+count only `IF rawmode`. A **cooked** client holding the alt screen
+(none shipped — More and Ed are raw; the same hypothetical as A6)
+scrolls via `drawedit`→`edroom`→`screenscroll` on every spilling
+edit line, uncounted — `over` understated, `sbcnt` restored too
+high, and the oldest history row after `?47l` is a recycled row
+shown as a wrong join. **Pre-existing since the alt machinery** (any
+in-session keystroke scroll had the hole); the b8 A6 hoist added one
+more instance (the doresize `drawedit` now follows the re-snapshot)
+and the review of that hoist is what surfaced it. Same
+reachability tier as A6: no shipped client. **Fix (b9): count the
+scroll whenever `altvalid`, not only under `rawmode` — one line at
+each site, closing every instance at once (keystrokes and resize
+alike).**
+
+### F2 — the X2 comment's parenthetical is false as written
+
+`doactive()`'s new coherence comment says "reanchor runs inside
+dorender only" — `reanchor()` also runs at the SCREEN_MODE
+cooked-revert (1504) and the Return commit (6992). Both flush
+first, so the safety ARGUMENT stands; the stated reason doesn't,
+and a wrong written-down reason is how the next edit goes wrong.
+**Fix (b9): reword — pending wob bytes move the anchor only through
+dorender; every other mover flushes first.**
+
+### F3 — the X5 stack sentence names the wrong deepest path
+
+The mountlist comment claims drop resolution
+(dodrop/dropbuild/lockpath, ~2.1 KB) is the deepest handler path.
+The history-save chain is deeper: `savehistfile` carries
+`buf[2048]` and calls `tcresolve` (`dcopy[300]` + `devname[40]`) ≈
+2.5 KB, reached from dovanilla→histpersist and conclose. Headroom
+conclusion (10000-byte E stack) unaffected. **Fix (b9): correct the
+sentence.**
+
+### F4 — a drop larger than the queue is refused forever, and the write-up doesn't say so (NOTE, kept)
+
+A11's whole-drop check refuses `total > INQMAX-1` (2047) even
+against an EMPTY queue — the beep suggests "retry when it drains"
+but no drain can ever make it fit; the old per-icon code delivered
+what fit. This is whole-or-nothing semantics taken to its honest
+edge (delivering a silently truncated argument LIST is the exact
+A11 wound), so the behaviour stands — **fix (b9): one comment line
+at the check acknowledging the edge.** A future escape hatch, if
+ever wanted, is per-icon delivery when a single drop can never fit.
+
+### F5 — the total=0 early return skips the old incidental eofpend wake (NOTE, accepted)
+
+A fully-failed raw drop used to still call `inputarrived()`, which
+could incidentally serve a standing `eofpend` to a queued reader;
+the A11 early return skips that. Arguably more correct (a failed
+drop performing an unrelated EOF delivery was an accident), zero
+shipped-client impact. Recorded, no change.
+
+### F6 — a line-number comment went stale the same day it was written
+
+The b6 lockpath comment cites "the 2463 promise"; b8's edits moved
+the promise header to ~2493. Line numbers belong in audit documents
+(dated, versioned), not in code comments. **Fix (b9): reword to
+name the header, not the line.**
+
+### F7 — the A7 wall's comment still says `droppath`
+
+`dodrop()`'s guard comment names a proc b8 renamed to `dropbuild`.
+**Fix (b9): rename in the comment.**
+
+## Verified clean
+
+A1 (New-zeroed iconreq, per-console drain, clear-before-act,
+iconreq-then-closereq cannot double-CloseWindow — closewin removes
+the AppIcon first and replies every parked packet on the windowless
+arm; ihkey's direct call runs in ihdrain before the window walk) ·
+A2 (guard placement, DOSFALSE + ERROR_BAD_NUMBER) · A7 (all four
+globals, before any use) · A8 (single exit, restore on it) · A3+X1
+(all four constituents curcon-pure from all three contexts;
+breaktask stays packet-side; tcclose mid-swaccept repaints a
+settled model — the packet's bytes are not yet in wob) · A4 (all 24
+fscall sites 5-arg; no caller reads fspkt.res2 after return; {r2}
+legal on a stack local; strictly sequential fspkt use incl. the A11
+double resolve; locks freed on every arm) · A5 (clearsel's only
+state was sello/selhi; the XOR cursor's pixels die under the
+unconditional inner RectFill; stale selvo gated by sello=-1) · A6
+(landed as prescribed, ?47h-shape preconditions matched — F1 is the
+surviving edge, pre-existing) · A9 (IECLASS_CLOSEWINDOW is
+doclosew's exact class; ihreport runs only in the handler task, so
+DisplayBeep is legal) · A10 (TAB clear first-in-branch, FF clear
+covers both dfon arms, ESC8's bytes cannot reach either — cesc
+routing verified byte-by-byte) · A11 (pb/tb bounds proven, 563 max
+against 620; per-icon belt makes partial arguments impossible under
+any dropbuild return; pasteinsert's flag only counts cap-refused
+printables; dopaste legally discards the new return) · X3 (the
+discard arm IS unreachable: every hide path flushes first) · X4
+(altvalid implies a current-grid snapshot, altpop's grid check
+cannot fail at doresize entry) · plus the general pass: no new
+Mod/DIVS hazards, E-VO one-liner forms valid, $VER bumped.
+
+## Verdict
+
+The campaign held: eleven fixes and five comment items, and the
+worst thing the after-pass found is a pre-existing accounting hole
+in the same no-shipped-client corner the fix it reviewed was
+hardening (F1), plus four comment corrections — two of them in
+comments this very campaign wrote (F2, F6): documentation written
+at speed rots at speed. F1's one-line-per-site fix and the comment
+repairs ship as **1.2.6b9**; F4/F5 are recorded behaviour, kept.

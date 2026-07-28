@@ -2367,7 +2367,7 @@ PROC dodrop(am:PTR TO appmessage)
   DEF i, wa:PTR TO wbarg, pb[620]:ARRAY OF CHAR, n, k, total, all
   IF curcon.win = NIL THEN RETURN
   -> audit5 A7: dotab's wall - mount-time allocation of the fs plumbing
-  -> may have failed (main tolerates it); droppath/lockpath would write
+  -> may have failed (main tolerates it); dropbuild/lockpath would write
   -> packet fields through NIL or hand the filesystem a zero FIB BPTR
   IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
      (fsname = NIL) THEN RETURN
@@ -2395,9 +2395,11 @@ PROC dodrop(am:PTR TO appmessage)
     ENDFOR
     IF total = 0 THEN RETURN    -> nothing resolved, nothing owed
     IF inqroom(total) = FALSE
-      DisplayBeep(NIL)          -> C5: the whole drop bounces, audibly
-      RETURN
-    ENDIF
+      DisplayBeep(NIL)          -> C5: the whole drop bounces, audibly.
+      RETURN                    -> (audit6 F4: a drop bigger than the
+    ENDIF                       -> QUEUE can never fit and is refused
+                                -> forever - honest whole-or-nothing,
+                                -> not a retryable condition)
     FOR i := 0 TO am.numargs - 1
       n := dropbuild(wa[i], pb)
       IF n > 0
@@ -2523,8 +2525,8 @@ PROC lockpath(blk, out:PTR TO CHAR, cap)
         -> leaves its reason in res2 - before this check the walk
         -> ended early with ok TRUE and the emit loop crowned the
         -> last DIRECTORY segment with ':' ("sub:file" inserted as if
-        -> typed). Now the 2463 promise - insert nothing rather than
-        -> something wrong - holds on all three arms.
+        -> typed). Now the header's promise - insert nothing rather
+        -> than something wrong - holds on all three arms.
         IF (par = 0) AND (r2 <> 0) THEN ok := FALSE
       ENDIF
     ELSE
@@ -4015,13 +4017,15 @@ ENDPROC
 -> glyphs repaint invisibly, so no flicker) - but only live: drawedit
 -> has never been viewoff-aware (the b33 lesson), and scrolled back
 -> there is no blip on the glass to redress anyway.
--> audit5 X2: this is the ONE glass-touching event path with NO
--> pre-flush, and that is sound today for a written-down reason:
--> under accept-then-render the model and the glass lag TOGETHER,
--> and the redress reads only values pending wob bytes cannot move
--> (reanchor runs inside dorender only). If accept ever mutates
--> cx/cy/anc* before render, this becomes a live desync site - add
--> the flushout(curcon) then.
+-> audit5 X2 (wording fixed by audit6 F2): this is the ONE
+-> glass-touching event path with NO pre-flush, and that is sound
+-> today for a written-down reason: under accept-then-render the
+-> model and the glass lag TOGETHER, and the redress reads only
+-> values pending wob bytes cannot move - pending bytes reach the
+-> anchor solely through dorender's reanchor, and reanchor's other
+-> callers (SCREEN_MODE revert, the Return commit) both flush
+-> first. If accept ever mutates cx/cy/anc* before render, this
+-> becomes a live desync site - add the flushout(curcon) then.
 PROC doactive(on)
   IF curcon.winact = on THEN RETURN
   curcon.winact := on
@@ -4937,7 +4941,11 @@ PROC screenscroll()
     curcon.sbtop := curcon.sbtop + 1
     IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
     IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
-    IF curcon.rawmode THEN curcon.rawscr := curcon.rawscr + 1
+    -> audit6 F1: count while a snapshot is ARMED, not only in raw -
+    -> a cooked alt client's edroom scrolls recycled ring rows
+    -> uncounted, and altpop's over understated = a wrong join at
+    -> the oldest history row after ?47l
+    IF curcon.rawmode OR curcon.altvalid THEN curcon.rawscr := curcon.rawscr + 1
     clearrow(curcon.rows - 1)   -> (rawscr: altrestore's overflow
   ENDIF                         -> accounting, see the alt procs)
 ENDPROC
@@ -5010,7 +5018,9 @@ PROC dfscroll()
   curcon.sbtop := curcon.sbtop + 1
   IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
   IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
-  IF curcon.rawmode THEN curcon.rawscr := curcon.rawscr + 1
+  IF curcon.rawmode OR curcon.altvalid THEN curcon.rawscr := curcon.rawscr + 1
+                                -> (OR altvalid: audit6 F1 - the same
+                                -> accounting as screenscroll's)
   clearrow(curcon.rows - 1)
   IF dffull THEN RETURN         -> already rebuilding wholesale
   dfpend := dfpend + 1
@@ -8534,4 +8544,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b8 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b9 (28.7.26) CCON: LTX console handler', 0

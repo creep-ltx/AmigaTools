@@ -4606,6 +4606,85 @@ smoothness comes back with ScreenMode → 16. The bisect discipline
 paid for itself: two probes and a control, zero fixes designed
 against a phantom.
 
+## 1.2.6b9 — audit6, the after-fixes pass (28.7.26): the campaign audits its own campaign
+
+His call: fixes get audited before the release. Audit6 = the full
+after-pass over the b4–b8 delta vs baseline @baead1e — two
+INDEPENDENT review passes in parallel (an adversarial fix-verifier
+item-by-item against audit5's prescriptions; a caller-sweeper over
+every touched proc: all 25 fscall sites, pasteinsert's new return,
+acceptreset's four constituents from three contexts, alteat vs
+Ed's real `?47l ESC8 \n` byte-by-byte, iconreq's lifecycle,
+altsave's moved call) plus an author pass focused on b4 (written
+by a session that died before its code was re-read). Full findings
+F1–F7 + the verified-clean ledger in ccon/audit.md's Audit6
+section. Every A-item verified landed-as-prescribed; the sweeps
+all came back clean.
+
+**What it found, shipped as b9:**
+- **F1 (the one code fix, corruption-narrow, PRE-EXISTING):**
+  `rawscr` — the alt machinery's ring-wrap overflow counter — was
+  fed only under `rawmode`, at both scroll sites (screenscroll,
+  dfscroll). A cooked client holding the alt screen scrolls via
+  drawedit→edroom uncounted → altpop's `over` understated → after
+  ?47l the oldest history row can be a recycled row shown as a
+  wrong join. No shipped client is cooked+alt (More/Ed are raw) —
+  the same corner A6 lives in; the hole predates the campaign
+  (every in-session keystroke scroll had it), and reviewing the
+  A6 hoist is what surfaced it. Fix: count whenever `altvalid`,
+  one line at each site — closes every instance (keystrokes and
+  resize) at once.
+- **F2:** the fresh X2 comment's parenthetical was FALSE (reanchor
+  also runs at SCREEN_MODE revert + Return commit; both flush
+  first, so the argument stood while its stated reason didn't) —
+  reworded.
+- **F3:** the fresh mountlist stack sentence named the wrong
+  deepest path — it's the history save (savehistfile/tcresolve,
+  ~2.5KB), not drop resolution (~2.1KB) — corrected.
+- **F4 (note, behaviour kept):** a drop with total > 2047 bytes is
+  refused forever, even against an empty queue — honest
+  whole-or-nothing at its edge; now said at the check.
+- **F5 (note, accepted):** a fully-failed raw drop no longer
+  performs the old incidental eofpend wake — more correct, zero
+  shipped-client impact.
+- **F6/F7:** two comments this same campaign wrote had already
+  rotted (a line-number cite gone stale the day it was written; a
+  proc name from before its own rename) — fixed. Lesson, written
+  in audit6's verdict: documentation written at speed rots at
+  speed; line numbers belong in audit docs, not code comments.
+
+Built + deployed 28.7.26: compile clean (LARGE, baseline warnings/
+UNREFERENCED), vamos usage smoke green (exit 5), L:ccon-handler =
+b9 md5-matched (staged ccon-handler-1.2.6b9, .bak = b8),
+CCON-mountlist redeployed (comment).
+
+**Boot test (REBOOT FIRST; `Version L:ccon-handler` must say
+1.2.6b9) — F1 touched BOTH live scroll sites, so the sweep is
+scroll-heavy:**
+- [x] plain scrolling: `ls -R`, `type` a long file, wheel + Shift
+      +arrows through scrollback — unchanged
+- [x] More: pages, quits, transcript restored (raw alt — rawscr
+      now also counts under altvalid; More's path must be
+      byte-identical)
+- [x] Ed: full session, scroll inside Ed, resize mid-edit, quit —
+      transcript restored, no wrong join at the TOP of scrollback
+      after quit (scroll far back and look at the oldest rows)
+- [x] scrollback depth spot-check after a long raw session: fill
+      the ring (big `ls -R` first), run More through many pages,
+      quit, scroll to the oldest history — coherent, no garbage
+      row at the join
+- [x] drops: one file icon, one multi-icon — regression only
+- [x] iconify gadget once — regression only
+
+**Boot findings (28.7.26): ALL GREEN — "all looks good to me."
+1.2.6b9 is boot-verified. AUDIT6 IS CLOSED — the campaign audited
+its own campaign, found one pre-existing hole and its own comment
+rot, fixed both, and boot-proved the fix. Six boot-green builds in
+one day, b4–b9. Nothing stands between the tree and the 1.2.6
+release ladder.**
+
+## Design notes
+
 ## Design notes
 
 ## Design notes
