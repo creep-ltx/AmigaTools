@@ -3414,7 +3414,15 @@ PROC doresize()
     altdrop()                   -> belt: a mismatch already dropped
   ENDIF
   tcclose()                     -> restores rows at the OLD geometry
-  clearsel()
+  -> audit5 A5: state-only - clearsel()'s repaint runs at the OLD grid
+  -> full-width into the already-resized window, overpainting border
+  -> pixels the final heal (inner RectFill) never touches: the b8
+  -> lesson BOTH neighbours of this call already carry (altpop's
+  -> paint half above, dropeditmirror below). The full clear+redraw
+  -> at the bottom owes the pixels anyway; clearsel() itself stays
+  -> for its other callers.
+  curcon.sello := -1
+  curcon.selhi := -1
   curcon.selon := FALSE                -> a drag dies with the old grid
   curcon.cursx := -1                   -> a full repaint follows anyway
   curcon.viewoff := 0
@@ -3533,11 +3541,14 @@ PROC doresize()
                                 -> repaint, in both directions
   redraw()
   settitle()
-  IF curcon.rawmode
-    cursdraw()
-  ELSE
-    drawedit()
-  ENDIF
+  -> audit5 A6: the snapshot runs BEFORE the raw/cooked paint block.
+  -> For a cooked alt-screen client, drawedit() mirrors the edit line
+  -> into the model - snapshotting after it archived our own editor's
+  -> cells as phantom transcript on the eventual ?47l (the b7 wound
+  -> class, self-inflicted). Raw clients (More, Ed - the only real
+  -> alt users) never noticed: cursdraw is pixels-only. Hoisted, NOT
+  -> reordered-within-the-arm: drawedit's edroom can scroll and
+  -> desync altsbtop.
   IF wasalt
     altsave()                   -> b7: re-arm the snapshot AT THE NEW
                                 -> geometry (rawscr resets inside); the
@@ -3546,6 +3557,11 @@ PROC doresize()
                                 -> repaint covers it - honest, brief,
                                 -> and nothing of the client's page
                                 -> ever touches the ring
+  ENDIF
+  IF curcon.rawmode
+    cursdraw()
+  ELSE
+    drawedit()
   ENDIF
   IF curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW)
     e := evb
@@ -8459,4 +8475,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b6 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b7 (28.7.26) CCON: LTX console handler', 0

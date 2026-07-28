@@ -22,9 +22,12 @@
 -> acceptreset) = 1.2.6b5 BOOT-GREEN same day, all six rows incl.
 -> the A3 repro healed + conbench A/B b4-vs-b5 identical (5.70; the
 -> SGR drift vs the 1.2.4-era baseline is a PARKED perf note in
--> todo.md, not this campaign's). Batch C (A4 fscall2) BUILT +
--> DEPLOYED as 1.2.6b6 same day — awaiting its boot test (checklist
--> todo.md b6). D-E next.
+-> todo.md, not this campaign's). Batch C (A4 fscall2) = 1.2.6b6
+-> BOOT-GREEN same day ("no weirdness or inconsistencies";
+-> inspection fix, regression surface proven). Batch D (A5 state-
+-> only clearsel + A6 altsave hoist) BUILT + DEPLOYED as 1.2.6b7
+-> same day — awaiting its boot test (checklist todo.md b7; the A5
+-> repro has a real before/after on the glass). E last.
 
 # Fix roadmap, fifth pass
 

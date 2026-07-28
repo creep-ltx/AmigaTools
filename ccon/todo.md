@@ -4432,6 +4432,56 @@ rides fscall) is unchanged, which is all this batch can prove on a
 healthy system; the failure arm stays inspection-verified. Batch C
 done; Batch D (A5+A6) = b7.**
 
+## 1.2.6b7 — audit5 Batch D (28.7.26): the resize seams
+
+**A5 — doresize's clearsel() went state-only.** clearsel()'s
+repaint ran at the OLD grid, full-width, into the already-resized
+window — overpainting border pixels the final heal (inner-region
+RectFill) never touches. The b8 lesson was already documented on
+BOTH neighbours of the call (altpop's paint half, dropeditmirror);
+the call between them now clears `sello`/`selhi` directly and lets
+the full clear+redraw at the bottom pay the pixels. clearsel()
+itself unchanged for its other callers.
+
+**A6 — altsave() hoisted above the raw/cooked paint block.** For a
+cooked alt-screen client, drawedit() mirrors the edit line into the
+model BEFORE the re-snapshot — the eventual ?47l restored our own
+edit line as phantom transcript, archived into scrollback (the b7
+wound class, self-inflicted). Raw clients (More, Ed — the only
+real alt users) never noticed: cursdraw is pixels-only. Hoisted
+whole, NOT reordered inside the cooked arm — drawedit's edroom can
+scroll and desync altsbtop (audit.md's own warning).
+
+Built + deployed 28.7.26: compile clean (LARGE, baseline warnings/
+UNREFERENCED), vamos usage smoke green (exit 5), L:ccon-handler =
+b7 md5-matched (staged ccon-handler-1.2.6b7, .bak = b6).
+
+**Boot test (REBOOT FIRST; `Version L:ccon-handler` must say
+1.2.6b7):**
+- [x] the A5 repro, healed: drag a highlight across several rows,
+      release, SHRINK the window with the size gadget — border
+      clean immediately (on b6: overpainted cells on the border
+      until a frame redraw). Repeat with the highlight standing
+      during a More page (drag mid-More, release, resize)
+- [x] selection regression: drag/copy/paste, double- and
+      triple-click, cross-window paste — unchanged
+- [x] Ed: resize mid-edit — repaints to new size, transcript
+      restored on quit, border intact through the dance (the b7/b8
+      rows re-run — A6 moved code inside their proc)
+- [x] More: resize mid-page, next keypress repaints, quit restores
+- [x] scrollback + selection after several resizes (model realloc
+      path unchanged but adjacent)
+
+**Boot findings (28.7.26): ALL GREEN — "all checks out." Batch D
+done. AND a live sighting for the parked perf note: he reports
+`ls -R sys:` output "not as smooth as it used to be" — ls output
+is SGR-heavy (its colour columns ride exactly the rows that
+doubled in results9: sgr-colour 0.64→1.22, sgr-perchar
+0.62→1.08), so the daily-use feel and the bench agree. The drift
+predates b5/b6 (A/B-proven identical) — window is 1.2.5b1..1.2.6b4,
+twelve builds, all staged in L:. Bisect plan in the b7 findings
+below.**
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
