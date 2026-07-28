@@ -241,3 +241,30 @@ error instead of a silent drop). And the third suspect in B1's original
 list is RETIRED by code reading: `AstrCopy(e.comm, fib.comment, 80)`
 clamps to 79+NUL — no overrun ever existed there. A/B under vamos on the
 system-drive tree (2920 output lines): 0.3.2 vs 0.3.3 byte-identical.
+
+
+**The cycle guard's first real filesystem convicted it - ls 0.3.4
+(28.7.26, HIS REAL-A1200 FIND, photo evidence).** `ls -R dh0:` on the
+real machine printed "directory cycle, skipped" for EVERY first-level
+directory and listed nothing below the root. Mechanism: the 0.3.3
+guard trusted (fl_Volume, fib_DiskKey) as an identity, and the boot
+volume's filesystem (PFS3-class) fills fib_DiskKey with the same
+internal value for every directory lock - so after the root was
+recorded, every child "matched" it. The 0.3.3 release had
+boot-verified the guard's TRUE-POSITIVE arm (a real FFS link loop,
+correctly skipped) - but the FALSE-POSITIVE arm, two distinct
+directories sharing one key, existed in no test environment at all:
+vamos keys are per-lock-instance, FS-UAE host dirs report 0, FFS
+keys are honestly unique. The one arm no environment could exercise
+is the one that fired on the real machine's boot volume. Fix (L3): a key hit is an accusation, not a conviction -
+the stored path is re-Locked and SameLock() must answer LOCK_SAME
+before the skip; the first PROVEN false accusation (two distinct
+dirs, one key) marks the volume's keys meaningless and the guard
+stands down there for the rest of the run, exactly as it always did
+for key 0. Cost: one extra Lock+SameLock per volume on constant-key
+filesystems, zero on honest ones except at real cycles. SameLock is
+another vamos blind spot (probed 27.7.26, cp.e intodst note), so
+vamos smoke covers recursion only - the verdict belongs to the real
+machine. Lesson for the family: a guard that a blind spot disarms in
+EVERY test environment has never actually run; find the environment
+where it fires before shipping it, or ship it confirm-first.

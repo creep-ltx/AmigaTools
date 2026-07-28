@@ -71,10 +71,33 @@ ENDOBJECT
 -> dirs) may not fill the field at all - an all-zero key would have
 -> matched EVERY directory to the first one and silently truncated
 -> -R exactly where it must not.
+-> 0.3.4 L3 (his real-A1200 find, 28.7.26: `ls -R dh0:` called
+-> EVERY first-level directory a cycle and listed nothing): key 0
+-> was not the only lie. PFS3-class filesystems fill fib_DiskKey
+-> with the same internal value for every directory lock, so on the
+-> real boot volume every child collided with the root. A key hit
+-> is only an ACCUSATION now: the accused path is re-Locked and
+-> SameLock() must answer LOCK_SAME before anything is skipped -
+-> and the first PROVEN false accusation (two distinct directories
+-> sharing one key) marks the whole volume's keys meaningless, so
+-> the guard stands down there for the rest of the run exactly as
+-> it always did for key 0. FFS keeps the full guard: real block
+-> numbers collide only on real cycles. The 0.3.3 guard was never
+-> live-tested against real keys - vamos and FS-UAE host dirs both
+-> report 0, so its first honest filesystem was the real machine.
+-> (SameLock identity is another thing vamos cannot express -
+-> probed 27.7.26, see cp.e's intodst note - so this stays
+-> real-iron/FS-UAE-hardfile territory.)
 OBJECT vnode
   next:PTR TO vnode
   vol:LONG
   key:LONG
+  path:PTR TO CHAR              -> String copy, for the L3 confirm
+ENDOBJECT
+
+OBJECT bnode                    -> L3: volumes whose keys are lies
+  next:PTR TO bnode
+  vol:LONG
 ENDOBJECT
 
 DEF rc
@@ -89,6 +112,7 @@ DEF gdate=NIL:PTR TO CHAR, gtime=NIL:PTR TO CHAR
 DEF gpatbuf[1030]:ARRAY OF CHAR
 DEF pendhead=NIL:PTR TO pnode               -> -R work list, depth-first
 DEF vishead=NIL:PTR TO vnode                -> 0.3.3 L2: -R visited set
+DEF badvhead=NIL:PTR TO bnode               -> 0.3.4 L3: stood-down vols
 DEF seqdir[8]:ARRAY OF CHAR                 -> CSI 1;34m, dirs: blue
 DEF seqhid[8]:ARRAY OF CHAR                 -> CSI 1;30m, hidden: grey
 DEF seqoff[8]:ARRAY OF CHAR                 -> CSI 0m
@@ -475,8 +499,10 @@ PROC listdir(path:PTR TO CHAR) HANDLE
   -> diskkey) was already listed is a cycle (hard-linked dir); skip
   -> it with a warning instead of walking the graph forever. Soft-
   -> links never get here (not queued); this is defense in depth.
+  -> 0.3.4 L3: the key hit alone no longer convicts - SameLock
+  -> confirms against the stored path (see visited's header).
   IF frec
-    IF visited(lock, gfib.diskkey)
+    IF visited(lock, gfib.diskkey, path)
       UnLock(lock)
       WriteF('ls: \s: directory cycle, skipped\n', path)
       setrc(RETURN_WARN)
@@ -612,18 +638,51 @@ ENDPROC
 -> recorded, never matched, the guard simply stands down there
 -> (no links exist on those handlers anyway). vnodes live until
 -> exit; E frees the heap wholesale at CleanUp.
-PROC visited(lock, key)
-  DEF fl:PTR TO filelock, v:PTR TO vnode
+-> 0.3.4 L3: a key hit no longer skips by itself - see the vnode
+-> header. Confirm with SameLock, or stand the volume down on the
+-> first proven false accusation; the confirm Lock is paid at most
+-> once per volume on constant-key filesystems, and only on real
+-> cycles on honest ones.
+PROC keysbad(vol)
+  DEF b:PTR TO bnode
+  b := badvhead
+  WHILE b
+    IF b.vol = vol THEN RETURN TRUE
+    b := b.next
+  ENDWHILE
+ENDPROC FALSE
+
+PROC visited(lock, key, path:PTR TO CHAR)
+  DEF fl:PTR TO filelock, v:PTR TO vnode, b:PTR TO bnode, ol, r
   IF key = 0 THEN RETURN FALSE
   fl := Shl(lock, 2)
+  IF keysbad(fl.volume) THEN RETURN FALSE
   v := vishead
   WHILE v
-    IF (v.vol = fl.volume) AND (v.key = key) THEN RETURN TRUE
+    IF (v.vol = fl.volume) AND (v.key = key)
+      IF v.path                 -> a node without its path cannot
+        ol := Lock(v.path, ACCESS_READ)  -> accuse (String() failed)
+        IF ol
+          r := SameLock(ol, lock)
+          UnLock(ol)
+          IF r = LOCK_SAME THEN RETURN TRUE   -> a REAL cycle
+          -> two distinct directories, one key: fib_DiskKey is not
+          -> an identity on this volume - stand the guard down
+          NEW b
+          b.vol := fl.volume
+          b.next := badvhead
+          badvhead := b
+          RETURN FALSE
+        ENDIF                   -> unlockable old path (tree changed
+      ENDIF                     -> mid-walk): not provable - walk on
+    ENDIF
     v := v.next
   ENDWHILE
   NEW v
   v.vol := fl.volume
   v.key := key
+  v.path := String(StrLen(path))
+  IF v.path THEN StrCopy(v.path, path)
   v.next := vishead
   vishead := v
 ENDPROC FALSE
@@ -912,4 +971,4 @@ PROC fmtsize(v)
   ENDIF
 ENDPROC
 
-version: CHAR '$VER: ls 0.3.3 (27.7.26) E build',0
+version: CHAR '$VER: ls 0.3.4 (28.7.26) E build',0

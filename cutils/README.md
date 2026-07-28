@@ -8,7 +8,7 @@ they are the utils that live in `C:`.
 
 | Command | Version | What it is |
 |---------|---------|------------|
-| [ls](ls.doc) | [0.3.3](../../../releases/tag/ls-v0.3.3) | directory lister — `-la`, colors, columns sized by asking the console, sorts, patterns, safe `-R` |
+| [ls](ls.doc) | [0.3.4](../../../releases/tag/ls-v0.3.4) | directory lister — `-la`, colors, columns sized by asking the console, sorts, patterns, safe `-R` |
 | [cp](cp.doc) | [0.1.2](../../../releases/tag/cp-v0.1.2) | copy — patterns, recursive trees, metadata carried like `Copy CLONE`, non-destructive by default |
 | [mv](mv.doc) | [0.5](../../../releases/tag/mv-v0.5) | move — `Rename()` on the same volume, copy+delete across volumes, whole directory trees all-or-nothing |
 | [mkdir](mkdir.doc) | [0.1.1](../../../releases/tag/mkdir-v0.1.1) | make directory — `-p` builds the missing parents in place |
@@ -17,7 +17,7 @@ they are the utils that live in `C:`.
 Each command keeps its own version and its own release; this
 directory is the family home. The Aminet archive (`ltx-cutils.lha`)
 carries a single **pack version** of its own — pack 0.1.0 =
-ls 0.3.3 / cp 0.1.2 / mv 0.5 / mkdir 0.1.1 / rm 0.1 — bumped
+ls 0.3.4 / cp 0.1.2 / mv 0.5 / mkdir 0.1.1 / rm 0.1 — bumped
 whenever the archive is repacked with newer commands. Per-command reference docs live in
 the `<command>.doc` files (AmigaDOS command-doc style, readable
 with `More` on the Amiga); the full code audit that shaped the

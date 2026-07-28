@@ -56,7 +56,13 @@ EXAMPLES
 NOTES
     -R never descends soft-links (they list, as Unix ls -R does),
     and a visited-directory set skips hard-link cycles with
-    "directory cycle, skipped" instead of looping.
+    "directory cycle, skipped" instead of looping. As of 0.3.4 a
+    suspected cycle is confirmed with SameLock() before anything
+    is skipped: filesystems like PFS3 fill fib_DiskKey with the
+    same internal value for every directory, and trusting the key
+    alone made -R call the whole disk one big cycle. On such
+    volumes the guard stands down after the first disproven match
+    (FFS keys are real block numbers and keep the full guard).
 
     Empty-named directory entries are never queued by -R (a guard
     from the 0.3.x heap-corruption investigation - see ls-bugs.md
