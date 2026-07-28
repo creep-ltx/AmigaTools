@@ -38,10 +38,27 @@ FEATURES
 
   - Hosts real AmigaShells: NewShell CCON:
 
-  - Iconify to the Workbench: RightAmiga+I sends a window to a
-    desktop icon and a click brings it back exactly as you left
-    it - scrollback, a half-typed line and all; its own icon is
-    built into the handler. Works over a fullscreen client (Ed) too
+  - Iconify to the Workbench: the title bar's own iconify gadget
+    (the native V47.4+ one, next to the depth gadget) or
+    RightAmiga+I sends a window to a desktop icon and a click
+    brings it back exactly as you left it - scrollback, a
+    half-typed line and all; its own icon is built into the
+    handler. Works over a fullscreen client (Ed) too
+
+  - Drag and drop: Workbench icons dropped on the window become
+    their full paths at the cursor, as if typed - files as
+    Volume:dir/file, drawers with a trailing /, disks as
+    Volume:, quoted when the shell needs it, one blank after
+    each so several icons line up as ready arguments; cooked
+    mode inserts into the edit line, a raw fullscreen client
+    (Ed) gets typed input, and a drop that cannot fit beeps and
+    arrives not at all rather than truncated
+
+  - The cursor dresses like the ROM's: block cursor and editor
+    blip drawn in complement mode (console.device's own
+    mechanism), correct over any colours at any screen depth,
+    with the stock checkerboard ghost cursor on an inactive
+    window - a parked Ed session included
 
   - fish-style autosuggestions: history's continuation as grey
     ghost text; Right accepts, Ctrl+Right/Tab take it word by word;
@@ -125,6 +142,41 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.2.6
+    - A real iconify gadget in the title bar - the native V47.4+
+      one, beside the depth gadget: click to park the window to
+      its AppIcon, exactly the trip RightAmiga+I always made
+      (and still makes). On older systems the gadget simply does
+      not appear and the key keeps working
+
+    - The cursor draws in complement mode, the ROM console's own
+      mechanism: it takes its colour from whatever is under it,
+      on any screen depth, and an inactive window shows the
+      stock checkerboard ghost cursor - a parked Ed session
+      included
+
+    - Drag and drop: Workbench icons dropped on a window land as
+      full quoted paths at the cursor - drawers end in /, disks
+      as Volume:, several icons line up as arguments - into the
+      shell's edit line or straight into a fullscreen program
+      like Ed. A drop that cannot fit is refused whole with a
+      beep, never delivered truncated
+
+    - A fifth source audit closed every finding before release,
+      the largest being the new gadget's own latent crash (its
+      window-close ran inside the event drain it was closing).
+      Also hardened: a NIL-buffer Info() packet can no longer
+      zero low memory, a drop during a Ctrl+R search no longer
+      vanishes, a failed parent hop during drop resolution now
+      inserts nothing rather than a wrong shorter path, and
+      resizing away a standing selection stays inside the new
+      window
+
+    - A sixth audit - new for this release - reviewed the fix
+      campaign itself before shipping: two independent review
+      passes; one pre-existing gap in the fullscreen-snapshot
+      accounting was found and closed with it
 
   1.2.5
     - Ghost text and completion-menu colours now show on 32+

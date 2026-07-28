@@ -7,9 +7,81 @@ mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
 Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
-1.2.4 and 1.2.5 are released and tagged.
+1.2.4, 1.2.5 and 1.2.6 are released and tagged.
 
 ---
+
+## [1.2.6] — 2026-07-28 (tag `ccon-1.2.6`)
+
+The wishlist release. All three features a reader of amiga-news.de
+asked for after 1.2.5, plus the deepest hardening pass the handler
+has had: a fifth source audit before the features shipped and — a
+first for this project — a sixth audit of the fixes themselves
+before the release. Nine beta builds (1.2.6b1–b9), every one
+boot-verified before the next.
+
+### Added
+- **A real iconify gadget.** The title bar now carries the native
+  V47.4+ iconify gadget, next to the depth gadget, on every owned
+  CCON window — click it and the window parks to the CCON AppIcon
+  on the Workbench, exactly like RightAmiga+I always did;
+  double-click the icon and the session returns, transcript,
+  history and pending output intact. Works over a fullscreen
+  program (Ed) too. On earlier OS versions the gadget simply does
+  not appear and RightAmiga+I still works. (1.2.6b1)
+- **The cursor dresses like the ROM's.** The block cursor and the
+  line-editor blip are now drawn in complement mode — the exact
+  mechanism console.device and KingCON use — instead of
+  inverse-video white, so the cursor takes its colour from
+  whatever sits under it on any screen depth. An inactive CCON
+  window now shows the stock **checkerboard ghost cursor**, kept
+  live even while iconified or borrowed, so a parked Ed session
+  ghosts its cursor like any shell. (1.2.6b2)
+- **Drag and drop.** Drop any Workbench icon on a CCON window and
+  its full path lands at the cursor as if typed — `Volume:dir/file`
+  for a file, a trailing `/` for a drawer, `Volume:` for a disk,
+  quoted whenever the shell would mangle it bare, one trailing
+  blank each so several icons line up as arguments. Cooked mode
+  inserts into the edit line under paste rules; a raw fullscreen
+  client (Ed) receives it as typed input. A drop that cannot fit
+  is refused whole with a beep — never a silently truncated
+  argument list. (1.2.6b3, hardened in b8)
+
+### Fixed
+- **The fifth audit, all findings closed** (builds b4–b8, one day,
+  each batch boot-verified): the new iconify gadget deferred its
+  window-close past the event drain it used to run inside — the
+  one latent crash the features had shipped, and the release
+  blocker until it fell; a malformed `Info()` packet with a NIL
+  buffer can no longer zero low memory; a drop during a Ctrl+R
+  scrollback search no longer vanishes (the accept-time reset
+  bundle is one shared proc now, so the next input path cannot
+  forget it); a failed parent-directory hop during drop
+  resolution now inserts *nothing* instead of a wrong shorter
+  path; resizing away a standing selection no longer paints
+  outside the new window; and a swept set of smaller guards —
+  the close-gadget report beeps when a wedged client's queue
+  refuses it, fullscreen exit tidying survives form feeds and
+  tabs, borrowed-window area patterns are restored rather than
+  reset.
+- **The sixth audit — the fixes audited before release** (b9):
+  two independent review passes over the fix campaign itself
+  verified every fix landed as prescribed, and surfaced one
+  pre-existing accounting gap in the fullscreen-snapshot
+  machinery (scrolls by a cooked alternate-screen client — a
+  client shape no shipped program has — went uncounted and could
+  mis-join the oldest scrollback row on restore). Closed, plus
+  the campaign's own comment rot repaired the day it was written.
+
+### Notes
+- Beta ladder 1.2.6b1–b9, boot-verified in FS-UAE per build; the
+  audit trail (audit5 consolidated + audit6 after-pass) lives in
+  `audit.md`.
+- A benchmark side-mystery closed honestly: a suspected rendering
+  slowdown bisected to *the Workbench screen being set to 256
+  colours* during ghost-text testing — eight bitplanes against
+  the baseline's four, no code involved. Control-probe the old
+  baseline before bisecting builds.
 
 ## [1.2.5] — 2026-07-24 (tag `ccon-1.2.5`)
 

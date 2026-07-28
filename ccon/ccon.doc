@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.5
+                               CCON: 1.2.6
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -16,7 +16,7 @@
     8. Tab completion
     9. Ctrl+R history search
    10. Scrollback
-   11. Copy and paste
+   11. Copy, paste and drag and drop
    12. Raw mode and CRAW:
    13. Running fullscreen programs (Ed, More)
    14. Iconify
@@ -273,6 +273,13 @@
   the bottom of the window scrolls the screen, and the prompt walks
   up with it.
 
+  The editor's cursor is drawn in COMPLEMENT mode, the same way
+  the ROM's own console draws its cursor: it takes its colour from
+  whatever sits under it, correct on any screen depth. An inactive
+  window shows the stock checkerboard ghost cursor instead,
+  exactly like CON: and KingCON - even for an iconified or
+  borrowed window's session.
+
 
 7. AUTOSUGGESTIONS (THE GREY GHOST)
 --------------------------------------------------------------------------
@@ -419,7 +426,7 @@
   stays put until you scroll, search again, or return to live.
 
 
-11. COPY AND PASTE
+11. COPY, PASTE AND DRAG AND DROP
 --------------------------------------------------------------------------
 
   Selecting:
@@ -469,6 +476,26 @@
   You can select the line you are still typing; the prompt and the
   edit line are ordinary cells to the selection machinery.
 
+  Drag and drop:
+
+    Drop any Workbench icon on the window and its full path lands
+    at the cursor as if you had typed it:
+
+      a file      Volume:dir/file
+      a drawer    Volume:dir/drawer/   (trailing slash)
+      a disk      Volume:
+
+    The path is quoted whenever the shell would mangle it bare
+    (spaces, '='), and every icon gets one trailing blank, so
+    dropping several icons lines them up as ready arguments. In
+    cooked mode the paths join the edit line under the paste
+    rules; in raw mode a fullscreen program (Ed) receives them as
+    typed input. A multi-icon drop is delivered whole or not at
+    all - if it cannot fit, the window beeps and NOTHING is
+    inserted, never a silently shortened argument list. A drop
+    during a Ctrl+R search ends the search first, like any other
+    keystroke would.
+
 
 12. RAW MODE AND CRAW:
 --------------------------------------------------------------------------
@@ -477,7 +504,9 @@
   usual SetMode/ACTION_SCREEN_MODE - fullscreen programs do this
   themselves. In raw mode every key becomes bytes for the program
   (arrows and F-keys as CSI sequences, Ctrl+C as a plain byte 3),
-  and the console shows the classic block cursor.
+  and the console shows the classic block cursor - complement-
+  drawn like the editor's cursor (section 6), with the same
+  checkerboard ghost when the window is inactive.
 
   CRAW: is the same handler mounted a second time with a startup
   argument that opens every stream raw from the first byte - the
@@ -557,6 +586,14 @@
 
   The icon is built into the handler - nothing extra to install. Each
   iconified window gets its own "CCON" icon on the Workbench.
+
+  Since 1.2.6 the same trip is on the window itself: an ICONIFY
+  GADGET sits in the title bar next to the depth gadget - the
+  native one, which AmigaOS draws on V47.4 or newer (on older
+  systems the gadget simply does not appear, and the key always
+  works). Click it and the window parks to its icon exactly as
+  RIGHT-AMIGA + I does, from a shell prompt and over a fullscreen
+  program alike.
 
 
 15. REPLACING THE SYSTEM CONSOLE (EXPERIMENTAL)

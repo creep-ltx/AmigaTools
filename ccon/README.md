@@ -10,19 +10,26 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.5.** Every milestone boot-verified on AmigaOS 3.2 —
-and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.5 is **the
-Ed-and-deep-screens release**: autosuggestion ghosts and
-completion-menu colours now appear on 32+ colour and RTG screens,
-Shift+Backspace/Shift+Del join Ctrl+U/K as the Amiga spellings of
-kill-to-start/end, the close gadget speaks the full V47 protocol (Ed
-quits properly from it instead of dying mid-session), quitting Ed
-leaves no stray blank line, and resizing during an Ed session no
-longer leaks the edited file into your scrollback — the transcript
-now survives such a resize to the exit. Plus the hardening from a
-fourth full source audit. Before it: 1.2.4 was **the tuning
-release** — on a real accelerated Amiga the whole benchmark suite
-runs **five times faster than stock `CON:`** (see **Speed**, below),
+**Status: 1.2.6.** Every milestone boot-verified on AmigaOS 3.2 —
+and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.6 is **the
+wishlist release** — the three features an amiga-news.de reader
+asked for after 1.2.5, plus the project's deepest hardening pass: a
+**real iconify gadget** in the title bar (the native V47.4+ one —
+click to park to the AppIcon, the same trip RightAmiga+I always
+made), a **complement-mode cursor** drawn the way the ROM's own
+console draws it (takes its colour from what's under it on any
+screen depth, with the stock checkerboard ghost on inactive
+windows), and **drag and drop** — any Workbench icon dropped on a
+CCON window becomes its full quoted path at the cursor, in the
+shell's edit line or straight into a fullscreen program like Ed. A
+fifth source audit closed every finding before release, and — a
+first here — a sixth audit reviewed the fixes themselves. Before
+it: 1.2.5 was **the Ed-and-deep-screens release** — deep-screen
+ghost text and menu colours, Shift+Backspace/Del spellings, the
+V47 close-gadget protocol, and the mid-Ed resize made safe. 1.2.4
+was **the tuning release** — on a real accelerated Amiga the whole
+benchmark suite runs **five times faster than stock `CON:`** (see
+**Speed**, below),
 building on 1.2.3's plane-masked rendering (the trick read out of
 the 3.2 ROM's own console.device), 1.2.2's model-first engine (at
 most one scroll blit per write, accept-then-render buffering), and
@@ -120,12 +127,28 @@ the real prompt comes back from the scrollback model:
   `NOBORDER`, …) parsed per open, `WIDTH`/`HEIGHT` of `-1` filling
   whatever's left of the screen from `X`/`Y`; `*`/`CONSOLE:` opens
   attach to the caller's console.
-- **Iconify to the Workbench**: RightAmiga+I sends a window to a
-  desktop icon and the console keeps running behind it (output pauses,
-  then flushes on restore); double-click the icon and the window is
-  back exactly as you left it — scrollback, a half-typed line, cursor
-  and all. The icon is built into the handler, and it works over a
-  fullscreen client like Ed too.
+- **Iconify to the Workbench**: a real title-bar **iconify gadget**
+  (the native V47.4+ one, next to the depth gadget) or RightAmiga+I
+  sends a window to a desktop icon and the console keeps running
+  behind it (output pauses, then flushes on restore); double-click
+  the icon and the window is back exactly as you left it —
+  scrollback, a half-typed line, cursor and all. The icon is built
+  into the handler, and it works over a fullscreen client like Ed
+  too. (On pre-V47.4 systems the gadget doesn't appear; the key
+  always works.)
+- **Drag and drop**: drop Workbench icons on the window and each
+  becomes its full path at the cursor as if typed —
+  `Volume:dir/file`, drawers with a trailing `/`, disks as
+  `Volume:`, quoted when the shell would mangle it bare, one
+  trailing blank each so several icons line up as arguments. Cooked
+  mode inserts into the edit line; raw fullscreen clients (Ed)
+  receive it as typed input. A drop that cannot fit beeps and is
+  refused whole — never a silently truncated argument list.
+- **A cursor dressed like the ROM's**: block cursor and editor blip
+  drawn in complement mode — the mechanism console.device and
+  KingCON use — so the cursor reads correctly over any colours on
+  any screen depth, and an inactive window shows the stock
+  checkerboard ghost (kept live even for a parked Ed session).
 - **FONT and LINES per window**: your own face/size (loaded from
   disk if needed) or scrollback depth; unset FONT follows your
   Font Prefs default instead of a hardcoded topaz 8.
@@ -201,7 +224,9 @@ design notes. A running handler keeps its seglist: after updating
 - `ccon.readme` — short-form readme for the release archive.
 - `ccon.doc` — the full plain-text manual (Amiga-width lines).
 - [`changelog.md`](changelog.md) — the version history, 0.1 to now.
-- `ltx-cc12.lha` — the release archive (`L/`, `DEVS/`, docs).
+- `ltx-cc11.lha` — the 1.1 release archive (`L/`, `DEVS/`, docs);
+  later releases ship their archive as a GitHub release asset and
+  on Aminet instead of in the tree.
 - `todo.md` — the complete build history: every milestone, every
   verified protocol fact, every disassembly finding, every latent
   bug the boots flushed out. The project's lab notebook.
@@ -279,11 +304,13 @@ CCON: windows now **iconify** to the Workbench — RightAmiga+I
 collapses a window to a desktop icon (its own icon, built into the
 handler, so there's nothing to install), the console keeping its
 scrollback and half-typed line behind it; a click brings it back
-untouched. Getting there settled, the hard way, that a DOS-handler
-window can't take a click on a title-bar gadget at all — the standard
-iconify gadget is handled entirely inside Intuition with no report to
-the app, and a custom gadget renders but never sees the click — so
-the trigger is a key, the way AmiExpress does it. And More, or any
+untouched. Getting there settled — so it seemed, the hard way — that
+a DOS-handler window can't take a click on a title-bar gadget at all
+(the standard iconify gadget looked handled entirely inside
+Intuition, and a custom gadget rendered but never saw the click), so
+the trigger became a key, the way AmiExpress does it. That verdict
+was overturned in 1.2.6: V47.4's gadget *does* report its click, on
+a channel the original hunt never inspected — see **Since 1.2.5**. And More, or any
 program that repaints a full screen, now REPLACES the page on a form
 feed the way `CON:` always did, instead of scrolling it — the one
 thing 1.0 and 1.1 were missing. And 1.1's raw arrow-key fix turned out
@@ -295,3 +322,34 @@ window resize, which had looked unfixable: the earlier attempt's "Ed
 breaks worse" was this very arrow bug firing on every test keypress, not
 the resize — with it gone, letting the resize event through repaints Ed
 and lets it re-measure cleanly. The full account is in `todo.md`.
+
+## Since 1.2.5
+
+The wishlist, and the audits. A reader of amiga-news.de asked for
+three things after 1.2.5, and 1.2.6 is all three. The iconify
+gadget first — which meant overturning the v1.2 "unhookable"
+verdict: NDK 3.2's release notes revealed that V47.4's native
+gadget reports its click as a `CLOSEWINDOW` event with `Code=1`,
+the one channel the original hunt never inspected, so the gadget is
+real now and the old key still works. Then the cursor: Timm's
+"sterile white block" complaint was answered by disassembling
+console.device (and KingCON, which turned out to delegate to it) —
+the ROM draws its cursor in complement mode, so CCON does too now,
+checkerboard ghost on inactive windows included. Then drag and
+drop, KingCON's old party trick: paths resolved at packet level
+(the no-DOS rule intact) with drawer/disk spellings, quoting, and
+whole-or-nothing delivery.
+
+Under it, the discipline grew a rung: audit5 consolidated four
+prior audit documents into one (`audit.md`), re-verified every old
+finding against the live source, read the three new features
+adversarially — and found the gadget's one latent crash (its
+window-close ran inside the event drain it was closing), which
+became the release blocker until it fell. Five fix batches went
+boot-green in a single day. Then, before release, **the fixes
+themselves were audited** (audit6): two independent review passes
+over the campaign's own diff, which caught a pre-existing
+accounting gap in the fullscreen-snapshot machinery and the
+campaign's own comment rot, same-day. Six beta builds, b4–b9,
+every one boot-verified. The full trail is in `audit.md` and
+`todo.md`.

@@ -4683,6 +4683,33 @@ rot, fixed both, and boot-proved the fix. Six boot-green builds in
 one day, b4–b9. Nothing stands between the tree and the 1.2.6
 release ladder.**
 
+## 1.2.6 — the release build + docs pass (28.7.26)
+
+Clean `$VER: ccon-handler 1.2.6 (28.7.26)` — logic-identical to
+the boot-green b9, beta suffix dropped. Compile clean, vamos smoke
+green, deployed to L: (staged ccon-handler-1.2.6, .bak = b9),
+$VER string verified inside the built hunk.
+
+Docs, all five: **changelog.md** [1.2.6] entry (the wishlist
+release — three features, audit5, audit6, the 256-colour coda);
+**README.md** status → 1.2.6, three new Highlights rows (gadget in
+the iconify bullet, drag-and-drop, complement cursor), the stale
+1.2 "gadget is unhookable" story amended to point at its 1.2.6
+overturning, a new "Since 1.2.5" section, and the Files row fixed
+(ltx-cc11.lha is the tracked 1.1 archive; later archives are GH
+assets); **ccon.doc** title → 1.2.6, section 11 grew the
+drag-and-drop subsection (renamed "Copy, paste and drag and
+drop" — no section renumbering, cross-refs intact), sections 6/12
+carry the complement-cursor + ghost paragraphs, section 14 the
+gadget paragraph — all lines ≤74 cols; **ccon.readme** (DRAFT —
+his edits canonical, resync repo if he rewrites) three feature
+bullets + the 1.2.6 HISTORY block; **root README.md** ccon row →
+1.2.6 with the new features named.
+
+NOT done (his call, the remaining ladder): tag ccon-1.2.6, GH
+release, .lha from his staging ~/Documents/Releases/CCon/ (+ his
+Aminet readme).
+
 ## Design notes
 
 ## Design notes
