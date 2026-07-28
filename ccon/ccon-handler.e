@@ -1588,6 +1588,20 @@ ENDPROC
 
 -> one ACTION_WRITE, for the dispatcher and for the parked-write
 -> flush after a selection drag ends
+-> audit5 A3+X1 (1.2.6b5): THE accept-time reset bundle. snaplive() is
+-> deliberately reset-free (its comment: every caller owes these), and
+-> the list had been hand-copied three times - the third copy (dodrop)
+-> arrived missing three of its four entries, exactly as audit4's X3
+-> predicted. One proc now; the fourth caller cannot forget what it
+-> never has to remember. KEY paths stay out on purpose: dorawkey's
+-> two-pass sbsrch handling must consume arrows itself (the C9 note).
+PROC acceptreset()
+  IF curcon.sbsrch THEN sbexit() -> input/output ends a content search
+  clearsel()                    -> and takes the highlight with it
+  snaplive()                    -> and pulls a scrolled view live
+  tcclose()                     -> and closes an open completion menu
+ENDPROC
+
 PROC dowrite(pkt:PTR TO dospacket)
   DEF sender:PTR TO mp, len
   -> ICONIFY: while iconified the console is windowless BY CHOICE - park the
@@ -1624,18 +1638,11 @@ PROC dowrite(pkt:PTR TO dospacket)
     ReplyPkt(pkt, -1, ERROR_BAD_NUMBER)
     RETURN
   ENDIF
-  -> audit3 C9: client output ends a scrollback CONTENT search. snaplive()
-  -> below resets viewoff and repaints live, but left sbsrch TRUE - so the
-  -> next keystroke took dovanilla's sbsrch branch and sbfind() yanked the
-  -> view straight back to a match ("my window jumped"). Targeted here
-  -> rather than inside snaplive(): the KEY paths that call snaplive()
-  -> already have their own carefully-reasoned sbsrch handling (see the
-  -> two-pass-trap comments in dorawkey), and clearing it there would stop
-  -> arrows being consumed the way those comments require.
-  IF curcon.sbsrch THEN sbexit()
-  clearsel()                    -> output takes the highlight with it
-  snaplive()                    -> new output pulls the view back to live
-  tcclose()                     -> and closes an open completion menu
+  -> audit3 C9 lived here as four hand-written lines (search exit,
+  -> selection, live view, menu); factored to acceptreset() with its
+  -> siblings (audit5 A3+X1) - the why-not-in-snaplive reasoning
+  -> moved to the proc's header
+  acceptreset()
   -> S5 (1.2.2b3): accept-then-render. DOS Write() blocks its caller
   -> until we reply, so a single-threaded client - every client - can
   -> never have two writes in flight: the ONLY way k lines ever reach
@@ -1764,12 +1771,9 @@ PROC swaccept()
              (c2.wob <> NIL) AND (c2.win <> NIL) AND
              (pkt.arg3 >= 0) AND ((c2.wolen + pkt.arg3) <= WOBSZ)
         curcon := c2            -> the accept-time state resets, exactly
-        sender := pkt.port      -> dowrite's: break owner, search exit,
-        c2.breaktask := sender.sigtask  -> selection, live view, menu
-        IF c2.sbsrch THEN sbexit()
-        clearsel()
-        snaplive()
-        tcclose()
+        sender := pkt.port      -> dowrite's: break owner (packet-side,
+        c2.breaktask := sender.sigtask  -> stays here), then the bundle
+        acceptreset()
         CopyMem(pkt.arg2, c2.wob + c2.wolen, pkt.arg3)
         c2.wolen := c2.wolen + pkt.arg3
         ReplyPkt(pkt, pkt.arg3, 0)
@@ -2365,7 +2369,12 @@ PROC dodrop(am:PTR TO appmessage)
   IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
      (fsname = NIL) THEN RETURN
   flushout(curcon)              -> settle output; the editor draws next
-  snaplive()                    -> a drop is input: scrolled view snaps
+  -> audit5 A3: a drop is "input, same manners as a keystroke" - but it
+  -> ran only snaplive(), leaving sbsrch TRUE (the dropped path fed the
+  -> search and vanished on Esc), the menu open (next Enter eaten), a
+  -> highlight standing. The full bundle, like both accept siblings;
+  -> NO breaktask - that is packet-side, and a drop has no sender.
+  acceptreset()
   IF am.numargs <= 0 THEN RETURN
   wa := am.arglist
   FOR i := 0 TO am.numargs - 1
@@ -8431,4 +8440,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b4 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b5 (28.7.26) CCON: LTX console handler', 0

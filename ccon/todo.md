@@ -4310,6 +4310,77 @@ self-explanatory — left as-is.
 
 With A1 boot-green the 1.2.6 RELEASE BLOCKER is cleared; the
 ladder continues at Batch B (b5) per ccon/audit-roadmap.md.
+**His call 28.7.26: ALL fixes (batches A-E) land before the 1.2.6
+release** — the ladder runs to the end, release ships after batch E.
+
+## 1.2.6b5 — audit5 Batch B (28.7.26): the accept-reset factoring
+
+A3+X1 in one move, the audit4-X3 debt paid properly: ONE
+`acceptreset()` proc — `IF curcon.sbsrch THEN sbexit()` /
+`clearsel()` / `snaplive()` / `tcclose()` — sits above dowrite,
+called from all three accept sites. dowrite and swaccept keep
+`breaktask` beside the call (packet-side: the writer owns Ctrl+C);
+dodrop takes the bundle WITHOUT breaktask (a drop has no sender).
+The C9 why-not-in-snaplive reasoning moved to the proc header; key
+paths stay out on purpose (dorawkey's two-pass sbsrch handling must
+consume arrows itself). Net: three copies become one, dodrop gains
+the three entries it was missing — the A3 consequences (drop during
+Ctrl+R feeds the search and vanishes on Esc; drop under an open
+completion menu leaves stale spans and the next Enter eaten by the
+menu-close guard; drop leaves a highlight standing) all close at
+once.
+
+Built + deployed 28.7.26: compile clean (LARGE, same 3 asm warnings
++ same 9-name UNREFERENCED set), vamos usage smoke green (exit 5),
+L:ccon-handler = b5 md5-matched (staged ccon-handler-1.2.6b5,
+.bak = b4).
+
+**Boot test (REBOOT FIRST; `Version L:ccon-handler` must say
+1.2.6b5):**
+- [x] the A3 repro, healed: scroll back, Ctrl+R, type a fragment,
+      drop an icon on the window — search exits, path sits on the
+      edit line, next keystroke types normally (on b4: path vanished
+      on Esc, next keystroke fed the search)
+- [x] drop with the completion menu open — menu closes, path
+      inserts, next Enter commits the line (not eaten by the menu)
+- [x] drop with a standing highlight — highlight clears like any
+      keystroke
+- [x] plain drop regression: file/drawer/disk, cooked and into Ed
+      (raw) — unchanged
+- [x] dowrite/swaccept regression (the factoring touched the hot
+      accept path): `list` a big dir with a highlight standing —
+      highlight clears, output flows; Ctrl+R then `dir` in another
+      window — that window unaffected; type-ahead during output
+- [x] conbench quick pass — accept-path cost unchanged (the factor
+      is a call, not new work; verify the number anyway)
+
+**Boot findings so far (28.7.26, screenshot 12:53 + conbench
+results9/10):** The A3 repro healed on the glass: `ls -R dh0:` +
+`dh1:`, scroll back, Ctrl+R "cfile", drop the Amiga: disk icon —
+the matched ls row ("CFile          CFile.ReadMe", column padding
+and all, the b35 match-on-prompt design) stayed on the edit line
+and "Amiga: " appended after it: sbexit() keeps the match (only
+Esc/sbcancel restores the stash), the search ENDED, nothing
+vanished. Tab-menu drop: "Devs" selected → "Devs/Amiga: " on the
+line, menu closed, Enter commits. Plain drops all fine.
+
+conbench: b5 SYNC TOTAL 5.70 (results9) — an A/B against the
+staged b4 (results10) gives an IDENTICAL 5.70 with the same
+per-row numbers, so the factoring costs nothing; row green.
+**Separate finding, NOT batch B: the SGR rows drifted vs the
+1.2.4-era results8 baseline (23.7.26)** — sgr-colour 0.64→1.22,
+sgr-perchar 0.62→1.08, sync-line 1.74→1.98, TOTAL 4.30→5.70.
+Twelve builds sit in that window (all of 1.2.5's Ed machinery,
+1.2.6's cursor/gadget/dnd). Prime suspect: the b2 complement
+cursor's SetDrMd/RectFill round-trip inside every render bracket.
+PARKED as a perf note — bisectable any time via the staged
+L:ccon-handler-1.2.5 / -1.2.6b1 / -1.2.6b2 builds, one reboot
+each; not a 1.2.6 gate unless he says so.
+
+**ALL SIX ROWS GREEN 28.7.26 — 1.2.6b5 is boot-verified.**
+Highlight rows closed the run: drop with a standing highlight
+clears it and inserts the path; `list` with a highlight standing
+clears it and the output flows. Batch B done; Batch C (A4) = b6.
 
 ## Design notes
 

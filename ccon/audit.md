@@ -31,8 +31,11 @@ boot-verified in 1.2.6b4** — full findings in todo.md's 1.2.6b4
 section, fix shapes in audit-roadmap.md Batch A. A1's fix clears the
 1.2.6 release blocker. A2 was proven live by `tests/ccinfo0`
 (res2=115 ERROR_BAD_NUMBER from a CCON: shell; res2=205 from stock
-CON: = sender-routing, the negative control). The remaining A-series
-(A3–A6, A9–A11, X1–X5) is unfixed and queued as batches B–E.
+CON: = sender-routing, the negative control). **A3 and X1 are FIXED
+and boot-verified in 1.2.6b5** (the `acceptreset()` factoring; the
+A3 repro healed on the glass, conbench A/B b4-vs-b5 identical at
+5.70). His call: ALL batches land before the 1.2.6 release. The
+remaining A-series (A4–A6, A9–A11, X2–X5) is queued as batches C–E.
 
 ---
 

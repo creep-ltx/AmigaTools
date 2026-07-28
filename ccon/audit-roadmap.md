@@ -17,8 +17,12 @@
 -> ccinfo0 proved A2 both ways: res2=115 ERROR_BAD_NUMBER from a
 -> CCON: shell, res2=205 ERROR_OBJECT_NOT_FOUND from stock CON:
 -> (sender-routing, the documented negative control). A1 boot-green
--> = THE 1.2.6 RELEASE BLOCKER IS CLEARED. Batches B-E not started;
--> next build is b5 = Batch B.
+-> = THE 1.2.6 RELEASE BLOCKER IS CLEARED. His call 28.7.26: ALL
+-> batches (A-E) land before the release. Batch B (A3+X1 =
+-> acceptreset) = 1.2.6b5 BOOT-GREEN same day, all six rows incl.
+-> the A3 repro healed + conbench A/B b4-vs-b5 identical (5.70; the
+-> SGR drift vs the 1.2.4-era baseline is a PARKED perf note in
+-> todo.md, not this campaign's). C-E next.
 
 # Fix roadmap, fifth pass
 
