@@ -303,6 +303,9 @@ OBJECT console
   fwptr                         -> WINDOW0xADDR: borrow this window
   fwin, oldidcmp                -> borrowed-window bookkeeping
   closereq                      -> close gadget seen; close after drain
+  iconreq                       -> audit5 A1: iconify gadget seen; park
+                                -> after drain (doiconify CloseWindows -
+                                -> never mid-drain of the port it owns)
   pauto                         -> AUTO: window on first I/O
   autopend                      -> an AUTO open waits, windowless
   pnoborder, pnodrag, pnodepth, pnosize, pbackdrop, pinactive
@@ -912,10 +915,20 @@ PROC main()
               -> over a raw fullscreen client (Ed) too - parity with
               -> RightAmiga+I. Pre-V47 intuition never sends Code=1
               -> (the tag is unknown there, no gadget appears).
-              IF code = 1 THEN doiconify() ELSE doclosew()
+              -> audit5 A1: doiconify() ran HERE in b1-b3 and worked by
+              -> luck alone - hidewin CloseWindows this very port and
+              -> the next GetMsg above reads through win=NIL (addr $56).
+              -> Deferred past the drain like closereq, the rule the
+              -> comment below has always stated.
+              IF code = 1 THEN c.iconreq := TRUE ELSE doclosew()
             ENDIF
           ENDIF
         UNTIL im = NIL
+        IF c.iconreq              -> audit5 A1: the gadget's iconify,
+          c.iconreq := FALSE      -> deferred. BEFORE closereq: both in
+          curcon := c             -> one drain must end CLOSED (conclose
+          doiconify()             -> handles a windowless console; the
+        ENDIF                     -> other order CloseWindows twice)
         IF c.closereq             -> deferred: never CloseWindow while
           c.closereq := FALSE     -> draining the port it owns
           conclose(c)
@@ -1516,6 +1529,14 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN                    -> both hang off this pointer)
     ENDIF
     curcon := c
+    -> audit5 A2: arg1 is the one packet arg we WRITE through - a NIL
+    -> InfoData from a buggy client would zero addresses 0-35 (the
+    -> ExecBase pointer at 4 included). Guarded BEFORE ensurewin so a
+    -> bad packet cannot materialize an AUTO window either.
+    IF pkt.arg1 = 0
+      ReplyPkt(pkt, DOSFALSE, ERROR_BAD_NUMBER)
+      RETURN
+    ENDIF
     -> the console curiosity: id_VolumeNode carries the WINDOW pointer,
     -> which is how programs find the console's window
     ensurewin()                 -> the asker wants a window pointer
@@ -2338,6 +2359,11 @@ ENDPROC
 PROC dodrop(am:PTR TO appmessage)
   DEF i, wa:PTR TO wbarg
   IF curcon.win = NIL THEN RETURN
+  -> audit5 A7: dotab's wall - mount-time allocation of the fs plumbing
+  -> may have failed (main tolerates it); droppath/lockpath would write
+  -> packet fields through NIL or hand the filesystem a zero FIB BPTR
+  IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR
+     (fsname = NIL) THEN RETURN
   flushout(curcon)              -> settle output; the editor draws next
   snaplive()                    -> a drop is input: scrolled view snaps
   IF am.numargs <= 0 THEN RETURN
@@ -3858,18 +3884,21 @@ ENDPROC
 -> all-zero over the visible region) is never violated by a standing
 -> block.
 PROC curfill(cx, cy)
-  DEF x0, y0, om
+  DEF x0, y0, om, oap, oas
   x0 := curcon.left + Mul(cx, curcon.cw)
   y0 := curcon.topy + Mul(cy, curcon.ch)
   om := curcon.rp.drawmode
+  oap := curcon.rp.areaptrn     -> audit5 A8: restore, don't reset - a
+  oas := curcon.rp.areaptsz     -> borrowed frame's owner may keep a
+                                -> pattern on ITS rastport
   SetDrMd(curcon.rp, RP_COMPLEMENT)
   IF (curcon.winact = FALSE) AND (gpat <> NIL)
     curcon.rp.areaptrn := gpat
     curcon.rp.areaptsz := 1     -> 2^1 pattern rows = the two words
   ENDIF
   RectFill(curcon.rp, x0, y0, x0 + curcon.cw - 1, y0 + curcon.ch - 1)
-  curcon.rp.areaptrn := NIL
-  curcon.rp.areaptsz := 0
+  curcon.rp.areaptrn := oap
+  curcon.rp.areaptsz := oas
   SetDrMd(curcon.rp, om)
 ENDPROC
 
@@ -8402,4 +8431,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b3 (27.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b4 (28.7.26) CCON: LTX console handler', 0

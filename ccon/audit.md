@@ -1,804 +1,626 @@
--> audit.md - CCON codebase audit, ccon-handler 1.2b1
--> Read 20.7.26 against ccon-handler.e as of 1.2b1 (5549 lines).
--> Line numbers are as-of that revision and will drift once fixes
--> land; every finding names the PROC too, which will not.
-->
--> Static read only - nothing here was boot-verified. Findings are
--> ranked by whether the trigger is REACHABLE, not by how bad the
--> consequence sounds; where a trigger needs a specific sequence to
--> fire, that sequence is spelled out so it can be tested rather
--> than argued about. See audit-fix-roadmap.md for the order to
--> work them in.
+# CCON source audit — 1.2.6b3 (audit5, the consolidated document)
 
-# CCON 1.2b1 audit
+Full read of `ccon-handler.e` at `$VER: ccon-handler 1.2.6b3 (27.7.26)`
+(8405 lines, HEAD @ baead1e), delta-focused on the ~490 lines gained
+since audit4's 1.2.5b1 baseline: the 1.2.5b2 audit-fix batch, the
+b3–b8 "evening of Ed" ladder, and the three 1.2.6 features (iconify
+gadget, complement cursor, drag and drop). Read-only: nothing in this
+pass has been changed.
 
-Scope: `ccon-handler.e`, the whole file. Cross-checked against
-`todo.md` so nothing already logged there is reported as new.
+**This document replaces `audit.md`, `audit2.md`, `audit3.md`,
+`audit4.md` and the three roadmap files** (his call, 28.7.26). The
+retired texts remain in git history (`git log --all -- ccon/audit*.md`);
+the changelog carries the release-level story of every fix that
+shipped. What this document keeps from them is the part that must stay
+live: **the ledger** — the current, code-verified status of every
+prior finding ID — at the bottom. The ledger pass re-checked all 44
+prior IDs against the current source; one materially stale row was
+found and corrected there (old B8).
 
-## Status
+Method: four parallel read passes (the 1.2.6 features; the 1.2.5b2–b8
+fixes incl. verification that audit4's D1–D3 landed as prescribed; the
+whole-file cross-cutting sweeps; the ledger fact-check), then every
+ranked finding re-verified against the cited lines before it was
+written down.
 
-| Finding | State |
-|---|---|
-| P1, P2, P4, H1, H2, H5 | **fixed in 1.2b2** (batch 1, boot-tested 21.7.26) |
-| B1, H4 | **fixed in 1.2b6** (batch 2, harness + A/B hardware proof, corrected after a 1.2b3 regression - see B1) |
-| B2, B4 | **fixed in 1.2b7** (batch 3, harness + hardware-verified 21.7.26) |
-| B3 | **fixed in 1.2b8** (batch 4, one positive A/B repro, not a matched pair - 21.7.26) |
-| P5 | **fixed in 1.2b11** (append not full rewrite; hardware-verified on the on-disk file 22.7.26) |
-| B5 | **fixed in 1.2b13** (ACTION_DIE teardown; hardware-verified with ccdie - clean tear-down, fresh re-mount, busy-refuse - 22.7.26) |
-| B6 | **fixed in 1.2b12** (DISK_INFO fails rather than guessing; telemetry proved the fallback never fires - 22.7.26) |
-| B7 | **fixed in 1.2b10 / 1.2b10a** (true reflow, CON: parity - pixel-identical round trip; gadget regression fixed, gates clean 21.7.26) |
-| B8 | open - new finding 21.7.26 (raw-mode/Ed resize clips + stale pixels; NOT a B7 regression, proved by A/B) |
+Numbering is a fresh series (**A1..**) — B/P/H, C, D and E are taken
+(audits 1–4 and the 1.2.4 render campaign).
 
-The findings below are kept as written at audit time, including for
-the ones now fixed - the reasoning is the record of WHY the change was
-made, and 1.2b2's todo.md entry points back here. Line numbers are
-as-of 1.2b1 and have drifted; the PROC names have not.
+**Status update (28.7.26): A1, A2, A7 and A8 are FIXED and
+boot-verified in 1.2.6b4** — full findings in todo.md's 1.2.6b4
+section, fix shapes in audit-roadmap.md Batch A. A1's fix clears the
+1.2.6 release blocker. A2 was proven live by `tests/ccinfo0`
+(res2=115 ERROR_BAD_NUMBER from a CCON: shell; res2=205 from stock
+CON: = sender-routing, the negative control). The remaining A-series
+(A3–A6, A9–A11, X1–X5) is unfixed and queued as batches B–E.
 
 ---
 
-## 1. Bugs
+## Verdict
 
-### B1 - `eraseedit()`'s early returns skip the `edlast`/`edext` reset
+The b5–b8 Ed machinery is the strongest work in the delta: the
+three-way close protocol covers its client shapes exactly, `alteat` is
+render-scoped by construction despite being a global, and the
+altpop/altrestore split honors the plane-mask invariant in both
+directions. The audit4 fixes (D1–D3) all landed **exactly as
+prescribed**, ELSE-arms and warnings included. The choke-point flush
+discipline audit4 declared complete **still holds** across all three
+new features — every path that observes the model or the glass
+flushes first, with one argued-sound, undocumented exception (X2).
 
-**Where:** `eraseedit()`, ccon-handler.e:3445-3489.
+What broke is what always breaks here: the seams. b1's six lines
+re-broke the oldest rule in the drain loop — with the rule's own
+comment four lines below the new call (A1). The drop path re-ran most
+of the house checklist impressively (lock hygiene, buffer caps,
+nested-IF pointer discipline, no-DOS purity) and then skipped the two
+guards that live in its own siblings (A3, A7). And audit4's X3
+prediction — "the un-factored accept-reset list is how the next
+D-item gets written" — came true verbatim: the third copy is missing
+three of its five entries (A3).
 
-Two guards return before the reset at the bottom of the proc:
+| Severity | Count | Items |
+|---|---|---|
+| Crash / wild write | 2 | A1 (new in b1), A2 (pre-existing) |
+| Corruption (wrong state/text) | 2 | A3, A4 |
+| Corruption, narrow trigger | 1 | A6 |
+| Cosmetic | 2 | A5, A10 |
+| Hygiene | 4 | A7, A8, A9, A11 |
+| Maintenance / comments | 5 | X1..X5 |
+| Performance | carried | P-notes (all prior, none new) |
 
-```
-IF curcon.win = NIL THEN RETURN
-IF curcon.ancx >= curcon.cols THEN RETURN  -> inverted RectFill = wild writes
+---
+
+## Correctness
+
+### A1 — the iconify gadget closes the window whose UserPort the drain loop is still reading
+
+**Where:** main() 905–918 (dispatch), 882 (the re-fetch), 919–922 (the
+invariant, stated); `doiconify()` 2493 → `hidewin()` 2540–2542.
+
+```e
+915              IF code = 1 THEN doiconify() ELSE doclosew()
 ...
-curcon.edlast := 0                         -> not reached on either path
-curcon.edext := 0
+918        UNTIL im = NIL
+919        IF c.closereq             -> deferred: never CloseWindow while
+920          c.closereq := FALSE     -> draining the port it owns
 ```
 
-The b9 note (todo.md:1264) states why that reset exists: *"eraseedit
-now zeroes edlast/edext after erasing so the tail never re-cleans at
-a moved anchor (the theft pattern must not come back through the back
-door)."* The `ancx >= cols` guard is the back door.
+`doiconify()` on the Code=1 branch runs `hidewin()` →
+`CloseWindow(curcon.win); curcon.win := NIL` synchronously, mid-drain
+of that window's own UserPort. The message just dispatched was
+non-NIL, so `UNTIL im = NIL` loops back to
+`im := GetMsg(c.win.userport)` at 882 with `c.win = NIL` — a load
+from absolute address $56 (win_UserPort off a NIL base). Whatever
+lives there is treated as a MsgPort; a garbage non-NIL GetMsg return
+then feeds `ReplyMsg(im)` a wild pointer, which **writes** through it.
 
-**Trigger, reachable:** `render()`'s printable-run loop leaves
-`cx = cols` whenever a write ends exactly at the right margin
-(`fit := cols - cx; cx := cx + fit`) - the pending-wrap state
-documented as legal at `doresize` (:1857). `reanchor()` then parks
-`ancx = cols`. On the NEXT `dowrite()`:
+This is the exact violation the `closereq` machinery four lines below
+exists to prevent, and the true-close branch (`doclosew`, Code 0)
+honors it. The old RAMIGA+I path is safe — it calls `doiconify()`
+from `ihkey`, outside the window-port drain. The b1 boot pass ("It
+works, of course it does") means address $56's contents happened to
+parse as an idle port on that machine — luck, not soundness; a
+different ROM/MapROM/RTG layout can detonate it.
 
-1. `eraseedit()` returns at once; `edlast` keeps N from the old anchor
-2. `render()` writes new client text
-3. `reanchor()` moves the anchor
-4. `drawedit()` reads `oldl := curcon.edlast` = N and, where
-   `oldl > l`, zeroes `N - l` model cells from the NEW anchor
+**Reachable:** every click of the new gadget — the feature's only
+trigger.
 
-**Consequence:** client text erased from the model at a moved anchor -
-the exact theft pattern b9 closed, re-entered through the guard.
-
-**Trigger, CORRECTED (21.7.26).** This section first said "any output
-whose last line is exactly `cols` wide qualifies". That was too broad,
-and the harness caught it: an identical cols-wide write does NO damage
-when the row the anchor lands on is blank. All four of these have to
-hold at once:
-
-1. a write ends flush on the right margin, so `reanchor` parks
-   `ancx = cols`, AND
-2. the edit line is non-empty when Enter is pressed (`edlast > 0`), AND
-3. the line SHRINKS in the same `drawedit` that sees the moved anchor -
-   in practice the Enter-commit path specifically, since a plain
-   `dowrite` never touches `ebuf`, so its stale `edlast` is consumed
-   against an equal `l` and nothing is zeroed, AND
-4. the row the post-commit anchor lands on still holds content
-
-So it needs content BELOW the prompt, which is not the everyday
-bottom-of-screen shell case - reachable via `CSI H` positioning, a
-full-screen client's restored transcript, or a prompt sitting
-mid-screen.
-
-**Status, CORRECTED (21.7.26): FIXED in 1.2b6, not 1.2b3.** The 1.2b3
-fix below was real - harness (`edanchortest.e`) proved the model
-corruption and pinned the precondition; an A/B pair differing ONLY in
-this proc showed the gap appear and disappear in FS-UAE, damage width
-always equal to the typed line's length - but it was not the end of
-the story. Deployed alongside batch 3, a further A/B pair showed the
-"fixed" build leaving STALE CURSOR BLOCKS on screen, two or three
-visible at once, where the reverted build showed only one.
-
-Two hypotheses were tried and disproved: that the stale cursors
-predated the fix (no - the A/B showed one reverted, three fixed), and
-that clearing `edext` alongside `edlast` was the cause (no - a build
-clearing `edlast` only, briefly `1.2b5`, still showed the blocks).
-
-**The actual cause:** the `ancx >= cols` guard did not just skip the
-model reset, it `RETURN`ed out of the WHOLE proc - including the pixel
-repaint (`drawmodelrow` / `RectFill`). But `drawedit()` legitimately
-paints through that same case (H4, below: `ancx = cols` is the
-pending-wrap anchor), so every commit landing there left real, painted
-pixels with nothing ever erasing them.
-
-**Fix as applied (1.2b6):** the extent-into-locals fix below stands
-for the model side. For the pixel side, `eraseedit()` no longer bails
-on `ancx >= cols` - since `ancx` is clamped to `cols` everywhere it is
-set, that condition only ever means `ancx = cols` exactly, so the
-start cell is normalised to row `ancy+1`, col `0` (the same wrap
-`drawedit`'s own mirror loop already computes) and the proc runs its
-full body - mirror-zero loop, model repaint, `RectFill` - against that
-cell instead. Confirmed with temporary telemetry across six boot
-passes and four window geometries (including a narrower column count):
-the wrap path fires with correct normalised coordinates every time,
-and every screenshot shows exactly one cursor, never more.
-
-**Fix as first applied (1.2b3, the model-corruption half only):** take
-the extent into locals and clear the fields ABOVE both guards. Note it
-is NOT "zero the fields at the top" - the erase loop reads the count,
-so zeroing first would skip the erase on the normal path (the
-harness's scenario C exists to catch exactly that mistake, and did).
+**Fix:** the house pattern, one flag: in the drain,
+`IF code = 1 THEN c.iconreq := TRUE ELSE doclosew()`; beside the
+closereq check after `UNTIL im = NIL`:
+`IF c.iconreq THEN (c.iconreq := FALSE; curcon := c; doiconify())`.
+New console field — `New()` zeroes it, no init needed. RAMIGA+I keeps
+its direct call.
 
 ---
 
-### B2 - `sbcnt` is not re-clamped when the window grows
-
-**Where:** `doresize()`, ccon-handler.e:1825 (immediately after
-`gridcalc()`).
-
-The ring invariant is `sbcnt <= sbmax - rows`. `screenscroll()`
-(:1829) enforces it on the way up. Nothing re-establishes it when
-`gridcalc()` INCREASES `rows` underneath an already-large `sbcnt`.
-
-**Trigger:** fill the scrollback, then enlarge the window.
-
-**Consequence, CORRECTED (21.7.26).** The diagnosis above is right that
-the invariant breaks, but it named the wrong symptom AND proposed a fix
-that measurably makes things worse. Both were caught by the harness
-(`sbresizetest.e`), and the correction matters more than the original
-finding did.
-
-The real defect is not the count: it is that `doresize()` handles
-SHRINK symmetrically - advancing `sbtop`, pushing the rows above the
-cursor into history - and handles GROW **not at all**. So the visible
-window simply extends DOWNWARD over ring rows that have already been
-recycled. Enlarging a window with a full scrollback shows ancient lines,
-out of order, in the newly exposed rows. That is visible immediately at
-`viewoff = 0`, without scrolling anywhere.
-
-**The clamp this section originally proposed is NOT a fix.** Measured
-over the harness's two cases, bad rows: current logic 3, clamp 4,
-symmetric grow 0. The clamp only changes how far back you may scroll,
-leaves the recycled rows untouched, and cuts off history that WAS
-readable - worse than doing nothing.
-
-**Fix as applied (1.2b7):** the mirror of the shrink loop. For each row
-gained, step `sbtop` back one and drop `sbcnt` by one, pulling history
-down into the new space, with `cy`/`ancy` following it; rows history
-cannot fill are genuinely new and get cleared so they show blank rather
-than recycled text. This keeps `sbcnt <= sbmax - rows` for free, which
-is what the clamp was reaching for by the wrong route.
-
-**Status: FIXED in 1.2b7.** Harness-verified, and hardware-confirmed
-21.7.26: `ccon-b2`/`ccon-b2-fill` (`ccon/tests/`) write 60 numbered
-rows, deliberately more than any tested window height. A 5-row window
-showing rows 57-60 grown to 30 rows showed 32-60 - dead sequential,
-nothing repeated or reordered, exactly the pulled-down history the fix
-predicts.
-
----
-
-### B3 - a full input queue truncates CSI reports mid-sequence
-
-**Where:** `enqueue()` :5507; callers `ihreport()` :4758,
-`sendreport()` :3211, `rawcsikey()` :4335.
-
-`enqueue()` drops silently PER BYTE. Every report path emits a
-multi-byte sequence one `enqueue()` at a time, so a full queue
-delivers a PARTIAL CSI.
-
-**Consequence:** worse than dropping the event. A truncated report
-desyncs the client's CSI parser permanently; a dropped one costs a
-single event. This is the failure mode that reads as "Ed went mad"
-rather than "Ed missed a key".
-
-**Trigger:** a client holding a fat `evmask` (e.g. `CSI 2{` mouse
-reports) that stops reading. `ihreport` is ~50 bytes/event against
-`INQMAX` 2048 - roughly 40 events fills it.
-
-**Fix as applied (1.2b8):** `inqroom(n)` predicate
-(`(INQMAX-1) - inavail() >= n`), asked once per report before any byte
-of it is written. `rawcsikey()`'s branches each know their own fixed
-length once `sh` is resolved, so each got its own guard rather than a
-shared `enqueuestr()` buffer-and-length call.
-
-**Status: FIXED in 1.2b8.** A/B pair with `INQMAX` shrunk to 64 and
-the three guards stripped back out on the broken side (source diff
-verified to be exactly those changes). The broken build showed a
-report with a field merged mid-record
-(`...911467|2;0;255;327682;0` - a stray digit landed inside what
-should have been a fresh value), confirming the byte-drop truncation
-this finding describes. The fixed build's comparison round used a
-different drive and wasn't a matched A/B, so this rests on the one
-positive repro plus the fix's own narrowness, not a clean before/after
-pair like B1/B2 got.
-
----
-
-### B4 - a failed AUTO `openwin()` retries forever and accretes into the title
-
-**Where:** `openwin()` :1534 (`IF curcon.win = NIL THEN RETURN`) vs
-:1706 (`curcon.autopend := FALSE`).
-
-`autopend` is cleared PAST the failure return, so `ensurewin()` (:1387)
-retries `openwin()` on every subsequent packet for that console.
-
-**Consequence:** repeated `LockPubScreen`/`OpenWindowTagList` per
-write/read/wait; and in the `ihon = FALSE` fallback,
-`StrAdd(curcon.wtitlebase, ' [no chain]')` (:1483) runs each time -
-the title fills with `[no chain] [no chain] [no chain]...` up to
-`wtitlebase`'s 84-char cap.
-
-**Fix as applied (1.2b7):** clear `autopend` on `openwin()`'s failure
-return, so one attempt is all a console gets. Reasoned, not
-reproduced - forcing `OpenWindowTagList` to fail on demand is more
-instrumentation than the finding is worth, and the change only removes
-a retry.
-
----
-
-### B5 - no `ACTION_DIE`
-
-**Where:** `dopkt()` `DEFAULT` arm, :989.
-
-Unmount/shutdown answers `ERROR_ACTION_NOT_KNOWN`. `main()` is
-`WHILE TRUE` with no exit, so `ihring`, `ihis`, `fhstub`, the
-input-chain hookup and the opened devices are never released.
-
-**Consequence:** not a leak in a live system (the process is
-immortal by design), but a mount/unmount cycle during development
-leaves the previous chain handler installed. That is a
-development-time hazard on the machine doing the boot tests.
-
-**Fix as applied (1.2b13):** a `CASE ACTION_DIE` that refuses
-(`DOSFALSE`, `ERROR_OBJECT_IN_USE`) while `conlist` is non-NIL;
-otherwise clears the DeviceNode's `dn_Task` (so DOS re-mounts a fresh
-handler on the next open), replies `DOSTRUE`, and sets `dieing` to end
-`main()`'s loop - now `WHILE dieing = FALSE`. `killhandler()` then
-releases only the EXEC resources E's exit does not track:
-`IND_REMHANDLER` first (before E frees `ihis`/`ihring` under a live
-interrupt), close the three devices, delete the IO requests and message
-ports, close keymap, free both signals. The `New()`/`String()` memory
-rides E's list and is freed by `CLEANUPALL`/`FREEBUFFERS` when `main()`
-returns - freeing it here too would double-free.
-
-**Status: FIXED in 1.2b13, hardware-verified 22.7.26.** Tested with
-`ccdie` (tests/ccdie.e), which sends `ACTION_DIE` since no stock
-command does. An idle CCON: handler (port `$400F9B94`) with its input
-handler installed replied `DOSTRUE` and tore down with NO guru;
-re-opening CCON: started a genuinely NEW process (port `$400F9C24` -
-the changed port proves the old one actually died and DOS re-mounted
-fresh), which rendered `list` and echoed keys correctly (the input
-chain was cleanly removed and reinstalled). A second `ccdie` with a
-window open was refused with `res2 = 202` (`ERROR_OBJECT_IN_USE`),
-verifying the busy guard. This also confirmed the reasoning that E
-re-initializes globals on re-entry and DOS reuses the seglist - the
-one part that could not be checked from Linux.
-
----
-
-### B6 - `conbysender`'s list-head fallback is wrong for `ACTION_DISK_INFO`
-
-**Where:** `conbysender()` :665, `ENDPROC conlist` at :696;
-`ACTION_DISK_INFO` arm :955.
-
-When the CLI-StandardInput, breaktask and active-window lookups all
-miss, the caller gets SOMEONE ELSE'S console.
-
-For `WAIT_CHAR`/`SCREEN_MODE` that is a harmless wrong answer. For
-`DISK_INFO` it hands out `id.volumenode := curcon.win` - a window
-pointer for a console the caller has no relationship with, which a
-client like More will then `SetWindowTitles` and draw into.
-
-**Fix as applied (1.2b12):** `conbysender()` gained a `guess` flag.
-`DISK_INFO` passes `FALSE` and gets `NIL` -> `ERROR_OBJECT_NOT_FOUND`
-instead of the list head; the other four callers
-(`WAIT_CHAR`/`SCREEN_MODE`/`CHANGE_SIGNAL` and the `*`/`CONSOLE:` open,
-where attaching to the active console is the intended behaviour) pass
-`TRUE` and keep the guess.
-
-**De-risked with telemetry before the change, per the roadmap.** A
-throwaway 1.2b11 build logged every fallback to `L:ccon-dbg.log` with
-the packet type, the live console count, and the sender task name.
-Across More, Ed and shell probing in ONE and TWO windows, the
-list-head fallback NEVER fired - not one line - so the real lookups
-resolve every client that actually sends these packets. The audit's
-worry ("the fallback exists because some client did not resolve any
-other way") did not materialise for the tested clients, and the
-single-console case the finding did not consider (where the head guess
-IS the right console) never arose either. So failing `DISK_INFO` costs
-nothing observed and is strictly safer if an untested client ever
-reaches it.
-
-**Status: FIXED in 1.2b12, telemetry-de-risked 22.7.26.** A confirming
-boot round (More retitles its window, Ed's menu strip works, both in
-two windows) is the only thing outstanding, and the telemetry already
-showed those paths never touch the changed fallback.
-
----
-
-### B7 - width-shrink permanently deletes ring content beyond the new column count
-
-**Where:** `doresize()`, ccon-handler.e:1851-1881 (the `curcon.cols <>
-oc` reallocation block).
-
-**Found:** exploratory boot testing, not the original systematic audit
-(21.7.26).
-
-Every row of the scrollback ring is reallocated at the new column
-stride whenever the window's WIDTH changes. Only `Min(oc, curcon.cols)`
-bytes per row are copied from the old buffer into the new one; the old
-buffer is then `Dispose()`d in full, in the same breath.
-
-**Trigger:** type or receive a line wider than the CURRENT window, then
-shrink the window narrower than that line.
-
-**Consequence:** every character past the new column count is not
-clipped from the display, it is destroyed - the byte is never copied,
-and the buffer holding it is freed immediately after. This runs over
-EVERY row in the ring, not only the visible ones, so scrollback history
-wider than the new width is truncated too. Growing the window back
-afterward cannot recover any of it, because nothing is left to
-recover. Reported live: a long line typed in Ed vanished past the
-border on shrink and did not return on grow.
-
-`todo.md` (M8, 0.18) documents "no reflow (family behaviour)" as the
-intended trade-off, matching stock `CON:`'s clip-not-rewrap resize
-behaviour.
-
-**That defence is FALSIFIED (21.7.26), by direct A/B on hardware.**
-The same long line typed into Ed, the same shrink, the same grow, run
-once under stock `CON:` and once under `CCON:`:
-
-- **stock `CON:`** - shrink clips the line to the new width; growing
-  back **restores the full text**.
-- **`CCON:`** - shrink clips; growing back shows the text still
-  truncated, byte-identical to the shrunk state
-  (`This is a test of CCON's ability to` / `multiple lines and have
-  the window r`). The characters are gone, not merely unrendered.
-
-So stock `CON:` clips the VIEW and keeps the DATA. "Family behaviour"
-describes the visual result and not the storage behaviour, and it is
-the storage behaviour that differs. Whether CCON's destructive version
-was a deliberate call or an unexamined side effect of the fixed-stride
-ring is still not established, but it is no longer defensible as
-matching the family.
-
-**MECHANISM CONFIRMED (21.7.26), Ed taken out of the loop.**
-`ccon-b7`/`ccon-b7-fill` (`ccon/tests/`) echo a 100-column ruler and
-marker into a plain Shell, which does NOT redraw on resize - so
-whatever survives a shrink/grow came from the console's own buffer,
-not from a client re-sending it. Run under both consoles:
-
-- **`CCON:`** - shrunk to ~40 columns and grown back, the ruler still
-  stops at `30....:..` and the marker at `B7-START------------------`.
-  Destroyed. The rows that DID survive are the ones already shorter
-  than the shrunk width (`.80....:...90....:..100`, and the wrapped
-  `-----------B7-END` tail) - exactly the per-row truncation signature
-  this finding predicts.
-- **stock `CON:`** - shrunk and grown back **fully restored**,
-  identical to the original.
-
-So the cause is CCON's own ring storage, as written here. Not a
-client-notification problem.
-
-**And stock `CON:` does MORE than keep the data - it REFLOWS.** At the
-shrunk width its marker line spans THREE rows, and
-`-> B7-END and ..100 come back on grow` re-wraps mid-word into
-`B7-END an` / `d ..100 come back on grow`. That is a console holding
-LOGICAL LINES and re-wrapping them to the current width, then
-re-wrapping again on grow. `todo.md` M8's "rows stay rows, no reflow -
-family behaviour" is therefore wrong in both halves: the family
-reflows, and it does not lose data.
-
-CCON has no logical-line concept at all - `render()` wraps as it
-writes and the ring stores finished SCREEN rows, so the wrap position
-is baked in at write time and cannot be recomputed later.
-
-**Fix:** still a decision, now an informed one. Two honest levels:
-
-- **Non-destructive storage (cheaper).** Keep ring rows at their
-  original width - allocate the new stride as `Max(old, new)`, or keep
-  a separate logical-width per row - so a shrink only affects what is
-  RENDERED and a later grow restores. Result: shrink clips (no
-  reflow), grow restores everything. Not CON:-identical, but the data
-  loss is gone, which is the part that bites.
-- **True reflow (CON: parity, structural).** Store logical lines and
-  re-wrap on every resize. This is a real rewrite of the ring's
-  representation, not a patch to `doresize()`, and it interacts with
-  scrollback indexing, selection coordinates and `edlastrow()` math
-  throughout.
-
-Doing nothing is now the weakest option: it is no longer defensible as
-"what the family does", because the family demonstrably does better.
-
-**Still open, SEPARATELY:** the original Ed repro is not fully
-explained by this. Ed is a raw-mode client that owns the screen and
-re-draws itself on resize, so under `CON:` its restore may have been
-Ed redrawing rather than `CON:` reflowing (reflow is a cooked-mode
-behaviour). If Ed redraws under `CON:` but not under `CCON:`, there is
-a SECOND finding about the class-12 resize report `todo.md` M8 says Ed
-asks for - worth a separate check, and not covered by fixing the ring.
-
-**Status: FIXED in 1.2b10, gadget regression fixed in 1.2b10a** (level
-2, true reflow - CON: parity), staged 1.2b9 (the wrap plane) ->
-reflowtest.e (the algorithm on data) -> 1.2b10 (wired into doresize)
--> 1.2b10a (the paint-in-doresize gadget fix).
-
-**Hardware proof, 21.7.26.** `ccon-b7` under CCON, wide -> shrunk ->
-grown back. At the shrunk width the ruler re-wraps to `..90....:..10`
-/ `0` and the marker to `B7-EN` / `D` - splitting mid-token across
-rows, which is REFLOW, not preservation, and is what stock `CON:` was
-seen doing in its own run. Grown back, the text region of the before
-and after screenshots is PIXEL-IDENTICAL: 0 differing pixels across
-406220, once aligned for a 1px vertical offset (the window was regrown
-to 720px against the original 699). Not "looks right" - bit-for-bit.
-
-**A gadget regression, found and fixed (1.2b10a).** The 1.2b10 reflow
-put `eraseedit()` at the top of `doresize()` for its model side effect
-(clearing the edit line's mirrored cells so they do not reflow as
-client text). But `eraseedit` also PAINTS, and by then Intuition has
-resized the window while `curcon.rows/cols/topy` are still the old
-geometry - so its `drawmodelrow`/`RectFill` ran at old coordinates
-into the new smaller window, over the border where the sizing gadget
-lives, and it was never redrawn. A/B on hardware: gadget present on
-b9, gone on b10. Fixed with `dropeditmirror()` - the model clearing
-with none of the painting, which was pure waste anyway since
-`doresize` clears and redraws right after.
-
-**Regression gates re-run under 1.2b10a and clean:** `ccon-bisect`
-(five cases), `ccon-progress`, `ccon-ichdch` - the b8 theft-pattern
-tests, the direct gate on the `eraseedit`/`drawedit` paths stage 3
-disturbed. All match their printed expectations, no missing text or
-artefacts, gadget intact.
-
-**How it was done without rewriting the ring.** The audit first
-called this "a rewrite of the ring's representation". That was wrong,
-and cheaper was available: the grid stays exactly as it is, and the
-ONLY thing added is a per-ring-row flag saying whether a row is a
-soft-wrap continuation (`sw`, one byte per row against three existing
-planes of sbmax*cols). With that, `reflowring()` can rejoin logical
-lines and re-wrap them at any width. visrow/sarow/ssrow, selvidx,
-redraw, screenscroll and drawmrow were all left untouched.
-
----
-
-### B8 - resizing a raw-mode client (Ed) clips its content and leaves stale pixels
-
-**Where:** `doresize()`, the raw path - `curcon.rawmode = TRUE`, no
-alternate screen (Ed does not use `?47h`, unlike More).
-
-**Found:** boot testing after B7, 21.7.26. NOT the original audit, and
-NOT a B7 regression - see below.
-
-**Trigger:** open Ed (or any raw client that owns the screen and does
-not re-render on a size event), type a line that wraps, resize the
-window.
-
-**Symptoms, two distinct ones:**
-
-1. The client's content is CLIPPED to the new width and the tail is
-   lost - the wrapped continuation does not re-wrap and does not come
-   back on grow.
-2. Growing the window back leaves STALE PIXEL FRAGMENTS from the old
-   wide layout scattered in the newly-revealed area (`w`, `d`, `l r`,
-   `u` in the repro), which a later click only partly clears.
-
-**This is NOT B7, and NOT a B7 regression - proved by A/B on
-hardware.** The same Ed session, the same resize, run under 1.2b9 (no
-reflow at all) and 1.2b10a (the shipped reflow), behaves IDENTICALLY:
-same clipping on shrink, same stale fragments on grow, tail
-unrecoverable in both. So the reflow neither causes nor cures this -
-in raw mode its rewrap never becomes visible (the shrunk view clips
-rather than re-wrapping, in both builds). B7's cooked-mode fix stands.
-
-**Why the two problems are separate:**
-
-- Problem 1 is largely the CLIENT's: a raw client positions its own
-  screen and only re-lays-it-out if it handles `IECLASS_SIZEWINDOW`.
-  This Ed apparently does not, so nothing re-wraps its text. CCON
-  cannot re-wrap it either, because in raw mode the ring holds a
-  screen the client drew, not a transcript of logical lines - the
-  reflow's premise (soft-wrap flags marking continuations) does not
-  hold for content the client positioned itself. Whether CCON should
-  even reflow in raw mode is an open question; the evidence says its
-  effect is currently invisible there anyway.
-- Problem 2 IS CCON's: after a resize the newly-exposed area should
-  come up clean and it does not fully. The `doresize()` clear +
-  `redraw()` is leaving remnants in the raw path. This is the
-  tractable half and the place to start.
-
-**ROOT CAUSE FOUND (22.7.26), telemetry-confirmed.** `doresize()` NEVER
-RUNS for Ed. The main loop's window-port drain was skipped whole for a
-raw client with the chain on and an evmask
-(`IF (ihon = FALSE) OR (c.evmask = 0)`), and `doresize()`'s only caller
-is `IDCMP_NEWSIZE` inside that drain - so a resize of Ed was never
-seen. A one-line telemetry at `doresize()`'s top logged 20 `rawmode=0`
-entries across cooked-shell resizes and ZERO for Ed's resizes. That
-single fact explains BOTH symptoms at once: CCON never repaints
-(problem 2), AND the `IECLASS_SIZEWINDOW` report - emitted at the end
-of `doresize()`, the class-12 report Ed asks for with `CSI 12{` - is
-never sent (problem 1). It also explains why the b9/b10a A/B was
-identical: the reflow lives in `doresize()`, which never ran for Ed.
-The M8 (0.18) claim that "Ed re-draws itself to the new size" was
-therefore NEVER TRUE - it was never exercised.
-
-**A FIX WAS ATTEMPTED (1.2b15) AND REVERTED.** Draining the port always
-(with `parked` suppressing only the key/mouse/menu classes) made
-`doresize()` run for Ed - confirmed, the log then showed `rawmode=1`
-entries, and the resize repaint worked. But it made Ed WORSE:
-
-- With the `IECLASS_SIZEWINDOW` report enabled (its first-ever
-  delivery), Ed's input parser desynced - garbage in Ed's command
-  line ("blue ARexx commands"), an unclosable window. The report goes
-  as 8-bit CSI (`$9B`); whether Ed accepts that vs 7-bit `ESC[` is the
-  same client-specific split that bit the b42 arrow keys.
-- With the report DISABLED (1.2b15b, repaint only), the desync
-  REMAINED: arrow keys still brought up Ed's command line, and Ed's
-  edit area stayed stuck at the old size (it never learns it grew). So
-  `doresize()` merely RUNNING for Ed disrupts it, even sending Ed
-  nothing - the interaction is deeper than the report.
-
-Reverted to 1.2b14: shipping an Ed input regression to fix cosmetic
-stale pixels is the wrong trade, and untangling it needs Ed's actual
-raw-mode resize protocol, not more blind boot tests.
-
-**Status: open - root cause understood, a real fix needs dedicated
-work on the raw-client resize protocol (which report shape Ed accepts,
-whether to reflow raw content at all, how Ed re-measures). NOT a
-quick fix, and the current cosmetic-only impact (stale pixels on a raw
-client's resize) does not justify the risk of another Ed regression.
-The telemetry (`dbglog` + a line at doresize's top) and the 1.2b15
-drain change are recorded here and in git (reverted) for whoever picks
-this up.**
-
----
-
-## 2. Performance
-
-All of these sit in per-keystroke or per-byte paths, which is where
-7MHz is actually felt.
-
-### P1 - `curattr()` called once per cell in the main text path
-
-**Where:** `render()` :3388.
-
-```
-FOR j2 := 0 TO fit - 1
-  m[j2] := curattr()
-ENDFOR
+### A2 — `ACTION_DISK_INFO` zeroes 36 bytes through an unvalidated client BPTR: `arg1 = 0` wipes low memory
+
+**Where:** `dopkt` 1522–1526.
+
+```e
+    id := Shl(pkt.arg1, 2)      -> BPTR to InfoData
+    zp := id
+    FOR i := 0 TO 8
+      zp[i] := 0
 ```
 
-`curattr()` calls `fgpen()`, which does up to five `curcon.`
-indirections and branches. That is a nested call per character on the
-hottest output loop in the program - an 80-column line pays 80 of
-them. Nothing in the loop can change the SGR state.
+`arg1` is the only packet argument in the dispatch that is *written
+through* with no validation. A client passing NIL (a failed
+allocation it never checked) makes `id = 0` and the loop zeroes
+addresses 0–35 — including ExecBase's pointer at 4 — before
+`disktype`/`volumenode` land there too. Pre-existing (1.2.1-era, not
+a regression), same class as audit4's D1: READ/WRITE buffer trust is
+inherent to the protocol and shared with stock handlers, but this is
+the one case where **we** proactively write through a client pointer,
+and it is one line to guard.
 
-**Fix:** hoist - `at := curattr()` before the loop.
+**Reachable:** any buggy client calling Info() on a console with a
+NIL InfoData. Not reachable from correct DOS calls.
 
-### P2 - `Mod`/`Div` on a power-of-two constant
-
-**Where:** `enqueue()` :5509, `inavail()` :5516, `satisfyreads()`
-:5539.
-
-`INQMAX` is 2048. Each `Mod(..., INQMAX)` is a DIVS, and `inavail()`
-is a loop condition. The right idiom is already in the file for the
-input ring (`ihring + Shl(n AND (IHMAX - 1), 5)`) - it just never
-reached the byte queue.
-
-**Fix:** `AND (INQMAX - 1)`.
-
-### P3 - history lookups do a DIVS per entry, per keystroke
-
-**Where:** `sgfind()` :4030, `srfind()` :3761, `histmatches()` :4084,
-`histload()` :4093 - all `Mod(ghtotal - 1 - idx, HISTMAX)`.
-
-`HISTMAX` is 200, not a power of two, so it is a real division.
-`sgfind()` runs from `drawedit()` on EVERY keystroke and walks all 200
-entries: worst case ~200 DIVS (~140 cycles each on 68000, ~4ms) plus
-200 `StrLen`s of up to 400 bytes, per keypress.
-
-**Fix, two independent halves:**
-
-- replace the `Mod` with a decrementing index and a manual wrap
-  (`i--; IF i < 0 THEN i := HISTMAX - 1`)
-- give `sgfind()` an early `RETURN` after it sets `sghost`. It
-  currently guards with `IF curcon.sghost = NIL` INSIDE the FOR and
-  still iterates to 200 after a hit. `srfind()` has the same shape
-  (`IF got = FALSE` inside the loop).
-
-Note: the `Mod`-on-negative class already bit this codebase once -
-todo.md:63, `hist[Mod(-1,32)]` on empty history. Current call sites
-are bounded (`avail := Min(ghtotal, HISTMAX)`), so this is a speed
-fix, not a correctness one - but the manual-wrap form removes the
-class entirely.
-
-### P4 - `curcon.` indirection in the paint loops
-
-Every `curcon.cols` is a load of `curcon` followed by a load of the
-field; E will not hoist it. In `drawmrow()`, `drawselrow()`,
-`drawmodelcells()` and `render()`'s inner loops that is several
-redundant loads per iteration.
-
-**Fix:** cache `c := curcon` as a `PTR TO console` local at the top of
-the paint procs and use `c.cols`. Shortens the lines as a side effect.
-
-Same family, smaller:
-
-- `drawselrow()` :2135-2137 calls `selvidx(r)` three times for one `r`
-- `drawmrow()` :1992-1994 computes `Mul(idx, curcon.cols)` three times
-- `inslines`/`dellines`/`scrollup`/`scrolldown` do 6 `Mul`s per row via
-  the `visrow`/`sarow`/`ssrow` trio
-
-### P5 - `savehistfile()` on every Enter
-
-**Where:** `dovanilla()` commit path :4210; `savehistfile()` :5060.
-
-Each call is `tcresolve('L:')` (a `LockDosList` + a `LOCATE_OBJECT`
-round trip) -> `FREE_LOCK` -> `FINDOUTPUT` -> up to 200 lines rewritten
-in 2KB `WRITE`s -> `END`. Roughly 6+ synchronous packet round trips and
-up to ~16KB of file I/O, and the handler task is blocked in
-`WaitPort(fsport)` for all of it - so EVERY CCON: window this process
-serves stalls, not just the one that pressed Enter.
-
-The reasoning for moving off last-window-close (todo.md:1474) is
-right; the implementation is a full-ring rewrite where an append would
-do.
-
-**Fix as applied (1.2b11): append, no persistent handle.** Each commit
-now `FINDUPDATE` (open without truncating) -> `SEEK` to end -> `WRITE`
-the one new line -> `END`. Four packets regardless of history length,
-and no truncate-and-rewrite-every-block. `histremember()` returns
-whether it actually appended (not a dedup'd repeat) so the file tracks
-the ring, and `histfilelines` counts the file so the append path trims
-with a full `savehistfile()` once the file reaches 2x the ring cap -
-bounding it to `[0, 2*HISTMAX)` lines and paying the rewrite only once
-every HISTMAX commits. The first write on a fresh system goes through
-`FINDOUTPUT` (reliable create) rather than trusting `FINDUPDATE`'s
-create-on-missing.
-
-The persistent-handle option (keep the file open across commits) was
-rejected: it is shared state to release on every teardown path
-(`conclose`, and `ACTION_DIE` once B5 exists), and the per-commit open
-is cheap next to the block rewrite it saves. The dirty-flag + timer
-option was rejected too - it reintroduces the crash-loss window that
-todo.md:1474 deliberately moved away from.
-
-**Status: FIXED in 1.2b11, hardware-verified 22.7.26.** The on-disk
-`L:ccon-history` was inspected directly after a real session: it grew
-by append with new commands at the end in order, zero consecutive
-duplicate lines (dedup gate held across a whole session), no
-corruption, and reloaded cleanly across a reboot. The trim-at-2x path
-is the existing `savehistfile()` on a counter, verified by
-construction.
-
-**Still worth a comment at minimum (NOT done here):** `fscall()` has no
-timeout on `WaitPort(fsport)`. A wedged or spinning-up filesystem
-freezes every console this process serves - including the one that
-would display the error. This is on the Tab path too, not just Enter.
-Left open as its own small item.
+**Fix:** before the Shl:
+`IF pkt.arg1 = 0 THEN (ReplyPkt(pkt, DOSFALSE, ERROR_BAD_NUMBER); RETURN)`.
 
 ---
 
-## 3. Consistency and hardening
+### A3 — `dodrop()` skips the accept-time reset trio: the audit4-X3 prediction, come true
 
-Not bugs. Each is a place where the invariant is held by argument
-rather than by code.
+**Where:** `dodrop()` 2338–2353; the pattern it misses: `dowrite`
+1614–1617, `swaccept` 1748–1751, `ihkey` 7389–7391.
 
-### H1 - `port` is shadowed in the two procs where it deadlocks
+A drop is "input, same manners as a keystroke" (its own comment), but
+between `flushout` and the insert it runs only `snaplive()` — not the
+`IF curcon.sbsrch THEN sbexit()` / `clearsel()` / `tcclose()` trio
+that both accept siblings carry (the audit3-C9 fix relocated exactly
+there because `snaplive()` deliberately does not do it itself — the
+1610 comment says every caller must). Three consequences:
 
-`loadhistfile()` :5011 and `savehistfile()` :5061 both declare a local
-`port:PTR TO mp` over the global packet port.
+1. **Ctrl+R scrollback-search active** (`sbsrch`): the drop
+   pasteinserts into the *match* line while the user's real line sits
+   stashed; `sbsrch` stays TRUE, so the next keystroke feeds the
+   search fragment (`sbadd` → `sbfind` yanks the view to a stale
+   match) and Esc restores the stash — **the dropped path silently
+   vanishes**. Audit3 C9's exact shape, reintroduced on the newest
+   input path (third sighting of this species).
+2. **Completion menu open** (`tcactive`): the path inserts under the
+   frozen menu; `tcreplace`'s spans are stale and the next Enter is
+   eaten by the menu-close guard instead of committing.
+3. **Standing highlight:** output kills it, keys kill it, a drop
+   leaves it standing. Cosmetic.
 
-Correct today - `fscall()`'s `IF tport = port THEN RETURN 0`
-self-deadlock guard resolves `port` in its own scope. But any future
-edit inside those two procs that means "our packet port" silently gets
-the filesystem's port, in the two procs where that mistake hangs the
-machine.
+**Reachable:** (1) is four user actions, no client needed.
 
-**Fix:** rename the local to `fsp`.
-
-### H2 - `wcq` depth is a bare literal
-
-`RDMAX`, `WQMAX`, `INQMAX`, `TCMAX`, `IHMAX` are all named. The
-WAIT_CHAR queue is `wcq[8]` (:208) with `curcon.wcn >= 8` hardcoded at
-:906.
-
-**Fix:** `WCMAX=8` alongside the others.
-
-### H3 - `condispose` has no safety net for the model planes
-
-`condispose()` :700 frees the ten E-strings but not `sb`/`sa`/`ss`/
-`altm`/`alta`/`alts`/`tf`.
-
-Currently sound: `closewin()` is only ever called from `conclose()`,
-and its `win = NIL` early-return case provably cannot have allocated
-planes (`openwin()` returns before the ring allocation on failure).
-But that is an invariant held by argument, and `condispose` is exactly
-where a future path would break it.
-
-**Fix:** NIL-checked `Dispose` calls for all seven. Costs nothing and
-makes the proc self-evidently complete.
-
-### H4 - `drawedit` lacks the `ancx >= cols` guard `eraseedit` has
-
-`eraseedit()` guards it (:3449); `drawedit()` (:3545) does not.
-
-It happens to work out - the first mirror iteration computes `n = 0`
-and rolls to the next row consistently with the blip math at :3634-3646
-- but two procs that must agree on the same anchor disagreeing on its
-legal range is the kind of thing that bites on the next edit.
-
-**Resolved 1.2b3: COMMENT, and the guard would have been WRONG.** The
-audit offered "add the guard, or a comment"; that was a false choice.
-`ancx = cols` is the legal pending-wrap anchor and the editor still has
-to paint there - a guard would have made the typed line invisible until
-the next write moved the anchor. Confirmed on hardware: at the
-margin-parked prompt in the B1 repro, typing renders normally on the
-row below. The comment now in `drawedit` says why the asymmetry with
-`eraseedit` is correct (eraseedit's guard is about an inverted
-RectFill, a pixel concern `drawedit` does not have).
-
-### H5 - `ihdrop` is write-only
-
-Incremented at :4639, never read.
-
-**Fix:** surface it (title bar under a debug flag, or on the
-`CSI n{` report path) or state in the comment that it is a
-post-mortem field read only under a debugger.
+**Fix:** mirror 1614–1617 after the win-NIL guard — or do X1 below
+properly and give all three sites the one `acceptreset()` this file
+now owes twice over.
 
 ---
 
-## 4. What is right
+### A4 — `lockpath()` cannot tell a failed parent hop from the root: a wrong path is inserted, not nothing
 
-Worth recording, because several of these are things that are
-normally got wrong and they are the reason the rest of the file is
-auditable at all.
+**Where:** `lockpath()` 2456, 2462; `fscall()` 7522–7524; the
+contradicted contract at 2428–2430.
 
-**The no-DOS rule and its two escape hatches.** Recognising that
-`DoPkt` waits on `pr_MsgPort` - the same port clients send to - and
-then building two DIFFERENT legitimate escapes: a throwaway helper
-process with its own `pr_MsgPort` for `OpenDiskFont` (:1419), and
-hand-rolled exec-level packets on a private reply port for the
-filesystem (:4786). Most handlers deadlock here and never learn why.
+```e
+2456        par := fscall(fl.task, ACTION_PARENT, cur, 0, 0)
+...
+2462    cur := par                  -> par = 0 on the root: the walk ends
+```
 
-**Pointer validation as a discipline.** `conok()` (:608) checking
-every console pointer arriving from `fh_Arg1` or a ring slot before
-trusting it - and the comment noting that a LATER console could reuse
-the same heap address, so scrubbing the ring (:732) is not redundant
-with the list check. Right paranoia, right place.
+`fscall` returns only `res1`; ACTION_PARENT's failure (res1=0, reason
+in the discarded res2) is indistinguishable from reaching the root
+(also 0). A mid-walk failure ends the walk early with `ok` still
+TRUE, and the emit loop crowns the last-collected *directory* segment
+with `":"` — `sub:file` instead of `DH0:Work/sub/file`, inserted at
+the cursor as if typed. The block comment promises the opposite:
+"FALSE = a hop failed … insert nothing rather than something wrong" —
+the guard exists for EXAMINE failure (2458–2459) and overflow
+(2448–2449), but not for the one call whose failure hides inside its
+success value.
 
-**The chain/list concurrency design is correct for stated reasons.**
-Single-writer `ihhead`/`ihtail` (lock-free, sound on 68k for aligned
-longs); `Forbid`-bracketed list mutation with the note that
-input.device is a TASK so `Forbid` genuinely holds it off; `armed` set
-last in `openwin` and cleared first in `closewin` so a half-built
-window takes nothing. Three independent layers, each justified rather
-than assumed.
+**Reachable:** ACTION_PARENT allocates a lock; under the classic 68k
+memory squeeze or an FS hiccup it fails with res2=ERROR_NO_FREE_STORE.
+Rare — but the failure mode is silent wrong text on a command line,
+plausibly executed against the wrong file.
 
-**Every parked packet is replied before the memory goes away.**
-`closewin()` (:1723) covers this on both the windowed and windowless
-paths; the `wcq`/`rdq` drains and `flushwq()` are unconditional.
-Unreplied packets are the single most common way a handler hangs a
-machine, and it is covered.
+**Fix:** an `fscall2(..., res2ptr)` variant that reads
+`fspkt.pkt.res2` after the wait; treat `(par = 0) AND (res2 <> 0)` as
+`ok := FALSE`. One extra check at one call site.
 
-**Degraded modes instead of refusals.** Failed chain hookup -> IDCMP
-fallback. Failed ring allocation -> console runs without scrollback.
-Failed helper -> `OpenFont`. Failed resize realloc -> drop the model
-rather than render through a wrong stride. Failed `ObtainBestPen` ->
--1 and no ghost. The right posture for a 2MB target.
+---
 
-**Reading the real binaries instead of guessing.** The `'CCON'` vs
-`'CON\0'` DISK_INFO finding (:970) - disassembling ROM shell 47.47 at
-`$669A` to discover that answering `'CON\0'` makes the shell keep its
-OWN line editor - would have been unfindable by experiment. Same for
-Ed's report dispatcher at `$1708` and the `$9B` vs `ESC[` split
-between `ihreport` and `rawcsikey`.
+### A5 — `doresize()`'s `clearsel()` repaints at the OLD grid into the already-resized window
 
-**The commentary.** It records why, records what was verified against
-what was assumed, and records abandoned designs and the reason they
-were abandoned (b28's pilcrow markers; the parked `tcscancmd` at
-:3163). That is what made this audit possible - intent could be
-checked against implementation instead of reverse-engineered from it.
+**Where:** `doresize()` 3374 (before `gridcalc()` at 3391) →
+`clearsel()` → `selrepaint()` (rmax clamped to the OLD `rows - 1`) →
+`drawselrow()` (paints all OLD `cols`).
+
+The b8 lesson — old-grid paint overdraws the resized window's border,
+and the layer covers border pixels — is documented on **both
+neighbors** of this call: `altpop()` three lines above ("the paint
+half runs at the OLD grid and overdrew the resized window's border")
+and `dropeditmirror()` below ("its PAINT ran at the old geometry into
+the already-shrunk window, wiping the sizing gadget"). `clearsel()`
+between them still repaints every selection row full-width at old
+coordinates when a standing highlight dies with the resize. The final
+heal RectFills only the inner region — border pixels stay overpainted
+until Intuition redraws the frame. With `wasalt` there is a second
+facet (the repaint shows restored transcript under the client's alt
+page) but the full repaint below heals that one immediately.
+
+**Reachable:** any window with a standing highlight, shrink it. Also
+during a More session (More holds no event mask, so drag-select works
+mid-page).
+
+**Fix:** replace the call with a state-only clear
+(`curcon.sello := -1; curcon.selhi := -1`) — the full repaint below
+owes the pixels anyway, the same reasoning b8 applied to `altpop()`.
+`clearsel()` itself stays for its other callers.
+
+---
+
+### A6 — the mid-resize re-snapshot captures the edit-line mirror for a cooked alt-screen client
+
+**Where:** `doresize()` 3493–3506: `drawedit()` (3496) runs before
+`altsave()` (3499); contrast the `?47h`-time snapshot, which runs
+inside the render bracket after `eraseedit()`.
+
+For a **cooked** client holding the alternate screen, `drawedit()`
+mirrors the edit line's cells into the model and `altsave()` then
+snapshots those rows — so the eventual `?47l` restores the edit line
+as phantom transcript text, in the model, archived into scrollback.
+A miniature of the exact wound class b7 closed ("nothing of the
+client's page ever touches the ring" — here it is our own editor's
+page). Raw clients — More and Ed, the only real alt-screen users —
+are unaffected (`cursdraw` is pixels-only), which is why nothing has
+been seen. Found independently by two passes.
+
+**Reachable:** only a cooked client that sends `?47h`, then a resize,
+then `?47l`. No shipped client does this today; the invariant is
+stated absolutely, so it is a finding, not a note.
+
+**Fix:** hoist the `IF wasalt THEN altsave()` block above the
+raw/cooked paint block (raw indifferent, cooked snapshots a clean
+model). Do **not** merely reorder drawedit after altsave inside the
+cooked arm — `drawedit`'s `edroom` can scroll and desync `altsbtop`.
+
+---
+
+### A7 — the drop path uses the fs plumbing without `dotab`'s NIL wall
+
+**Where:** `dodrop()`/`droppath()`/`lockpath()` (all via `fscall`);
+the guard the sibling carries: `dotab()` 8264–8265
+(`IF (fsport = NIL) OR (fspkt = NIL) OR (fsfib = NIL) OR (fsname = NIL) … RETURN`).
+
+If `fspkt`/`fsfib`/`fsname` failed to allocate at mount (main()
+tolerates it), a drop writes packet fields through NIL — or hands the
+target filesystem a zero FIB BPTR, making **it** write 260 bytes at
+address 0. Near-theoretical (alloc failure at mount + a drop), but
+the one-word-asymmetry class again: the guard exists ten screens away
+in the exact sibling. (`loadhistfile`/`savehistfile` share this
+pre-existing exposure; noted.)
+
+**Fix:** `dotab`'s guard line at the top of `dodrop()`.
+
+---
+
+### A8 — `curfill()` clobbers a borrowed rastport's AreaPtrn
+
+**Where:** `curfill()` 3864–3872.
+
+`om := drawmode` is saved and restored; `areaptrn`/`areaptsz` are
+unconditionally forced to NIL/0 — even when the ghost pattern was
+never installed, and even on a **borrowed** CTerm frame, where winact
+ghosting explicitly applies and any pattern the owner keeps on its
+own rastport is silently destroyed by every cursor paint. Owned
+windows: harmless.
+
+**Fix:** save/restore both fields beside `om` — the three-line shape
+the drawmode already uses.
+
+---
+
+### A9 — a full input queue eats a requested close-gadget click whole
+
+**Where:** `doclosew()` 3540–3550 → `ihreport()` 7472 (room check
+fails → silent RETURN).
+
+For the Ed path the click's only effect is the queued class-11
+report; with `inq` full (wedged client, ~2 KB backlog) the report is
+dropped and there is no fallback — no report, no EOF, no closereq.
+Stock discards *unrequested* clicks; this discards a **requested**
+one. Narrow (a wedged client wasn't going to run its quit flow
+anyway) and retryable once the queue drains.
+
+**Fix (if wanted):** `DisplayBeep(NIL)` when the room check fails on
+this path (the C5 audibility rule), or a one-slot pending flag
+replayed from `inputarrived()`.
+
+---
+
+### A10 — `alteat` survives non-printable output: FF/TAB then a working LF loses that LF
+
+**Where:** armed 5146; cleared at 5560 (printables), 5779 (the eaten
+LF), 5842 (render exit) — but not by FF (5795), TAB spaces, or CSI
+motion.
+
+A hypothetical alt-screen client whose exit packet is
+`?47l · FF · LF` (or TAB then LF) loses a newline doing real work.
+Ed's proven packet (`?47l ESC8 \n`) and More's (nothing after
+`?47l`) are unaffected. Render-scoped by construction, so the
+exposure is strictly in-packet.
+
+**Fix:** clear `alteat` in the FF and TAB branches ("any output
+disarms"); leave CSI motion armed — that is ESC8's own family, and
+disarming there defeats the feature.
+
+---
+
+### A11 — multi-icon drops are whole-or-nothing per *icon*, not per drop; cooked overflow is silent
+
+**Where:** `droppath()` 2412–2417 (raw: per-path `inqroom` + beep in
+`dodrop`'s FOR loop); `pasteinsert()` 4407 (cooked: per-char
+`IF l < cap`, no else).
+
+A 5-icon drop into a nearly-full raw queue can deliver icons 1, 2, 3,
+5 — one beep, a silently incomplete *and reordered-by-omission*
+argument list. The todo spec's "a drop that does not fit beeps
+instead of half-arriving" treats the drop as the unit. Cooked side:
+characters past `edcap` drop with no signal at all. Both need a
+genuinely full queue / very long paths, hence hygiene.
+
+**Fix:** resolve all paths first, test room once, beep-and-abort the
+whole drop; cooked: beep when any character was refused.
+
+---
+
+## Maintenance (X) and performance (P)
+
+- **X1 — `acceptreset()` is now owed three times.** audit4's X3
+  (factor the accept-time reset list shared by `dowrite`/`swaccept`)
+  was not done; b3 wrote the third copy and lost three entries in the
+  copying (A3). The two old sites are verified in sync today —
+  line-for-line — but the prediction has now come true once. Factor
+  it while A3 has the sites open.
+- **X2 — `doactive()` is the one glass-touching event path with no
+  pre-flush, and the argument for why that is sound is written
+  nowhere.** It holds only because model and glass lag *together*
+  under accept-then-render and redress reads values the pending bytes
+  cannot have moved (`reanchor` runs only inside `dorender`). If a
+  future change lets `wob` bytes move `cx/cy/ancx/ancy` before
+  render, this becomes a live desync site with no warning comment.
+  Either add the (cheap) `flushout` for uniformity or write the
+  two-line coherence argument down. Found by two passes
+  independently.
+- **X3 — audit4 X2 still owed:** `flushout()`'s win=NIL discard arm
+  still lacks its "unreachable by construction; kept as a net"
+  comment (byte-identical to the 1.2.5b1 baseline).
+- **X4 — the b7 reflow's correctness depends on `altpop()` succeeding
+  whenever `altvalid`** (a FALSE return there would archive the
+  client's page — the exact b7 wound). Unreachable today; one
+  sentence at the `altdrop()` belt would keep it that way.
+- **X5 — stack headroom note:** `droppath` + `lockpath` add ~2.0 KB
+  of frames (pb 620 + tb 560; segb 400 + sgo/sgl 192 + nb 110) on
+  E's 10000-byte runtime stack. Fits with room; remember it the next
+  time a buffer joins this call chain.
+
+- **P — the parked `fscall` timeout (old audit2 P6) got its third
+  caller family and its most casual trigger yet.** Tab/Enter/first
+  open could always hang every CCON window on a wedged filesystem;
+  drag and drop now does it with a mouse gesture, up to 3+hops calls
+  per icon. Both feature passes flagged the escalation. Still his
+  call — but the re-decide note this ledger carries (below) now has
+  a stronger case than when audit3 wrote it.
+- **P — carried, all confirmed still accurate at 1.2.6b3:**
+  `scrollview()` full-redraw + `settitle()` per wheel tick (audit3
+  P1 — still the largest interactive cost on 68k); `histpersist`
+  blocks the process per Enter (audit3 P3, parked design trade);
+  reflow doubles peak model memory (audit3 P4); audit4's P1–P3
+  render notes (WAIT_CHAR pollers forfeit aggregation; `vblankscan`
+  worst-case-on-blank; `dffull` RectFills a blank screen). None
+  worth code until a client or a benchmark row says otherwise.
+
+---
+
+## Verified sound
+
+The load-bearing re-verifications, condensed from all four passes:
+
+- **The audit4 fixes landed exactly as prescribed.** D1: negative-len
+  guard at `dowrite` 1602–1605 (reply -1/ERROR_BAD_NUMBER, parity
+  with `swaccept` 1744, packet still replied; a negative-len write
+  stashed by `swaccept` re-dispatches into the same reply). D2:
+  `vbrecheck()` 4628–4631 carries the prescribed line *including the
+  ELSE arm* for LINES=0 consoles, called at all three prescribed
+  seams (`pastehintroom` 4519, `edroom` 5881, dotab menu loop 8334);
+  the warning was heeded — `drawedit()` contains no vblank write; an
+  exhaustive `screenscroll()` caller sweep found no new unguarded
+  site. D3: `dfd[tmp] := 0` at 683 in the canonical init loop.
+- **The choke-point discipline holds at 1.2.6b3.** Every
+  model/glass-observing path flushes first — checked each: END 1388,
+  READ 1430, WAIT_CHAR 1452, SCREEN_MODE 1475, dowrite's sync/join
+  paths, conclose 1265, doiconify 2490, doresize 3346, doclosew 3537
+  (the class-11 report included), selmouse 4123, dopaste 4281,
+  dovanilla 6756, dorawkey 7063, dodrop 2341. `flushwq()` on every
+  drag-death path: release, resize, closewin (windowed and
+  windowless), the lost-button-up belt; iconify mid-drag legally
+  re-parks and replays. The one no-flush exception is argued sound
+  and is X2.
+- **All 15 SELECT packet cases reply on all branches** — checked
+  each, including every error arm, park-and-reply-later path
+  (satisfyreads/satisfywaits/timer/closewin) and the DIE/default
+  arms. `fh_Arg1` conok-validated on END/READ/WRITE and in swaccept;
+  every non-packet entry (UserPort walk with next-taken-first, ring
+  drain with conclose scrub, timer, sweepstash re-entry, AppMessages)
+  resolves its console against the live list before trust. The one
+  write-through-unvalidated-arg1 exception is A2.
+- **Resource lifecycle clean.** New acquires: `gpat` (chip)
+  freed in killhandler — the one allocation E's exit doesn't track,
+  correctly hand-freed; `appwin` removed strictly before its window
+  dies on all three exits (hidewin 2536–2539, closewin 3079–3082,
+  DIE-implies-empty-list); AppIcon and AppWindow never coexist. Old
+  ladders re-verified at the new version: openwin failure unwind,
+  reopenwin stride-mismatch drop, reflow all-four-or-none, alt-plane
+  idempotent drops, pens symmetric across hide/reopen/close,
+  abort-before-delete on the timer clone. `lockpath` frees every
+  intermediate lock on every arm including both failure exits; the
+  drop's argument locks are correctly left to Workbench, resolved
+  before the unconditional ReplyMsg.
+- **The no-DOS rule survived its riskiest feature yet.** Drag-and-
+  drop path resolution is pure hand-rolled packets on the private
+  fsport — no NameFromLock, no Lock, no GetDiskObject anywhere in
+  the delta; AddAppWindowA/RemoveAppWindow/AddAppIconA are
+  workbench.library list-ops, not packet senders; `fscall` still
+  refuses our own port (closing the self-drop deadlock).
+- **The complement cursor's XOR discipline is airtight.** The one
+  non-idempotent primitive has exactly two callers, both protected:
+  `cursdraw` self-erases first; `drawedit`'s blip paints full-depth
+  JAM2 Text over the cell before every fill. Erase is
+  repaint-from-model — idempotent by construction, the right erase
+  for an XOR mark. `curfill` runs only outside the masked bracket
+  (render restores mask $FF before any caller), and both fills are
+  erased full-depth before the next masked render. `winact` is
+  ground-truthed from WFLG_WINDOWACTIVE at both open sites, kept
+  current by always-on frame classes; `doactive`'s three guards
+  (same-state, win-NIL, viewoff) each hold. `gpat` is
+  NIL-survivable at its one read site.
+- **The b5–b8 Ed machinery is internally consistent.** The stale-
+  evmask hazard is closed twice over (SCREEN_MODE 0 clears the whole
+  mask — the comment even names Ed's missing CSI }; closewin clears
+  it too). `alteat` cannot cross a packet, a console, or an event
+  (armed only in-render, killed at render exit; the residual
+  in-packet case is A10). The altpop/altsave ordering around
+  gridcalc is right (dims compared old-to-old, reflow reads real
+  transcript); altsave-at-new-geometry fails soft to the pre-b11
+  behavior; the class-12 report is sent after re-arm, so Ed's
+  repaint lands on the re-armed session; a non-subscribing client
+  degrades exactly as the doc claims.
+- **The E-trap sweep on the delta came back clean.** Every new
+  global DEF-initialized or covered by New()-zeroing + coninit; every
+  new AND/OR site evaluates only safe operands (the C3 nested-IF
+  discipline extended to the new AppMessage drop branch); no new
+  client-derived CopyMem length; no new Mod/DIVU on unbounded
+  values; every drop-path buffer cap checked before its write
+  (lockpath's 398/24/cap chain, droppath's 548/558/620 chain,
+  tcbstr/tcfibname clamps covering both BSTR and C-string FIBs).
+- **Drop-while-X surfaces covered by construction:** scrolled-back →
+  snaplive precedes the insert; iconified → win-NIL guard (the
+  AppWindow doesn't exist then anyway); mid-resize → window ports
+  drain before wbport in the same wake; raw client → whole-path
+  inqroom + one inputarrived; wa_Lock=0 left-outs skipped;
+  drawer/volume drops emit `Vol:dir/` and `Vol:` per spec. Borrowed
+  frames never register an AppWindow (the "CTerm: no drop target"
+  todo row is real) — and a borrowed frame's iconify gadget, if its
+  owner tagged one, is deliberately swallowed by the fwin guard.
+
+---
+
+## The ledger — every prior finding ID, verified against 1.2.6b3
+
+Status re-checked in the source (not just the docs) by the ledger
+pass, 28.7.26. "Fixed" rows were confirmed present; only deltas from
+the old docs' claims are annotated.
+
+**audit1 (1.2b1 pass):** B1 eraseedit theft ✓fixed b6 · B2 resize
+grow ✓b7 · B3 CSI truncation ✓b8 · B4 AUTO retry ✓b7 · B5 ACTION_DIE
+✓b13 · B6 conbysender ✓b12 · B7 width reflow ✓b10a ·
+**B8 raw-resize — the doc said OPEN; it is FIXED** (1.2b25 @
+1c989df: the always-drain with `parked` suppressing only input
+classes; the 1.2b15 "fix reverted" breakage was the ESC[ arrow-key
+bug, misattributed; hardened for mid-alt resize in 1.2.5b7/b8;
+audit1's "Ed does not use ?47h" premise was disproven by the b6
+EDDBG telemetry — Ed brackets its session with the alt screen) ·
+P1 curattr ✓ · P2 Mod/Div ✓ · P3 history walk ✓b16 · P4 curcon
+hoist ✓ · P5 hist rewrite ✓b11 · H1–H5 ✓ (H4 resolved-as-comment,
+by design).
+
+**audit2 (1.2b14 pass):** B9 textattr leak ✓b15 · B10 selcopy LF
+✓b17 · B11 paste spin ✓b17 (subsumed by C4) · B12 runaway freeze
+✓closed, was ls, not CCON · P6 fscall timeout — **still parked**
+(comment present at 7495–7509, WaitPort 7522 timeout-less; see the
+P-note above: exposure widened by dnd, re-decide requested) · H3
+condispose planes ✓b15 · H6 stray bytes ✓.
+
+**audit3 (1.2 pass):** C1 sbmax floor ✓1.2.1 (both directions) · C2
+iconify geometry ✓ (+sbcols belt) · C3 doappmsg conok ✓ (discipline
+extended to the 1.2.6b3 drop branch) · C4 chunk overflow ✓ · C5 raw
+paste ceiling — partial by design (beep ships, tail-pump never
+built; documented) · C6 iconified wq accept+discard — deliberate,
+his call stands (1580) · C7 diskfont close ✓ · C8 icon-less strand
+✓ · C9 snaplive/sbsrch ✓ (relocated to the accept sites — and A3 is
+its third-sighting echo) · C10 edcap ✓ · P1 scrollview wheel —
+**still open** (4679–4693), the big interactive perf item · P2 ✓ ·
+P3 histpersist — parked · P4 reflow peak — parked · X1 ✓ · X2
+wrap-idiom unification — not done (mitigated by C1's floor) · X3 tf
+comment — not done · X4 SGR-cap doc note — not done · X5 255-col
+doc ✓ (plus LINES + paste-limit wording).
+
+**audit4 (1.2.5b1 pass):** D1/D2/D3 ✓ fixed 1.2.5b2 exactly as
+prescribed (verified in detail above) · P1/P2/P3 — accurate,
+unactioned by intent · X1 WODEFER arm — deliberate, unchanged · X2
+flushout comment — **not done** (now this doc's X3) · X3
+acceptwrite factoring — **not done, and its prediction came true**
+(now this doc's X1/A3).
+
+**Genuinely open at 1.2.6b3, the whole list:** A1–A11 above; X1–X5;
+audit3 P1 (wheel redraw), audit2 P6 (fscall timeout, parked), audit3
+P3 (histpersist, parked), audit3 P4 (reflow peak, parked), audit3 C5
+tail-pump (never built, documented), audit3 C6 (deliberate), audit3
+X2/X3/X4 (hygiene/doc debt), audit4 P1–P3 (notes).
+
+---
+
+## Great / Good / Meh / Bad / Terrible
+
+### Great
+
+- **The b6 EDDBG habit paid for the whole ledger.** Capturing Ed's
+  actual exit bytes settled `alteat`'s design, disproved audit1's
+  B8 premise, and turned "fix reverted, cause unknown" into "the
+  arrow-key bug, misattributed" — the read-what-the-client-sends
+  discipline keeps outranking every hypothesis.
+- **`alteat` is a global that provably cannot leak.** Armed only
+  inside render, killed unconditionally at render exit — scope by
+  construction where the language offers none. The right way to do
+  a one-shot in E.
+- **The drop path's packet plumbing.** Hand-rolled ACTION_PARENT
+  walks with per-arm lock hygiene, whole-or-nothing segment
+  buffers, and BSTR/C-string FIB tolerance — the no-DOS rule held
+  through the feature most likely to break it.
+- **The XOR cursor shipped with its hazard already understood** —
+  "repaint is idempotent, a second XOR is not" was written before
+  the code, and the two-caller discipline enforces it.
+
+### Good
+
+- The three-way close protocol's client-shape coverage, including
+  the stale-evmask double-close (SCREEN_MODE + closewin).
+- The altpop/altrestore split and the b8 border lesson applied at
+  the site that taught it.
+- D1–D3 landing letter-perfect, ELSE-arms included — prescriptions
+  are being read, not skimmed.
+
+### Meh
+
+- The accept-reset list existing three times (X1). Twice was
+  "fragile by construction"; three times with a divergent copy is a
+  bug factory in production.
+- `doactive`'s soundness argument living in no comment (X2).
+
+### Bad
+
+- **A1** — six lines, and one of them re-broke the drain loop's
+  oldest rule with the rule's own comment four lines away. Audit3
+  said it about the first iconify, audit4 said it about the accept
+  path, and it is still true: *new seams must re-run the old
+  checklist* — especially the six-line features, because nobody
+  audits six lines.
+- **A4** — a contract stated in the block comment ("insert nothing
+  rather than something wrong") and honored on two of three failure
+  arms. The third arm's failure is invisible in res1, which is
+  precisely why it needed the comment's promise kept.
+
+### Terrible
+
+Nothing. Four audits and a consolidation in, the file's failure
+species has never changed: seams, not confusion. The invariants are
+real, the instruments exist, and every crash-class find in this
+pass is one flag or one line from closed.
+
+---
+
+## Suggested order
+
+1. **A1** — one flag + two lines, crash-class, the release blocker
+   for 1.2.6.
+2. **A3 + X1 together** — factor `acceptreset()`, call it from all
+   three sites; closes the corruption and retires the prediction.
+3. **A2** — one line.
+4. **A4** — `fscall2` + one check.
+5. **A7** — one guard line, while the drop file is open.
+6. **A5** — swap a call for two assignments.
+7. **A6** — hoist `altsave` above the paint block.
+8. **A8–A11, X2–X5** — the hygiene sweep, one sitting.
+9. The P-notes stay notes — except the fscall-timeout re-decide,
+   which now has three trigger families and deserves its sentence
+   in todo.md.

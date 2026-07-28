@@ -127,8 +127,6 @@ is there before you see it draw, and Ed scrolls like butter.
 
 ## [1.2.3] — 2026-07-23 (tag `ccon-1.2.3`)
 
-## [1.2.3] — 2026-07-23 (tag `ccon-1.2.3`)
-
 The masking release, shipped the same day as 1.2.2. After the speed
 release, one measured gap to stock CON: remained: the raw scroll
 blit, ~34ms per full-window ScrollRaster against stock's ~17 per

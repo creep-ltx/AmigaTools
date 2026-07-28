@@ -4233,6 +4233,84 @@ Boot checklist (REBOOT FIRST):
 - [ ] CTerm borrowed frame: no drop target (not ours), nothing breaks
 - [ ] RAM: and a floppy/other volume both resolve correct full paths
 
+## 1.2.6b4 — audit5 Batch A (28.7.26): the blocker + the mechanical guards
+
+AUDIT5 first: the four old audit docs + three roadmaps consolidated
+into ONE ccon/audit.md (fresh A-series, every prior ID re-verified —
+old B8 row was stale, fixed since 1.2b25) + ccon/audit-roadmap.md
+(batches A–E as the b4–b7 ladder). Batch A = A1/A2/A7/A8, BUILT +
+DEPLOYED 28.7.26 (compile clean LARGE, same 3 asm warnings + same
+9-name UNREFERENCED set as baseline; vamos usage smoke green;
+L:ccon-handler = b4, staged ccon-handler-1.2.6b4, .bak = b3).
+
+- **A1 — THE 1.2.6 RELEASE BLOCKER, fixed:** the b1 iconify gadget
+  called doiconify() INSIDE the UserPort drain — hidewin CloseWindows
+  the port being drained, next GetMsg reads through win=NIL (address
+  $56); every gadget click since b1 survived on the luck of what $56
+  holds. Now: new console field `iconreq` (New() zeroes it), the
+  Code=1 branch only sets it, and the iconify runs AFTER `UNTIL im =
+  NIL`, beside closereq — iconreq FIRST, so gadget+EndShell in one
+  drain ends CLOSED (conclose handles a windowless console; the other
+  order would CloseWindow twice). RAMIGA+I keeps its direct call
+  (ihkey runs outside the window-port drain — always was legal).
+- **A2 — DISK_INFO validates arg1:** NIL InfoData now gets DOSFALSE +
+  ERROR_BAD_NUMBER instead of 36 zero bytes written over addresses
+  0–35 (ExecBase pointer included). Guard sits BEFORE ensurewin(), so
+  a malformed packet can't materialize an AUTO window either. NEW
+  TEST CLIENT tests/ccinfo0.e (ccdie's plumbing, DISK_INFO arg1=0,
+  deployed C:ccinfo0) — run it FROM A CCON: SHELL (DISK_INFO routes
+  by sender); prints the res1/res2 verdict either way.
+- **A7 — dodrop gets dotab's NIL wall:** fsport/fspkt/fsfib/fsname
+  checked before any drop resolution (mount-time alloc may fail;
+  droppath/lockpath would write through NIL / hand the filesystem a
+  zero FIB BPTR).
+- **A8 — curfill restores areaptrn/areaptsz** instead of forcing
+  NIL/0 — a borrowed CTerm frame's owner keeps whatever pattern it
+  had on its own rastport; owned windows unchanged.
+
+**Boot test (REBOOT FIRST — handler seglists only reload then;
+`Version L:ccon-handler` must say 1.2.6b4):**
+- [x] iconify gadget on a live shell — parks to AppIcon, double-click
+      restores, transcript intact (the b1 rows, now on the safe path)
+- [x] gadget HAMMERED: iconify/restore five times fast, then gadget +
+      EndShell in quick succession — no guru, console ends clean
+- [x] gadget over Ed — parks and restores like RA+I
+- [x] WAIT window: gadget parks it, restore, close gadget still kills
+- [x] RA+I still iconifies everywhere, incl. a borrowed CTerm frame
+- [x] `ccinfo0` from a CCON: shell — "refused clean", machine fine
+      (from a stock shell it reports not-found: routing, not guard)
+- [x] ghost cursor on an inactive window still checkerboards; blip
+      and block cursor unchanged (A8 touched their shared painter)
+- [x] drop regression: a file, a drawer, a disk icon — paths insert
+      as before (A7's guard must be invisible)
+
+**Boot findings (28.7.26, screenshots 11:47/11:48) — ALL GREEN,
+Batch A is boot-verified.** The 11:47 series walks the full 8-step
+list: live shell survives the gadget and the hammer with transcript
+intact; the gadget-over-Ed run (ed Amiga:ltx-cc11.readme) parks and
+restores with Ed's alt-screen pixel-identical before and after, and
+quitting Ed lands back on a live prompt with the transcript reflowed
+to the window's shape — reflow itself doubling as a regression
+witness. No guru anywhere in the run. The 11:48 pair is the A2
+proof both ways: `c:ccinfo0` from a CCON: shell gets res1=0,
+**res2=115 (ERROR_BAD_NUMBER)** — the guard refusing the NIL
+InfoData exactly as coded — and the same binary from a stock
+AmigaDOS CON: shell gets res1=0, **res2=205
+(ERROR_OBJECT_NOT_FOUND)** — CCON's DISK_INFO sender-routing finding
+no console for a foreign process, the documented negative control.
+Before A2 the first run would have been 36 zero bytes over addresses
+0–35. Ghost/blip/block cursors and icon drops (file/drawer/disk)
+unchanged, A7/A8 invisible as required.
+
+One cosmetic note, not a defect: ccinfo0 prints its "refused clean -
+the A2 guard works" verdict line on ANY res1=0, so the stock-CON:
+run gets the same label with res2=205; the parenthetical it prints
+right after explains the 205 case correctly, so the output stays
+self-explanatory — left as-is.
+
+With A1 boot-green the 1.2.6 RELEASE BLOCKER is cleared; the
+ladder continues at Batch B (b5) per ccon/audit-roadmap.md.
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id
