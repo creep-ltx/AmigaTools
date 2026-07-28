@@ -22,12 +22,25 @@
 -> acceptreset) = 1.2.6b5 BOOT-GREEN same day, all six rows incl.
 -> the A3 repro healed + conbench A/B b4-vs-b5 identical (5.70; the
 -> SGR drift vs the 1.2.4-era baseline is a PARKED perf note in
--> todo.md, not this campaign's). Batch C (A4 fscall2) = 1.2.6b6
--> BOOT-GREEN same day ("no weirdness or inconsistencies";
--> inspection fix, regression surface proven). Batch D (A5 state-
--> only clearsel + A6 altsave hoist) BUILT + DEPLOYED as 1.2.6b7
--> same day — awaiting its boot test (checklist todo.md b7; the A5
--> repro has a real before/after on the glass). E last.
+-> todo.md, not this campaign's — and CLOSED by measurement same
+-> day: a 1.2.4 control probe showed the identical numbers, the
+-> "drift" was the 23.7 baseline measured under different host
+-> conditions; no build convicted, suspects retracted, bisect log
+-> in todo.md b7). Batch C (A4 fscall2) = 1.2.6b6 BOOT-GREEN same
+-> day ("no weirdness or inconsistencies"; inspection fix,
+-> regression surface proven). Batch D (A5 state-only clearsel +
+-> A6 altsave hoist) = 1.2.6b7 BOOT-GREEN same day ("all checks
+-> out", A5 repro healed on the glass). Batch E (A9 + A10 + A11
+-> BOTH ARMS + X2-X5) BUILT + DEPLOYED as 1.2.6b8 — awaiting its
+-> boot test (regression sweep, checklist todo.md b8). Batch E =
+-> 1.2.6b8 BOOT-GREEN same day ("it all works in my testing").
+-> AUDIT5 CLOSED: A1-A11 + X1-X5 all fixed or written down, five
+-> batches boot-green in one day (b4-b8). Perf-note coda: the SGR
+-> numbers were 256-colour WB (his ghost-text test setting, never
+-> reverted) vs the 16-colour baseline - his find, no code involved.
+-> WHAT REMAINS: the 1.2.6 RELEASE LADDER (clean $VER, changelog,
+-> README/doc/readme, tag ccon-1.2.6, GH release, .lha from his
+-> staging) - his call on timing.
 
 # Fix roadmap, fifth pass
 

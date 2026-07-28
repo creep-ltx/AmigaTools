@@ -1721,7 +1721,10 @@ PROC flushout(c:PTR TO console)
   IF c.win = NIL
     c.wolen := 0                -> hidden or never-opened: nowhere to
     RETURN                      -> draw - accept + discard, the parked-
-  ENDIF                         -> write overflow policy
+  ENDIF                         -> write overflow policy (audit5 X3:
+                                -> unreachable by construction - every
+                                -> hide path flushes first; kept as a
+                                -> net, not a live arm)
   old := curcon
   curcon := c
   snaplive()
@@ -2361,7 +2364,7 @@ ENDPROC
 -> drops line up as arguments. Cooked = the edit line (literal insert,
 -> the paste rules); raw = the client's input queue (Ed types it).
 PROC dodrop(am:PTR TO appmessage)
-  DEF i, wa:PTR TO wbarg
+  DEF i, wa:PTR TO wbarg, pb[620]:ARRAY OF CHAR, n, k, total, all
   IF curcon.win = NIL THEN RETURN
   -> audit5 A7: dotab's wall - mount-time allocation of the fs plumbing
   -> may have failed (main tolerates it); droppath/lockpath would write
@@ -2377,31 +2380,66 @@ PROC dodrop(am:PTR TO appmessage)
   acceptreset()
   IF am.numargs <= 0 THEN RETURN
   wa := am.arglist
-  FOR i := 0 TO am.numargs - 1
-    droppath(wa[i])
-  ENDFOR
+  -> audit5 A11: the DROP is the whole-or-nothing unit, not the icon.
+  -> The old per-icon room check could deliver icons 1,2,3,5 of five -
+  -> one beep, a silently reordered-by-omission argument list. Raw:
+  -> tally every argument first (a second resolve per icon at insert
+  -> time - drops are rare, packets are cheap), ONE room check, ONE
+  -> beep refusing the drop whole. The per-icon belt at the enqueue
+  -> stays for the racy-FS corner (a path that GREW between the two
+  -> passes): skip that icon rather than wedge the queue mid-argument.
   IF curcon.rawmode
+    total := 0
+    FOR i := 0 TO am.numargs - 1
+      total := total + dropbuild(wa[i], pb)
+    ENDFOR
+    IF total = 0 THEN RETURN    -> nothing resolved, nothing owed
+    IF inqroom(total) = FALSE
+      DisplayBeep(NIL)          -> C5: the whole drop bounces, audibly
+      RETURN
+    ENDIF
+    FOR i := 0 TO am.numargs - 1
+      n := dropbuild(wa[i], pb)
+      IF n > 0
+        IF inqroom(n)           -> the belt (see above)
+          FOR k := 0 TO n - 1 DO enqueue(pb[k])
+        ENDIF
+      ENDIF
+    ENDFOR
     inputarrived()              -> wake the blocked reader
   ELSE
+    all := TRUE
+    FOR i := 0 TO am.numargs - 1
+      n := dropbuild(wa[i], pb)
+      IF n > 0
+        IF pasteinsert(pb, n) = FALSE THEN all := FALSE
+      ENDIF
+    ENDFOR
+    IF all = FALSE THEN DisplayBeep(NIL)  -> A11 cooked arm: characters
+                                -> past the line's cap were refused -
+                                -> audible, never silent
     drawedit()                  -> one paint for the whole drop
   ENDIF
 ENDPROC
 
--> one dropped icon -> its injected path. The dir-or-file question is
--> answered the only honest way at packet level: lock the leaf under
--> its parent and Examine (failure = treat as file, the path still
--> inserts). Whole-or-nothing into a raw queue, the C5 audibility
--> rule: a drop that does not fit beeps instead of half-arriving.
-PROC droppath(wa:PTR TO wbarg)
-  DEF pb[620]:ARRAY OF CHAR, tb[560]:ARRAY OF CHAR, p, n, i, isdir,
+-> one dropped icon -> its assembled argument (quoted when needed,
+-> blank-terminated) built into the CALLER's pb. RETURNs the length,
+-> 0 = no argument (no lock, resolve failure, oversize). The dir-or-
+-> file question is answered the only honest way at packet level:
+-> lock the leaf under its parent and Examine (failure = treat as
+-> file, the path still inserts). Insertion is dodrop's - audit5 A11
+-> made the DROP the whole-or-nothing unit, so the caller needs every
+-> argument's length BEFORE the first byte lands anywhere.
+PROC dropbuild(wa:PTR TO wbarg, pb:PTR TO CHAR)
+  DEF tb[560]:ARRAY OF CHAR, p, n, i, isdir,
       fl:PTR TO filelock, ol, needq
-  IF wa.lock = 0 THEN RETURN    -> no lock, no path (left-out volumes)
-  IF lockpath(wa.lock, tb, 548) = FALSE THEN RETURN
+  IF wa.lock = 0 THEN RETURN 0  -> no lock, no path (left-out volumes)
+  IF lockpath(wa.lock, tb, 548) = FALSE THEN RETURN 0
   n := StrLen(tb)
   isdir := FALSE
   IF wa.name
     IF wa.name[0]
-      IF (n + StrLen(wa.name) + 2) > 558 THEN RETURN
+      IF (n + StrLen(wa.name) + 2) > 558 THEN RETURN 0
       i := 0
       WHILE wa.name[i]
         tb[n] := wa.name[i]
@@ -2444,16 +2482,7 @@ PROC droppath(wa:PTR TO wbarg)
   pb[p] := 32                   -> the separating blank
   p++
   pb[p] := 0
-  IF curcon.rawmode
-    IF inqroom(p)
-      FOR i := 0 TO p - 1 DO enqueue(pb[i])
-    ELSE
-      DisplayBeep(NIL)
-    ENDIF
-  ELSE
-    pasteinsert(pb, p)          -> literal at the cursor, paste rules;
-  ENDIF                         -> dodrop draws once at the end
-ENDPROC
+ENDPROC p
 
 -> full path of a LOCK, packet-level (fscall - the no-DOS rule bars
 -> NameFromLock; this is the same plumbing tab completion trusts).
@@ -3411,7 +3440,12 @@ PROC doresize()
                                 -> overdrew the resized window's border
                                 -> (doresize repaints at the new grid
                                 -> below anyway)
-    altdrop()                   -> belt: a mismatch already dropped
+    altdrop()                   -> belt: a mismatch already dropped.
+                                -> audit5 X4: the reflow below is only
+                                -> correct because altpop() succeeds
+                                -> whenever altvalid - a FALSE there
+                                -> would reflow the CLIENT's page into
+                                -> history (the exact b7 wound)
   ENDIF
   tcclose()                     -> restores rows at the OLD geometry
   -> audit5 A5: state-only - clearsel()'s repaint runs at the OLD grid
@@ -3981,6 +4015,13 @@ ENDPROC
 -> glyphs repaint invisibly, so no flicker) - but only live: drawedit
 -> has never been viewoff-aware (the b33 lesson), and scrolled back
 -> there is no blip on the glass to redress anyway.
+-> audit5 X2: this is the ONE glass-touching event path with NO
+-> pre-flush, and that is sound today for a written-down reason:
+-> under accept-then-render the model and the glass lag TOGETHER,
+-> and the redress reads only values pending wob bytes cannot move
+-> (reanchor runs inside dorender only). If accept ever mutates
+-> cx/cy/anc* before render, this becomes a live desync site - add
+-> the flushout(curcon) then.
 PROC doactive(on)
   IF curcon.winact = on THEN RETURN
   curcon.winact := on
@@ -4455,7 +4496,8 @@ ENDPROC
 -> content, ZERO new rendering concepts, because it always really
 -> is just one line.
 PROC pasteinsert(b:PTR TO CHAR, take)
-  DEF s:PTR TO CHAR, l, cap, k, c, j, i
+  DEF s:PTR TO CHAR, l, cap, k, c, j, i, all
+  all := TRUE
   i := 0
   WHILE (i < take) AND (b[i] <> 10)
     i++
@@ -4473,12 +4515,14 @@ PROC pasteinsert(b:PTR TO CHAR, take)
         s[curcon.cpos] := c
         l := l + 1
         curcon.cpos := curcon.cpos + 1
-      ENDIF
-    ENDIF
+      ELSE
+        all := FALSE            -> audit5 A11: a printable REFUSED at
+      ENDIF                     -> the line's cap - the caller decides
+    ENDIF                       -> whether that deserves a beep
   ENDFOR
   SetStr(curcon.ebuf, l)
   IF i < take THEN pasteappend(b + i + 1, take - i - 1)
-ENDPROC
+ENDPROC all
 
 -> append len bytes (a raw span, NOT null-terminated - a slice of
 -> the shared clipboard buffer) to the queued paste tail. Allocated
@@ -5850,6 +5894,8 @@ PROC render(buf, len)
       IF curcon.cx > 0 THEN curcon.cx := curcon.cx - 1
       i := i + 1
     ELSEIF c = 9
+      alteat := FALSE           -> audit5 A10: TAB spaces are output -
+                                -> any output disarms the exit-LF eater
       REPEAT
         IF dfon THEN dfputc(32) ELSE outchr(32)
       UNTIL (Mod(curcon.cx, 8) = 0) OR (curcon.cx >= curcon.cols)
@@ -5863,6 +5909,10 @@ PROC render(buf, len)
       -> complaint. list, which does not send ^L, correctly kept scrolling.
       curcon.vblank := TRUE     -> E5: the page is now provably blank -
                                 -> the very state scroll-nl lives in
+      alteat := FALSE           -> audit5 A10: a new page disarms the
+                                -> eater ("any output disarms"; CSI
+                                -> motion stays armed - ESC8's own
+                                -> family, the feature's whole point)
       IF dfon
         -> S3: no RectFill at all - clear the model, flag the rebuild;
         -> dfflush's redraw() paints every row full-width from the model
@@ -7531,7 +7581,16 @@ PROC ihreport(e:PTR TO ihev)
           e.cls, e.sub, e.code AND $FFFF, e.qual AND $FFFF,
           Shr(e.addr, 16) AND $FFFF, e.addr AND $FFFF,
           e.secs AND $7FFFFFFF, e.mics)
-  IF inqroom(StrLen(b) + 2) = FALSE THEN RETURN
+  IF inqroom(StrLen(b) + 2) = FALSE
+    -> audit5 A9: for a class-11 client (Ed) the close-gadget click's
+    -> ONLY effect is this report - a full queue (wedged client, 2KB
+    -> backlog) ate a REQUESTED click in silence: no report, no EOF,
+    -> no closereq. The C5 audibility rule: beep, and the click is
+    -> retryable once the queue drains. Other refused reports keep
+    -> the silent drop (stock discards silently too).
+    IF e.cls = IECLASS_CLOSEWINDOW THEN DisplayBeep(NIL)
+    RETURN
+  ENDIF
   enqueue($9B)
   FOR i := 0 TO StrLen(b) - 1
     enqueue(b[i])
@@ -8475,4 +8534,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b7 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b8 (28.7.26) CCON: LTX console handler', 0

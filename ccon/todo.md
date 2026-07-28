@@ -4482,6 +4482,132 @@ predates b5/b6 (A/B-proven identical) — window is 1.2.5b1..1.2.6b4,
 twelve builds, all staged in L:. Bisect plan in the b7 findings
 below.**
 
+**The SGR-drift bisect plan (parked until he wants it, ~2-3 boots;
+every build in the window is staged in L: by version name):**
+Each probe = `Copy L:ccon-handler-<ver> L:ccon-handler`, reboot,
+one conbench SYNC run at 77x29, read the sgr-colour row (0.64 =
+clean, 1.22 = drifted). Binary search:
+1. **Boot 1 = 1.2.5** (the release, the window's midpoint).
+   - 5.7-class → the drift is inside 1.2.5; boot 2 = **1.2.5b2**
+     (prime suspect there: audit4-D2's vbrecheck at the edroom
+     seam — a visible-model scan that drawedit can hit per flush).
+   - 4.3-class → the drift is inside 1.2.6b1-b4; boot 2 =
+     **1.2.6b2** (prime suspect there: the complement cursor's
+     SetDrMd/RectFill/restore round-trip per render bracket).
+2. Afterwards `Copy L:ccon-handler-1.2.6b7 L:ccon-handler` (or
+   newest beta) + reboot back.
+Two named suspects, one measured verdict — no fix gets designed
+until a build is convicted. If convicted, the fix rides the 1.2.6
+campaign (his call — he FEELS this one in daily use, "linux finger
+memory" is the mission).
+
+**Bisect log (28.7.26):**
+- Probe 1 — **1.2.5** (results11): sgr-colour **1.22**, sgr-perchar
+  1.08, TOTAL 5.64 = the FULL drift. **1.2.6 exonerated** (the
+  complement cursor is innocent); the drift is inside 1.2.5 b1-b8.
+- Probe 2 — **1.2.6b7 re-run** (results12): 1.22/1.08, TOTAL 5.74 —
+  today's runs are repeatable to the hundredth across builds.
+- Probe 3 — **1.2.4 control** (results13): **1.22 / 1.08 / 5.72 —
+  IDENTICAL. THE CODE HUNT IS CLOSED: no build drifted.** Five
+  builds spanning the whole window (1.2.4, 1.2.5, 1.2.6b4/b5/b7)
+  measure the same TODAY; the only outlier in the series is
+  results8 itself, measured 23.7. The drift is ENVIRONMENTAL —
+  the machine/config measures SGR-heavy rendering ~2x slower now
+  than on the 23rd. The earlier "prime suspect" framings
+  (complement cursor, vbrecheck) are RETRACTED — both exonerated
+  by measurement, the discipline working as intended.
+  Leading environmental suspect: WB screen DEPTH (a deeper screen
+  = more planes per masked blit; SGR-coloured text touches more
+  planes than plain pen-1 text, which fits sgr rows doubling
+  while sync-line moved only +11% — sync-line sits at the mask1
+  blit floor). To check: ScreenMode prefs vs what ran on 23.7
+  (16 colours for the b2 cursor/ls-colour work?). Other
+  candidates: host CPU governor/load, FS-UAE accuracy settings.
+  His `ls -R` smoothness feel likely shares whatever this cause
+  is — same rendering path, same machine.
+
+## 1.2.6b8 — audit5 Batch E (28.7.26): the hygiene sweep — the ladder's last rung
+
+A9, A10, A11 (both arms, the full fix not the doc-out), X2–X5. With
+this batch every audit5 finding is addressed: the A-series is
+closed, 1.2.6 owes the audit nothing.
+
+- **A9 — the eaten close click beeps.** ihreport's room check
+  refusing the class-11 close report was a silent RETURN — a full
+  queue (wedged client) ate a REQUESTED close-gadget click whole:
+  no report, no EOF, no closereq. Now: `IF e.cls =
+  IECLASS_CLOSEWINDOW THEN DisplayBeep(NIL)` on the refusal path
+  (C5 audibility; the click is retryable once the queue drains).
+  Other refused reports keep the silent drop — stock manners.
+- **A10 — FF and TAB disarm alteat.** "Any output disarms" now
+  includes a new page (FF) and TAB spaces; a hypothetical
+  `?47l·FF·LF` exit packet no longer loses a working newline. CSI
+  motion stays armed — ESC8's own family, the feature's point.
+  Ed (`?47l ESC8 \n`) and More (nothing) unaffected.
+- **A11 — the DROP is the whole-or-nothing unit.** droppath split:
+  `dropbuild(wa, pb)` returns the assembled argument's length
+  (0 = no argument), insertion moved to dodrop. Raw: tally pass
+  over all icons, ONE `inqroom(total)`, ONE beep refusing the drop
+  WHOLE — never again icons 1,2,3,5 of five with a reordered-by-
+  omission argument list. Insert pass resolves each icon a second
+  time (drops are rare, packets are cheap — no 2KB accumulation
+  buffer on the 10000-byte stack); a per-icon `inqroom` belt
+  guards the racy-FS corner (a path that GREW between passes) by
+  skipping that icon rather than wedging the queue mid-argument.
+  Cooked: `pasteinsert()` now returns FALSE when a printable was
+  refused at the line's cap, and dodrop beeps once — audible,
+  never silent. (The paste path ignores the return, unchanged.)
+- **X2** — doactive's no-flush coherence argument written at the
+  proc (model and glass lag TOGETHER; redress reads values pending
+  wob bytes cannot move; becomes a live desync site if accept ever
+  mutates cursor state pre-render).
+- **X3** — flushout's discard arm labelled "unreachable by
+  construction, kept as a net" (the audit4-X2 debt).
+- **X4** — the altdrop belt now states the b7 invariant: the
+  reflow is only correct because altpop() succeeds whenever
+  altvalid.
+- **X5** — the mountlist stack comment gained the headroom line
+  (deepest path = drop resolution, ~2.2 KB of 10000). Mountlist
+  redeployed to Devs: (comment-only change).
+
+Built + deployed 28.7.26: compile clean (LARGE, baseline warnings/
+UNREFERENCED), vamos usage smoke green (exit 5), L:ccon-handler =
+b8 md5-matched (staged ccon-handler-1.2.6b8, .bak = b7).
+
+**Boot test (REBOOT FIRST; `Version L:ccon-handler` must say
+1.2.6b8) — the standing regression sweep once (batch E's code arms
+are one line each in paths the sweep already exercises):**
+- [x] typing, completion, history, Ctrl+R (both searches)
+- [x] scrollback + wheel, copy/paste
+- [x] More page-flips; Ed session incl. quit (A10 touched render's
+      FF branch and the alteat family; Ed/More exits must stay
+      tidy — no doubled or missing blank line)
+- [x] iconify (gadget + RA+I), close gadget
+- [x] drops: single + multi-icon, file/drawer/disk, into shell and
+      into Ed (A11 rebuilt the insertion plumbing — paths must
+      land byte-identical to b7, trailing blanks included)
+- [x] a paste (RAMIGA-V) — unchanged (pasteinsert's return is new,
+      its behaviour must not be)
+
+**Boot findings (28.7.26): ALL GREEN — "it all works in my
+testing." 1.2.6b8 is boot-verified and AUDIT5 IS CLOSED: every
+finding (A1–A11, X1–X5) fixed or written down, batches A–E all
+boot-green in a single day, b4 through b8. The 1.2.6 release
+ladder is what remains.**
+
+**And the perf mystery is SOLVED, by him:** the WB screen was on
+**256 colours** — set to test the ghost-text bug (the b2 cursor
+work) and never reverted — where the 23.7 baseline ran on **16**.
+Eight planes instead of four: every masked blit and glyph in the
+SGR path pushes twice the planes, which is exactly the doubling
+the bench showed (and why sync-line, sitting at the mask1 floor,
+barely moved). No code regression, no CCON action — the ls
+smoothness comes back with ScreenMode → 16. The bisect discipline
+paid for itself: two probes and a control, zero fixes designed
+against a phantom.
+
+## Design notes
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

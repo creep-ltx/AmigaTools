@@ -33,9 +33,12 @@ section, fix shapes in audit-roadmap.md Batch A. A1's fix clears the
 (res2=115 ERROR_BAD_NUMBER from a CCON: shell; res2=205 from stock
 CON: = sender-routing, the negative control). **A3 and X1 are FIXED
 and boot-verified in 1.2.6b5** (the `acceptreset()` factoring; the
-A3 repro healed on the glass, conbench A/B b4-vs-b5 identical at
-5.70). His call: ALL batches land before the 1.2.6 release. The
-remaining A-series (A4–A6, A9–A11, X2–X5) is queued as batches C–E.
+A3 repro healed on the glass, conbench A/B b4-vs-b5 identical).
+**A4 in 1.2.6b6, A5+A6 in 1.2.6b7, and A9+A10+A11 (both arms) +
+X2–X5 in 1.2.6b8 — all boot-verified 28.7.26. THIS AUDIT IS
+CLOSED: every finding fixed or written down, five batches
+boot-green in one day (b4–b8).** What remains is the 1.2.6 release
+ladder, not audit work.
 
 ---
 
