@@ -4382,6 +4382,56 @@ Highlight rows closed the run: drop with a standing highlight
 clears it and inserts the path; `list` with a highlight standing
 clears it and the output flows. Batch B done; Batch C (A4) = b6.
 
+## 1.2.6b6 — audit5 Batch C (28.7.26): the parent-hop truth
+
+A4: `lockpath()` could not tell a failed ACTION_PARENT hop from
+reaching the root — both answer res1=0, the difference lives in the
+res2 that `fscall` discarded. A mid-walk failure (no free store, FS
+hiccup) ended the walk early with `ok` still TRUE and the emit loop
+crowned the last-collected DIRECTORY segment with ':' —
+"sub:file" inserted at the cursor as if typed, plausibly executed
+against the wrong file. The block comment promised the opposite.
+
+Fix: `fscall2(tport, act, a1, a2, a3, r2p)` = fscall's body + one
+res2 read-out after the wait; `fscall` is now a one-line delegate
+passing NIL. In the walk: `par := fscall2(..., {r2})`, then
+`IF (par = 0) AND (r2 <> 0) THEN ok := FALSE` — the root still ends
+with r2=0, a failed hop fails the WHOLE drop. One design point past
+the roadmap: fscall's two early outs (NIL task, self-send) also
+return 0, so fscall2 pre-writes a FAILURE res2
+(ERROR_OBJECT_NOT_FOUND) before them — a NIL task is never the
+root, and r2=0 there would re-open the exact hole through the side
+door.
+
+Verification honesty (the roadmap's own words): no on-demand repro
+exists — ACTION_PARENT failure needs a memory squeeze or a wedged
+FS at exactly the right packet. The root arm is exercised by EVERY
+successful drop (nothing would insert otherwise); the failure arm
+is four lines, code-symmetric with the EXAMINE failure arm two
+lines above. Inspection fix, labelled as such — audit3-C3's class.
+
+Built + deployed 28.7.26: compile clean (LARGE, same 3 warnings +
+9-name UNREFERENCED), vamos usage smoke green (exit 5),
+L:ccon-handler = b6 md5-matched (staged ccon-handler-1.2.6b6,
+.bak = b5).
+
+**Boot test (REBOOT FIRST; `Version L:ccon-handler` must say
+1.2.6b6):**
+- [x] drops still resolve: RAM:, the boot volume, a deep path, a
+      drawer (trailing `/`), a disk icon (`Vol:`), spaces quoted
+- [x] multi-icon drop unchanged
+- [x] Tab completion regression (`fscall` was touched): `cd Ut<Tab>`,
+      `dir SYS:Prefs/<Tab>`, menu cycling — unchanged
+- [x] history survives the session (savehistfile rides fscall too):
+      close a shell, reopen — history intact
+
+**Boot findings (28.7.26): GREEN — "seems to work as far as I can
+tell, I could not find any weirdness or inconsistencies." The
+regression surface (drops, completion, history — everything that
+rides fscall) is unchanged, which is all this batch can prove on a
+healthy system; the failure arm stays inspection-verified. Batch C
+done; Batch D (A5+A6) = b7.**
+
 ## Design notes
 
 - One stream, one window for M1 — fh.args is already a per-open id

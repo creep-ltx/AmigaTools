@@ -2464,7 +2464,7 @@ ENDPROC
 -> failed or the path outgrew its buffers - insert nothing rather
 -> than something wrong.
 PROC lockpath(blk, out:PTR TO CHAR, cap)
-  DEF fl:PTR TO filelock, cur, par, res, n, i, k, p, ok, segn, sp,
+  DEF fl:PTR TO filelock, cur, par, res, n, i, k, p, ok, segn, sp, r2,
       segb[400]:ARRAY OF CHAR, sgo[24]:ARRAY OF LONG,
       sgl[24]:ARRAY OF LONG, nb[110]:ARRAY OF CHAR
   out[0] := 0
@@ -2488,7 +2488,15 @@ PROC lockpath(blk, out:PTR TO CHAR, cap)
         sgl[segn] := n
         sp := sp + n
         segn++
-        par := fscall(fl.task, ACTION_PARENT, cur, 0, 0)
+        par := fscall2(fl.task, ACTION_PARENT, cur, 0, 0, {r2})
+        -> audit5 A4: par=0 is the root ONLY when res2 agrees (r2=0).
+        -> A failed hop (no free store, FS hiccup) also answers 0 but
+        -> leaves its reason in res2 - before this check the walk
+        -> ended early with ok TRUE and the emit loop crowned the
+        -> last DIRECTORY segment with ':' ("sub:file" inserted as if
+        -> typed). Now the 2463 promise - insert nothing rather than
+        -> something wrong - holds on all three arms.
+        IF (par = 0) AND (r2 <> 0) THEN ok := FALSE
       ENDIF
     ELSE
       ok := FALSE
@@ -7545,7 +7553,14 @@ ENDPROC
 -> fspkt cannot be reused until that arrives (or the late reply is
 -> drained). B5-teardown weight, its own commit - not worth it until a
 -> real slow-mount hang is actually seen in use.
-PROC fscall(tport:PTR TO mp, act, a1, a2, a3)
+-> audit5 A4 (1.2.6b6): the res2-aware twin. ACTION_PARENT hides its
+-> failure inside its success value (res1=0 both on the root AND on a
+-> failed hop, the reason in res2) - a caller that needs the
+-> difference passes {var}; NIL keeps fscall's shape. The early outs
+-> write a FAILURE res2 on purpose: a NIL task or a self-send is
+-> never the root, and r2=0 there would re-open the exact hole.
+PROC fscall2(tport:PTR TO mp, act, a1, a2, a3, r2p:PTR TO LONG)
+  IF r2p THEN r2p[0] := ERROR_OBJECT_NOT_FOUND
   IF tport = NIL THEN RETURN 0
   IF tport = port THEN RETURN 0   -> never send to OURSELVES: deadlock
   fspkt.pkt.type := act
@@ -7559,7 +7574,11 @@ PROC fscall(tport:PTR TO mp, act, a1, a2, a3)
   PutMsg(tport, fspkt.msg)
   WaitPort(fsport)
   GetMsg(fsport)
+  IF r2p THEN r2p[0] := fspkt.pkt.res2
 ENDPROC fspkt.pkt.res1
+
+PROC fscall(tport:PTR TO mp, act, a1, a2, a3)
+ENDPROC fscall2(tport, act, a1, a2, a3, NIL)
 
 -> build a BSTR (length byte + chars) in the aligned buffer
 PROC tcbstr(s:PTR TO CHAR)
@@ -8440,4 +8459,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6b5 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.6b6 (28.7.26) CCON: LTX console handler', 0
