@@ -68,9 +68,12 @@ OPT LARGE
 MODULE 'intuition/intuition','intuition/screens',
        'graphics/text','graphics/rastport',
        'utility/tagitem','dos/dos','dos/dosextens',
-       'dos/datetime','dos/dostags','devices/inputevent','diskfont'
+       'dos/datetime','dos/dostags','devices/inputevent','diskfont',
+       'dos/exall','graphics/gfx'
 
-CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384,
+CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
+      EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
+      DTCHUNK=100,    -> I7b: names snapshotted per deltree scan round
       FINDMAX=500,    -> find: results collected before the search stops
       FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
       CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
@@ -99,6 +102,14 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     esize[1000]:ARRAY OF LONG,    -> file size (0 for dirs/volumes)
     edate[1000]:ARRAY OF LONG,    -> sortable date key (days*1440+minute,
                                   -> 0 for archive members and volumes)
+    edds[8000]:ARRAY OF CHAR,     -> C4: per-slot "DDMon" memo, 8B each
+    eddk[1000]:ARRAY OF LONG,     -> C4: the datekey each memo is FOR.
+                                  -> VALUE-keyed (datestr is a pure
+                                  -> function of the key), so the entry
+                                  -> movers need NOT carry these: any
+                                  -> reorder just mismatches the tag
+                                  -> and the slot re-fills on next draw
+                                  -> - no new esize-lesson exposure
     ealloc[2]:ARRAY OF LONG,      -> allocated name slots per pane
     ecount[2]:ARRAY OF LONG,
     esel[2]:ARRAY OF LONG,
@@ -114,6 +125,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     ta=NIL:PTR TO textattr,
     rp=NIL:PTR TO rastport,
     ownscr=FALSE, txtpen=1, dirpen=1, errpen=1, softmask=0,
+    panemask=255, flatmask=255,   -> R6: scroll-blit plane masks (255
+                                  -> = unmasked; set at openui only on
+                                  -> a planar-standard own screen)
     winw, winh, baseline, x0, top, bordy, panetop,
     cw=8, ch=8,          -> the font cell; every coordinate derives
     ncols=80, nrows=31,  -> the character grid the screen provides
@@ -126,6 +140,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
     copybuf=NIL,      -> file-copy buffer, allocated once at startup
+    cbufsz=CBUFSZ,    -> its actual size: 256K/64K when RAM allows (I1)
+    pipebuf=NIL:PTR TO CHAR,    -> shared PIPE: read buffer (I7a); safe
+                                -> because the two pipe readers are modal
+                                -> loops that can never nest
     rnames[500]:ARRAY OF LONG,    -> resolved target names (bulk runs)
     ridx[500]:ARRAY OF LONG,      -> entry index per resolved slot
     ralloc=0,                     -> allocated rnames slots
@@ -146,7 +164,9 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
                         -> only then does Esc during it set `abort`
     abort=FALSE,        -> Esc pressed mid-op: the copy/tree loops bail out
     ccol=0, crow=0, cesc=0, cnum=0,    -> the in-frame console renderer
-    cmodel=NIL, cmrow=0,    -> its text model: the scrollback
+    cmodel=NIL, cmrow=0, cmfull=FALSE,  -> its text model: the scrollback
+                                  -> (cmfull: R2 - model cap reached,
+                                  -> the direct path serves the rest)
     cfgleft[300]:STRING, cfgright[300]:STRING,    -> start paths
     savedirs=TRUE,          -> rewrite the config with them on quit
     arcwrite=TRUE,          -> ARCWRITE key: TRUE = ONEXIT (batch archive
@@ -181,7 +201,11 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     amst[2]:ARRAY OF LONG,     -> New()'d LONG[] of MST_* status per member
     amcnt[2]:ARRAY OF LONG,    -> members cached for the pane
     arcfmt[2]:ARRAY OF LONG,   -> archive kind of the pane: TY_LHA or TY_LZX
-    rc=0
+    rc=0,
+    -> BENCH mode: temporary perf-campaign instrument (perf-roadmap.md
+    -> phase 0). `cfile BENCH <dir> [file] [needle]` - see dobench()
+    benchmode=FALSE, bdir[300]:STRING, bfile[300]:STRING,
+    bneedle[80]:STRING
 
 -> the global arrays are NOT zero-initialised (E globals live in the
 -> uncleared stack allocation), so every pane field is set explicitly
@@ -205,7 +229,23 @@ PROC initpanes()
   ENDFOR
   StrCopy(ppath[0], cfgleft)
   StrCopy(ppath[1], cfgright)
-  IF (copybuf := String(CBUFSZ)) = NIL THEN Raise("MEM")
+  -> I1: bigger copy chunks = fewer packet round trips (the audit's
+  -> 13ms/16KB floor). 256KB only when the machine clearly has room,
+  -> 64KB as the normal case, the old 16KB so a 2MB machine keeps its
+  -> RAM for the editor. MUST be New(), not String(): E-VO String()
+  -> returns NIL for >= 32767 bytes (vamos-proven, strsz.e) - the
+  -> first ladder build silently fell through to 16KB on every config.
+  -> copybuf is a raw byte buffer (Read/Write/CopyMem only), so New()
+  -> is the right kind anyway.
+  cbufsz := IF AvailMem(0) > $400000 THEN 262144 ELSE 65536
+  IF (copybuf := New(cbufsz)) = NIL
+    cbufsz := 65536
+    IF (copybuf := New(cbufsz)) = NIL
+      cbufsz := CBUFSZ
+      IF (copybuf := New(cbufsz)) = NIL THEN Raise("MEM")
+    ENDIF
+  ENDIF
+  IF (pipebuf := New(PIPESZ)) = NIL THEN Raise("MEM")
 ENDPROC
 
 -> the bookmark slots, allocated before loadconfig so it can fill them from
@@ -417,7 +457,19 @@ PROC parseargs()
       StrCopy(tok, s + t, i - t)
       IF q AND s[i] THEN i := i + 1
       IF ntok = 0
-        StrCopy(cfgleft, tok)
+        IF nccmp(tok, 'BENCH') = 0
+          benchmode := TRUE
+        ELSE
+          StrCopy(cfgleft, tok)
+        ENDIF
+      ELSEIF benchmode
+        IF ntok = 1
+          StrCopy(bdir, tok)
+        ELSEIF ntok = 2
+          StrCopy(bfile, tok)
+        ELSEIF ntok = 3
+          StrCopy(bneedle, tok)
+        ENDIF
       ELSEIF ntok = 1
         StrCopy(cfgright, tok)
       ENDIF
@@ -970,7 +1022,11 @@ PROC nameismarked(p, nm)
   bb := p * MAXENT
   IF ecount[p] > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[bb + i] AND (nccmp(enames[bb + i], nm) = 0) THEN RETURN TRUE
+      -> C3: nested, not AND - E's eager AND ran nccmp for every
+      -> unmarked entry, which made icon-heavy bulk ops quadratic
+      IF emark[bb + i]
+        IF nccmp(enames[bb + i], nm) = 0 THEN RETURN TRUE
+      ENDIF
     ENDFOR
   ENDIF
 ENDPROC FALSE
@@ -984,6 +1040,15 @@ PROC infodup(p, idx)
   IF isinfo(enames[idx]) = FALSE THEN RETURN FALSE
   infobase(enames[idx], base)
 ENDPROC nameismarked(p, base)
+
+-> C3: "marked, and not a sidecar-duplicate" with the guards NESTED -
+-> at the bulk-loop call sites the eager AND ran infodup (and its
+-> pane scan) for every UNMARKED entry too. Unmarked now costs one
+-> array read.
+PROC markednodup(p, idx)
+  IF emark[idx] = 0 THEN RETURN FALSE
+  IF infodup(p, idx) THEN RETURN FALSE
+ENDPROC TRUE
 
 -> sort order: directories first, then files. Within a tier the key is
 -> the chosen mode - name (A-Z), size (largest first) or date (newest
@@ -1010,21 +1075,39 @@ PROC entbefore(p, i, j)
   IF sortrev THEN c := -c
 ENDPROC c < 0
 
--> selection sort: n*n/2 compares but only n swaps; fine for one
--> directory's worth of names
+-> C1 (0.4.1 stage b4): Shell sort, Knuth gaps. The selection sort
+-> paid n*n/2 entbefore CALLS - 125k for a full pane, ~1M char-fold
+-> iterations, seconds at stock CPU on every entry into a big
+-> drawer. Shell's compare count is ~n^1.3 with the SAME entbefore
+-> and the same all-five-fields swapentry (which carries size, date
+-> and any live mark with the name). FFS delivers near-sorted names,
+-> which the gap ladder exploits and selection cannot. Harness-
+-> proven against the old sort (b4test.e): identical order on
+-> unique keys, tier + sortedness invariants on ties.
 PROC sortpane(p)
-  DEF i, j, m, b
-  IF ecount[p] < 2 THEN RETURN
+  DEF i, j, b, n, gap, done
+  n := ecount[p]
+  IF n < 2 THEN RETURN
   b := p * MAXENT
-  FOR i := 0 TO ecount[p] - 2
-    m := i
-    FOR j := i + 1 TO ecount[p] - 1
-      IF entbefore(p, j, m) THEN m := j
+  gap := 1
+  WHILE (Mul(gap, 3) + 1) < n
+    gap := Mul(gap, 3) + 1
+  ENDWHILE
+  WHILE gap >= 1
+    FOR i := gap TO n - 1
+      j := i
+      done := FALSE
+      WHILE (j >= gap) AND (done = FALSE)
+        IF entbefore(p, j, j - gap)
+          swapentry(b, j, j - gap)
+          j := j - gap
+        ELSE
+          done := TRUE
+        ENDIF
+      ENDWHILE
     ENDFOR
-    -> swapentry carries all five fields, so the size, date and any live
-    -> mark travel with the name instead of reading a neighbour's
-    IF m <> i THEN swapentry(b, i, m)
-  ENDFOR
+    gap := Div(gap - 1, 3)
+  ENDWHILE
 ENDPROC
 
 -> run a command with its output captured to a file, quietly - no
@@ -1284,17 +1367,16 @@ PROC loadarchive(p, arcfile)
     freearccache(p)
     RETURN FALSE
   ENDIF
-  buf := New(131072)
+  -> X4: size the capture to the file (slurpfh) - the old fixed 128KB
+  -> read silently truncated a long `lha v` of ~1500 long-pathed members
+  IF (fh := Open('T:CFile-arc', OLDFILE))
+    buf := slurpfh(fh, {n})
+    Close(fh)
+  ENDIF
   IF buf = NIL
     DeleteFile('T:CFile-arc')
     freearccache(p)
     RETURN FALSE
-  ENDIF
-  IF (fh := Open('T:CFile-arc', OLDFILE))
-    n := Read(fh, buf, 131071)
-    Close(fh)
-  ELSE
-    n := 0
   ENDIF
   IF n < 0 THEN n := 0
   IF arcfmt[p] = TY_LZX THEN parselzx(p, buf, n) ELSE parselha(p, buf, n)
@@ -1302,8 +1384,129 @@ PROC loadarchive(p, arcfile)
   DeleteFile('T:CFile-arc')
 ENDPROC amcnt[p] > 0
 
+-> 0.4.1 I3 (campaign stage b3): batched directory reads. ExAll
+-> delivers dozens of entries per packet round trip where ExNext
+-> costs one trip per entry - the classic 3-10x real-media win. One
+-> iterator serves every walker; its state lives in the CALLER's
+-> frame (DEF s[1]:ARRAY OF eascan) so recursive walkers can nest
+-> scans. Fallback: a handler that rejects the FIRST ExAll call
+-> (odd handlers, netfs - and vamos) is served by Examine/ExNext
+-> through the SAME iterator, each entry shaped into one reusable
+-> exalldata so callers see a single form. ED_COMMENT level: the
+-> deepest field any of the family's views reads. E note: no
+-> short-circuit ANDs in any loop body - readdir's own old rule.
+OBJECT eascan
+  lock:LONG                     -> the caller's lock, never freed here
+  buf:PTR TO CHAR               -> New'd ExAll buffer (EABUFSZ)
+  ctl:PTR TO exallcontrol       -> AllocDosObject(DOS_EXALLCONTROL)
+  cur:PTR TO exalldata          -> next unserved entry of the batch
+  more:LONG                     -> ExAll promised another batch
+  first:LONG                    -> no batch fetched yet
+  fb:LONG                       -> fallback (Examine/ExNext) mode
+  err:LONG                      -> scan died mid-way; caller reports
+  fib:PTR TO fileinfoblock      -> fallback only
+  fbed:PTR TO exalldata         -> fallback only: the reusable entry
+ENDOBJECT
+
+PROC easbegin(s:PTR TO eascan, lock)
+  s.lock := lock
+  s.buf := New(EABUFSZ)
+  s.ctl := NIL
+  s.cur := NIL
+  s.more := 0
+  s.first := TRUE
+  s.fb := FALSE
+  s.err := FALSE
+  s.fib := NIL
+  s.fbed := NIL
+  IF s.buf THEN s.ctl := AllocDosObject(DOS_EXALLCONTROL, NIL)
+  IF s.ctl = NIL THEN easfallback(s)
+ENDPROC
+
+-> switch to Examine/ExNext - legal only while NO ExAll entry has
+-> been served yet (easbegin, or the first ExAll call failing)
+PROC easfallback(s:PTR TO eascan)
+  s.fb := TRUE
+  IF s.fib = NIL THEN s.fib := AllocDosObject(DOS_FIB, NIL)
+  IF s.fbed = NIL THEN s.fbed := New(SIZEOF exalldata)
+  IF (s.fib = NIL) OR (s.fbed = NIL)
+    s.err := TRUE
+    RETURN
+  ENDIF
+  IF Examine(s.lock, s.fib) = FALSE THEN s.err := TRUE
+ENDPROC
+
+PROC easnextfb(s:PTR TO eascan)
+  DEF ed:PTR TO exalldata, ds:PTR TO LONG
+  IF ExNext(s.lock, s.fib) = FALSE
+    IF IoErr() <> ERROR_NO_MORE_ENTRIES THEN s.err := TRUE
+    RETURN NIL
+  ENDIF
+  ed := s.fbed
+  ed.name := s.fib.filename
+  ed.type := s.fib.direntrytype
+  ed.size := s.fib.size
+  ds := s.fib.datestamp
+  ed.days := ds[0]
+  ed.mins := ds[1]
+  ed.ticks := ds[2]
+  ed.comment := s.fib.comment
+ENDPROC ed
+
+-> the next directory entry, or NIL at the end (s.err tells a died
+-> scan from a finished one). The entry is valid until the NEXT
+-> easnext/easend call - consume before iterating.
+PROC easnext(s:PTR TO eascan)
+  DEF ed:PTR TO exalldata, r
+  IF s.err THEN RETURN NIL
+  IF s.fb THEN RETURN easnextfb(s)
+  IF s.cur = NIL
+    IF s.first = FALSE
+      IF s.more = 0 THEN RETURN NIL   -> batches exhausted, clean end
+    ENDIF
+    r := ExAll(s.lock, s.buf, EABUFSZ, ED_COMMENT, s.ctl)
+    s.more := r
+    IF s.ctl.entries = 0
+      IF r = 0
+        IF IoErr() = ERROR_NO_MORE_ENTRIES THEN RETURN NIL
+        IF s.first                    -> handler without ExAll: the
+          easfallback(s)              -> whole scan restarts on the
+          IF s.err THEN RETURN NIL    -> ExNext road (nothing was
+          RETURN easnextfb(s)         -> served yet, no duplicates)
+        ENDIF
+        s.err := TRUE                 -> died mid-scan
+        RETURN NIL
+      ENDIF
+      s.err := TRUE                   -> more promised, zero entries:
+      RETURN NIL                      -> one entry outgrew 16KB -
+    ENDIF                             -> impossible; refuse to spin
+    s.first := FALSE
+    s.cur := s.buf
+  ENDIF
+  ed := s.cur
+  s.cur := ed.next
+ENDPROC ed
+
+PROC easend(s:PTR TO eascan)
+  IF s.fb = FALSE
+    IF s.more                         -> aborted mid-scan: drain the
+      WHILE ExAll(s.lock, s.buf, EABUFSZ, ED_COMMENT, s.ctl)
+      ENDWHILE                        -> handler's state (no V39
+    ENDIF                             -> ExAllEnd dependency)
+  ENDIF
+  IF s.ctl THEN FreeDosObject(DOS_EXALLCONTROL, s.ctl)
+  IF s.buf THEN Dispose(s.buf)
+  IF s.fib THEN FreeDosObject(DOS_FIB, s.fib)
+  IF s.fbed THEN Dispose(s.fbed)
+  s.ctl := NIL
+  s.buf := NIL
+  s.fib := NIL
+  s.fbed := NIL
+ENDPROC
+
 PROC readdir(p)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, ds:PTR TO LONG
+  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   ecount[p] := 0
   efail[p] := FALSE
   clearmarks(p)
@@ -1318,17 +1521,19 @@ PROC readdir(p)
   ENDIF
   IF Examine(lock, fib)
     IF fib.direntrytype > 0
-      -> ExNext lives in the loop body: E's AND does not short-circuit,
-      -> so it must never sit in a compound condition
-      more := ExNext(lock, fib)
-      WHILE more
-        -> a sortable date key: minutes since the epoch (days*1440 +
-        -> minute). datestamp is a 3-LONG DateStamp; ticks are dropped
-        ds := fib.datestamp
-        addentry(p, fib.filename, fib.direntrytype > 0, fib.size,
-                 Mul(ds[0], 1440) + ds[1])
-        more := ExNext(lock, fib)
+      -> I3: the entry loop is BATCHED now (exallscan above); the
+      -> dircheck Examine stays - ExAll answers nothing for a file.
+      -> Date key as before: minutes since the epoch, ticks dropped.
+      sc := s
+      easbegin(sc, lock)
+      ed := easnext(sc)
+      WHILE ed
+        addentry(p, ed.name, ed.type > 0, ed.size,
+                 Mul(ed.days, 1440) + ed.mins)
+        ed := easnext(sc)
       ENDWHILE
+      IF sc.err THEN efail[p] := TRUE
+      easend(sc)
     ELSE
       efail[p] := TRUE    -> the path is a file, not a directory
     ENDIF
@@ -1360,7 +1565,10 @@ ENDPROC TRUE
 PROC arcdirseen(p, name)
   DEF b, i
   b := p * MAXENT
-  FOR i := 0 TO ecount[p] - 1
+  -> C5 (stage b4): BACKWARD - the member list names same-dir
+  -> entries in runs, so the dir just added answers on the first
+  -> probe instead of after a full forward scan per member
+  FOR i := ecount[p] - 1 TO 0 STEP -1
     IF edirs[b + i]
       IF nccmp(enames[b + i], name) = 0 THEN RETURN TRUE
     ENDIF
@@ -1373,7 +1581,7 @@ ENDPROC FALSE
 PROC readarcdir(p)
   DEF a:PTR TO LONG, z:PTR TO LONG, st:PTR TO LONG, k, m:PTR TO CHAR,
       pfx[CPATHLEN]:STRING,
-      pl, rest:PTR TO CHAR, sl, comp[200]:STRING, e
+      pl, rest:PTR TO CHAR, sl, comp[200]:STRING, e, keep
   ecount[p] := 0
   efail[p] := FALSE
   clearmarks(p)
@@ -1392,8 +1600,18 @@ PROC readarcdir(p)
     FOR k := 0 TO amcnt[p] - 1
       m := a[k]
       -> a member queued for deletion is gone from the view already;
-      -> the pane shows what the archive will be once committed
-      IF (st[k] <> MST_DEL) AND ((pl = 0) OR ncprefix(m, pfx, pl))
+      -> the pane shows what the archive will be once committed.
+      -> C5 (stage b4): NESTED - the eager AND/OR called ncprefix
+      -> for every deleted member and for EVERY member at root level
+      keep := FALSE
+      IF st[k] <> MST_DEL
+        IF pl = 0
+          keep := TRUE
+        ELSEIF ncprefix(m, pfx, pl)
+          keep := TRUE
+        ENDIF
+      ENDIF
+      IF keep
         rest := m + pl
         IF rest[0]    -> not the level's own directory entry
           sl := -1
@@ -1655,6 +1873,8 @@ PROC openui()
   ELSE
     -> fallback: window on the public screen, no palette of our own
     ownscr := FALSE
+    panemask := 255    -> R6: never mask a pubscreen
+    flatmask := 255
     OpenWorkBench()    -> ensure the Workbench screen exists (early boot)
     IF (scr := LockPubScreen(NIL)) = NIL THEN Throw("UI", 'no screen')
     win := OpenWindowTagList(NIL,
@@ -1682,6 +1902,20 @@ PROC openui()
     txtpen := 1
     dirpen := 4
     errpen := 5
+    -> R6 (stage b8): the ROM's plane-mask trick. The own screen is
+    -> depth 3; the pane surfaces use pens {0,1,4,5} (planes %101 -
+    -> plane 1 provably untouched) and the console/viewer/editor/
+    -> results surfaces pens {0,1} (%001). Their SCROLL blits may
+    -> skip the other planes - but only when the bitmap is really
+    -> planar-standard (RTG lies about depth); the pubscreen
+    -> fallback and the ANSI viewer (full-colour, never blits) stay
+    -> at 255. Text/fills stay full-depth: every surface ENTRY
+    -> repaints unmasked, which is what scrubs another surface's
+    -> planes (the ccon narrowing rule).
+    IF GetBitMapAttr(rp.bitmap, BMA_FLAGS) AND BMF_STANDARD
+      panemask := %101
+      flatmask := %001
+    ENDIF
   ELSE
     txtpen := 1
     dirpen := 1
@@ -1769,6 +2003,7 @@ PROC applyfont()
   IF cmodel    -> the scrollback's row width changed with the grid
     Dispose(cmodel)
     cmodel := NIL
+    cmfull := FALSE
   ENDIF
   StrCopy(appliedfont, cfgfont)
 ENDPROC TRUE
@@ -1839,11 +2074,29 @@ PROC panew(p)
 ENDPROC IF p = 0 THEN panewl ELSE panewr
 
 -> one row of the composed frame, 0-based
+-> R5 (0.4.1 stage b5): a PANE row's framebuf interior is spaces by
+-> construction (the composer writes only cols 0/divcol/divcol+1/
+-> ncols-1 there, and no ctab art piece lands on rows 6..nrows-4) -
+-> drawframe's RectFill already blanked it and drawpane owns it, so
+-> pane rows draw just the four border cells instead of ncols of
+-> Text that drawrow then painted a third time.
 PROC frow(r)
+  DEF y, m
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  Move(rp, x0, top + (r * ch) + baseline)
-  Text(rp, framebuf + Mul(r, ncols), ncols)
+  y := top + (r * ch) + baseline
+  IF (r >= 6) AND (r <= (nrows - 4))
+    m := framebuf + Mul(r, ncols)
+    Move(rp, x0, y)
+    Text(rp, m, 1)
+    Move(rp, x0 + Mul(divcol, cw), y)
+    Text(rp, m + divcol, 2)
+    Move(rp, x0 + Mul(ncols - 1, cw), y)
+    Text(rp, m + (ncols - 1), 1)
+  ELSE
+    Move(rp, x0, y)
+    Text(rp, framebuf + Mul(r, ncols), ncols)
+  ENDIF
 ENDPROC
 
 PROC drawframe()
@@ -1880,7 +2133,7 @@ ENDPROC
 -> InfoData and AllocDosObject has no type for one, so it comes from
 -> New(), which is longword-aligned.
 PROC freebytes(p)
-  DEF id:PTR TO infodata, lock=NIL, n=-1, nfree, bpb
+  DEF id:PTR TO infodata, lock=NIL, n=-1, nfree, bpb, t, lim
   -> Info() means a Lock, so on a floppy it can touch the disk; cache
   -> the answer and only re-ask when readpane marks the pane stale
   IF pfreeok[p] THEN RETURN pfree[p]
@@ -1896,10 +2149,23 @@ PROC freebytes(p)
       IF nfree < 0 THEN nfree := 0
       IF bpb < 1
         n := -1
-      ELSEIF nfree > Div(2147483647, bpb)
-        n := 2147483647    -> past a LONG of bytes; fmtbytes says 1.9G
       ELSE
-        n := Mul(nfree, bpb)
+        -> X1: Div's DIVS quotient overflows 16 bits for any real
+        -> bytes-per-block, so this guard was dead and Mul could wrap
+        -> negative on a >2GB volume. Shift-derive the limit instead:
+        -> halve MAXLONG once per doubling up to bpb (rounding bpb UP
+        -> to a power of two, so odd sizes stay conservative).
+        lim := 2147483647
+        t := 1
+        WHILE t < bpb
+          t := Shl(t, 1)
+          lim := Shr(lim, 1)
+        ENDWHILE
+        IF nfree > lim
+          n := 2147483647    -> past a LONG of bytes; fmtbytes says 1.9G
+        ELSE
+          n := Mul(nfree, bpb)
+        ENDIF
       ENDIF
     ENDIF
     UnLock(lock)
@@ -1982,15 +2248,39 @@ PROC drawpaths()
   SetBPen(rp, 0)
 ENDPROC
 
+-> R8 (stage b5): repaint ONLY one pane's border-row status slot (the
+-> FLDW field drawpaths reserves) - the slot span is restored from the
+-> composed frame row (dashes) and the field re-laid right-aligned,
+-> exactly as drawpaths lays it. For the mark-run path, where the full
+-> row redraw (and its two markcount walks per pane) was the cost.
+PROC drawfield(p)
+  DEF fld[20]:STRING, fw, hend, w, cpos
+  IF involume(p) THEN RETURN    -> no slot reserved there
+  hend := IF p = 0 THEN divcol - 1 ELSE ncols - 2
+  panefield(p, fld)
+  fw := EstrLen(fld)
+  w := FLDW + 1                 -> the slot + its carving space
+  cpos := hend - w
+  SetAPen(rp, txtpen)
+  SetBPen(rp, 0)
+  Move(rp, x0 + Mul(cpos, cw), bordy + baseline)
+  Text(rp, framebuf + Mul(5, ncols) + cpos, w)
+  IF fw > 0
+    Move(rp, x0 + Mul(hend - fw - 1, cw), bordy + baseline)
+    Text(rp, ' ', 1)
+    Text(rp, fld, fw)
+  ENDIF
+ENDPROC
+
 PROC drawrow(p, r)
   DEF idx, x, y, s, l, pw, i, mk, sz[12]:STRING, fw, nw
   x := panex(p)
   y := panetop + (r * ch)
   pw := Mul(panew(p), cw)
   idx := etop[p] + r
-  SetAPen(rp, 0)
-  RectFill(rp, x, y, x + pw - 1, y + ch - 1)
   IF efail[p]
+    SetAPen(rp, 0)
+    RectFill(rp, x, y, x + pw - 1, y + ch - 1)
     IF r = 0
       s := 'cannot read this directory'
       SetAPen(rp, errpen)
@@ -2000,7 +2290,11 @@ PROC drawrow(p, r)
     ENDIF
     RETURN
   ENDIF
-  IF idx >= ecount[p] THEN RETURN
+  IF idx >= ecount[p]
+    SetAPen(rp, 0)
+    RectFill(rp, x, y, x + pw - 1, y + ch - 1)
+    RETURN
+  ENDIF
   i := (p * MAXENT) + idx
   mk := emark[i]
   s := enames[i]
@@ -2014,6 +2308,9 @@ PROC drawrow(p, r)
   ENDIF
   IF nw < 1 THEN nw := 1
   IF l > nw THEN l := nw
+  -> R8 (stage b5): ONE fill per row - the bar row used to be
+  -> RectFilled black and then AGAIN in the bar pen (x22 per pane
+  -> draw); the fill pen now branches first
   IF (p = active) AND (idx = esel[p])
     -> the bar keeps the entry's type colour: blue text for a
     -> directory, grey for a file (unless the fallback screen left
@@ -2027,6 +2324,8 @@ PROC drawrow(p, r)
     ENDIF
     SetBPen(rp, txtpen)
   ELSE
+    SetAPen(rp, 0)
+    RectFill(rp, x, y, x + pw - 1, y + ch - 1)
     SetAPen(rp, IF edirs[i] THEN dirpen ELSE txtpen)
     SetBPen(rp, 0)
   ENDIF
@@ -2039,7 +2338,19 @@ PROC drawrow(p, r)
   -> the name, so the selection bar inverts it too.
   IF involume(p) = FALSE
     IF sortmode = 2
-      IF edate[i] > 0 THEN datestr(edate[i], sz) ELSE StrCopy(sz, '')
+      IF edate[i] > 0
+        -> C4: a DateToStr per visible cell per repaint became a
+        -> memo hit - scrolls and repaints stop re-deriving dates
+        IF eddk[i] <> edate[i]
+          datestr(edate[i], sz)
+          AstrCopy(edds + Mul(i, 8), sz, 8)
+          eddk[i] := edate[i]
+        ELSE
+          StrCopy(sz, edds + Mul(i, 8))
+        ENDIF
+      ELSE
+        StrCopy(sz, '')
+      ENDIF
     ELSEIF edirs[i] AND (esize[i] = 0)
       StrCopy(sz, '<DIR>')
     ELSE
@@ -2061,6 +2372,17 @@ PROC drawpane(p)
   ENDFOR
 ENDPROC
 
+-> R1 (0.4.1 stage b6): the scroll engine's ONE primitive - shift a
+-> pixel rectangle by one cell row; the caller draws only what came
+-> in. dy = +1 scrolls content UP (revealing at the bottom), -1 DOWN
+-> (revealing at the top). The CCON lesson in one line: move pixels
+-> that exist, draw only what is new - the border is never touched.
+PROC scrollone(x, y, w, h, dy, mask)
+  rp.mask := mask               -> R6 (stage b8): the blit skips the
+  ScrollRaster(rp, 0, Mul(dy, ch), x, y, x + w - 1, y + h - 1)
+  rp.mask := 255                -> planes this surface's pens never
+ENDPROC                         -> touch; everything else full-depth
+
 PROC drawall()
   drawframe()
   drawpaths()
@@ -2076,6 +2398,37 @@ PROC refreshall()
   drawall()
 ENDPROC
 
+-> R5 (stage b5): refresh + re-place the cursor on prevname with each
+-> pane drawn ONCE - the old shape was refreshall() (both panes drawn)
+-> then selectbyname() (the pane drawn AGAIN)
+PROC refreshsel(p)
+  readpane(0)
+  readpane(1)
+  placebyname(p)
+  drawall()
+ENDPROC
+
+-> I6 (stage b5): one-sided refresh - re-read and redraw ONLY pane p;
+-> the OTHER pane re-reads only when it shows the same directory
+-> (else its pixels are not touched at all). Border row redrawn for
+-> the field slots. Only for verbs whose screen debris is confined
+-> to the border row (prompts) - anything that painted a progress
+-> box must keep refreshall's full-frame erase.
+PROC refreshpane(p, place)
+  DEF q
+  q := 1 - p
+  readpane(p)
+  IF place THEN placebyname(p)
+  IF inarchive(q) = FALSE
+    IF nccmp(ppath[p], ppath[q]) = 0
+      readpane(q)
+      drawpane(q)
+    ENDIF
+  ENDIF
+  drawpane(p)
+  drawpaths()
+ENDPROC
+
 -> F5: re-read both panes from disk (a shell or Workbench may have
 -> changed a directory behind CFile's back), keeping each cursor on the
 -> entry it was on if that entry is still there.
@@ -2087,19 +2440,22 @@ PROC rescan()
   IF ecount[1] > 0 THEN StrCopy(n1, enames[MAXENT + esel[1]])
   readpane(0)
   readpane(1)
-  drawall()
+  -> R5 (stage b5): place BOTH cursors first, draw once - each pane
+  -> was drawn by drawall and then AGAIN by selectbyname
   IF EstrLen(n0) > 0
     StrCopy(prevname, n0)
-    selectbyname(0)
+    placebyname(0)
   ENDIF
   IF EstrLen(n1) > 0
     StrCopy(prevname, n1)
-    selectbyname(1)
+    placebyname(1)
   ENDIF
+  drawall()
 ENDPROC
 
--> select the entry named in prevname (if present), centre it, redraw
-PROC selectbyname(p)
+-> locate the entry named in prevname (if present) and centre it -
+-> NO draw (R5: callers pair it with the one draw they already own)
+PROC placebyname(p)
   DEF i, b
   IF ecount[p] > 0
     b := p * MAXENT
@@ -2110,6 +2466,11 @@ PROC selectbyname(p)
     IF etop[p] > (ecount[p] - visrows) THEN etop[p] := ecount[p] - visrows
     IF etop[p] < 0 THEN etop[p] := 0
   ENDIF
+ENDPROC
+
+-> select the entry named in prevname (if present), centre it, redraw
+PROC selectbyname(p)
+  placebyname(p)
   drawpane(p)
 ENDPROC
 
@@ -2213,7 +2574,15 @@ PROC drawinput(prompt, buf, cpos, max)
   IF cpos < l THEN Text(rp, s + cpos + 1, l - cpos - 1)
   pad := max + 1 - IF cpos < l THEN l ELSE l + 1
   IF pad > 80 THEN pad := 80
-  IF pad > 0 THEN Text(rp, {spaces}, pad)
+  IF pad > 0
+    -> R8 (stage b5): the trailing pad was a Text of up to 80 spaces
+    -> per prompt repaint - one fill covers the same cells
+    SetAPen(rp, 0)
+    RectFill(rp, x0 + Mul(4 + pl + (IF cpos < l THEN l ELSE l + 1), cw), bordy,
+             x0 + Mul(4 + pl + (IF cpos < l THEN l ELSE l + 1) + pad, cw) - 1,
+             bordy + ch - 1)
+    SetAPen(rp, txtpen)
+  ENDIF
 ENDPROC
 
 -> in-place line editor on the border row: returns 1 on Return, 0 on
@@ -2316,8 +2685,12 @@ PROC moveup()
   IF esel[p] <= 0 THEN RETURN
   esel[p] := esel[p] - 1
   IF esel[p] < etop[p]
+    -> R1 (stage b6): edge cross = one blit + two rows, not a
+    -> 22-row repaint (the hottest interactive path in the program)
     etop[p] := esel[p]
-    drawpane(p)
+    scrollone(panex(p), panetop, Mul(panew(p), cw), Mul(visrows, ch), -1, panemask)
+    drawrow(p, 0)
+    IF visrows > 1 THEN drawrow(p, 1)
   ELSE
     drawrow(p, esel[p] + 1 - etop[p])
     drawrow(p, esel[p] - etop[p])
@@ -2331,8 +2704,11 @@ PROC movedown()
   IF esel[p] >= (ecount[p] - 1) THEN RETURN
   esel[p] := esel[p] + 1
   IF esel[p] >= (etop[p] + visrows)
+    -> R1 (stage b6): edge cross = one blit + two rows (see moveup)
     etop[p] := esel[p] - visrows + 1
-    drawpane(p)
+    scrollone(panex(p), panetop, Mul(panew(p), cw), Mul(visrows, ch), 1, panemask)
+    IF visrows > 1 THEN drawrow(p, visrows - 2)
+    drawrow(p, visrows - 1)
   ELSE
     drawrow(p, esel[p] - 1 - etop[p])
     drawrow(p, esel[p] - etop[p])
@@ -2359,7 +2735,8 @@ PROC switchpane()
   DEF old
   old := active
   active := IF active = 0 THEN 1 ELSE 0
-  drawpaths()
+  -> R8 (stage b5): no drawpaths - nothing on that row changes on a
+  -> pane switch (the bar alone shows which pane is active)
   drawrow(old, esel[old] - etop[old])
   drawrow(active, esel[active] - etop[active])
 ENDPROC
@@ -2471,12 +2848,12 @@ PROC parentdir()
     IF didleave
       -> leaving may have committed edits that changed the archive file's
       -> size, so refresh BOTH panes - the other one may show that file too
-      refreshall()
+      refreshsel(p)    -> R5: one draw, cursor pre-placed
     ELSE
       readpane(p)
       drawpaths()
+      selectbyname(p)
     ENDIF
-    selectbyname(p)
     RETURN
   ENDIF
   s := ppath[p]
@@ -2584,7 +2961,7 @@ PROC copyfile(src, dst)
     IF checkabort()    -> Esc mid-copy: stop like an error, dst is cleaned up
       ok := FALSE
     ELSE
-      n := Read(fhs, copybuf, CBUFSZ)
+      n := Read(fhs, copybuf, cbufsz)
       IF n < 0
         ok := FALSE
         err := IoErr()
@@ -2669,33 +3046,30 @@ ENDPROC
 -> sums file bytes into statbytes (progress denominators only, so
 -> errors are simply ignored)
 PROC treestat(path, depth)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, child
+  DEF lock=NIL, child,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20 THEN RETURN
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN
-  IF (child := String(CPATHLEN)) = NIL
-    FreeDosObject(DOS_FIB, fib)
-    RETURN
-  ENDIF
+  IF (child := String(CPATHLEN)) = NIL THEN RETURN
   IF lock := Lock(path, SHARED_LOCK)
-    IF Examine(lock, fib)
-      more := ExNext(lock, fib)
-      WHILE more AND (checkabort() = FALSE)    -> Esc stops the pre-scan too
-        statfiles := statfiles + 1
-        IF fib.direntrytype > 0
-          StrCopy(child, path)
-          AddPart(child, fib.filename, CPATHLEN - 4)
-          SetStr(child, StrLen(child))
-          treestat(child, depth + 1)
-        ELSE
-          statbytes := statbytes + fib.size
-        ENDIF
-        more := ExNext(lock, fib)
-      ENDWHILE
-    ENDIF
+    sc := s                     -> I3 (stage b3+): batched walk
+    easbegin(sc, lock)
+    ed := easnext(sc)
+    WHILE (ed <> NIL) AND (checkabort() = FALSE)   -> Esc stops the pre-scan too
+      statfiles := statfiles + 1
+      IF ed.type > 0
+        StrCopy(child, path)
+        AddPart(child, ed.name, CPATHLEN - 4)
+        SetStr(child, StrLen(child))
+        treestat(child, depth + 1)
+      ELSE
+        statbytes := statbytes + ed.size
+      ENDIF
+      ed := easnext(sc)
+    ENDWHILE
+    easend(sc)
     UnLock(lock)
   ENDIF
   DisposeLink(child)
-  FreeDosObject(DOS_FIB, fib)
 ENDPROC
 
 -> TRUE if `s` carries an AmigaDOS pattern metacharacter - then find globs
@@ -2718,50 +3092,49 @@ ENDPROC FALSE
 -> Esc (checkabort - the caller sets cancelok). Heap path buffers, like
 -> copytree: a deep tree cannot sit on E's stack.
 PROC findwalk(dir, depth, pat, parsed, isglob, res:PTR TO LONG, cnt:PTR TO LONG)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, child=NIL, full=NIL, s, match
+  DEF lock=NIL, child=NIL, full=NIL, s, match,
+      es[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20 THEN RETURN
   IF cnt[0] >= FINDMAX THEN RETURN
   IF checkabort() THEN RETURN
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN
   child := String(CPATHLEN)
   full := String(CPATHLEN)
   IF (child = NIL) OR (full = NIL)
     IF child THEN DisposeLink(child)
     IF full THEN DisposeLink(full)
-    FreeDosObject(DOS_FIB, fib)
     RETURN
   ENDIF
   IF lock := Lock(dir, SHARED_LOCK)
-    IF Examine(lock, fib)
-      more := ExNext(lock, fib)
-      WHILE more AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
-        StrCopy(full, dir)
-        AddPart(full, fib.filename, CPATHLEN - 4)
-        SetStr(full, StrLen(full))
-        IF isglob
-          match := MatchPatternNoCase(parsed, fib.filename)
-        ELSE
-          match := nchas(fib.filename, pat)
+    sc := es                    -> I3 (stage b3+): batched walk
+    easbegin(sc, lock)
+    ed := easnext(sc)
+    WHILE (ed <> NIL) AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
+      StrCopy(full, dir)
+      AddPart(full, ed.name, CPATHLEN - 4)
+      SetStr(full, StrLen(full))
+      IF isglob
+        match := MatchPatternNoCase(parsed, ed.name)
+      ELSE
+        match := nchas(ed.name, pat)
+      ENDIF
+      IF match
+        IF (s := String(EstrLen(full) + 1))
+          StrCopy(s, full)
+          res[cnt[0]] := s
+          cnt[0] := cnt[0] + 1
         ENDIF
-        IF match
-          IF (s := String(EstrLen(full) + 1))
-            StrCopy(s, full)
-            res[cnt[0]] := s
-            cnt[0] := cnt[0] + 1
-          ENDIF
-        ENDIF
-        IF (fib.direntrytype > 0) AND (cnt[0] < FINDMAX)
-          StrCopy(child, full)
-          findwalk(child, depth + 1, pat, parsed, isglob, res, cnt)
-        ENDIF
-        more := ExNext(lock, fib)
-      ENDWHILE
-    ENDIF
+      ENDIF
+      IF (ed.type > 0) AND (cnt[0] < FINDMAX)
+        StrCopy(child, full)
+        findwalk(child, depth + 1, pat, parsed, isglob, res, cnt)
+      ENDIF
+      ed := easnext(sc)
+    ENDWHILE
+    easend(sc)
     UnLock(lock)
   ENDIF
   DisposeLink(child)
   DisposeLink(full)
-  FreeDosObject(DOS_FIB, fib)
 ENDPROC
 
 -> TRUE if directory b is (or lies inside) directory a: walk b's
@@ -2789,8 +3162,8 @@ ENDPROC inside
 -> files of the same name are overwritten). Path buffers per level
 -> come from the heap - E cannot size its stack for deep recursion.
 PROC copytree(src, dst, depth)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, ok=TRUE, lk,
-      csrc=NIL, cdst=NIL
+  DEF lock=NIL, ok=TRUE, lk, csrc=NIL, cdst=NIL,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20
     showmsg('directory tree too deep')
     RETURN FALSE
@@ -2804,71 +3177,81 @@ PROC copytree(src, dst, depth)
       RETURN FALSE
     ENDIF
   ENDIF
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN FALSE
   csrc := String(CPATHLEN)
   cdst := String(CPATHLEN)
   IF (csrc = NIL) OR (cdst = NIL)
     IF csrc THEN DisposeLink(csrc)
     IF cdst THEN DisposeLink(cdst)
-    FreeDosObject(DOS_FIB, fib)
     RETURN FALSE
   ENDIF
   IF (lock := Lock(src, SHARED_LOCK)) = NIL
     faultmsg('cannot read the source')
     ok := FALSE
   ELSE
-    IF Examine(lock, fib) = FALSE THEN ok := FALSE
-    IF ok
-      more := ExNext(lock, fib)
-      WHILE more AND ok    -> plain flags: safe despite E's eager AND
-        StrCopy(csrc, src)
-        AddPart(csrc, fib.filename, CPATHLEN - 4)
-        SetStr(csrc, StrLen(csrc))
-        StrCopy(cdst, dst)
-        AddPart(cdst, fib.filename, CPATHLEN - 4)
-        SetStr(cdst, StrLen(cdst))
-        IF fib.direntrytype > 0
-          ok := copytree(csrc, cdst, depth + 1)
-        ELSE
-          ok := copyfile(csrc, cdst)
-        ENDIF
-        IF ok THEN more := ExNext(lock, fib)
-      ENDWHILE
-    ENDIF
+    sc := s                     -> I3 (stage b3+): batched walk
+    easbegin(sc, lock)
+    ed := easnext(sc)
+    WHILE (ed <> NIL) AND ok    -> plain flags: safe despite E's eager AND
+      StrCopy(csrc, src)
+      AddPart(csrc, ed.name, CPATHLEN - 4)
+      SetStr(csrc, StrLen(csrc))
+      StrCopy(cdst, dst)
+      AddPart(cdst, ed.name, CPATHLEN - 4)
+      SetStr(cdst, StrLen(cdst))
+      IF ed.type > 0
+        ok := copytree(csrc, cdst, depth + 1)
+      ELSE
+        ok := copyfile(csrc, cdst)
+      ENDIF
+      IF ok THEN ed := easnext(sc)
+    ENDWHILE
+    IF sc.err THEN ok := FALSE  -> a died scan fails the copy, as the
+    easend(sc)                  -> old failed Examine did
     UnLock(lock)
   ENDIF
   DisposeLink(csrc)
   DisposeLink(cdst)
-  FreeDosObject(DOS_FIB, fib)
   IF ok THEN copyattribs(src, dst)
 ENDPROC ok
 
--> delete a directory tree, then the directory itself. Children are
--> taken one at a time with a fresh scan each round - deleting during
--> an ExNext walk would invalidate it. tick = count entries on the
--> progress bar (deletes use entry units, copies use byte units).
--> An entry that will not go (protection, or a name the handler
--> cannot resolve back - seen with FS-UAE directory drives and
--> non-ASCII names) is put on a skip list and the rest of the tree
--> still gets deleted; every undeletable entry counts into gfails
--> and the caller reports the total.
+-> delete a directory tree, then the directory itself. tick = count
+-> entries on the progress bar (deletes use entry units, copies use
+-> byte units). An entry that will not go (protection, or a name the
+-> handler cannot resolve back - seen with FS-UAE directory drives
+-> and non-ASCII names) is put on a skip list and the rest of the
+-> tree still gets deleted; every undeletable entry counts into
+-> gfails and the caller reports the total.
+-> 0.4.1 I7b (stage b3): the old shape re-Locked and re-walked the
+-> directory PER DELETED CHILD (~4-5 packets each - deleting during
+-> an ExNext walk would invalidate it, so each round rescanned to
+-> the first unskipped name). Now one exallscan SNAPSHOTS up to
+-> DTCHUNK unskipped names, the deletes run from the snapshot, and
+-> the level rescans only when the snapshot was truncated. The
+-> snapshot lives on the heap (New), not the frame - the proc
+-> recurses 20 deep and the stack budget stays where it was.
 PROC deltree(path, depth, tick)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, ok, got, isdir=FALSE,
-      nm[108]:STRING, child, pm[130]:STRING,
-      skip[16]:ARRAY OF LONG, nskip=0, j, more, over, sawany=FALSE,
-      giveup=FALSE    -> stop this level, but nskip stays the true slot count
+  DEF lock=NIL, ok, child, pm[130]:STRING,
+      skip[16]:ARRAY OF LONG, nskip=0, j, i, over, sawany=FALSE,
+      giveup=FALSE,   -> stop this level, but nskip stays the true slot count
+      names=NIL:PTR TO LONG, dirsb=NIL:PTR TO CHAR, ncol, trunc,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20
     showmsg('directory tree too deep')
     gfails := gfails + 1
     RETURN FALSE
   ENDIF
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN FALSE
-  IF (child := String(CPATHLEN)) = NIL
-    FreeDosObject(DOS_FIB, fib)
+  IF (child := String(CPATHLEN)) = NIL THEN RETURN FALSE
+  names := New(DTCHUNK * 4)
+  dirsb := New(DTCHUNK)
+  IF (names = NIL) OR (dirsb = NIL)
+    IF names THEN Dispose(names)
+    IF dirsb THEN Dispose(dirsb)
+    DisposeLink(child)
     RETURN FALSE
   ENDIF
   REPEAT
-    got := FALSE
+    ncol := 0
+    trunc := FALSE
     IF checkabort()
       abort := TRUE    -> Esc mid-delete: end the loop, leave the rest in place
     ELSEIF (lock := Lock(path, SHARED_LOCK)) = NIL
@@ -2876,58 +3259,80 @@ PROC deltree(path, depth, tick)
       faultmsg(pm)
       giveup := TRUE    -> cannot even scan: give up on this level
     ELSE
-      IF Examine(lock, fib)
-        -> first child that is not on the skip list
-        more := ExNext(lock, fib)
-        WHILE more AND (got = FALSE)
-          over := FALSE
-          IF nskip > 0
-            FOR j := 0 TO nskip - 1
-              IF nccmp(fib.filename, skip[j]) = 0 THEN over := TRUE
-            ENDFOR
-          ENDIF
-          IF over
-            more := ExNext(lock, fib)
+      -> snapshot pass: every unskipped name, up to the chunk cap
+      sc := s
+      easbegin(sc, lock)
+      ed := easnext(sc)
+      WHILE ed
+        over := FALSE
+        IF nskip > 0
+          FOR j := 0 TO nskip - 1
+            IF nccmp(ed.name, skip[j]) = 0 THEN over := TRUE
+          ENDFOR
+        ENDIF
+        IF over = FALSE
+          IF ncol < DTCHUNK
+            IF (names[ncol] := String(StrLen(ed.name)))
+              StrCopy(names[ncol], ed.name)
+              dirsb[ncol] := IF ed.type > 0 THEN 1 ELSE 0
+              ncol := ncol + 1
+              sawany := TRUE
+            ELSE
+              giveup := TRUE
+            ENDIF
           ELSE
-            got := TRUE
-            sawany := TRUE
-            StrCopy(nm, fib.filename)
-            isdir := fib.direntrytype > 0
+            trunc := TRUE       -> the remainder waits for a rescan
           ENDIF
-        ENDWHILE
-      ENDIF
+        ENDIF
+        ed := easnext(sc)
+      ENDWHILE
+      easend(sc)
       UnLock(lock)
+      lock := NIL
     ENDIF
-    IF got
-      StrCopy(child, path)
-      AddPart(child, nm, CPATHLEN - 4)
-      SetStr(child, StrLen(child))
-      IF isdir
-        ok := deltree(child, depth + 1, tick)
+    -> delete pass: from the snapshot, no rescan per child
+    i := 0
+    WHILE (i < ncol) AND (abort = FALSE) AND (giveup = FALSE)
+      IF checkabort()
+        abort := TRUE
       ELSE
-        IF (ok := zap(child, TRUE))
-          IF tick THEN progadd(1)
+        StrCopy(child, path)
+        AddPart(child, names[i], CPATHLEN - 4)
+        SetStr(child, StrLen(child))
+        IF dirsb[i]
+          ok := deltree(child, depth + 1, tick)
         ELSE
-          StringF(pm, 'cannot delete "\s"', nm)
-          faultmsg(pm)
-          gfails := gfails + 1
-        ENDIF
-      ENDIF
-      IF (ok = FALSE) AND (abort = FALSE)
-        -> leave it behind and carry on with its siblings
-        IF nskip < 16
-          IF (skip[nskip] := String(108)) = NIL
-            giveup := TRUE
+          IF (ok := zap(child, TRUE))
+            IF tick THEN progadd(1)
           ELSE
-            StrCopy(skip[nskip], nm)
-            nskip := nskip + 1
+            StringF(pm, 'cannot delete "\s"', names[i])
+            faultmsg(pm)
+            gfails := gfails + 1
           ENDIF
-        ELSE
-          giveup := TRUE    -> too many failures here: stop this level
         ENDIF
+        IF (ok = FALSE) AND (abort = FALSE)
+          -> leave it behind and carry on with its siblings
+          IF nskip < 16
+            IF (skip[nskip] := String(StrLen(names[i])))
+              StrCopy(skip[nskip], names[i])
+              nskip := nskip + 1
+            ELSE
+              giveup := TRUE
+            ENDIF
+          ELSE
+            giveup := TRUE    -> too many failures here: stop this level
+          ENDIF
+        ENDIF
+        i := i + 1
       ENDIF
-    ENDIF
-  UNTIL (got = FALSE) OR giveup OR abort
+    ENDWHILE
+    FOR j := 0 TO ncol - 1      -> this chunk's name copies
+      DisposeLink(names[j])
+    ENDFOR
+    -> trunc=FALSE means the snapshot covered the WHOLE level: after
+    -> its delete pass nothing new remains (failures sit in the skip
+    -> list) - no confirming rescan owed
+  UNTIL (trunc = FALSE) OR giveup OR abort
   -> free every skip slot we actually allocated (nskip is the true count now,
   -> so a give-up no longer leaks them)
   FOR j := 0 TO nskip - 1
@@ -2956,7 +3361,8 @@ PROC deltree(path, depth, tick)
     ENDIF
   ENDIF
   DisposeLink(child)
-  FreeDosObject(DOS_FIB, fib)
+  Dispose(names)
+  Dispose(dirsb)
 ENDPROC ok
 
 -> DeleteFile with DOpus's policies: an object that is already gone
@@ -3184,13 +3590,10 @@ ENDPROC
 -> before the commit. `disk` is the staged directory, `mprefix` its
 -> stored member path (no trailing slash).
 PROC arccachetree(p, disk, mprefix, depth)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, child=NIL, mem=NIL, more
+  DEF lock=NIL, child=NIL, mem=NIL,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20 THEN RETURN
   IF (lock := Lock(disk, SHARED_LOCK)) = NIL THEN RETURN
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL
-    UnLock(lock)
-    RETURN
-  ENDIF
   -> path buffers from the heap, not the stack: this recurses to depth 20
   -> and E cannot size its stack for that (as copytree/deltree/treestat do)
   child := String(CPATHLEN)
@@ -3198,31 +3601,30 @@ PROC arccachetree(p, disk, mprefix, depth)
   IF (child = NIL) OR (mem = NIL)
     IF child THEN DisposeLink(child)
     IF mem THEN DisposeLink(mem)
-    FreeDosObject(DOS_FIB, fib)
     UnLock(lock)
     RETURN
   ENDIF
-  IF Examine(lock, fib)
-    more := ExNext(lock, fib)
-    WHILE more
-      StrCopy(mem, mprefix)
-      StrAdd(mem, '/')
-      StrAdd(mem, fib.filename)
-      IF fib.direntrytype > 0
-        arccacheput(p, mem, 0, TRUE)
-        StrCopy(child, disk)
-        AddPart(child, fib.filename, CPATHLEN - 4)
-        SetStr(child, StrLen(child))
-        arccachetree(p, child, mem, depth + 1)
-      ELSE
-        arccacheput(p, mem, fib.size, FALSE)
-      ENDIF
-      more := ExNext(lock, fib)
-    ENDWHILE
-  ENDIF
+  sc := s                       -> I3 (stage b3+): batched walk
+  easbegin(sc, lock)
+  ed := easnext(sc)
+  WHILE ed
+    StrCopy(mem, mprefix)
+    StrAdd(mem, '/')
+    StrAdd(mem, ed.name)
+    IF ed.type > 0
+      arccacheput(p, mem, 0, TRUE)
+      StrCopy(child, disk)
+      AddPart(child, ed.name, CPATHLEN - 4)
+      SetStr(child, StrLen(child))
+      arccachetree(p, child, mem, depth + 1)
+    ELSE
+      arccacheput(p, mem, ed.size, FALSE)
+    ENDIF
+    ed := easnext(sc)
+  ENDWHILE
+  easend(sc)
   DisposeLink(child)
   DisposeLink(mem)
-  FreeDosObject(DOS_FIB, fib)
   UnLock(lock)
 ENDPROC
 
@@ -3333,7 +3735,8 @@ ENDPROC ok
 -> verified by the caller, not by an exit code the asynch run hides.
 PROC arcrunprog(dir, cmd)
   DEF wout=NIL, nin=NIL, rdr=NIL, dlock=NIL, old=NIL, res,
-      buf[260]:ARRAY OF CHAR, n, i, c, st=0, prevtotal=0, curtot=0
+      buf:PTR TO CHAR, n, i, c, st=0, prevtotal=0, curtot=0
+  buf := pipebuf    -> I7a: 4KB shared pipe buffer, not 256B on the stack
   IF (wout := Open('PIPE:cfile-arc', NEWFILE)) = NIL
     RETURN runcapture(dir, cmd, 'T:CFile-out')    -> no PIPE: no bar
   ENDIF
@@ -3358,7 +3761,7 @@ PROC arcrunprog(dir, cmd)
   ENDIF
   -> the launched command owns nin/wout now (asynch closes them)
   IF rdr := Open('PIPE:cfile-arc', OLDFILE)
-    n := Read(rdr, buf, 256)
+    n := Read(rdr, buf, PIPESZ)
     WHILE n > 0
       FOR i := 0 TO n - 1
         c := buf[i]
@@ -3467,7 +3870,7 @@ PROC arcrunprog(dir, cmd)
           ENDIF
         ENDIF
       ENDFOR
-      n := Read(rdr, buf, 256)
+      n := Read(rdr, buf, PIPESZ)
     ENDWHILE
     Close(rdr)
     IF progbybytes THEN progadd(prevtotal)    -> the last member
@@ -3670,13 +4073,9 @@ ENDPROC n
 -> the delete pass; the shared lock is held across the run, which is
 -> safe - lha only reads the tree, it writes the archive elsewhere.
 PROC arcaddstaged(p, stageroot)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, cmd[700]:STRING,
-      base[360]:STRING, baselen, more
+  DEF lock=NIL, cmd[700]:STRING, base[360]:STRING, baselen,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF (lock := Lock(stageroot, SHARED_LOCK)) = NIL THEN RETURN
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL
-    UnLock(lock)
-    RETURN
-  ENDIF
   -> add the staging tree's top-level entries; -r -e keeps the subtree and
   -> stores empty dirs. Source names go unescaped (they name real staged
   -> files, so a pattern can only re-match them).
@@ -3687,20 +4086,20 @@ PROC arcaddstaged(p, stageroot)
   ENDIF
   StrCopy(cmd, base)
   baselen := EstrLen(cmd)
-  IF Examine(lock, fib)
-    more := ExNext(lock, fib)
-    WHILE more
-      IF (EstrLen(cmd) + StrLen(fib.filename)) > 600
-        arcrunprog(stageroot, cmd)
-        StrCopy(cmd, base)
-      ENDIF
-      StrAdd(cmd, ' "')
-      StrAdd(cmd, fib.filename)
-      StrAdd(cmd, '"')
-      more := ExNext(lock, fib)
-    ENDWHILE
-  ENDIF
-  FreeDosObject(DOS_FIB, fib)
+  sc := s                       -> I3 (stage b3+): batched walk
+  easbegin(sc, lock)
+  ed := easnext(sc)
+  WHILE ed
+    IF (EstrLen(cmd) + StrLen(ed.name)) > 600
+      arcrunprog(stageroot, cmd)
+      StrCopy(cmd, base)
+    ENDIF
+    StrAdd(cmd, ' "')
+    StrAdd(cmd, ed.name)
+    StrAdd(cmd, '"')
+    ed := easnext(sc)
+  ENDWHILE
+  easend(sc)
   UnLock(lock)
   IF EstrLen(cmd) > baselen THEN arcrunprog(stageroot, cmd)
   DeleteFile('T:CFile-out')
@@ -3711,31 +4110,27 @@ ENDPROC
 -> TRUE if at least one entry was archived (an all-deleted archive would
 -> leave newarc absent - the caller keeps the original then).
 PROC arcrepack(work, newarc)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, cmd[700]:STRING,
-      base[360]:STRING, baselen, more, any=FALSE
+  DEF lock=NIL, cmd[700]:STRING, base[360]:STRING, baselen, any=FALSE,
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF (lock := Lock(work, SHARED_LOCK)) = NIL THEN RETURN FALSE
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL
-    UnLock(lock)
-    RETURN FALSE
-  ENDIF
   StringF(base, 'lha -M -r -e a "\s"', newarc)
   StrCopy(cmd, base)
   baselen := EstrLen(cmd)
-  IF Examine(lock, fib)
-    more := ExNext(lock, fib)
-    WHILE more
-      IF (EstrLen(cmd) + StrLen(fib.filename)) > 600
-        runcapture(work, cmd, 'T:CFile-out')
-        StrCopy(cmd, base)
-      ENDIF
-      StrAdd(cmd, ' "')
-      StrAdd(cmd, fib.filename)
-      StrAdd(cmd, '"')
-      any := TRUE
-      more := ExNext(lock, fib)
-    ENDWHILE
-  ENDIF
-  FreeDosObject(DOS_FIB, fib)
+  sc := s                       -> I3 (stage b3+): batched walk
+  easbegin(sc, lock)
+  ed := easnext(sc)
+  WHILE ed
+    IF (EstrLen(cmd) + StrLen(ed.name)) > 600
+      runcapture(work, cmd, 'T:CFile-out')
+      StrCopy(cmd, base)
+    ENDIF
+    StrAdd(cmd, ' "')
+    StrAdd(cmd, ed.name)
+    StrAdd(cmd, '"')
+    any := TRUE
+    ed := easnext(sc)
+  ENDWHILE
+  easend(sc)
   UnLock(lock)
   IF EstrLen(cmd) > baselen THEN runcapture(work, cmd, 'T:CFile-out')
   DeleteFile('T:CFile-out')
@@ -4394,7 +4789,7 @@ PROC doxfer(ismove, force)
   -> whose file is also marked is skipped - it travels as the sidecar)
   IF nmark > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[b + i] AND (infodup(p, b + i) = FALSE)
+      IF markednodup(p, b + i)
         r := resolveone(p, q, enames[b + i], edirs[b + i] <> 0,
                         force, tname)
         IF r < 0 THEN RETURN    -> refused/Esc: nothing has happened
@@ -4695,7 +5090,7 @@ PROC dodelete()
   statfiles := 0
   IF nmark > 0
     FOR i := 0 TO ecount[p] - 1
-      IF emark[b + i] AND (infodup(p, b + i) = FALSE)
+      IF markednodup(p, b + i)
         statfiles := statfiles + 1
         IF edirs[b + i]
           buildfull(dpath, ppath[p], enames[b + i])
@@ -4719,7 +5114,7 @@ PROC dodelete()
     FOR i := 0 TO ecount[p] - 1
       -> skip an icon whose file is also marked: it goes as that file's
       -> sidecar, so deleting it again would fault on the missing file
-      IF emark[b + i] AND (infodup(p, b + i) = FALSE) AND (abort = FALSE)
+      IF markednodup(p, b + i) AND (abort = FALSE)
         delone(p, b + i)
       ENDIF
     ENDFOR
@@ -4922,11 +5317,12 @@ ENDPROC
 -> what is this file? Amiga magic is strong: hunk executables, lha,
 -> LZX and zip have exact headers; text is "no NULs, nearly all
 -> printable" over the first 512 bytes
-PROC sniff(path)
-  DEF fh, buf[520]:ARRAY OF CHAR, n, i, c, m, pr=0, esc=FALSE
-  IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN TY_OTHER
-  n := Read(fh, buf, 512)
-  Close(fh)
+-> classify a buffer's leading bytes (<=512 examined). Factored out of
+-> sniff so a caller that already read the file (grepwalk) can type it
+-> without a second Open (I5).
+PROC sniffmem(buf:PTR TO CHAR, n)
+  DEF i, c, m, pr=0, esc=FALSE
+  IF n > 512 THEN n := 512
   IF n < 1 THEN RETURN TY_OTHER
   IF n >= 4
     IF (buf[0] = 0) AND (buf[1] = 0) AND (buf[2] = 3) AND (buf[3] = $F3)
@@ -4960,21 +5356,35 @@ PROC sniff(path)
   ENDIF
 ENDPROC TY_OTHER
 
+PROC sniff(path)
+  DEF fh, buf[520]:ARRAY OF CHAR, n
+  IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN TY_OTHER
+  n := Read(fh, buf, 512)
+  Close(fh)
+ENDPROC sniffmem(buf, n)
+
 -> render one text line (tabs to 8-column stops, controls as dots)
 -> into a 78-column row buffer; returns the offset after the line
-PROC textrow(buf, len, off, rb)
+-> R3 (stage b6): colp receives the populated width (clamped to
+-> ncols) so the caller can Text the prefix and RectFill the tail
+PROC textrow(buf, len, off, rb, colp:PTR TO LONG)
   DEF col=0, c, r:PTR TO CHAR, s:PTR TO CHAR
   r := rb
   s := buf
+  colp[0] := 0
   WHILE off < len
     c := s[off]
     off := off + 1
-    IF c = 10 THEN RETURN off    -> line done
+    IF c = 10
+      colp[0] := IF col > ncols THEN ncols ELSE col
+      RETURN off                 -> line done
+    ENDIF
     IF c = 9
       REPEAT
         IF col < ncols THEN r[col] := 32
         col := col + 1
-      UNTIL Mod(col, 8) = 0
+      UNTIL (col AND 7) = 0    -> X2: Mod is DIVS - a divide per tab
+                               -> column, and unclamped col overflows it
     ELSEIF (c >= 32) AND ((c <= 126) OR (c >= 160))
       IF col < ncols THEN r[col] := c
       col := col + 1
@@ -4983,6 +5393,7 @@ PROC textrow(buf, len, off, rb)
       col := col + 1
     ENDIF
   ENDWHILE
+  colp[0] := IF col > ncols THEN ncols ELSE col
 ENDPROC off
 
 -> offset of the line start before 'off' (scan back over the buffer)
@@ -4990,7 +5401,8 @@ PROC prevline(buf, off)
   DEF s:PTR TO CHAR, o
   s := buf
   o := off - 2    -> step over the LF that ends the previous line
-  WHILE (o >= 0) AND (s[o] <> 10)
+  WHILE o >= 0    -> X3: nested, not AND - the eager AND read s[-1]
+    IF s[o] = 10 THEN RETURN o + 1
     o := o - 1
   ENDWHILE
 ENDPROC o + 1
@@ -5121,10 +5533,61 @@ ENDPROC
 -> full-screen viewer over the pane area: text pager, hex dump, or
 -> ANSI art (mode 0/1/2). Up/Down = line, Shift = page, Ctrl = ends,
 -> Space = page down, Esc/q = back.
+-> R3 (stage b6): one viewer row - build, Text the populated
+-> prefix, RectFill the tail (the space-pad Text of a full ncols is
+-> gone). Returns the NEXT offset in text mode; hex advances by 16
+-> at the caller. A row at/past EOF blanks and returns off as-is.
+PROC viewrow(buf, len, off, mode, r)
+  DEF rb[204]:ARRAY OF CHAR, i, w=0, y, n
+  FOR i := 0 TO ncols - 1
+    rb[i] := 32                  -> hexrow leaves gaps; prefill stays
+  ENDFOR
+  IF off < len
+    IF mode = 1
+      hexrow(buf, len, off, rb)
+      n := len - off
+      IF n > 16 THEN n := 16
+      w := 58 + n
+      IF w > ncols THEN w := ncols
+    ELSE
+      off := textrow(buf, len, off, rb, {w})
+    ENDIF
+  ENDIF
+  y := panetop + (r * ch)
+  -> R6 coda 2 (his hunt for instant): viewer rows never change in
+  -> place, and every row they land on is ALREADY background - the
+  -> entry scrub, the masked page fill before a full redraw, or a
+  -> blit-vacated row. So: JAM1 (glyphs only, no per-cell background
+  -> rendering), one plane, and NO tail fill at all. A first page is
+  -> one full-depth scrub + 22 glyph-only one-plane Texts.
+  IF w > 0
+    rp.mask := flatmask
+    SetDrMd(rp, RP_JAM1)
+    SetAPen(rp, txtpen)
+    Move(rp, x0, y + baseline)
+    Text(rp, rb, w)
+    SetDrMd(rp, RP_JAM2)
+    rp.mask := 255
+  ENDIF
+ENDPROC off
+
+-> the byte offset of the row `steps` text lines below `off`
+PROC textskip(bp:PTR TO CHAR, len, off, steps)
+  DEF o2
+  o2 := off
+  WHILE steps > 0
+    WHILE (o2 < len) AND (bp[o2] <> 10)
+      o2 := o2 + 1
+    ENDWHILE
+    IF o2 < len THEN o2 := o2 + 1
+    steps := steps - 1
+  ENDWHILE
+ENDPROC o2
+
 PROC viewfile(path, name, mode, bulk)
   DEF buf=NIL, bp:PTR TO CHAR, len, size, fh, top2=0, r, off, o2,
       class, code, qual, done=FALSE, dirty=TRUE, res2=0,
-      rb[204]:ARRAY OF CHAR, i, mb[120]:STRING, mn:PTR TO CHAR,
+      mb[120]:STRING, mn:PTR TO CHAR, i, otop, d1, u1,
       pgd, lock, fib:PTR TO fileinfoblock, nrows2=0, maxtop=0, vmax=0
   -> size via the pane data is stale-proof enough, but re-examine to
   -> be safe for files just written
@@ -5145,7 +5608,8 @@ PROC viewfile(path, name, mode, bulk)
     RETURN
   ENDIF
   IF size > 0
-    IF (buf := New(size)) = NIL
+    IF (buf := New(size + 1)) = NIL    -> X3: the line scans and the
+                                       -> ANSI parser peek one past len
       showmsg('not enough memory to view this file')
       RETURN
     ENDIF
@@ -5189,6 +5653,14 @@ PROC viewfile(path, name, mode, bulk)
   IF mode = 1 THEN mn := 'hex'
   IF mode = 2 THEN mn := 'ansi'
   drawviewframe(TRUE)
+  -> R6 coda (stage b8, his find: the first page visibly filled top
+  -> to bottom at authentic speed): ONE full-depth entry scrub - it
+  -> erases the previous surface's planes in a single blit, and it
+  -> is what makes the MASKED row rendering below safe (the ccon
+  -> narrowing rule: scrub unmasked, then narrow)
+  SetAPen(rp, 0)
+  RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+           panetop + Mul(visrows, ch) - 1)
   IF bulktot > 0
     StringF(mb, '\s "\s" (\d/\d) - \d bytes', mn, name, bulkpos, bulktot, len)
   ELSE
@@ -5200,24 +5672,22 @@ PROC viewfile(path, name, mode, bulk)
       IF mode = 2
         drawansipage(bp, len, top2)
       ELSE
-        -> draw the page: 22 rows over the pane area
+        -> draw the page (R3 + R6 coda 2): ONE masked background
+        -> fill for the whole area (plane 0 is the only plane with
+        -> content since the entry scrub), then glyph-only rows
+        rp.mask := flatmask
+        SetAPen(rp, 0)
+        RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
+                 panetop + Mul(visrows, ch) - 1)
+        rp.mask := 255
         off := top2
         FOR r := 0 TO visrows - 1
-          FOR i := 0 TO ncols - 1
-            rb[i] := 32
-          ENDFOR
           IF mode = 1
-            IF off < len
-              hexrow(buf, len, off, rb)
-              off := off + 16
-            ENDIF
+            viewrow(buf, len, off, 1, r)
+            off := off + 16
           ELSE
-            IF off < len THEN off := textrow(buf, len, off, rb)
+            off := viewrow(buf, len, off, 0, r)
           ENDIF
-          SetAPen(rp, txtpen)
-          SetBPen(rp, 0)
-          Move(rp, x0, panetop + (r * ch) + baseline)
-          Text(rp, rb, ncols)
         ENDFOR
       ENDIF
       dirty := FALSE
@@ -5273,6 +5743,21 @@ PROC viewfile(path, name, mode, bulk)
       ENDIF
       pgd := 0
     ENDIF
+    otop := top2                 -> R3: for the one-row blit below
+    IF (mode <> 2) AND (pgd <> 0)
+      -> his find (b16): the Ctrl jumps used to WALK the step loops
+      -> below - a full-file line scan just to reach an offset both
+      -> ends already know. Jump straight: top is 0, bottom is vmax
+      -> (computed at load). The +-30000 sentinels only come from
+      -> the Ctrl arms; pages are visrows-sized and keep stepping.
+      IF pgd <= -30000
+        top2 := 0
+        pgd := 0
+      ELSEIF pgd >= 30000
+        top2 := vmax
+        pgd := 0
+      ENDIF
+    ENDIF
     WHILE pgd > 0
       -> forward one line/row from top2, stopping at the last line
       IF mode = 1
@@ -5284,10 +5769,7 @@ PROC viewfile(path, name, mode, bulk)
         ENDWHILE
         o2 := o2 + 1
       ENDIF
-      IF o2 <= vmax
-        top2 := o2
-        dirty := TRUE
-      ENDIF
+      IF o2 <= vmax THEN top2 := o2
       pgd := pgd - 1
       IF o2 > vmax THEN pgd := 0
     ENDWHILE
@@ -5299,13 +5781,38 @@ PROC viewfile(path, name, mode, bulk)
         ELSE
           top2 := prevline(buf, top2)
         ENDIF
-        dirty := TRUE
       ELSE
         pgd := 0
       ENDIF
       pgd := pgd + 1
       IF pgd > 0 THEN pgd := 0
     ENDWHILE
+    IF (mode <> 2) AND (top2 <> otop) AND (done = FALSE)
+      -> R3 (stage b6): a move of exactly one row is a blit + ONE
+      -> viewrow; anything else repaints the page
+      IF mode = 1
+        d1 := otop + 16
+        u1 := otop - 16
+        IF u1 < 0 THEN u1 := 0
+      ELSE
+        d1 := textskip(bp, len, otop, 1)
+        u1 := IF otop > 0 THEN prevline(buf, otop) ELSE 0
+      ENDIF
+      IF top2 = d1
+        scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), 1, flatmask)
+        IF mode = 1
+          viewrow(buf, len, top2 + Mul(16, visrows - 1), 1, visrows - 1)
+        ELSE
+          viewrow(buf, len, textskip(bp, len, top2, visrows - 1), 0,
+                  visrows - 1)
+        ENDIF
+      ELSEIF top2 = u1
+        scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), -1, flatmask)
+        viewrow(buf, len, top2, mode, 0)
+      ELSE
+        dirty := TRUE
+      ENDIF
+    ENDIF
   ENDWHILE
   IF buf THEN Dispose(buf)
   IF mode = 2 THEN setlightpal()
@@ -5502,32 +6009,43 @@ ENDPROC
 -> one window row: line edvtop+r from column edxoff, with the cursor
 -> cell inverted when it lives here
 PROC edrow(r)
-  DEF idx, s:PTR TO CHAR, l, i, vis, erb[204]:ARRAY OF CHAR,
-      cc[4]:ARRAY OF CHAR
+  DEF idx, s:PTR TO CHAR, l, vis=0, erb[204]:ARRAY OF CHAR,
+      cc[4]:ARRAY OF CHAR, y
   idx := edvtop + r
-  FOR i := 0 TO ncols - 1
-    erb[i] := 32
-  ENDFOR
+  y := panetop + (r * ch)
   IF idx < ednum
     s := edl[idx]
     l := EstrLen(edl[idx])
     vis := l - edxoff
     IF vis > ncols THEN vis := ncols
+    IF vis < 0 THEN vis := 0
     IF vis > 0 THEN CopyMem(s + edxoff, erb, vis)
   ENDIF
+  -> R4 (stage b6): populated prefix + ONE tail fill - the full-width
+  -> space-padded Text (and its ncols prefill loop) is gone.
+  -> R6 coda: masked - editfile's entry fill is the unmasked scrub
+  rp.mask := flatmask
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
-  Move(rp, x0, panetop + (r * ch) + baseline)
-  Text(rp, erb, ncols)
+  IF vis > 0
+    Move(rp, x0, y + baseline)
+    Text(rp, erb, vis)
+  ENDIF
+  IF vis < ncols
+    SetAPen(rp, 0)
+    RectFill(rp, x0 + Mul(vis, cw), y, x0 + Mul(ncols, cw) - 1, y + ch - 1)
+    SetAPen(rp, txtpen)
+  ENDIF
   IF idx = edcur
-    cc[0] := erb[edcol - edxoff]
+    cc[0] := IF (edcol - edxoff) < vis THEN erb[edcol - edxoff] ELSE 32
     SetAPen(rp, 0)
     SetBPen(rp, txtpen)
-    Move(rp, x0 + ((edcol - edxoff) * cw), panetop + (r * ch) + baseline)
+    Move(rp, x0 + ((edcol - edxoff) * cw), y + baseline)
     Text(rp, cc, 1)
     SetAPen(rp, txtpen)
     SetBPen(rp, 0)
   ENDIF
+  rp.mask := 255
 ENDPROC
 
 PROC edpage()
@@ -5609,7 +6127,7 @@ ENDPROC TRUE
 -> Lines grow to any length; only the line COUNT (8192) and whole-file
 -> size (512KB) are capped. -1 = failed (message shown).
 PROC edload(path)
-  DEF fh, buf=NIL, n, size=-1, i, c, col, s, ok=TRUE,
+  DEF fh, buf=NIL, n, size=-1, i, c, col, s, ok=TRUE, le, k, rs,
       lock, fib:PTR TO fileinfoblock, bp:PTR TO CHAR, ln:PTR TO CHAR
   IF edl = NIL
     IF (edl := New(Mul(EDMAXL, 4))) = NIL THEN RETURN FALSE
@@ -5656,68 +6174,122 @@ PROC edload(path)
   IF ok
     edl[0] := s
     ednum := 1
-    col := 0
     i := 0
-    WHILE (i < n) AND ok
-      c := bp[i]
-      IF c = 10
-        IF ednum >= EDMAXL
-          showmsg('too many lines to edit (8192 cap)')
-          ok := FALSE
-        ELSEIF (s := String(EDLINIT)) = NIL
-          showmsg('not enough memory')
-          ok := FALSE
-        ELSE
-          edl[ednum] := s
-          ednum := ednum + 1
-          col := 0
+    -> C2 (stage b4): line-at-a-time. The old loop paid an edgrow
+    -> CALL and a SetStr CALL per CHARACTER - the whole cost of
+    -> opening a big file at stock CPU. Now per line: find the end,
+    -> MEASURE the final width (tabs to 8-stops, CRs dropped), ONE
+    -> edgrow, CopyMem the clean runs between tabs/CRs, ONE SetStr.
+    -> Same output byte-for-byte, harness-proven (b4test.e: tabs,
+    -> CRLF, no trailing LF, empty file, empty lines, tab-at-eol).
+    WHILE (i <= n) AND ok
+      le := i                        -> the line spans [i, le)
+      WHILE (le < n) AND (bp[le] <> 10)
+        le := le + 1
+      ENDWHILE
+      col := 0                       -> measuring pass
+      k := i
+      WHILE k < le
+        c := bp[k]
+        IF c = 9
+          col := (col OR 7) + 1      -> next 8-stop (X2: no DIVS)
+        ELSEIF c <> 13
+          col := col + 1             -> CRs dropped: Amiga text is LF
         ENDIF
-      ELSEIF c = 13
-        -> dropped: Amiga text is LF
-      ELSEIF c = 9
-        -> tab to the next 8-stop, the line growing as needed
-        REPEAT
-          IF edgrow(ednum - 1, col + 1) = FALSE
+        k := k + 1
+      ENDWHILE
+      IF edgrow(ednum - 1, col) = FALSE
+        showmsg('not enough memory')
+        ok := FALSE
+      ELSE
+        ln := edl[ednum - 1]         -> filling pass
+        col := 0
+        rs := i
+        k := i
+        WHILE k <= le
+          c := IF k < le THEN bp[k] ELSE 10   -> sentinel: flush at end
+          IF (c = 9) OR (c = 13) OR (k = le)
+            IF k > rs
+              CopyMem(bp + rs, ln + col, k - rs)
+              col := col + (k - rs)
+            ENDIF
+            IF c = 9
+              REPEAT
+                ln[col] := 32
+                col := col + 1
+              UNTIL (col AND 7) = 0
+            ENDIF
+            rs := k + 1
+          ENDIF
+          k := k + 1
+        ENDWHILE
+        SetStr(edl[ednum - 1], col)
+      ENDIF
+      IF ok
+        IF le < n                    -> the LF opens the next line
+          IF ednum >= EDMAXL
+            showmsg('too many lines to edit (8192 cap)')
+            ok := FALSE
+          ELSEIF (s := String(EDLINIT)) = NIL
             showmsg('not enough memory')
             ok := FALSE
           ELSE
-            ln := edl[ednum - 1]
-            ln[col] := 32
-            col := col + 1
-            SetStr(edl[ednum - 1], col)    -> keep EstrLen live for edgrow
+            edl[ednum] := s
+            ednum := ednum + 1
           ENDIF
-        UNTIL (Mod(col, 8) = 0) OR (ok = FALSE)
-      ELSE
-        IF edgrow(ednum - 1, col + 1) = FALSE
-          showmsg('not enough memory')
-          ok := FALSE
-        ELSE
-          ln := edl[ednum - 1]
-          ln[col] := c
-          col := col + 1
-          SetStr(edl[ednum - 1], col)
         ENDIF
       ENDIF
-      i := i + 1
+      i := le + 1
     ENDWHILE
   ENDIF
   IF buf THEN Dispose(buf)
   IF ok = FALSE THEN edfree()
 ENDPROC ok
 
+-> I2: a save used to be TWO Write packets per line - 4000 synchronous
+-> round trips for a 2000-line file, ~1.2s even on the PiStorm (packet
+-> count is the whole cost; no CPU makes round trips free). Lines are
+-> now assembled into copybuf and flushed in cbufsz chunks - two-ish
+-> packets per save. Byte-identical output harness-proven (b2test.e:
+-> exact-fit, one-over, giant-line, empty-line).
 PROC edsave(path)
-  DEF fh, i, ok=TRUE
+  DEF fh, i, ok=TRUE, used=0, l, wb:PTR TO CHAR
   IF samefile(path, 'PROGDIR:cfile.config') THEN wantreload := TRUE
   IF (fh := Open(path, NEWFILE)) = NIL
     faultmsg('cannot save')
     RETURN FALSE
   ENDIF
+  wb := copybuf    -> free: edsave and copyfile are never concurrent
   FOR i := 0 TO ednum - 1
     IF ok
-      IF Write(fh, edl[i], EstrLen(edl[i])) < 0 THEN ok := FALSE
-      IF Write(fh, '\n', 1) < 0 THEN ok := FALSE
+      l := EstrLen(edl[i])
+      IF (used + l + 1) > cbufsz
+        IF used > 0
+          IF Write(fh, wb, used) < used THEN ok := FALSE
+          used := 0
+        ENDIF
+      ENDIF
+      IF ok
+        IF (l + 1) > cbufsz
+          -> a line longer than the whole buffer: write it direct
+          IF Write(fh, edl[i], l) < l THEN ok := FALSE
+          IF ok
+            IF Write(fh, '\n', 1) < 1 THEN ok := FALSE
+          ENDIF
+        ELSE
+          CopyMem(edl[i], wb + used, l)
+          used := used + l
+          wb[used] := 10
+          used := used + 1
+        ENDIF
+      ENDIF
     ENDIF
   ENDFOR
+  IF ok
+    IF used > 0
+      IF Write(fh, wb, used) < used THEN ok := FALSE
+    ENDIF
+  ENDIF
   Close(fh)
   IF ok = FALSE THEN faultmsg('write failed')
 ENDPROC ok
@@ -5726,7 +6298,7 @@ ENDPROC ok
 -> 0 = left without saving, 1 = saved.
 PROC editfile(path, name)
   DEF class, code, qual, done2=FALSE, saved=0, k, i, l, r, nl,
-      s:PTR TO CHAR
+      s:PTR TO CHAR, ovtop, oxoff, ocr, cr
   IF edload(path) = FALSE THEN RETURN -1
   edcur := 0
   edcol := 0
@@ -5777,8 +6349,29 @@ PROC editfile(path, name)
             edcur := edcur + 1
             edcol := 0
             edtouch(name)
-            edfix()
-            edpage()
+            -> R4 (stage b6): the split shifts only the rows BELOW -
+            -> blit them down one and draw the two changed rows;
+            -> bottom-edge splits blit the whole page up instead;
+            -> any horizontal shift keeps the full repaint
+            ocr := edcur - 1 - edvtop
+            ovtop := edvtop
+            oxoff := edxoff
+            IF edfix()
+              IF (edxoff = oxoff) AND (edvtop = (ovtop + 1))
+                scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), 1, flatmask)
+                IF visrows > 1 THEN edrow(visrows - 2)
+                edrow(visrows - 1)
+              ELSE
+                edpage()
+              ENDIF
+            ELSE
+              IF (ocr + 1) < visrows
+                scrollone(x0, panetop + Mul(ocr + 1, ch), Mul(ncols, cw),
+                          Mul(visrows - ocr - 1, ch), -1, flatmask)
+              ENDIF
+              edrow(ocr)
+              IF (ocr + 1) < visrows THEN edrow(ocr + 1)
+            ENDIF
           ENDIF
         ENDIF
       ELSEIF code = 8    -> backspace
@@ -5805,8 +6398,20 @@ PROC editfile(path, name)
             ednum := ednum - 1
             edcur := edcur - 1
             edtouch(name)
-            edfix()
-            edpage()
+            oxoff := edxoff
+            IF edfix()
+              edpage()
+            ELSE
+              -> R4: the join pulls the rows below UP one - blit them
+              -> and draw the joined row + the revealed bottom row
+              cr := edcur - edvtop
+              IF (cr + 1) < visrows
+                scrollone(x0, panetop + Mul(cr + 1, ch), Mul(ncols, cw),
+                          Mul(visrows - cr - 1, ch), 1, flatmask)
+              ENDIF
+              edrow(cr)
+              IF visrows > 1 THEN edrow(visrows - 1)
+            ENDIF
           ENDIF
         ENDIF
       ELSEIF code = 127    -> del: under the cursor / join the next
@@ -5828,14 +6433,23 @@ PROC editfile(path, name)
             ENDFOR
             ednum := ednum - 1
             edtouch(name)
-            edfix()
-            edpage()
+            IF edfix()
+              edpage()
+            ELSE
+              cr := edcur - edvtop    -> R4: same shape as the
+              IF (cr + 1) < visrows   -> backspace-join above
+                scrollone(x0, panetop + Mul(cr + 1, ch), Mul(ncols, cw),
+                          Mul(visrows - cr - 1, ch), 1, flatmask)
+              ENDIF
+              edrow(cr)
+              IF visrows > 1 THEN edrow(visrows - 1)
+            ENDIF
           ENDIF
         ENDIF
       ELSEIF code = 9    -> tab: spaces to the next 8-stop (grows the line)
         REPEAT
           r := edinsch(32)
-        UNTIL (r = FALSE) OR (Mod(edcol, 8) = 0)
+        UNTIL (r = FALSE) OR ((edcol AND 7) = 0)    -> X2: no DIVS
         edtouch(name)
         IF edfix() THEN edpage() ELSE edrow(edcur - edvtop)
       ELSEIF (code >= 32) AND (code <= 255)
@@ -5885,8 +6499,22 @@ PROC editfile(path, name)
         IF edcur < 0 THEN edcur := 0
         IF edcur > (ednum - 1) THEN edcur := ednum - 1
         IF edcol > EstrLen(edl[edcur]) THEN edcol := EstrLen(edl[edcur])
+        ovtop := edvtop
+        oxoff := edxoff
         IF edfix()
-          edpage()
+          -> R4 (stage b6): a vertical edge cross is one blit + two
+          -> rows; horizontal shifts move every row and repaint
+          IF (edxoff = oxoff) AND (edvtop = (ovtop + 1))
+            scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), 1, flatmask)
+            IF visrows > 1 THEN edrow(visrows - 2)
+            edrow(visrows - 1)
+          ELSEIF (edxoff = oxoff) AND (edvtop = (ovtop - 1))
+            scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), -1, flatmask)
+            edrow(0)
+            IF visrows > 1 THEN edrow(1)
+          ELSE
+            edpage()
+          ENDIF
         ELSEIF edcur <> r
           edrow(r - edvtop)
           edrow(edcur - edvtop)
@@ -5980,8 +6608,7 @@ PROC arceditdefer(p, i, nm, member)
     -> a FULL redraw, not just drawpane: the editor painted over the whole
     -> frame (both panes and the view border), so the two-pane view has to
     -> be rebuilt or the editor's leftovers linger until the next redraw
-    refreshall()
-    selectbyname(p)
+    refreshsel(p)    -> R5: one draw, cursor pre-placed
   ELSE
     -> not saved: drop a fresh extract, keep a pre-staged edit untouched
     IF wasstaged = FALSE THEN DeleteFile(sfile)
@@ -6032,8 +6659,7 @@ PROC arcedit(p)
       arcwipe('T:CFile-x')
       loadarchive(p, arcpath[p])
       StrCopy(prevname, nm)
-      refreshall()
-      selectbyname(p)
+      refreshsel(p)    -> R5: one draw, cursor pre-placed
     ENDIF
   ELSE
     arcwipe('T:CFile-x')
@@ -6161,8 +6787,10 @@ PROC connl()
   IF crow < (visrows - 1)
     crow := crow + 1
   ELSE
+    rp.mask := flatmask         -> R6: the direct path's blit masks too
     ScrollRaster(rp, 0, ch, x0, panetop,
                  x0 + Mul(ncols, cw) - 1, panetop + Mul(visrows, ch) - 1)
+    rp.mask := 255
   ENDIF
   IF cmodel
     IF cmrow < (CMAXL - 1)    -> past the cap the last line churns
@@ -6175,14 +6803,175 @@ PROC connl()
   ENDIF
 ENDPROC
 
--> feed raw command output to the area: printable runs in one Text
--> each, LF = new line, CR = column 0 (in-place progress counters
--> work), tabs to 8-stops, 80-col wrap. Control sequences come as
--> ESC[ or the Amiga's single-byte CSI ($9B); params run until the
--> first byte >= $40, the final letter. Cursor-forward (C) and
--> erase-to-end-of-line (K) are honoured - lha uses both - the rest
--> is swallowed.
+-> R2 (0.4.1 stage b7): one console row from the MODEL - populated
+-> prefix + one tail fill (trailing spaces never Text)
+PROC conrow(mr, r)
+  DEF m:PTR TO CHAR, w, y
+  m := cmodel + Mul(mr, ncols)
+  w := ncols
+  WHILE (w > 0) AND (m[w - 1] = 32)
+    w := w - 1
+  ENDWHILE
+  y := panetop + (r * ch)
+  rp.mask := flatmask           -> R6 coda: livestart's entry fill
+  SetAPen(rp, txtpen)           -> is the unmasked scrub
+  SetBPen(rp, 0)
+  IF w > 0
+    Move(rp, x0, y + baseline)
+    Text(rp, m, w)
+  ENDIF
+  IF w < ncols
+    SetAPen(rp, 0)
+    RectFill(rp, x0 + Mul(w, cw), y, x0 + Mul(ncols, cw) - 1, y + ch - 1)
+    SetAPen(rp, txtpen)
+  ENDIF
+  rp.mask := 255
+ENDPROC
+
+-> R2: model-only newline - screen catch-up is the caller's settle
+PROC cmnl(pendp:PTR TO LONG)
+  DEF m:PTR TO CHAR, j
+  ccol := 0
+  IF crow < (visrows - 1)
+    crow := crow + 1
+  ELSE
+    pendp[0] := pendp[0] + 1
+  ENDIF
+  cmrow := cmrow + 1    -> the caller's cap guard guarantees room
+  m := cmodel + Mul(cmrow, ncols)
+  FOR j := 0 TO ncols - 1
+    m[j] := 32
+  ENDFOR
+ENDPROC
+
+-> feed raw command output to the area. R2 (stage b7): MODEL-FIRST -
+-> the whole chunk lands in cmodel while pending scrolls and a dirty
+-> row range accumulate, then the screen settles ONCE per call: a
+-> screenful+ of scrolls rebuilds the grid from the model (zero
+-> blits - a full pack's spew costs repaints, not 34ms blits per
+-> LF), anything less is ONE ScrollRaster of `pend` rows + the dirty
+-> rows repainted. The CCON architecture, ported. Printable runs, LF,
+-> CR (in-place progress counters), tabs, 80-col wrap, and the CSI
+-> C/K pair lha uses all keep their exact old semantics - the parser
+-> below IS the old one with draws turned into model writes. A NIL
+-> model (allocation failed) or a full one (the CMAXL cap - the old
+-> churn-the-last-line corner) hands the bytes to confeeddirect, the
+-> old renderer kept verbatim.
 PROC confeed(buf, n)
+  DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR,
+      pend=0, dlo, dhi, r0, r, mr
+  IF (cmodel = NIL) OR cmfull
+    confeeddirect(buf, n)
+    RETURN
+  ENDIF
+  s := buf
+  dlo := cmrow + CMAXL    -> empty range
+  dhi := -1
+  WHILE (i < n) AND (cmfull = FALSE)
+    IF cmrow >= (CMAXL - 1)
+      cmfull := TRUE    -> on the last model row: settle what is
+    ELSE                -> done, the direct path takes the rest
+      c := s[i]
+      IF cesc = 2    -> inside a CSI sequence
+        IF (c >= 48) AND (c <= 57)
+          cnum := (cnum * 10) + (c - 48)
+        ELSEIF c = ";"
+          cnum := 0
+        ENDIF
+        IF c >= 64    -> the final byte
+          IF c = "C"
+            ccol := ccol + (IF cnum = 0 THEN 1 ELSE cnum)
+            IF ccol > ncols THEN ccol := ncols
+          ELSEIF c = "K"
+            m := cmodel + Mul(cmrow, ncols)
+            FOR j := ccol TO ncols - 1
+              m[j] := 32
+            ENDFOR
+            IF cmrow < dlo THEN dlo := cmrow
+            IF cmrow > dhi THEN dhi := cmrow
+          ENDIF
+          cesc := 0
+        ENDIF
+        i := i + 1
+      ELSEIF cesc = 1    -> just saw ESC
+        IF c = "["
+          cesc := 2
+          cnum := 0
+        ELSE
+          cesc := 0    -> a lone ESC+letter sequence: swallow it
+        ENDIF
+        i := i + 1
+      ELSEIF c = $9B    -> the Amiga single-byte CSI
+        cesc := 2
+        cnum := 0
+        i := i + 1
+      ELSEIF c = 27
+        cesc := 1
+        i := i + 1
+      ELSEIF c = 10
+        cmnl({pend})
+        i := i + 1
+      ELSEIF c = 13
+        ccol := 0
+        i := i + 1
+      ELSEIF c = 9
+        m := cmodel + Mul(cmrow, ncols)
+        REPEAT
+          m[ccol] := 32
+          ccol := ccol + 1
+        UNTIL ((ccol AND 7) = 0) OR (ccol >= ncols)    -> X2: no DIVS
+        IF cmrow < dlo THEN dlo := cmrow
+        IF cmrow > dhi THEN dhi := cmrow
+        IF ccol >= 80 THEN cmnl({pend})
+        i := i + 1
+      ELSEIF c >= 32
+        j := i
+        WHILE (j < n) AND (s[j] >= 32) AND (s[j] <> 127) AND (s[j] <> $9B)
+          j := j + 1
+        ENDWHILE
+        run := j - i
+        WHILE (run > 0) AND (cmrow < (CMAXL - 1))
+          IF ccol >= ncols THEN cmnl({pend})
+          fit := ncols - ccol
+          IF fit > run THEN fit := run
+          CopyMem(s + i, cmodel + Mul(cmrow, ncols) + ccol, fit)
+          IF cmrow < dlo THEN dlo := cmrow
+          IF cmrow > dhi THEN dhi := cmrow
+          ccol := ccol + fit
+          i := i + fit
+          run := run - fit
+        ENDWHILE
+      ELSE
+        i := i + 1
+      ENDIF
+    ENDIF
+  ENDWHILE
+  -> the settle: screen catches up in one step
+  r0 := cmrow - crow    -> the model row on screen row 0
+  IF pend >= visrows
+    FOR r := 0 TO visrows - 1
+      conrow(r0 + r, r)
+    ENDFOR
+  ELSE
+    IF pend > 0
+      scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), pend,
+                flatmask)    -> R6: dy rows in ONE masked blit
+    ENDIF
+    IF dhi >= dlo
+      mr := dlo
+      IF mr < r0 THEN mr := r0
+      WHILE mr <= dhi
+        conrow(mr, mr - r0)
+        mr := mr + 1
+      ENDWHILE
+    ENDIF
+  ENDIF
+  IF i < n THEN confeeddirect(buf + i, n - i)    -> the cap corner
+ENDPROC
+
+-> the pre-R2 renderer, kept verbatim: serves a NIL model and the
+-> post-cap churn corner (screen scrolls, last model line rewrites)
+PROC confeeddirect(buf, n)
   DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR
   s := buf
   SetAPen(rp, txtpen)
@@ -6244,7 +7033,7 @@ PROC confeed(buf, n)
           m[ccol] := 32
         ENDIF
         ccol := ccol + 1
-      UNTIL (Mod(ccol, 8) = 0) OR (ccol >= ncols)
+      UNTIL ((ccol AND 7) = 0) OR (ccol >= ncols)    -> X2: no DIVS
       IF ccol >= 80 THEN connl()
       i := i + 1
     ELSEIF c >= 32
@@ -6285,6 +7074,7 @@ PROC livestart()
   -> still works, just without scrolling back
   IF cmodel = NIL THEN cmodel := New(Mul(CMAXL, ncols))
   cmrow := 0
+  cmfull := FALSE
   IF cmodel
     m := cmodel
     FOR j := 0 TO ncols - 1
@@ -6298,7 +7088,8 @@ ENDPROC
 -> fails to launch reports into the area and still returns TRUE.
 PROC livepipe(p, cmd)
   DEF dlock=NIL, old=NIL, res, wout=NIL, nin=NIL, rdr=NIL,
-      buf[260]:ARRAY OF CHAR, n, s:PTR TO CHAR
+      buf:PTR TO CHAR, n, s:PTR TO CHAR
+  buf := pipebuf    -> I7a: 4KB shared pipe buffer, not 256B on the stack
   IF (wout := Open('PIPE:cfile-con', NEWFILE)) = NIL THEN RETURN FALSE
   dlock := Lock(ppath[p], SHARED_LOCK)
   IF dlock THEN old := CurrentDir(dlock)
@@ -6322,10 +7113,10 @@ PROC livepipe(p, cmd)
   ENDIF
   -> the command owns the handles now (asynch closes them on exit)
   IF rdr := Open('PIPE:cfile-con', OLDFILE)
-    n := Read(rdr, buf, 256)
+    n := Read(rdr, buf, PIPESZ)
     WHILE n > 0
       confeed(buf, n)
-      n := Read(rdr, buf, 256)
+      n := Read(rdr, buf, PIPESZ)
     ENDWHILE
     Close(rdr)
   ENDIF
@@ -6512,34 +7303,44 @@ ENDPROC
 -> one page of a results list: visrows rows from `vtop`, the selected one
 -> inverted. tail TRUE = a long row shows its END (find-file: the filename);
 -> FALSE = its START (content search: the path:line prefix).
-PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel, tail)
-  DEF r, ln, s:PTR TO CHAR, l, y, ww
+-> one row of the results page (R7/R8, stage b6: single fill per
+-> row, and the scroll path below draws rows alone)
+PROC findrow(res:PTR TO LONG, cnt, vtop, sel, tail, r)
+  DEF ln, s:PTR TO CHAR, l, y, ww
   ww := ncols
-  FOR r := 0 TO visrows - 1
-    y := panetop + (r * ch)
-    ln := vtop + r
+  y := panetop + (r * ch)
+  ln := vtop + r
+  IF ln >= cnt
     SetAPen(rp, 0)
     RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
-    IF ln < cnt
-      s := res[ln]
-      l := StrLen(s)
-      IF l > ww
-        IF tail THEN s := s + (l - ww)    -> tail: show the end; else the start
-        l := ww
-      ENDIF
-      IF ln = sel
-        SetAPen(rp, txtpen)
-        RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
-        SetAPen(rp, 0)
-        SetBPen(rp, txtpen)
-      ELSE
-        SetAPen(rp, txtpen)
-        SetBPen(rp, 0)
-      ENDIF
-      Move(rp, x0, y + baseline)
-      Text(rp, s, l)
-      SetBPen(rp, 0)
-    ENDIF
+    RETURN
+  ENDIF
+  s := res[ln]
+  l := StrLen(s)
+  IF l > ww
+    IF tail THEN s := s + (l - ww)    -> tail: show the end; else the start
+    l := ww
+  ENDIF
+  IF ln = sel
+    SetAPen(rp, txtpen)
+    RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
+    SetAPen(rp, 0)
+    SetBPen(rp, txtpen)
+  ELSE
+    SetAPen(rp, 0)
+    RectFill(rp, x0, y, x0 + Mul(ww, cw) - 1, y + ch - 1)
+    SetAPen(rp, txtpen)
+    SetBPen(rp, 0)
+  ENDIF
+  Move(rp, x0, y + baseline)
+  Text(rp, s, l)
+  SetBPen(rp, 0)
+ENDPROC
+
+PROC drawfindpage(res:PTR TO LONG, cnt, vtop, sel, tail)
+  DEF r
+  FOR r := 0 TO visrows - 1
+    findrow(res, cnt, vtop, sel, tail, r)
   ENDFOR
 ENDPROC
 
@@ -6547,7 +7348,8 @@ ENDPROC
 -> (Shift = page, Ctrl = ends), Enter picks (returns the index), Esc = -1.
 -> tail controls the long-row truncation direction (see drawfindpage).
 PROC findlist(res:PTR TO LONG, cnt, tail, verb)
-  DEF sel=0, vtop=0, ns, class, code, qual, done=FALSE, pick=-1, hb[130]:STRING
+  DEF sel=0, vtop=0, ns, class, code, qual, done=FALSE, pick=-1, hb[130]:STRING,
+      osel, ovtop
   drawviewframe(TRUE)
   StringF(hb, '\d match\s - Up/Down, Enter \s, Esc cancels', cnt,
           IF cnt = 1 THEN '' ELSE 'es', verb)
@@ -6589,10 +7391,27 @@ PROC findlist(res:PTR TO LONG, cnt, tail, verb)
     IF ns > (cnt - 1) THEN ns := cnt - 1
     IF ns < 0 THEN ns := 0
     IF (ns <> sel) AND (done = FALSE)
+      -> R7 (stage b6): the pane's rule - sel-only move = two rows,
+      -> vtop +-1 = one blit + two rows, jumps keep the full page
+      osel := sel
+      ovtop := vtop
       sel := ns
       IF sel < vtop THEN vtop := sel
       IF sel >= (vtop + visrows) THEN vtop := sel - visrows + 1
-      drawfindpage(res, cnt, vtop, sel, tail)
+      IF vtop = ovtop
+        findrow(res, cnt, vtop, sel, tail, osel - vtop)
+        findrow(res, cnt, vtop, sel, tail, sel - vtop)
+      ELSEIF vtop = (ovtop + 1)
+        scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), 1, flatmask)
+        IF visrows > 1 THEN findrow(res, cnt, vtop, sel, tail, visrows - 2)
+        findrow(res, cnt, vtop, sel, tail, visrows - 1)
+      ELSEIF vtop = (ovtop - 1)
+        scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), -1, flatmask)
+        findrow(res, cnt, vtop, sel, tail, 0)
+        IF visrows > 1 THEN findrow(res, cnt, vtop, sel, tail, 1)
+      ELSE
+        drawfindpage(res, cnt, vtop, sel, tail)
+      ENDIF
     ENDIF
   ENDWHILE
 ENDPROC pick
@@ -6684,50 +7503,93 @@ ENDPROC
 -> file at a time. Cancellable; heap path buffers.
 PROC grepwalk(dir, depth, needle, root, scanbuf:PTR TO CHAR,
               paths:PTR TO LONG, disp:PTR TO LONG, cnt:PTR TO LONG)
-  DEF lock=NIL, fib=NIL:PTR TO fileinfoblock, more, child=NIL, full=NIL,
+  DEF lock=NIL, child=NIL, full=NIL,
       fh, n, i, ls, lineno, ty, e, sp, s, s2, rel:PTR TO CHAR, rl,
-      ltxt[210]:STRING, dstr[400]:STRING
+      ltxt[210]:STRING, dstr[400]:STRING,
+      np:PTR TO CHAR, fn[44]:ARRAY OF CHAR, nl, j, c, c2, hit, le,
+      es[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
   IF depth > 20 THEN RETURN
+  -> I5: fold the needle once per level; the scan below case-folds the
+  -> buffer inline instead of copying every line out first
+  np := needle
+  nl := StrLen(np)
+  IF nl > 40 THEN nl := 40
+  FOR i := 0 TO nl - 1
+    c := np[i]
+    IF (c >= "a") AND (c <= "z") THEN c := c - 32
+    fn[i] := c
+  ENDFOR
   IF cnt[0] >= FINDMAX THEN RETURN
   IF checkabort() THEN RETURN
-  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN
   child := String(CPATHLEN)
   full := String(CPATHLEN)
   IF (child = NIL) OR (full = NIL)
     IF child THEN DisposeLink(child)
     IF full THEN DisposeLink(full)
-    FreeDosObject(DOS_FIB, fib)
     RETURN
   ENDIF
   IF lock := Lock(dir, SHARED_LOCK)
-    IF Examine(lock, fib)
-      more := ExNext(lock, fib)
-      WHILE more AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
-        StrCopy(full, dir)
-        AddPart(full, fib.filename, CPATHLEN - 4)
-        SetStr(full, StrLen(full))
-        IF fib.direntrytype > 0
-          StrCopy(child, full)
-          grepwalk(child, depth + 1, needle, root, scanbuf, paths, disp, cnt)
-        ELSEIF (fib.size > 0) AND (fib.size <= VIEWMAX)
-          ty := sniff(full)
-          IF (ty = TY_TEXT) OR (ty = TY_ANSI)
-            IF fh := Open(full, OLDFILE)
-              n := Read(fh, scanbuf, VIEWMAX)
-              Close(fh)
-              IF n < 0 THEN n := 0
-              -> scan line by line (LF-delimited; a trailing CR is trimmed)
+    sc := es                    -> I3 (stage b3+): batched walk
+    easbegin(sc, lock)
+    ed := easnext(sc)
+    WHILE (ed <> NIL) AND (cnt[0] < FINDMAX) AND (checkabort() = FALSE)
+      StrCopy(full, dir)
+      AddPart(full, ed.name, CPATHLEN - 4)
+      SetStr(full, StrLen(full))
+      IF ed.type > 0
+        StrCopy(child, full)
+        grepwalk(child, depth + 1, needle, root, scanbuf, paths, disp, cnt)
+      ELSEIF (ed.size > 0) AND (ed.size <= VIEWMAX)
+          -> I5: ONE read serves both the type sniff and the scan (the
+          -> old path opened every candidate twice), and the scan runs
+          -> over the raw buffer with a folded first-char skip - no
+          -> per-line StrCopy/StrLen. Harness-proven against the old
+          -> loop (b2test.e); two deliberate differences: a match past
+          -> column 200 is now FOUND (display still truncates), and the
+          -> old phantom DUPLICATE hit for a matching final line with a
+          -> trailing LF is gone (it double-counted every such file).
+          IF fh := Open(full, OLDFILE)
+            n := Read(fh, scanbuf, VIEWMAX)
+            Close(fh)
+            IF n < 0 THEN n := 0
+            ty := sniffmem(scanbuf, n)
+            IF (ty = TY_TEXT) OR (ty = TY_ANSI)
               ls := 0
               lineno := 1
               i := 0
-              WHILE (i <= n) AND (cnt[0] < FINDMAX)
-                IF (i = n) OR (scanbuf[i] = 10)
-                  e := i - ls
-                  IF e > 200 THEN e := 200
-                  StrCopy(ltxt, IF e > 0 THEN scanbuf + ls ELSE '', e)
-                  sp := EstrLen(ltxt)
-                  IF (sp > 0) AND (ltxt[sp - 1] = 13) THEN SetStr(ltxt, sp - 1)
-                  IF nchas(ltxt, needle)
+              WHILE (i < n) AND (cnt[0] < FINDMAX)
+                c := scanbuf[i]
+                IF c = 10
+                  lineno := lineno + 1
+                  ls := i + 1
+                  i := i + 1
+                ELSE
+                  IF (c >= "a") AND (c <= "z") THEN c := c - 32
+                  hit := FALSE
+                  IF c = fn[0]
+                    IF (i + nl) <= n
+                      hit := TRUE
+                      j := 1
+                      WHILE (j < nl) AND hit
+                        c2 := scanbuf[i + j]
+                        IF (c2 >= "a") AND (c2 <= "z") THEN c2 := c2 - 32
+                        IF c2 <> fn[j] THEN hit := FALSE
+                        j := j + 1
+                      ENDWHILE
+                    ENDIF
+                  ENDIF
+                  IF hit
+                    -> one record per line: capture it, then skip to
+                    -> the line's end (the LF reruns the counters)
+                    le := i
+                    WHILE (le < n) AND (scanbuf[le] <> 10)
+                      le := le + 1    -> scanbuf[n] read is safe: X3 +1
+                    ENDWHILE
+                    e := le - ls
+                    IF e > 200 THEN e := 200
+                    StrCopy(ltxt, IF e > 0 THEN scanbuf + ls ELSE '', e)
+                    sp := EstrLen(ltxt)
+                    IF (sp > 0) AND (ltxt[sp - 1] = 13) THEN SetStr(ltxt, sp - 1)
                     -> display the path relative to the search root
                     rel := full
                     rl := StrLen(root)
@@ -6748,23 +7610,22 @@ PROC grepwalk(dir, depth, needle, root, scanbuf:PTR TO CHAR,
                       IF s THEN DisposeLink(s)
                       IF s2 THEN DisposeLink(s2)
                     ENDIF
+                    i := le
+                  ELSE
+                    i := i + 1
                   ENDIF
-                  lineno := lineno + 1
-                  ls := i + 1
                 ENDIF
-                i := i + 1
               ENDWHILE
             ENDIF
           ENDIF
         ENDIF
-        more := ExNext(lock, fib)
-      ENDWHILE
-    ENDIF
+      ed := easnext(sc)
+    ENDWHILE
+    easend(sc)
     UnLock(lock)
   ENDIF
   DisposeLink(child)
   DisposeLink(full)
-  FreeDosObject(DOS_FIB, fib)
 ENDPROC
 
 -> t: recursive text search - grep every text file under the active pane's
@@ -6794,7 +7655,7 @@ PROC docontent()
   ENDIF
   paths := New(FINDMAX * 4)
   disp := New(FINDMAX * 4)
-  scanbuf := New(VIEWMAX)
+  scanbuf := New(VIEWMAX + 1)    -> X3: the scan peeks scanbuf[n]
   IF (paths = NIL) OR (disp = NIL) OR (scanbuf = NIL)
     IF paths THEN Dispose(paths)
     IF disp THEN Dispose(disp)
@@ -7004,7 +7865,7 @@ ENDPROC
 PROC dounpack()
   DEF p, q, i, b, ty, nmark, narc=0, pick, pipeok=TRUE,
       fpath[310]:STRING, dst[314]:STRING, cmd[680]:STRING,
-      hdr[130]:STRING, s:PTR TO CHAR, l
+      hdr[130]:STRING, s:PTR TO CHAR, l, tyc=NIL:PTR TO CHAR
   p := active
   q := IF p = 0 THEN 1 ELSE 0
   IF inarchive(p) OR inarchive(q)
@@ -7026,6 +7887,9 @@ PROC dounpack()
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
+  -> I5: remember each pre-scan sniff so the action loop below doesn't
+  -> open every file a second time (NIL cache = degrade to re-sniffing)
+  tyc := New(ecount[p])
   -> pre-scan: is there anything unpackable in the set?
   FOR i := 0 TO ecount[p] - 1
     pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
@@ -7033,6 +7897,7 @@ PROC dounpack()
       IF edirs[b + i] = 0
         buildfull(fpath, ppath[p], enames[b + i])
         ty := sniff(fpath)
+        IF tyc THEN tyc[i] := ty
         IF (ty = TY_LHA) OR (ty = TY_LZX) OR (ty = TY_ZIP)
           narc := narc + 1
         ENDIF
@@ -7040,6 +7905,8 @@ PROC dounpack()
     ENDIF
   ENDFOR
   IF narc = 0
+    IF tyc THEN Dispose(tyc)
+    tyc := NIL
     IF nmark > 0
       showmsg('no archives among the marked entries')
     ELSE
@@ -7060,7 +7927,11 @@ PROC dounpack()
     IF pick AND pipeok
       IF edirs[b + i] = 0
         buildfull(fpath, ppath[p], enames[b + i])
-        ty := sniff(fpath)
+        IF tyc
+          ty := tyc[i]
+        ELSE
+          ty := sniff(fpath)    -> cache alloc failed: sniff again
+        ENDIF
         StrCopy(cmd, '')
         IF ty = TY_LHA
           StringF(cmd, 'lha x "\s" "\s"', fpath, dst)
@@ -7082,6 +7953,7 @@ PROC dounpack()
     ENDIF
   ENDFOR
   liveend()
+  IF tyc THEN Dispose(tyc)
 ENDPROC
 
 -> Enter: do the obvious thing for the type
@@ -7287,8 +8159,8 @@ PROC togglemark()
   ELSE
     drawrow(p, esel[p] - etop[p])
   ENDIF
-  drawpaths()    -> the marked count and bytes live on the border row
-ENDPROC
+  drawfield(p)   -> R8 (stage b5): only the count/bytes SLOT changes -
+ENDPROC          -> the full paths row ran markcount TWICE per keypress
 
 -> a: mark every entry, A: mark none - a fast bulk set/clear. The border
 -> row's marked count and total redraw with it.
@@ -7544,8 +8416,7 @@ PROC arcrename(p)
   ENDFOR
   IF any
     loadarchive(p, arcpath[p])
-    refreshall()
-    IF nmark = 0 THEN selectbyname(p)
+    IF nmark = 0 THEN refreshsel(p) ELSE refreshall()
   ELSE
     drawpaths()
   ENDIF
@@ -7602,8 +8473,10 @@ PROC dorename()
     ENDIF
   ENDFOR
   IF any
-    refreshall()
-    IF nmark = 0 THEN selectbyname(p)
+    -> I6 (stage b5): a rename touches only THIS pane's directory and
+    -> its debris is border-row prompts - the other pane's pixels
+    -> stay (it re-reads only if it shows the same directory)
+    refreshpane(p, nmark = 0)
     IF msgup THEN remsg()
   ELSE
     drawpaths()
@@ -7660,8 +8533,7 @@ PROC arcnewdefer(p, name, member, wantdir)
     st[slot] := MST_ADD
   ENDIF
   StrCopy(prevname, name)
-  refreshall()
-  selectbyname(p)
+  refreshsel(p)    -> R5: one draw, cursor pre-placed
 ENDPROC
 
 PROC arcnew(p)
@@ -7756,8 +8628,7 @@ PROC arcnew(p)
   ENDIF
   loadarchive(p, arcpath[p])
   StrCopy(prevname, tname)
-  refreshall()
-  selectbyname(p)
+  refreshsel(p)    -> R5: one draw, cursor pre-placed
 ENDPROC
 
 PROC donew()
@@ -7804,8 +8675,7 @@ PROC donew()
     IF lock := CreateDir(dpath)
       UnLock(lock)    -> CreateDir hands back an exclusive lock
       StrCopy(prevname, tname)
-      refreshall()
-      selectbyname(p)
+      refreshpane(p, TRUE)    -> I6: one-sided, prompt-only debris
     ELSE
       faultmsg('cannot create')
     ENDIF
@@ -7818,8 +8688,7 @@ PROC donew()
     r := editfile(dpath, tname)
     IF r = 1
       StrCopy(prevname, tname)
-      refreshall()
-      selectbyname(p)
+      refreshsel(p)    -> R5: one draw, cursor pre-placed
     ELSEIF r = 0
       drawall()    -> nothing was saved, nothing exists
     ENDIF
@@ -7863,7 +8732,7 @@ ENDPROC
 PROC helpscreen()
   DEF lines:PTR TO LONG, nlines=0, vtop=0, maxv, nv, hindent, over=FALSE,
       class, code, qual
-  lines := ['CFile 0.4',
+  lines := ['CFile 0.4.1b3',
             '',
             'Tab ........ switch the active pane',
             'Up/Down .... move (Shift = page, Ctrl = first/last)',
@@ -8057,6 +8926,149 @@ PROC eventloop()
   ENDWHILE
 ENDPROC
 
+-> ---- BENCH: temporary perf-campaign instrument -----------------------
+-> `cfile BENCH <dir> [file] [needle]` (see perf-roadmap.md phase 0):
+-> runs the hot paths programmatically with the UI open - pane scan,
+-> full-pane draw, the cursor walk (the path hand-timing cannot reach:
+-> a held key only measures the repeat rate), editor load/save, a copy,
+-> the grep - timing each with DateStamp ticks (1/50s) and writing the
+-> table to PROGDIR:cfile-bench.log (Linux-readable on the dir-drive).
+-> Quits when done; saveconfig is skipped so a bench run never rewrites
+-> cfile.config. Strip (or gate behind a debug flag) before release.
+
+-> elapsed ms between two DateStamp results (3 LONGs: days,minute,tick).
+-> Deltas only - each term is small, so the Muls stay in 32-bit range.
+PROC bms(a:PTR TO LONG, b:PTR TO LONG)
+ENDPROC Mul(b[0] - a[0], 86400000) + Mul(b[1] - a[1], 60000) + Mul(b[2] - a[2], 20)
+
+-> bench writer: StrLen, not wline's EstrLen, so string LITERALS are safe
+PROC bputs(fh, s)
+ENDPROC Write(fh, s, StrLen(s))
+
+-> one result row. Per-rep uses progadd's shift-both-down so the Div
+-> quotient stays inside DIVS' 16-bit limit whatever the total.
+PROC blog(fh, name, ms, reps)
+  DEF line[300]:STRING, d, s=0, per
+  d := ms
+  WHILE d > 30000
+    d := Shr(d, 1)
+    s := s + 1
+  ENDWHILE
+  per := IF reps > 1 THEN Shl(Div(d, reps), s) ELSE ms
+  StringF(line, '\s: \d ms total, \d reps, ~\d ms/rep\n', name, ms, reps, per)
+  bputs(fh, line)
+ENDPROC
+
+PROC dobench()
+  DEF fh, line[400]:STRING, t1[3]:ARRAY OF LONG, t2[3]:ARRAY OF LONG,
+      i, steps, cnt=0, paths=NIL:PTR TO LONG, disp=NIL:PTR TO LONG,
+      scanbuf=NIL:PTR TO CHAR
+  IF (fh := Open('PROGDIR:cfile-bench.log', NEWFILE)) = NIL THEN RETURN
+  StringF(line, 'bench: \s\n', {version} + 6)
+  bputs(fh, line)
+  StringF(line, 'cbufsz: \d\n', cbufsz)    -> which I1 ladder rung took
+  bputs(fh, line)
+  active := 0    -> the bench drives pane 0
+  IF EstrLen(bdir) = 0
+    bputs(fh, 'usage: cfile BENCH <dir> [file] [needle]\n')
+    Close(fh)
+    RETURN
+  ENDIF
+  IF gotopath(0, bdir) = FALSE
+    StringF(line, 'cannot open bench dir "\s"\n', bdir)
+    bputs(fh, line)
+    Close(fh)
+    RETURN
+  ENDIF
+  StringF(line, 'dir: \s (\d entries)\n', ppath[0], ecount[0])
+  bputs(fh, line)
+
+  -> scan: listing read + sort, no draw (readpane never draws)
+  DateStamp(t1)
+  FOR i := 1 TO 5 DO readpane(0)
+  DateStamp(t2)
+  blog(fh, 'scan   (readpane)', bms(t1, t2), 5)
+
+  -> draw: the full-pane repaint every scroll-edge step pays today
+  DateStamp(t1)
+  FOR i := 1 TO 20 DO drawpane(0)
+  DateStamp(t2)
+  blog(fh, 'draw   (drawpane)', bms(t1, t2), 20)
+
+  -> scroll: walk the bar top to bottom - the held-Down render path
+  esel[0] := 0
+  etop[0] := 0
+  drawpane(0)
+  steps := ecount[0] - 1
+  IF steps > 0
+    DateStamp(t1)
+    WHILE esel[0] < (ecount[0] - 1)
+      movedown()
+    ENDWHILE
+    DateStamp(t2)
+    blog(fh, 'scroll (movedown)', bms(t1, t2), steps)
+  ENDIF
+
+  IF EstrLen(bfile)
+    IF sniff(bfile) = TY_TEXT
+      DateStamp(t1)
+      FOR i := 1 TO 3
+        edload(bfile)
+        edfree()
+      ENDFOR
+      DateStamp(t2)
+      blog(fh, 'edload (incl edfree)', bms(t1, t2), 3)
+      IF edload(bfile)
+        DateStamp(t1)
+        FOR i := 1 TO 3 DO edsave('T:cfile-bench.tmp')
+        DateStamp(t2)
+        blog(fh, 'edsave (to T:)', bms(t1, t2), 3)
+        edfree()
+        DeleteFile('T:cfile-bench.tmp')
+      ELSE
+        -> seen on the 2MB stock config with the 424KB corpus: the 4th
+        -> load peaks ~1.5MB in a fragmented pool. Use a smaller file.
+        bputs(fh, 'edsave skipped (edload failed - file too big for this config?)\n')
+      ENDIF
+    ELSE
+      bputs(fh, 'edload/edsave skipped (bench file is not text)\n')
+    ENDIF
+    -> copy: the CBUFSZ chunk loop (target on T: - measures the read
+    -> side plus packet turnaround, not the target volume)
+    DateStamp(t1)
+    FOR i := 1 TO 3 DO copyfile(bfile, 'T:cfile-bench.tmp')
+    DateStamp(t2)
+    blog(fh, 'copy   (to T:)', bms(t1, t2), 3)
+    DeleteFile('T:cfile-bench.tmp')
+  ENDIF
+
+  IF EstrLen(bneedle)
+    paths := New(FINDMAX * 4)
+    disp := New(FINDMAX * 4)
+    scanbuf := New(VIEWMAX + 1)    -> X3: the scan peeks scanbuf[n]
+    IF paths AND disp AND scanbuf    -> no derefs: eager AND is safe here
+      cnt := 0
+      DateStamp(t1)
+      grepwalk(ppath[0], 0, bneedle, ppath[0], scanbuf, paths, disp, {cnt})
+      DateStamp(t2)
+      StringF(line, 'grep   ("\s", \d hits)', bneedle, cnt)
+      blog(fh, line, bms(t1, t2), 1)
+      FOR i := 0 TO cnt - 1
+        IF paths[i] THEN DisposeLink(paths[i])
+        IF disp[i] THEN DisposeLink(disp[i])
+      ENDFOR
+    ELSE
+      bputs(fh, 'grep skipped (no memory for buffers)\n')
+    ENDIF
+    IF paths THEN Dispose(paths)
+    IF disp THEN Dispose(disp)
+    IF scanbuf THEN Dispose(scanbuf)
+  ENDIF
+
+  bputs(fh, 'bench done\n')
+  Close(fh)
+ENDPROC
+
 PROC main() HANDLE
   ensureassigns()
   initbookmarks()    -> before loadconfig, which may fill the slots
@@ -8068,11 +9080,15 @@ PROC main() HANDLE
   readpane(1)
   openui()
   drawall()
-  eventloop()
+  IF benchmode
+    dobench()
+  ELSE
+    eventloop()
+  ENDIF
   arccommit(0)    -> flush any pane still inside a modified archive
   arccommit(1)
   closeui()
-  saveconfig()
+  IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
   dropassigns()
 EXCEPT DO
   closeui()
@@ -8172,4 +9188,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4 (23.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b16 (29.7.26) E build',0
