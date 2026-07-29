@@ -10497,8 +10497,9 @@ PROC helpscreen()
             'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
             '/ .......... filter: type to narrow, Space marks a match',
             'F5 ......... rescan: re-read both panes from disk',
-            'Enter ...... open by type: dir/archive/.iso/.adf, view, run',
-            'v .......... view text/ANSI/hex; with marks a tour',
+            'Enter ...... open by type: dir/archive/image, view/play, run',
+            'v .......... view text/ANSI/hex/pictures, play sounds/mods',
+            '             (pictures: + - zoom, Ctrl+arrows walk around)',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
             'Space ...... mark/unmark (ops take the marks if any)',
@@ -10948,4 +10949,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b33 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b34 (30.7.26) E build',0
