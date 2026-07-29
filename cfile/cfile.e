@@ -10788,6 +10788,7 @@ PROC helpscreen()
             'Enter ...... open by type: dir/archive/image, view/play, run',
             'v .......... view text/ANSI/hex/pictures, play sounds/mods',
             '             (pictures: + - zoom, Ctrl+arrows walk around)',
+            '             (marked tour: Right/Down next, Left/Up back)',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
             'Space ...... mark/unmark (ops take the marks if any)',
@@ -10803,6 +10804,8 @@ PROC helpscreen()
             'Esc ........ cancel a running operation, else quit (asks)',
             '',
             '.iso browses read-only; .adf mounts (Left at root ejects)',
+            '.dms unpacks to .adf beside it (a DOS disk then mounts)',
+            'in prompts: Shift+arrows = line ends, Shift/Ctrl+BS = cut',
             '',
             '-- arrows scroll, any other key returns --',
             NIL]:LONG
@@ -11238,4 +11241,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b41 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b42 (30.7.26) E build',0
