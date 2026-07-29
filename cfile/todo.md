@@ -341,7 +341,17 @@ keyboard program by design (DOpus is for mouse users).
 
 ### Comfort / nice, no hurry
 
-- [ ] **Auto-refresh** — StartNotify on the pane dirs so external changes
+- [x] **Auto-refresh** — DONE 30.7.26 = 0.5b46, GREEN ON THE REAL
+      A1200 ("I did not have to F5 after copying/creating a file in
+      the path of one of the panes"): StartNotify per pane
+      (NRF_SEND_MESSAGE + WAIT_REPLY throttle), re-registered on
+      every location change, unregistered inside containers; the
+      event loop waits on window + notify port together and the
+      notified pane refreshes F5-style when idle. THE OLD QUESTION
+      ANSWERED: FS-UAE directory drives do NOT deliver notification
+      - and his verdict deserves quoting: "I have (maybe, for now)
+      learned to check on the real deal before calling it a
+      failure." Original note: StartNotify on the pane dirs so external changes
       show without F5. FS-UAE dir-drive notification support unverified.
 - [ ] **KEYMAP config** — e.g. `KEYMAP s`; run `C:SetKeyboard` at startup
       before the window opens (bootless non-US keyboards). Needs a bootless

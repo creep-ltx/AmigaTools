@@ -35,6 +35,13 @@ archive, read-only — CFile reads the ISO 9660 structures itself, no
 mounting, no dependencies. View, copy out files and folders with the
 smooth bar, measure with `=`; write verbs refuse politely.
 
+**The panes notice the world.** Each pane watches its directory
+through DOS notification: create, copy or delete something there
+from a shell, Workbench or anywhere else, and the pane refreshes
+itself the moment CFile is idle — no `F5` needed. Real filesystems
+support this (proven on an A1200's FFS); some emulated directory
+drives do not, and there `F5` remains the manual road.
+
 **The caps died, and the pointer too.** The viewer streams text and
 hex through a sliding window — no more 512KB limit, a 30MB binary
 opens instantly and `Ctrl` jumps to either end (ANSI art keeps its

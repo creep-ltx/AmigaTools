@@ -27,7 +27,7 @@ verb does the natural thing for the type.
 | `t` | text search — grep every text file under here for a substring; the matching lines list as `path:line: text` and `Enter` opens the file |
 | `Right` | enter the selected directory, volume, lha/lzx archive or ISO image — or mount an ADF image and go inside |
 | `Left` | parent directory; at a device root, the volume list; inside an archive or image, up a level and then back out; at a mounted ADF's root, offers to unmount it |
-| `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
+| `F5` | rescan — re-read both panes from disk. Panes also refresh **by themselves** when the filesystem supports notification (real FFS does; some emulated directory drives do not) |
 | `Enter` | open by type: enter a directory, lha/lzx archive or ISO image, mount an ADF, view text/ANSI, show a picture, play a sound or mod, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; pictures full-screen (`+`/`-` zoom, `Ctrl`+arrows pan); sounds and ProTracker mods play (any key stops); with marks, a tour — `Right`/`Down` = next (unmarks the viewed file), `Left`/`Up` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |

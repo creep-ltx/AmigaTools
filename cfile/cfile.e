@@ -72,7 +72,8 @@ MODULE 'intuition/intuition','intuition/screens',
        'dos/exall','graphics/gfx',
        'datatypes','datatypes/datatypes','datatypes/datatypesclass',
        'datatypes/pictureclass','datatypes/soundclass','dos/var',
-       'exec/tasks','exec/memory','graphics/scale','ptreplay'
+       'exec/tasks','exec/memory','exec/ports','dos/notify',
+       'graphics/scale','ptreplay'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
@@ -171,6 +172,11 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     vbstart=0, vblen=0,     -> offset + valid bytes, the file's size,
     vbsize=0, vbcap=0,      -> and the window's allocated capacity
                             -> (viewer is modal - never two at once)
+    nport=NIL:PTR TO mp,    -> auto-refresh (0.5b46): the notify port,
+    nreq[2]:ARRAY OF LONG,  -> one request + watched-path string +
+    npath[2]:ARRAY OF LONG, -> active flag per pane; a change in a
+    nact[2]:ARRAY OF LONG,  -> watched dir refreshes that pane F5-wise
+                            -> the moment CFile is idle
     appliedfont[44]:STRING, wantreload=FALSE,    -> live config reload
     bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
@@ -267,6 +273,9 @@ PROC initpanes()
     IF (arcsub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (isopath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (isosub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (npath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (nreq[p] := New(44)) = NIL THEN Raise("MEM")    -> notifyrequest
+    nact[p] := FALSE
     isoroot[p] := 0
     isorootsz[p] := 0
   ENDFOR
@@ -307,6 +316,7 @@ PROC initpanes()
     ENDIF
   ENDIF
   IF (pipebuf := New(PIPESZ)) = NIL THEN Raise("MEM")
+  nport := CreateMsgPort()    -> NIL = no auto-refresh, F5 still works
 ENDPROC
 
 -> the bookmark slots, allocated before loadconfig so it can fill them from
@@ -2594,6 +2604,68 @@ PROC readvolumes(p)
   IF etop[p] > esel[p] THEN etop[p] := esel[p]
 ENDPROC
 
+-> ---- auto-refresh (0.5b46): the panes notice the world ----------
+-> StartNotify on each pane's REAL directory; NRF_WAIT_REPLY keeps it
+-> to one pending message per pane, so storms cannot flood the port.
+-> A filesystem without notification (some dir-drives) simply fails
+-> StartNotify and F5 stays the manual road - nothing else changes.
+
+PROC renotify(p)
+  DEF r:PTR TO notifyrequest, z:PTR TO LONG, k, want
+  IF nport = NIL THEN RETURN
+  want := FALSE
+  IF involume(p) = FALSE
+    IF inarchive(p) = FALSE
+      IF iniso(p) = FALSE THEN want := TRUE
+    ENDIF
+  ENDIF
+  IF want
+    IF nact[p]
+      IF nccmp(npath[p], ppath[p]) = 0 THEN RETURN    -> same watch
+    ENDIF
+  ENDIF
+  IF nact[p]
+    EndNotify(nreq[p])
+    nact[p] := FALSE
+  ENDIF
+  IF want = FALSE THEN RETURN
+  IF EstrLen(ppath[p]) = 0 THEN RETURN
+  StrCopy(npath[p], ppath[p])
+  r := nreq[p]
+  z := r
+  FOR k := 0 TO 10
+    z[k] := 0    -> StartNotify wants a clean request every time
+  ENDFOR
+  r.name := npath[p]
+  r.userdata := p
+  r.flags := NRF_SEND_MESSAGE OR NRF_WAIT_REPLY
+  r.port := nport
+  IF StartNotify(r) THEN nact[p] := TRUE
+ENDPROC
+
+-> drain the notify port; refresh what changed (called only when the
+-> event loop is idle, so this never fights a running operation)
+PROC notifysweep()
+  DEF nm:PTR TO notifymessage, r:PTR TO notifyrequest, p,
+      d0=FALSE, d1=FALSE
+  WHILE (nm := GetMsg(nport))
+    r := nm.nreq
+    p := r.userdata
+    ReplyMsg(nm)    -> re-arms the WAIT_REPLY throttle
+    IF p = 0 THEN d0 := TRUE
+    IF p = 1 THEN d1 := TRUE
+  ENDWHILE
+  IF d0
+    readpane(0)
+    drawpane(0)
+  ENDIF
+  IF d1
+    readpane(1)
+    drawpane(1)
+  ENDIF
+  IF d0 OR d1 THEN drawpaths()
+ENDPROC
+
 PROC readpane(p)
   pfreeok[p] := FALSE    -> free space may have changed; re-ask Info()
   IF inarchive(p)
@@ -2605,6 +2677,7 @@ PROC readpane(p)
   ELSE
     readdir(p)
   ENDIF
+  renotify(p)    -> every location change funnels through here
 ENDPROC
 
 -> the configured FONT via diskfont.library (CMenu's pattern);
@@ -11008,11 +11081,22 @@ PROC helpscreen()
 ENDPROC
 
 PROC eventloop()
-  DEF class, code, qual, k, done=FALSE
+  DEF class, code, qual, k, done=FALSE, msg:PTR TO intuimessage, sigs
   WHILE done = FALSE
-    class := WaitIMessage(win)
-    code := MsgCode()
-    qual := MsgQualifier()
+    -> wait on the window AND the notify port: external changes to a
+    -> watched directory refresh their pane while CFile sits idle
+    msg := GetMsg(win.userport)
+    WHILE msg = NIL
+      sigs := Shl(1, win.userport.sigbit)
+      IF nport THEN sigs := sigs OR Shl(1, nport.sigbit)
+      Wait(sigs)
+      IF nport THEN notifysweep()
+      msg := GetMsg(win.userport)
+    ENDWHILE
+    class := msg.class
+    code := msg.code
+    qual := msg.qualifier
+    ReplyMsg(msg)
     IF class = IDCMP_VANILLAKEY
       clearmsg()    -> any key first gives the paths row back
       IF code = 27
@@ -11266,6 +11350,7 @@ PROC dobench()
 ENDPROC
 
 PROC main() HANDLE
+  DEF k
   ensureassigns()
   initbookmarks()    -> before loadconfig, which may fill the slots
   loadconfig()
@@ -11285,6 +11370,16 @@ PROC main() HANDLE
   arccommit(0)    -> flush any pane still inside a modified archive
   arccommit(1)
   daunmountall()  -> let go of every disk image we mounted
+  FOR k := 0 TO 1
+    IF nact[k]
+      EndNotify(nreq[k])
+      nact[k] := FALSE
+    ENDIF
+  ENDFOR
+  IF nport
+    DeleteMsgPort(nport)
+    nport := NIL
+  ENDIF
   IF datatypesbase THEN CloseLibrary(datatypesbase)
   IF ptreplaybase THEN CloseLibrary(ptreplaybase)
   IF mpblank
@@ -11392,4 +11487,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b45 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.5b46 (30.7.26) E build',0

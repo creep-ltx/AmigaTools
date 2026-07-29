@@ -38,8 +38,10 @@ KEYS
   Left         parent directory; at a device root, the volume list;
                inside an archive or image, up a level and then back
                out; at a mounted ADF's root, offers to unmount it
-  F5           rescan: re-read both panes from disk (after a shell or
-               Workbench changed a directory behind CFile's back)
+  F5           rescan: re-read both panes from disk. Panes also
+               refresh BY THEMSELVES when the filesystem supports
+               notification (real FFS does; some emulated directory
+               drives do not)
   Enter        open by type: enter a directory, lha/lzx archive or
                ISO image, mount an ADF, view text or ANSI, show a
                picture, play a sound or mod, run an executable
