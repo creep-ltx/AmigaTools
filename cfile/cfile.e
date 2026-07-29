@@ -143,6 +143,7 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     framebuf=NIL, viewbuf=NIL, promptbuf=NIL,    -> composed frames
     vescol=0,            -> where the view footer's Esc text sits
     fullfont[44]:STRING, diskfontbase=NIL,
+    vertitle[44]:STRING,    -> help title, read from $VER at runtime
     appliedfont[44]:STRING, wantreload=FALSE,    -> live config reload
     bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
@@ -10042,10 +10043,20 @@ ENDPROC
 -> ends) when it is taller than the pane area; any other key returns.
 PROC helpscreen()
   DEF lines:PTR TO LONG, nlines=0, vtop=0, maxv, nv, hindent, over=FALSE,
-      class, code, qual
-  -> the title line rides the $VER bump (it said b3 until b27 - check
-  -> it whenever the version string moves)
-  lines := ['CFile 0.4.1b27',
+      class, code, qual, cut=0
+  -> the title comes from the $VER string itself (his call, after it
+  -> sat at b3 for a whole campaign): one version string, no drift.
+  -> "$VER: " is skipped, the cut lands after the "(date)".
+  IF EstrLen(vertitle) = 0
+    StrCopy(vertitle, {version} + 6)
+    code := 0
+    WHILE vertitle[code]
+      IF vertitle[code] = ")" THEN cut := code + 1
+      code++
+    ENDWHILE
+    IF cut > 0 THEN SetStr(vertitle, cut)
+  ENDIF
+  lines := [vertitle,
             '',
             'Tab ........ switch the active pane',
             'Up/Down .... move (Shift = page, Ctrl = first/last)',
@@ -10505,4 +10516,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b27 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b28 (30.7.26) E build',0
