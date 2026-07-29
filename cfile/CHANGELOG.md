@@ -32,6 +32,19 @@ archive, read-only — CFile reads the ISO 9660 structures itself, no
 mounting, no dependencies. View, copy out files and folders with the
 smooth bar, measure with `=`; write verbs refuse politely.
 
+**Pictures, sounds and music.** `v` on a picture shows it
+full-screen through the system's datatypes — ILBM out of the box,
+GIF/JPEG/PNG/BMP on 3.2, PCX/PSD/TIFF/WebP with the WarpDT pack —
+on its own screen in its own mode with its own palette. `+`/`-`
+zoom from ¼× to 4×, `Ctrl`+arrows pan, and marked pictures join
+the `v` tour (`Right`/`Down` next, `Left`/`Up` back). JPEGs decode
+reduced and pre-scaled so camera photos fit the display and chip
+RAM. `v` on a sound plays it at the file's own sample rate; `v` on
+a ProTracker module plays it through `ptreplay.library`, both
+`song.mod` and `mod.song` names recognised by the magic in the
+file. Any key stops. All of it degrades gracefully when the
+libraries are absent.
+
 **ADF images (`.adf`).** `Right`/`Enter` mounts an ADF write-enabled
 through AmigaOS 3.2's trackfile.device (`C:DAControl`) and the pane
 jumps inside a real volume — every verb works, writes land in the

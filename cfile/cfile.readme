@@ -9,10 +9,12 @@ WHAT IT IS
   font and screen it finds, so a small custom font gets a wider,
   taller grid and the same layout. Files are recognised by their
   headers (hunk executable, lha/lzx/zip archive, ANSI, text, ISO and
-  ADF disk images), and each verb does the natural thing for the
-  type. Written in Amiga E, compiled to a native AmigaOS
-  loadseg()able executable. Needs AmigaOS 2.0+ (mounting ADF images
-  needs 3.2).
+  ADF disk images, ProTracker modules - and, through datatypes,
+  every picture and sound format your system knows), and each verb
+  does the natural thing for the type. Written in Amiga E, compiled
+  to a native AmigaOS loadseg()able executable. Needs AmigaOS 2.0+
+  (mounting ADF images needs 3.2; pictures and sounds need
+  datatypes.library v39+, mods need ptreplay.library).
 
 KEYS
 
@@ -39,12 +41,16 @@ KEYS
   F5           rescan: re-read both panes from disk (after a shell or
                Workbench changed a directory behind CFile's back)
   Enter        open by type: enter a directory, lha/lzx archive or
-               ISO image, mount an ADF, view text or ANSI, run an
-               executable (asks first), hex-view the rest
+               ISO image, mount an ADF, view text or ANSI, show a
+               picture, play a sound or mod, run an executable
+               (asks first), hex-view the rest
   v            view: text pager, ANSI art in the classic palette,
                hex dump for binaries, contents listing for archives;
-               with marks, a tour - Right = next (unmarks the viewed
-               file), Left = back, Esc keeps the rest marked
+               pictures full-screen (+/- zoom, Ctrl+arrows pan);
+               sounds and ProTracker mods play (any key stops);
+               with marks, a tour - Right/Down = next (unmarks the
+               viewed file), Left/Up = back, Esc keeps the rest
+               marked
   e            edit a text file in place (e inside the viewer works
                too); Esc asks about saving only when something
                changed
@@ -235,6 +241,32 @@ DISK IMAGES
   stem, mounted writable and immediately usable. Fill it, unmount
   it, and carry it to any emulator.
 
+PICTURES, SOUNDS AND MUSIC
+
+  v (or Enter) on a picture shows it full-screen, decoded through
+  the system's datatypes - every format your machine has a class
+  for works: IFF ILBM out of the box, GIF/JPEG/PNG/BMP on AmigaOS
+  3.2, and anything more you have installed (the WarpDT pack
+  reaches PCX, PSD, TIFF and WebP). The picture gets its own screen
+  in its own mode with its own palette; + and - zoom from 1/4x to
+  4x, Ctrl+arrows walk around when zoomed, any other key returns.
+  JPEGs are decoded reduced and pre-scaled to the screen (via a
+  local override that never touches your WarpDT preferences), so
+  even a camera photo fits both the display and chip RAM. Marked
+  pictures join the v tour like any other file, mixing freely with
+  text and hex.
+
+  v on a sound plays it - 8SVX, AIFF, WAV, whatever your sound
+  datatypes speak - at the file's own sample rate (rates above
+  Paula's ~28kHz ceiling play as fast as the chip allows). v on a
+  ProTracker module plays it through ptreplay.library - both
+  "song.mod" and the Amiga-style "mod.song" are recognised by the
+  real magic in the file - and any key stops the music.
+
+  Pictures and sounds need datatypes.library v39+ (OS 3.0); mods
+  need ptreplay.library (Aminet, mus/misc). Without them those
+  verbs say so and everything else keeps working.
+
 THE CONSOLE
 
   Commands - u, p, :, and running an executable with Enter - stream
@@ -341,6 +373,13 @@ VERIFIED BEHAVIOUR
   verbs were run inside lzx archives against LZX 1.21 - which removes
   stored directory members directly, so its folder deletes need no
   rebuild.
+
+  Pictures, sounds and music were exercised on the same install
+  (3.2's stock datatypes plus a registered WarpDT pack): ILBM, PNG,
+  WebP and a 1440x1440 camera JPEG viewed full-screen with zoom and
+  panning, a WAV played at the right tempo, and ProTracker modules
+  played from both naming styles. The datatype road was proven by
+  six standalone probe rounds before it ever entered CFile.
 
   The navigation and search verbs were exercised on the same install:
   g jumping to a typed path, bookmarks set and jumped to and kept

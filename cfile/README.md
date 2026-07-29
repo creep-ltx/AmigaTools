@@ -10,8 +10,9 @@ and screen it finds, so a small custom font gets a wider, taller
 grid and the same layout. The selection bar is the only highlight
 and lives in the active pane; everything is done from the keyboard.
 Files are recognised by their headers (hunk executable, lha/lzx/zip,
-ANSI, text, ISO and ADF disk images), and each verb does the natural
-thing for the type.
+ANSI, text, ISO and ADF disk images, ProTracker modules — and, through
+datatypes, every picture and sound format your system knows), and each
+verb does the natural thing for the type.
 
 ## Keys
 
@@ -27,8 +28,8 @@ thing for the type.
 | `Right` | enter the selected directory, volume, lha/lzx archive or ISO image — or mount an ADF image and go inside |
 | `Left` | parent directory; at a device root, the volume list; inside an archive or image, up a level and then back out; at a mounted ADF's root, offers to unmount it |
 | `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
-| `Enter` | open by type: enter a directory, lha/lzx archive or ISO image, mount an ADF, view text/ANSI, run an executable (asks first), hex-view the rest |
-| `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
+| `Enter` | open by type: enter a directory, lha/lzx archive or ISO image, mount an ADF, view text/ANSI, show a picture, play a sound or mod, run an executable (asks first), hex-view the rest |
+| `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; pictures full-screen (`+`/`-` zoom, `Ctrl`+arrows pan); sounds and ProTracker mods play (any key stops); with marks, a tour — `Right`/`Down` = next (unmarks the viewed file), `Left`/`Up` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live, `c` edits the comment |
 | `Space` | mark/unmark the entry (and step down) |
@@ -201,6 +202,32 @@ blank 880K disk image — formatted FFS, volume named after the file's
 stem, mounted writable and immediately usable. Fill it, unmount it,
 and carry it to any emulator.
 
+## Pictures, sounds and music
+
+`v` (or `Enter`) on a picture shows it **full-screen** — decoded
+through the system's datatypes, so every format your machine has a
+class for works: IFF ILBM out of the box, GIF/JPEG/PNG/BMP on
+AmigaOS 3.2, and anything more the user has installed (the WarpDT
+pack reaches PCX, PSD, TIFF and WebP). The picture gets its own
+screen in its own mode with its own palette; `+`/`-` zoom from ¼× to
+4×, `Ctrl`+arrows walk around when zoomed, any other key returns.
+JPEGs are decoded reduced and pre-scaled to the screen (via a local
+override that never touches your WarpDT preferences), so even a
+camera photo fits both the display and chip RAM. Marked pictures
+join the `v` tour like any other file — `Right`/`Down` and
+`Left`/`Up` page through, mixing freely with text and hex files.
+
+`v` on a sound plays it — 8SVX, AIFF, WAV, whatever your sound
+datatypes speak — at the file's own sample rate (rates above Paula's
+~28kHz ceiling play as fast as the chip allows). `v` on a ProTracker
+module plays it through `ptreplay.library` — both `song.mod` and the
+Amiga-style `mod.song` names are recognised by the real magic in the
+file, and any key stops the music.
+
+Pictures and sounds need `datatypes.library` v39+ (OS 3.0);
+mods need `ptreplay.library` (Aminet, `mus/misc`). Without them
+those verbs say so and everything else works.
+
 ## The console
 
 Commands (`u`, `p`, `:`, and running an executable with `Enter`)
@@ -340,6 +367,14 @@ The navigation and search verbs were exercised on the same install:
 across runs with `SAVEBOOKMARKS ON`, `f` finding by substring and by
 `#?` pattern, `t` grepping text files, jumping to a hit from either
 list, and `Esc` stopping a long copy, a delete and a running search.
+
+Pictures, sounds and music were exercised on the same install
+(3.2's stock datatypes plus a registered WarpDT pack): ILBM, PNG,
+WebP and a 1440×1440 camera JPEG viewed full-screen with zoom and
+panning; a WAV played at the right tempo; ProTracker modules played
+and stopped from both naming styles. The datatype road was proven by
+six standalone probe rounds (kept in `tests/`) before it ever
+entered CFile.
 
 Disk images were exercised the same way: browsing, viewing and
 copying out of ISO images (including a 120-file directory and a tree
