@@ -223,10 +223,12 @@ keyboard program by design (DOpus is for mouse users).
 
 ### Search
 
-- [ ] **Find file** — recursive name search from the current directory;
-      results as a jump or a synthetic pane.
-- [ ] **Content search** — grep-style text search inside files, results
-      into the console frame.
+- [x] **Find file** — DONE (shipped in 0.4 as `f`): recursive name
+      search, substring or `#?`/`*` pattern, selectable results list,
+      `Enter` jumps.
+- [x] **Content search** — DONE (shipped in 0.4 as `t`): greps text
+      files under here, hits list as `path:line: text`, `Enter` opens
+      the file in the viewer.
 
 ### Configurable keys + user commands (the big refactor)
 
@@ -243,22 +245,27 @@ keyboard program by design (DOpus is for mouse users).
 
 ### Operation safety
 
-- [ ] **Cancel a running op** — `Esc` during a big copy/move/delete/pack/
-      archive aborts. Poll the window IDCMP non-blocking inside the copy /
-      tree / arcrunprog loops. Leaves what is already done and reports
-      "cancelled — N of M" (no rollback; the in-flight file's partial target
-      is cleaned up). Small, high-trust.
+- [x] **Cancel a running op** — DONE in two acts: 0.4 shipped `Esc`
+      for copy/move/delete and searches (checkabort polling, partial
+      target cleaned, "cancelled — N of M"); 0.4.1b21 extended it to
+      ARCHIVE transfers (the detached/piped archiver is handed the
+      shell break via a per-instance NP_NAME, nothing partial lands,
+      a cancelled move never loses its source) and b22's ISO copy-out
+      cancels mid-file.
 
 ### Smooth progress bars (the dream: ALL bars smooth)
 
-- [ ] Copy/EXTRACT can go truly smooth: lha prints `(done/total)` and lzx
-      `( run / total )` PER MEMBER as it works, so add the *delta* of the
-      running count instead of one jump per file. (Regular file-copy already
-      ticks per 16KB.) ADD/pack only prints the final size once
-      (`Adding (N)`), no running counter — so an add bar can smooth BETWEEN
-      files but each file stays one step unless we weight it by our own byte
-      accounting during staging. Supersedes the old "per-byte progress inside
-      a file" follow-up under 0.3b1.
+- [x] **DONE, and better than the sketch** (0.4.1 b17-b20, "the bar
+      chapter"): plain copies adapt their chunk to the run's
+      bytes-per-pixel (pixel-continuous across a marked set), and
+      archive EXTRACT went beyond pipe-parsing entirely — the archiver
+      runs detached while CFile polls the growing destination files
+      and credits honest byte deltas straight off the disk ("exactly
+      what I wanted"). b22's ISO copy-out is byte-smooth by
+      construction (our own reads). Still per-member, as predicted:
+      ADD/pack (the compressed size is unknowable in advance;
+      ADD-side polling of the growing archive is parked in
+      perf-roadmap.md).
 
 ### Comfort / nice, no hurry
 
