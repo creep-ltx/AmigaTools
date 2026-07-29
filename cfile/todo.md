@@ -511,6 +511,10 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       key stops.** Later: `i` names files by datatype (stage A),
       sound/mod in the marked tour, truecolour non-JPEG road, RAW
       sample playback, AHI for >28kHz. Feature-sized, 0.5-class.
+      **b42 (GREEN @18fc9aa) closed the chapter's docs: his audit
+      found the ? screen missing the tour keys, the .dms line and
+      the prompt-editing keys - added; standing habit since: every
+      feature build ends by asking "does ? know about this?".**
 
 - [x] **Comment editing** — done. `c` in the `i` window edits the
       FileNote (lineinput, capped to the row width) and SetComment saves
