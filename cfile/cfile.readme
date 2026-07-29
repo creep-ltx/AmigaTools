@@ -8,10 +8,11 @@ WHAT IT IS
   two-pane managers. The frame is composed at startup for whatever
   font and screen it finds, so a small custom font gets a wider,
   taller grid and the same layout. Files are recognised by their
-  headers (hunk executable, lha/lzx/zip archive, ANSI, text), and
-  each verb does the natural thing for the type. Written in Amiga E,
-  compiled to a native AmigaOS loadseg()able executable. Needs
-  AmigaOS 2.0+.
+  headers (hunk executable, lha/lzx/zip archive, ANSI, text, ISO and
+  ADF disk images), and each verb does the natural thing for the
+  type. Written in Amiga E, compiled to a native AmigaOS
+  loadseg()able executable. Needs AmigaOS 2.0+ (mounting ADF images
+  needs 3.2).
 
 KEYS
 
@@ -30,14 +31,16 @@ KEYS
   t            text search: grep every text file under here for a
                substring; the matching lines list as "path:line: text"
                and Enter opens the file
-  Right        enter the selected directory, volume, or lha/lzx archive
+  Right        enter the selected directory, volume, lha/lzx archive
+               or ISO image - or mount an ADF image and go inside
   Left         parent directory; at a device root, the volume list;
-               inside an archive, up a level and then back out
+               inside an archive or image, up a level and then back
+               out; at a mounted ADF's root, offers to unmount it
   F5           rescan: re-read both panes from disk (after a shell or
                Workbench changed a directory behind CFile's back)
-  Enter        open by type: enter a directory or lha/lzx archive, view
-               text or ANSI, run an executable (asks first),
-               hex-view the rest
+  Enter        open by type: enter a directory, lha/lzx archive or
+               ISO image, mount an ADF, view text or ANSI, run an
+               executable (asks first), hex-view the rest
   v            view: text pager, ANSI art in the classic palette,
                hex dump for binaries, contents listing for archives;
                with marks, a tour - Right = next (unmarks the viewed
@@ -64,9 +67,10 @@ KEYS
   m / M        move likewise (same volume renames, across volumes
                copies and deletes)
   r            rename; with marks, one prompt per entry
-  n            new: a name ending in "/" makes a directory, any
-               other name opens the editor on a new file (created
-               only when saved)
+  n            new: a name ending in "/" makes a directory, a name
+               ending in ".adf" makes a blank Amiga disk image
+               (formatted FFS, mounted, ready), any other name opens
+               the editor on a new file (created only when saved)
   Del / D      delete the selection or marked set, directories
                recursively (asks first)
   u            unpack the selected archive - or every marked
@@ -75,7 +79,8 @@ KEYS
                the other pane
   :            run a shell command in the active pane's directory
   ? / Help / h help screen (scrolls with Up/Down if taller than the window)
-  Esc          cancel a running copy/move/delete, otherwise quit (asks)
+  Esc          cancel a running copy/move/delete or archive
+               transfer, otherwise quit (asks)
 
   In every text prompt the cursor walks with Left/Right,
   Shift+Left/Shift+Right jump to the start and end of the line, and
@@ -88,14 +93,16 @@ GETTING AROUND
   the active pane straight to it. The ten bookmark slots remember places
   you keep coming back to - b then a digit sets one to the current
   location, and a bare digit jumps back; SAVEBOOKMARKS ON in the config
-  keeps them across runs.
+  keeps them across runs. A spot inside an archive or a disk image
+  cannot be bookmarked.
 
   f searches by name recursively from the current directory - a plain
   fragment matches as a substring, a #? or * pattern matches the whole
   name. t searches inside files, grepping every text file under here for
   a substring. Both list their hits in a selectable list; Enter jumps to
   a found file (t opens it), Esc backs out, and Esc during a long search
-  stops it and shows what turned up so far.
+  stops it and shows what turned up so far. Either search stops once it
+  has collected 500 hits.
 
 FILE OPERATIONS
 
@@ -107,11 +114,15 @@ FILE OPERATIONS
   Directories go recursively; copying preserves
   protection bits, datestamps and comments; a directory can be
   merged into an existing one. A centered progress bar covers the
-  longer operations, byte-accurate: file copies and moves count real
-  bytes, and copying members in or out of an archive weighs each by its
-  size, so a big member fills the bar and a small one barely moves it.
-  Esc stops a running copy, move or delete - it leaves what is already
-  done (no half-undo) and says how far it got.
+  longer operations and moves BYTE BY BYTE - not in chunks, not per
+  file: plain copies and moves count real bytes as they flow, and
+  extracting from an archive watches the destination files grow on
+  disk, so the bar creeps smoothly even while lha or lzx does the
+  work. Packing INTO an archive still advances per member (the
+  compressed size is unknowable in advance). Esc stops a running
+  copy, move, delete or archive transfer - it leaves what is already
+  done (no half-undo, nothing partial lands, a cancelled move never
+  loses its source) and says how far it got.
 
   Deleting is recursive and does not give up easily: a
   delete-protected entry asks unprotect? (y)es (n)o (a)ll, an entry
@@ -135,8 +146,8 @@ THE EDITOR
   Backspace/Del join across line ends, tabs become spaces on load.
   Esc asks about saving only when something changed. n opens the
   same editor on a new file, which is created only if it is saved.
-  Lines are capped at 200 characters and files at 8192 lines;
-  bigger files stay view-only.
+  A line grows as long as you type it; a file is capped at 8192
+  lines, and bigger files stay view-only.
 
 ARCHIVES
 
@@ -190,6 +201,40 @@ INSIDE AN ARCHIVE
   p, u and : have no meaning on a member and say so. lha and lzx both go
   inside; zip still opens from outside.
 
+DISK IMAGES
+
+  .iso and .adf disk images are first-class citizens, each handled
+  the way its nature demands.
+
+  ISO images browse like archives, read-only. Right or Enter on a
+  .iso goes inside: CFile reads the ISO 9660 structures itself - no
+  mounting, no CD filesystem, no dependencies - and the pane walks
+  the disc a directory at a time. v views files straight off the
+  image, c copies files and whole folders out with the byte-smooth
+  bar (Esc cancels mid-file), = measures a folder, and the write
+  verbs refuse politely: it is a CD image, it is read-only. Plain
+  ISO 9660 names are supported; a directory bigger than a pane
+  (500 entries) lists its first 500.
+
+  ADF images really mount. Right or Enter on an .adf mounts it
+  write-enabled through AmigaOS 3.2's trackfile.device (via
+  C:DAControl) and jumps the pane inside - from there it is a real
+  volume: every verb works, both panes can use it, and writes land
+  in the image file itself. Left at the volume's root asks
+  "unmount the disk image? (y)es (n)o" - keep it mounted and it
+  stays until you quit; CFile always unmounts what it mounted on
+  exit, and never remembers a mounted path as a start directory.
+  Deleting a mounted image unmounts it first, automatically. An
+  image that is not a DOS disk (a game/NDOS dump) is refused before
+  mounting instead of requester-storming. ADF mounting needs
+  AmigaOS 3.2 for DAControl - everything else in CFile, ISO
+  browsing included, works without it.
+
+  n creates transfer disks: a new name ending in .adf makes a blank
+  880K disk image - formatted FFS, volume named after the file's
+  stem, mounted writable and immediately usable. Fill it, unmount
+  it, and carry it to any emulator.
+
 THE CONSOLE
 
   Commands - u, p, :, and running an executable with Enter - stream
@@ -210,6 +255,7 @@ CONFIGURATION
     ICONS     ON
     SORT      name
     FONT      MicroKnight7/7
+    SAVEBOOKMARKS OFF
 
   LEFT/RIGHT are the start paths ("(volumes)" starts a pane in the
   volume list); command-line arguments (cfile [left] [right])
@@ -225,7 +271,10 @@ CONFIGURATION
   FONT takes any fixed-width disk
   font; "topaz" always means the ROM font, and a font that fails to
   open, is proportional, or leaves less than an 80x18 grid is
-  refused - CFile falls back to Topaz/8. Editing the config in
+  refused - CFile falls back to Topaz/8. SAVEBOOKMARKS ON keeps the
+  ten b+digit bookmark slots across runs: on quit CFile writes them
+  back as BOOKMARK0..BOOKMARK9 lines, replacing the old set; OFF (the
+  default) makes the slots session-only. Editing the config in
   CFile's own editor applies it on save: the font, grid and frames
   rebuild live, and a bad value keeps the last good setup.
 
@@ -292,3 +341,19 @@ VERIFIED BEHAVIOUR
   verbs were run inside lzx archives against LZX 1.21 - which removes
   stored directory members directly, so its folder deletes need no
   rebuild.
+
+  The navigation and search verbs were exercised on the same install:
+  g jumping to a typed path, bookmarks set and jumped to and kept
+  across runs with SAVEBOOKMARKS ON, f finding by substring and by #?
+  pattern, t grepping text files, jumping to a hit from either list,
+  and Esc stopping a long copy, a delete and a running search.
+
+  Disk images were exercised the same way: browsing, viewing and
+  copying out of ISO images (including a 120-file directory and a
+  tree eight levels deep - the parser was proven against
+  independently verified test images before it ever ran on the
+  Amiga), mounting ADFs, writing into them, creating blank images
+  with n, deleting a mounted image (auto-unmount first), unmounting
+  from the volume root, and quitting with images still mounted. Esc
+  cancelling a running archive extraction - the archiver told to
+  stop, no partial files left - was exercised on the same install.

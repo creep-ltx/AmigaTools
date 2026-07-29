@@ -108,7 +108,8 @@ for easy transfer to UAE on other systems". Planning first.
      around its own probing accesses).
    - Eject on an empty unit is safe; STOP leaves the DAn: node as
      an empty drive (harmless).
-2. **ISO stage — BUILT 30.7.26 = 0.4.1b22, BOOT TEST PENDING.**
+2. **ISO stage — BUILT 30.7.26 = 0.4.1b22, BOOT-GREEN** ("iso
+   works, I can go inside, copy out, view").
    Harness first (isoh.e in the job tmp): the parser procs were
    proven under vamos against three Python-mastered images
    (generator isogen.py, independently verified by 7z: 143
@@ -136,7 +137,7 @@ for easy transfer to UAE on other systems". Planning first.
    1/2 names (Joliet/RockRidge/Amiga extensions = follow-up).
    Test images staged in Amiga:datest/ (basic/bigdir/mixed.iso).
 3-5. **ADF mount + unmount + create — BUILT 30.7.26 = 0.4.1b23,
-   BOOT TEST PENDING.** All three stages collapsed into one build
+   hardened b24-b26, ALL BOOT-GREEN 30.7.26 ("All green!").** All three stages collapsed into one build
    because DAControl carries them all. TY_ADF sniff = .adf suffix
    + exactly a floppy's byte size (901120/1802240, the only sizes
    trackfile takes). ENTER MOUNTS: enteradf refuses NDOS images
@@ -177,7 +178,7 @@ for easy transfer to UAE on other systems". Planning first.
    try is not "already exists"). PLUS the UX hole he hit: deleting
    a mounted image now UNMOUNTS IT FIRST automatically in delone
    (other-pane-inside still refuses - the yank discipline), instead
-   of unprotect-prompting into "in use". BOOT TEST PENDING.**
+   of unprotect-prompting into "in use". BOOT-GREEN with b25/b26.**
    **b25 (30.7.26, his call): SAVEDIRS must never remember a DAn:
    path - quitting inside a mounted image now points the pane back
    at the .adf's parent directory before the unmounts (else next

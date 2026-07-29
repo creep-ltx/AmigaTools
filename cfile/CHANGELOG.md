@@ -2,6 +2,46 @@
 
 A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
+## 0.4.1 (unreleased — on main)
+
+The point release that made CFile fast, gave the progress bar its
+honesty, and taught the panes to open disk images.
+
+**The performance campaign.** A full audit and sixteen builds later,
+every surface earns its keep: directory reads batched through
+`ExAll()`, the drawer sort near-instant, the editor loading line-at-
+a-time, one-blit scrolling on every surface (panes, results, viewer,
+editor, console), content-only redraws that never repaint the border
+art, near-instant viewer opens, direct `Ctrl` jumps, and plane-masked
+blits on the own screen. On a real A1200 the wins land where the
+packets were.
+
+**The byte-by-byte progress bar.** Not chunks, not per file: plain
+copies count real bytes at pixel resolution, and archive extraction
+watches the destination files grow on disk — the bar creeps smoothly
+even while lha or lzx does the work. Staging for archive copy-out
+moved beside the destination (never through `T:`/RAM), and files land
+by same-volume rename.
+
+**Esc reaches the archiver.** A running archive transfer now cancels:
+the archiver is handed the shell break, nothing partial lands, and a
+cancelled move never loses its source.
+
+**ISO images (`.iso`).** `Right`/`Enter` browses a CD image like an
+archive, read-only — CFile reads the ISO 9660 structures itself, no
+mounting, no dependencies. View, copy out files and folders with the
+smooth bar, measure with `=`; write verbs refuse politely.
+
+**ADF images (`.adf`).** `Right`/`Enter` mounts an ADF write-enabled
+through AmigaOS 3.2's trackfile.device (`C:DAControl`) and the pane
+jumps inside a real volume — every verb works, writes land in the
+image file. `Left` at the root offers unmount; quit always unmounts
+what CFile mounted; deleting a mounted image unmounts it first;
+NDOS/game dumps are refused before they can requester-storm. `n`
+with a name ending `.adf` creates a formatted blank 880K FFS image,
+mounted and ready — a transfer disk for any emulator. ADF mounting
+needs 3.2; everything else works without it.
+
 ## 0.4 (2026-07-23)
 
 Getting around and finding things — go straight to a path, keep ten

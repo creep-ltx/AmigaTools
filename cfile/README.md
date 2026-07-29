@@ -10,7 +10,8 @@ and screen it finds, so a small custom font gets a wider, taller
 grid and the same layout. The selection bar is the only highlight
 and lives in the active pane; everything is done from the keyboard.
 Files are recognised by their headers (hunk executable, lha/lzx/zip,
-ANSI, text), and each verb does the natural thing for the type.
+ANSI, text, ISO and ADF disk images), and each verb does the natural
+thing for the type.
 
 ## Keys
 
@@ -23,10 +24,10 @@ ANSI, text), and each verb does the natural thing for the type.
 | `b` + `0`-`9` | bookmark this location in a slot; a bare digit jumps back to it. Session-only unless `SAVEBOOKMARKS ON` keeps them across runs |
 | `f` | find files by name, recursively from here — a plain substring or a `#?`/`*` pattern; the matches list is selectable and `Enter` jumps to one |
 | `t` | text search — grep every text file under here for a substring; the matching lines list as `path:line: text` and `Enter` opens the file |
-| `Right` | enter the selected directory, volume, or lha/lzx archive |
-| `Left` | parent directory; at a device root, the volume list; inside an archive, up a level and then back out |
+| `Right` | enter the selected directory, volume, lha/lzx archive or ISO image — or mount an ADF image and go inside |
+| `Left` | parent directory; at a device root, the volume list; inside an archive or image, up a level and then back out; at a mounted ADF's root, offers to unmount it |
 | `F5` | rescan — re-read both panes from disk (after a shell or Workbench changed a directory behind CFile's back) |
-| `Enter` | open by type: enter a directory or lha/lzx archive, view text/ANSI, run an executable (asks first), hex-view the rest |
+| `Enter` | open by type: enter a directory, lha/lzx archive or ISO image, mount an ADF, view text/ANSI, run an executable (asks first), hex-view the rest |
 | `v` | view: text pager, ANSI art with the classic palette, hex dump for binaries, contents listing for archives; with marks, a tour — `Right` = next (unmarks the viewed file), `Left` = back, `Esc` keeps the rest marked |
 | `e` | edit a text file in place (`e` inside the viewer works too) |
 | `i` | info window: size, date, comment, and the protection bits — `h s p a r w e d` toggle them live, `c` edits the comment |
@@ -39,13 +40,13 @@ ANSI, text), and each verb does the natural thing for the type.
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
-| `n` | new: a name ending in `/` makes a directory, any other name opens the editor on a new file (created only when saved) |
+| `n` | new: a name ending in `/` makes a directory, a name ending in `.adf` makes a blank Amiga disk image (formatted FFS, mounted and ready), any other name opens the editor on a new file (created only when saved) |
 | `Del` / `D` | delete the selection or marked set, directories recursively (asks first) |
 | `u` | unpack the selected archive — or every marked archive — into the other pane |
 | `p` | pack the selection or marked set into an archive in the other pane |
 | `:` | run a shell command in the active pane's directory |
 | `?` / `Help` / `h` | help screen (scrolls with `Up`/`Down` if it is taller than the window) |
-| `Esc` | cancel a running copy/move/delete, otherwise quit (asks first) |
+| `Esc` | cancel a running copy/move/delete or archive transfer, otherwise quit (asks first) |
 
 In every text prompt the cursor walks with `Left`/`Right`,
 `Shift+Left`/`Shift+Right` jump to the start and end of the line, and
@@ -60,14 +61,15 @@ Besides `Right`/`Left` and the volume list, **`g`** takes a typed path
 and jumps the active pane straight to it. Ten **bookmark** slots remember
 places you keep returning to — `b` then a digit sets one to the current
 location, a bare digit jumps back, and `SAVEBOOKMARKS ON` in the config
-keeps them across runs.
+keeps them across runs. A spot inside an archive or a disk image cannot
+be bookmarked.
 
 **`f`** searches by name recursively from here — a plain fragment matches
 as a substring, a `#?`/`*` pattern matches the whole name. **`t`** searches
 *inside* files, grepping every text file under here for a substring. Both
 present their hits in a selectable list: `Enter` jumps to a found file (`t`
 opens it), `Esc` backs out, and `Esc` during a long search stops it and
-shows what turned up.
+shows what turned up. Either search stops once it has collected 500 hits.
 
 ## File operations
 
@@ -81,10 +83,15 @@ If the copy won't fit on the target volume, CFile asks before it
 starts (a same-volume move is a rename and needs no room).
 Directories go recursively; copying preserves protection bits,
 datestamps and comments; a directory can be merged into an existing
-one. A centered progress bar covers the longer operations, byte-
-accurate: file copies/moves count real bytes, and copying members in
-or out of an archive weighs each by its size (a big member fills the
-bar, a small one barely moves it).
+one. A centered progress bar covers the longer operations and moves
+**byte by byte** — not in chunks, not per file: plain copies and
+moves count real bytes as they flow, and extracting from an archive
+watches the destination files grow on disk, so the bar creeps
+smoothly even while lha or lzx does the work. Packing *into* an
+archive still advances per member (the compressed size is unknowable
+in advance). `Esc` cancels an archive transfer too — the archiver is
+told to stop, nothing partial lands, and a cancelled move never
+loses its source.
 
 ![The byte-weighted progress bar while unpacking an archive; marked files carry their .info sidecars](progress_bar.png)
 
@@ -109,8 +116,9 @@ page and line ends, `Ctrl` = first/last line), `Enter` splits a line,
 `Backspace`/`Del` join across line ends, tabs become spaces on load.
 `Esc` asks `(y)es (n)o` about saving only when something changed —
 otherwise it just closes. `n` opens the same editor on a new file,
-which is created only if it is saved. Lines are capped at 200
-characters and files at 8192 lines; bigger files stay view-only.
+which is created only if it is saved. A line grows as long as you
+type it; a file is capped at 8192 lines, and bigger files stay
+view-only.
 
 ## Archives
 
@@ -160,6 +168,39 @@ members directly and needs no rebuild.
 `p`, `u` and `:` have no meaning on a member and say so. lha and lzx both
 go inside; zip still opens from outside.
 
+## Disk images
+
+`.iso` and `.adf` disk images are first-class citizens, each handled
+the way its nature demands.
+
+**ISO images browse like archives, read-only.** `Right` or `Enter` on
+a `.iso` goes inside: CFile reads the ISO 9660 structures itself — no
+mounting, no CD filesystem, no dependencies — and the pane walks the
+disc a directory at a time. `v` views files straight off the image,
+`c` copies files and whole folders out with the byte-smooth bar
+(`Esc` cancels mid-file), `=` measures a folder, and the write verbs
+refuse politely: it is a CD image, it is read-only. Plain ISO 9660
+names are supported; a CD too big for a directory pane (500 entries)
+lists its first 500.
+
+**ADF images really mount.** `Right` or `Enter` on an `.adf` mounts
+it write-enabled through AmigaOS 3.2's `trackfile.device` (via
+`C:DAControl`) and jumps the pane inside — from there it is a real
+volume: every verb works, both panes can use it, and writes land in
+the image file itself. `Left` at the volume's root asks
+`unmount the disk image? (y)es (n)o` — keep it mounted and it stays
+until you quit; CFile always unmounts what it mounted on exit, and
+never remembers a mounted path as a start directory. Deleting a
+mounted image unmounts it first, automatically. An image that is not
+a DOS disk (a game/NDOS dump) is refused before mounting instead of
+requester-storming. ADF mounting needs AmigaOS 3.2 for DAControl —
+everything else in CFile, ISO browsing included, works without it.
+
+**`n` creates transfer disks.** A new name ending in `.adf` makes a
+blank 880K disk image — formatted FFS, volume named after the file's
+stem, mounted writable and immediately usable. Fill it, unmount it,
+and carry it to any emulator.
+
 ## The console
 
 Commands (`u`, `p`, `:`, and running an executable with `Enter`)
@@ -183,6 +224,7 @@ ARCWRITE  ONEXIT
 ICONS     ON
 SORT      name
 FONT      MicroKnight7/7
+SAVEBOOKMARKS OFF
 ```
 
 - `LEFT` / `RIGHT` — start paths for the panes; the value
@@ -206,6 +248,10 @@ FONT      MicroKnight7/7
   more columns and rows. A font that fails to open, is
   proportional, or leaves less than an 80×18 grid is refused and
   CFile falls back to Topaz/8.
+- `SAVEBOOKMARKS ON` — keep the ten `b`+digit bookmark slots across
+  runs. On quit CFile writes them back as `BOOKMARK0`..`BOOKMARK9`
+  lines, replacing the old set. `OFF` (the default) makes the slots
+  session-only.
 
 Editing `cfile.config` in CFile's own editor applies it on save:
 the font, grid and frames rebuild live, and a bad value keeps the
@@ -288,3 +334,19 @@ members directly, so its folder deletes need no rebuild. One known limit:
 FS-UAE directory drives can hold host filenames the Amiga side cannot
 see; CFile reports these as "invisible entries remain" when they block
 a delete.
+
+The navigation and search verbs were exercised on the same install:
+`g` jumping to a typed path, bookmarks set and jumped to and kept
+across runs with `SAVEBOOKMARKS ON`, `f` finding by substring and by
+`#?` pattern, `t` grepping text files, jumping to a hit from either
+list, and `Esc` stopping a long copy, a delete and a running search.
+
+Disk images were exercised the same way: browsing, viewing and
+copying out of ISO images (including a 120-file directory and a tree
+eight levels deep — the parser was proven against independently
+verified test images before it ever ran on the Amiga), mounting
+ADFs, writing into them, creating blank images with `n`, deleting a
+mounted image (auto-unmount first), unmounting from the volume root,
+and quitting with images still mounted. `Esc` cancelling a running
+archive extraction — the archiver told to stop, no partial files
+left — was exercised on the same install.
