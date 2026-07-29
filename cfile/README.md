@@ -45,7 +45,7 @@ thing for the type.
 | `u` | unpack the selected archive — or every marked archive — into the other pane |
 | `p` | pack the selection or marked set into an archive in the other pane |
 | `:` | run a shell command in the active pane's directory |
-| `?` / `Help` / `h` | help screen (scrolls with `Up`/`Down` if it is taller than the window) |
+| `?` / `Help` | help screen (scrolls with `Up`/`Down` if it is taller than the window) |
 | `Esc` | cancel a running copy/move/delete or archive transfer, otherwise quit (asks first) |
 
 In every text prompt the cursor walks with `Left`/`Right`,

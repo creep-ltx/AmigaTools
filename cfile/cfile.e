@@ -47,7 +47,7 @@
 ->               the archiver (.lha/.lzh, .lzx, .zip)
 ->   :           run a shell command in the active pane's directory
 ->               (output streams into the frame; Up/Down scroll back)
-->   ? / Help    help screen (h works too)
+->   ? / Help    help screen
 ->   Esc         quit (asks first)
 ->
 -> Anything that takes a while (big files, directory trees, bulk
@@ -10043,18 +10043,20 @@ ENDPROC
 PROC helpscreen()
   DEF lines:PTR TO LONG, nlines=0, vtop=0, maxv, nv, hindent, over=FALSE,
       class, code, qual
-  lines := ['CFile 0.4.1b3',
+  -> the title line rides the $VER bump (it said b3 until b27 - check
+  -> it whenever the version string moves)
+  lines := ['CFile 0.4.1b27',
             '',
             'Tab ........ switch the active pane',
             'Up/Down .... move (Shift = page, Ctrl = first/last)',
-            'Right/Left . enter dir/lha/lzx archive / parent, volumes',
+            'Right/Left . enter dir/archive/image / parent, volumes',
             'g .......... go to a typed path',
             'f .......... find by name or #? pattern (recursive)',
             't .......... text search inside files (recursive grep)',
             'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
             '/ .......... filter: type to narrow, Space marks a match',
             'F5 ......... rescan: re-read both panes from disk',
-            'Enter ...... open: enter dir, view text, run a binary (asks)',
+            'Enter ...... open by type: dir/archive/.iso/.adf, view, run',
             'v .......... view text/ANSI/hex; with marks a tour',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
@@ -10063,12 +10065,14 @@ PROC helpscreen()
             '= / s ...... measure dir size / sort (name/size/date)',
             'c / C ...... copy to the other pane (C overwrites)',
             'm / M ...... move to the other pane (M overwrites)',
-            'r / n ...... rename / new (a trailing / makes a directory)',
+            'r / n ...... rename / new (/ = dir, .adf = blank disk)',
             'Del / D .... delete, directories and all (asks first)',
             'u / p ...... unpack / pack archive(s) (.lha/.lzx/.zip)',
             ': .......... run a shell command in this directory',
             '? / Help ... this help',
-            'Esc ........ cancel a running copy/delete, else quit (asks)',
+            'Esc ........ cancel a running operation, else quit (asks)',
+            '',
+            '.iso browses read-only; .adf mounts (Left at root ejects)',
             '',
             '-- arrows scroll, any other key returns --',
             NIL]:LONG
@@ -10143,7 +10147,8 @@ PROC eventloop()
         ENDIF
       ELSEIF code = 9
         switchpane()
-      ELSEIF (code = "h") OR (code = "H") OR (code = "?")
+      ELSEIF code = "?"
+        -> h freed 30.7.26 (his call): reserved for directory history
         helpscreen()
       ELSEIF code = 13     -> Enter: open by type
         doopen()
@@ -10500,4 +10505,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b26 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b27 (30.7.26) E build',0

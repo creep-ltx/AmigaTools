@@ -219,7 +219,9 @@ keyboard program by design (DOpus is for mouse users).
       like the other keys (`configensure` appends it to existing configs).
 - [x] **Go-to-path** — DONE (shipped) — `g` opens a prompt; type a path, the active pane
       jumps there (Lock it first; error if it won't open).
-- [ ] **Directory history** — back/forward through visited dirs. LOW prio.
+- [ ] **Directory history** — back/forward through visited dirs. LOW
+      prio. **The `h` key is reserved for it since 0.4.1b27** (30.7.26,
+      his call): help answers only to `?` and the Help key now.
 
 ### Search
 
