@@ -2,10 +2,13 @@
 
 A two-pane, keyboard-driven text-mode file manager for AmigaOS.
 
-## 0.4.1 (unreleased — on main)
+## 0.5 (unreleased — on main)
 
-The point release that made CFile fast, gave the progress bar its
-honesty, and taught the panes to open disk images.
+The release that made CFile fast, gave the progress bar its honesty,
+taught the panes to open disk images, and gave the machine its eyes
+and ears back. (Begun as 0.4.1; promoted — four new capability
+classes outgrew a point release, by the same rule that once demoted
+lzx-inside to 0.3.2.)
 
 **The performance campaign.** A full audit and sixteen builds later,
 every surface earns its keep: directory reads batched through

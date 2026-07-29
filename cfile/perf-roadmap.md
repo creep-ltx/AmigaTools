@@ -4,9 +4,11 @@ The fix campaign for `perf-audit.md` (finding IDs R/I/C/X refer there).
 Shape mirrors the CCON perf ladder: staged betas, each independently
 boot-testable, cheap-and-safe first, the render engine last, the mask
 after the engine it multiplies. Cut a release after any beta — the
-split into 0.4.1 / later gets decided as we go. 0.5 stays reserved for
-configurable-keys + user-commands; this campaign is a point release
-(`0.4.1`), same precedent as the 0.3.1 audit release.
+split into 0.4.1 / later gets decided as we go. (HISTORY: it began as
+a point release on the 0.3.1 precedent — then the line grew disk
+images, the media suite and the byte-honest bars, and was PROMOTED TO
+0.5 on 30.7.26, his call; configurable-keys + user-commands moved to
+0.6. Entries below keep the 0.4.1bNN names they wore when built.)
 
 Line numbers in the audit are against `cfile.e` @ `e0f2257`; re-check
 before each edit.
@@ -427,11 +429,12 @@ not per file" - the thing no Amiga file manager has.
       dir-drive + real FFS.
 - [ ] Re-run the Phase-0 table (stock config + real A1200), close the
       campaign with before/after numbers.
-- [ ] Drop to `$VER CFile 0.4.1 (date)`, help screen bumped.
-- [ ] CHANGELOG 0.4.1 entry (perf campaign + the four X fixes),
-      README/readme touch-ups — draft mirrors his voice, Tobias
-      approves copy, then mechanics: commit, tag `cfile-v0.4.1`, GH
-      release, `cfile-0.4.1.lha` (cfile/cfile + cfile/cfile.readme).
+- [ ] Drop to `$VER CFile 0.5 (date)` (promoted from 0.4.1, his
+      call 30.7.26 — the line outgrew a point release).
+- [ ] CHANGELOG 0.5 entry (drafted, on main), README/readme
+      touch-ups — Tobias approves copy, then mechanics: commit, tag
+      `cfile-v0.5`, GH release, `cfile-0.5.lha` (cfile/cfile +
+      cfile/cfile.readme).
 
 ## Deliberately NOT in this campaign
 

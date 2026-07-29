@@ -31,6 +31,15 @@ probe rounds captured lzx's real output first (~/Documents/Amiga/
 lzxhelp.txt, lzxprobe[/2/3]). Docs updated. `$VER`/help not yet bumped, not
 yet released.
 
+**VERSIONING (30.7.26, his call): the 0.4.1 line IS 0.5.** What
+began as a perf point release grew four capability classes — the
+byte-honest bars + archiver Esc, disk images (ISO/ADF/DMS), the
+datatypes media suite, and the hardening saga — outgrowing x.x.1 by
+the same rule that once demoted lzx-inside to 0.3.2. Betas continue
+their numbering as 0.5bNN (historical entries below keep the
+0.4.1bNN names they wore when built). Configurable keys + user
+commands move to 0.6.
+
 ## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
 
 **The ask (30.7.26):** `.iso` and `.adf` support. ISO read-only
