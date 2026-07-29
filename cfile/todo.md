@@ -31,6 +31,173 @@ probe rounds captured lzx's real output first (~/Documents/Amiga/
 lzxhelp.txt, lzxprobe[/2/3]). Docs updated. `$VER`/help not yet bumped, not
 yet released.
 
+## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
+
+**The ask (30.7.26):** `.iso` and `.adf` support. ISO read-only
+("usually cd/dvd"). ADF read/write — mount them, with a way to
+unmount — plus creating a standard empty `.adf` "for saving stuff
+for easy transfer to UAE on other systems". Planning first.
+
+**The shape — two different animals on purpose:**
+- **ISO = the archive-pane model, read-only.** No mounting at all:
+  ISO9660 is uncompressed and simple (one volume descriptor at a
+  fixed offset, directory records with explicit extents), so CFile
+  parses it natively and the pane browses it exactly like an lha —
+  view, copy out with the smooth bar (WE do the reads, so the b17
+  bar applies directly, no poller), write verbs refused. Zero
+  dependencies. Directories read lazily per-entry (an ISO can dwarf
+  the 1500-member archive cache; ISO dirs are a real tree, so read
+  one directory's records on demand like readdir does).
+- **ADF = a real mount, never a parser.** Read/write means the real
+  filesystem does the thinking — hand-writing FFS block allocation
+  is how disks get corrupted. GROUND TRUTH from his install
+  (checked on the host, 30.7.26): `Devs/trackfile.device` v2.46 +
+  **`C:DAControl` 2.34 — the 3.2 shell front-end for it** (System/
+  Mounter 47.11 is RDB-partitions-only, a different tool; the first
+  plan draft missed DAControl because its name greps for neither
+  "mount" nor "disk"). Full semantics from the shipped
+  `dacontrol.help` (375 lines, read on the host): LOAD mounts an
+  ADF on a DAn: device (default READ-ONLY; WRITEPROTECTED=NO for
+  writable — CFile's default, per his read/write ask), EJECT
+  [SAFEEJECT=YES] [TIMEOUT>=5] STOP unmounts (busy volume = wait
+  then clean error; a loaded image cannot be deleted/moved until
+  ejected), **CREATE LABEL=x FILESYSTEMTYPE=FFS DISKTYPE=DD makes a
+  formatted, labeled, mounted-writable blank in ONE command** (the
+  hand-rolled root-block generator is unnecessary), INFO
+  SHOWVOLUMES = parseable device/file/volume table, SETENV →
+  DA_LASTDEVICE, DEVICE=DAn: pins the unit, DD=880K / HD=1760K
+  only. So the WHOLE ADF side is the lha/lzx external-command
+  pattern — no NDK, no LVO stubs; every CFile verb works on the
+  mounted volume for free, both panes, real writes into the .adf.
+- **DMS rides along after all** (he fetched xdms 30.7.26: Amiga
+  binary in C:, Linux binary in ~/Downloads; readdisk too): `.dms`
+  is a COMPRESSED track archive, not an image — unpack via xdms to
+  a temp `.adf` BESIDE the file (the T:/RAM lesson stands), then
+  it's just an ADF. Read-only by nature (repack = later, if ever).
+
+**Build order (each stage boot-gated, house rhythm):**
+1. **Probe round `daprobe` — DONE 30.7.26, all questions closed**
+   (script + assets in Amiga:/Amiga:datest, output daprobe.out,
+   host-side verification with md5 + xdftool). Findings that shape
+   the build:
+   - LOAD on a pinned DEVICE=DAn:, writable, dir-drive-hosted
+     image: all work. Write-back PROVEN (checksum diff + xdftool
+     sees the written file; flushes to the .adf even while
+     mounted). CREATE = formatted+labeled+mounted-writable in one
+     command, xdftool-validated FFS; volume name = LABEL.
+   - DON'T parse DAControl output beyond pass/fail: the INFO
+     Device column runs name+unit together ("DA0000") and CREATE's
+     messages miss a newline. CFile pins DAn: itself, keeps its own
+     file↔device table, and resolves device→volume via the DosList
+     like the volume list already does. (DA_LASTDEVICE works but is
+     unneeded.)
+   - THE YANK SURPRISE: default EJECT SUCCEEDED with the shell's
+     CWD inside the volume — trackfile behaves like a real floppy,
+     the medium can be pulled from under live locks ("please
+     replace" zombies). DAControl will NOT protect us: CFile must
+     do its own in-use discipline (refuse unmount while either
+     pane is inside; step panes out first; then eject).
+   - TRANSIENT IN-USE: EJECT SAFEEJECT=YES right after
+     create+write failed once with "object is in use" (validator/
+     flush still busy). Unmount = try, on failure Delay ~1-2s and
+     retry once or twice, then report honestly.
+   - Unformatted image mounts fine (volume "-") and any DOS access
+     pops the system "Not a DOS disk" requester → CFile pre-sniffs
+     the bootblock ('DOS'+flag) and refuses NDOS images with its
+     own message (and suppresses requesters via pr_WindowPtr
+     around its own probing accesses).
+   - Eject on an empty unit is safe; STOP leaves the DAn: node as
+     an empty drive (harmless).
+2. **ISO stage — BUILT 30.7.26 = 0.4.1b22, BOOT TEST PENDING.**
+   Harness first (isoh.e in the job tmp): the parser procs were
+   proven under vamos against three Python-mastered images
+   (generator isogen.py, independently verified by 7z: 143
+   entries, 0 mismatches) — recursive listings diffed against the
+   manifests and ALL 132 files extracted byte-perfect (md5),
+   covering 8.3 + `;1` stripping, trailing-dot names, lowercase/
+   no-version names, a dir extent spanning 3 sectors (the
+   records-never-straddle padding rule), 8-deep nesting, a 3MB
+   file, an empty file. THEN transplanted verbatim into cfile.e:
+   TY_ISO sniff (.iso suffix gate + CD001 magic - the head is
+   boot code/zeros, worthless to sniffmem), enteriso/leaveiso/
+   readisodir (LAZY per-directory reads, no member cache - an ISO
+   can dwarf MAXMEM; isofind re-walks from the root so no stale
+   extent state), eext = the SIXTH parallel entry field riding
+   swapentry/snapentry/unsnapentry + the / filter snapshot (the
+   esize lesson, applied before first boot), isoviewsel (size gate
+   BEFORE the T: extract), isoxfer_out + isoextracttree (direct
+   reads through copybuf: the bar is byte-smooth by construction,
+   Esc lands mid-file, m refused - read-only), = sums via isosum,
+   all write/nav verbs guarded (Del/n/r/e/p/u/g/b/f/t/:). Dirs
+   list with size 0 so the column shows <DIR>; their extent size
+   is re-resolved at use. Known bounds, stated: 500 entries per
+   directory (the real-dir cap), >2GB images unreadable (32-bit
+   Seek - no Amiga FS can hold one anyway), plain ISO9660 level
+   1/2 names (Joliet/RockRidge/Amiga extensions = follow-up).
+   Test images staged in Amiga:datest/ (basic/bigdir/mixed.iso).
+3-5. **ADF mount + unmount + create — BUILT 30.7.26 = 0.4.1b23,
+   BOOT TEST PENDING.** All three stages collapsed into one build
+   because DAControl carries them all. TY_ADF sniff = .adf suffix
+   + exactly a floppy's byte size (901120/1802240, the only sizes
+   trackfile takes). ENTER MOUNTS: enteradf refuses NDOS images
+   before mounting (bootblock must open "DOS" - the daprobe
+   requester-storm lesson), runs `DAControl LOAD "<file>"
+   WRITEPROTECTED=NO SETENV QUIET`, reads DA_LASTDEVICE (never
+   parses DAControl output - the probe's rule), records the mount
+   in an 8-slot table (device/file/return-dir/name) and jumps the
+   pane to the DAn: device. Entering an already-mounted image just
+   jumps (mounting one file twice is the crash the checksums
+   option exists to prevent). LEAVE OFFERS UNMOUNT: Left at the
+   device root prompts (y)/(n)-keep/Esc-stay; unmount refuses
+   while the OTHER pane sits anywhere under the device (prefix
+   check - OUR in-use discipline, since DAControl happily yanks
+   through live locks), ejects with SAFEEJECT=YES TIMEOUT=5 STOP
+   + one retry after a beat (the transient-validator lesson), and
+   returns to the .adf's directory with it reselected. Quit
+   unmounts everything ours (daunmountall after the arccommits).
+   CREATE: `n` with a name ending .adf makes a formatted blank -
+   the name picks the type exactly like the trailing slash does -
+   via DAControl CREATE (FFS his default, DD, LABEL = the stem),
+   which formats AND mounts it writable in one stroke; the mount
+   is recorded so Enter jumps in and quit cleans up. v on an
+   image file hints instead of hex-viewing into the 512KB cap.
+   Known bounds, stated: needs C:DAControl (3.2) - detected at
+   runtime with a clear message, everything else in CFile works
+   without it; a volume entered via the VOLUME LIST under its
+   volume name is invisible to the unmount guard (device-name
+   prefix only); 8 concurrent image mounts.
+   **b24 (30.7.26, his first boot find): b23 trusted DA_LASTDEVICE
+   to learn the mounted unit - a stale env value recorded the WRONG
+   device, so his created image "unmounted" (the wrong, empty unit)
+   yet stayed held by trackfile: undeletable forever. Fix = PIN the
+   device ourselves on BOTH roads (LOAD/CREATE DEVICE=DAn:, ladder
+   over units not in our table until one takes - the probe proved
+   pinning; env read deleted outright, table entries now CERTAIN;
+   a failed CREATE try clears its leftover file so the next unit
+   try is not "already exists"). PLUS the UX hole he hit: deleting
+   a mounted image now UNMOUNTS IT FIRST automatically in delone
+   (other-pane-inside still refuses - the yank discipline), instead
+   of unprotect-prompting into "in use". BOOT TEST PENDING.**
+   **b25 (30.7.26, his call): SAVEDIRS must never remember a DAn:
+   path - quitting inside a mounted image now points the pane back
+   at the .adf's parent directory before the unmounts (else next
+   start begs "insert DA3: in any drive"). Done in daunmountall,
+   which runs before saveconfig.**
+   **b26 (30.7.26, his call): b closes the loophole - bookmarks now
+   refuse anywhere inside a container: archive, ISO, or a MOUNTED
+   image volume (new damunder(p) prefix helper, also tidying the
+   quit remap). Jumping an already-saved stale bookmark still fails
+   soft ("cannot go there").**
+6. **DMS stage** — sniff `DMS!` magic, unpack via xdms beside the
+   file (detached + byte-poller bar against the known 880K? probe
+   xdms's output behavior), then enter the resulting ADF.
+7. **Docs/help/release.**
+
+**Decisions (Tobias, 30.7.26):** Enter on a `.adf` mounts + jumps
+in (leave offers unmount, quit always unmounts ours); blank ADF
+defaults to FFS; create-image extends the `n` prompt; version
+framing decided later ("we worry about versioning later").
+
 ## 0.4 and beyond — agreed plan (design pinned 23.7.26)
 
 **0.4 is the daily-driver leap** — a genuine new capability class (reach,

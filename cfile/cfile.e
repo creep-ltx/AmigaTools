@@ -86,7 +86,10 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       RK_F5=$54,    -> re-read both panes
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
-      TY_ANSI=6,
+      TY_ANSI=6, TY_ISO=7, TY_ADF=8,
+      ISOSEC=2048,    -> ISO9660 logical sector (the only size supported)
+      ADFDD=901120, ADFHD=1802240,    -> the only sizes trackfile mounts
+      DAMAX=8,        -> disk images mounted by this CFile at once
       -> per-member cache status for deferred archive writes (0.3b3):
       -> CLEAN, flagged for DELETE at commit, a new member ADDed since
       -> entry, or a committed member whose staged copy REPLACEs it (edit
@@ -102,6 +105,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     esize[1000]:ARRAY OF LONG,    -> file size (0 for dirs/volumes)
     edate[1000]:ARRAY OF LONG,    -> sortable date key (days*1440+minute,
                                   -> 0 for archive members and volumes)
+    eext[1000]:ARRAY OF LONG,     -> ISO panes: the entry's extent LBA
+                                  -> (0 elsewhere). A SIXTH parallel
+                                  -> field: rides swapentry/snapentry/
+                                  -> unsnapentry like the other five
     edds[8000]:ARRAY OF CHAR,     -> C4: per-slot "DDMon" memo, 8B each
     eddk[1000]:ARRAY OF LONG,     -> C4: the datekey each memo is FOR.
                                   -> VALUE-keyed (datestr is a pure
@@ -200,6 +207,14 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     -> whole member list is parsed once on entry into amem/amsz and the
     -> pane listings are filtered out of that cache - no lha per keypress.
     arcpath[2]:ARRAY OF LONG, arcsub[2]:ARRAY OF LONG,
+    isopath[2]:ARRAY OF LONG,  -> pane browses inside this .iso ('' = no)
+    isosub[2]:ARRAY OF LONG,   -> current directory within the image
+    isoroot[2]:ARRAY OF LONG,  -> root dir extent LBA (from the PVD)
+    isorootsz[2]:ARRAY OF LONG, -> root dir byte size
+    damdev[8]:ARRAY OF LONG,   -> ADF mounts WE made: device ('' = free
+    damfile[8]:ARRAY OF LONG,  -> slot), the image file behind it, the
+    damback[8]:ARRAY OF LONG,  -> directory to return to on unmount and
+    damname[8]:ARRAY OF LONG,  -> the .adf name to reselect there
     amem[2]:ARRAY OF LONG,     -> New()'d LONG[] of member-path String ptrs
     amsz[2]:ARRAY OF LONG,     -> New()'d LONG[] of member sizes
     amst[2]:ARRAY OF LONG,     -> New()'d LONG[] of MST_* status per member
@@ -220,6 +235,18 @@ PROC initpanes()
     IF (ppath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (arcpath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (arcsub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (isopath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (isosub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    isoroot[p] := 0
+    isorootsz[p] := 0
+  ENDFOR
+  FOR p := 0 TO DAMAX - 1
+    IF (damdev[p] := String(16)) = NIL THEN Raise("MEM")
+    IF (damfile[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (damback[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+    IF (damname[p] := String(110)) = NIL THEN Raise("MEM")
+  ENDFOR
+  FOR p := 0 TO 1
     amem[p] := NIL
     amsz[p] := NIL
     amst[p] := NIL
@@ -786,6 +813,571 @@ PROC leavearchive(p)
   SetStr(arcsub[p], 0)
 ENDPROC
 
+-> ---- ISO9660: browse a CD image like a directory, READ-ONLY ---------
+-> The parser was proven in a vamos harness (isoh.e, 30.7.26) against
+-> Python-mastered images verified by 7z: 143 entries listed and 132
+-> files extracted byte-perfect before any of this touched cfile. No
+-> member cache: an ISO can dwarf MAXMEM, and its directories are a
+-> real tree - each listing reads just the one directory's records.
+-> All numbers come from the BIG-endian halves of the format's
+-> both-endian fields (the 68k half - no byte swapping anywhere).
+
+PROC iniso(p)
+ENDPROC EstrLen(isopath[p]) > 0
+
+-> big-endian u32 at b. CD extents/sizes stay far below 2^31.
+PROC isob32(b:PTR TO CHAR)
+ENDPROC Shl(b[0], 24) OR Shl(b[1], 16) OR Shl(b[2], 8) OR b[3]
+
+-> read the Primary Volume Descriptor: root dir extent + byte size.
+-> Descriptors start at sector 16; type 1 + "CD001" is the PVD, 255
+-> ends the set. Only 2048-byte logical blocks are accepted (anything
+-> else is vanishingly rare and everything here assumes Shl(x,11)).
+PROC isopvd(fh, rootp:PTR TO LONG, rszp:PTR TO LONG)
+  DEF buf:PTR TO CHAR, sec, ok=FALSE, t, r:PTR TO CHAR
+  IF (buf := New(ISOSEC)) = NIL THEN RETURN FALSE
+  FOR sec := 16 TO 31    -> descriptor set: a bounded scan is plenty
+    IF ok = FALSE
+      IF Seek(fh, Shl(sec, 11), OFFSET_BEGINNING) >= 0
+        IF Read(fh, buf, ISOSEC) = ISOSEC
+          t := buf[0]
+          IF (buf[1] = "C") AND (buf[2] = "D") AND (buf[3] = "0") AND
+             (buf[4] = "0") AND (buf[5] = "1")
+            IF t = 1
+              IF (Shl(buf[130], 8) OR buf[131]) = ISOSEC
+                r := buf + 156          -> the root directory record
+                rootp[] := isob32(r + 6)
+                rszp[]  := isob32(r + 14)
+                ok := TRUE
+              ENDIF
+            ELSEIF t = 255
+              sec := 31               -> terminator: stop scanning
+            ENDIF
+          ELSE
+            sec := 31                 -> not a descriptor: stop
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+  Dispose(buf)
+ENDPROC ok
+
+-> caller-frame directory-record iterator (the eascan shape). One heap
+-> sector buffer; records never straddle sectors (a length byte of 0
+-> means the rest of this sector is padding - hop to the next one).
+OBJECT isoscan
+  fh                          -> image file handle (caller owns)
+  ext                         -> dir extent LBA
+  secs                        -> sectors in the extent
+  cur                         -> sectors consumed so far
+  pos                         -> parse offset in buf
+  avail                       -> valid bytes in buf
+  buf:PTR TO CHAR             -> New(ISOSEC); NIL = begin failed
+  err
+  rsize                       -> current record: file byte size
+  rext                        ->   extent LBA
+  rdir                        ->   nonzero = directory
+  rname[110]:ARRAY OF CHAR    -> display name, NUL-terminated
+                              -> (";version" and one trailing "." off)
+ENDOBJECT
+
+PROC isodbegin(s:PTR TO isoscan, fh, ext, size)
+  s.fh := fh
+  s.ext := ext
+  s.secs := Shr(size + (ISOSEC - 1), 11)
+  s.cur := 0
+  s.pos := 0
+  s.avail := 0
+  s.err := FALSE
+  s.buf := New(ISOSEC)
+  IF s.buf = NIL THEN s.err := TRUE
+ENDPROC
+
+PROC isodsec(s:PTR TO isoscan)    -> pull the next sector into buf
+  IF s.cur >= s.secs THEN RETURN FALSE
+  IF Seek(s.fh, Shl(s.ext + s.cur, 11), OFFSET_BEGINNING) < 0
+    s.err := TRUE
+    RETURN FALSE
+  ENDIF
+  IF Read(s.fh, s.buf, ISOSEC) <> ISOSEC
+    s.err := TRUE
+    RETURN FALSE
+  ENDIF
+  s.cur := s.cur + 1
+  s.pos := 0
+  s.avail := ISOSEC
+ENDPROC TRUE
+
+PROC isodnext(s:PTR TO isoscan)
+  DEF b:PTR TO CHAR, len, il, i, c, n, going=TRUE
+  IF s.err THEN RETURN FALSE
+  WHILE going
+    IF (s.avail = 0) OR (s.pos >= s.avail)
+      IF isodsec(s) = FALSE THEN RETURN FALSE
+    ENDIF
+    b := s.buf + s.pos
+    len := b[0]
+    IF len = 0
+      s.pos := s.avail    -> padding: the rest of this sector is dead
+    ELSEIF (s.pos + len) > s.avail
+      s.err := TRUE       -> a record cannot straddle: broken image
+      RETURN FALSE
+    ELSE
+      s.pos := s.pos + len
+      il := b[32]
+      IF (il = 1) AND (b[33] <= 1)
+        -> the "." / ".." records: skip
+      ELSE
+        s.rext := isob32(b + 6)
+        s.rsize := isob32(b + 14)
+        s.rdir := b[25] AND 2
+        n := 0
+        IF il > 106 THEN il := 106    -> enames slots are String(108)
+        FOR i := 0 TO il - 1
+          c := b[33 + i]
+          IF (c = ";") AND (s.rdir = 0)
+            i := il             -> ";version": the name ends here
+          ELSE
+            s.rname[n] := c
+            n++
+          ENDIF
+        ENDFOR
+        IF n > 1
+          IF s.rname[n - 1] = "." THEN n--    -> "TRAIL." stores a dot
+        ENDIF
+        s.rname[n] := 0
+        IF n > 0 THEN going := FALSE          -> a real entry: yield
+      ENDIF
+    ENDIF
+  ENDWHILE
+ENDPROC TRUE
+
+PROC isodend(s:PTR TO isoscan)
+  IF s.buf THEN Dispose(s.buf)
+  s.buf := NIL
+ENDPROC
+
+-> resolve a "/"-separated path inside the image to (extent, size,
+-> isdir), walking from the root. Empty path = the root itself.
+PROC isofind(fh, root, rootsz, path:PTR TO CHAR,
+             extp:PTR TO LONG, szp:PTR TO LONG, dirp:PTR TO LONG)
+  DEF comp[110]:STRING, i=0, j, ext, sz, isdir=2, found, done=FALSE,
+      s[1]:ARRAY OF isoscan, sc:PTR TO isoscan
+  ext := root
+  sz := rootsz
+  sc := s
+  WHILE done = FALSE
+    j := 0
+    WHILE (path[i] <> 0) AND (path[i] <> "/")
+      IF j < 106
+        comp[j] := path[i]
+        j++
+      ENDIF
+      i++
+    ENDWHILE
+    IF path[i] = "/" THEN i++
+    comp[j] := 0
+    SetStr(comp, j)
+    IF j = 0
+      IF path[i] = 0 THEN done := TRUE    -> ran out of components
+    ELSE
+      IF isdir = 0 THEN RETURN FALSE      -> a component under a FILE
+      found := FALSE
+      isodbegin(sc, fh, ext, sz)
+      WHILE (found = FALSE) AND isodnext(sc)
+        IF nccmp(sc.rname, comp) = 0
+          ext := sc.rext
+          sz := sc.rsize
+          isdir := sc.rdir
+          found := TRUE
+        ENDIF
+      ENDWHILE
+      isodend(sc)
+      IF found = FALSE THEN RETURN FALSE
+      IF path[i] = 0 THEN done := TRUE
+    ENDIF
+  ENDWHILE
+  extp[] := ext
+  szp[] := sz
+  dirp[] := isdir
+ENDPROC TRUE
+
+-> does the path smell like an ISO image? Cheap gate: ".iso" suffix,
+-> then the CD001 magic where the descriptor set lives.
+PROC isoext(name:PTR TO CHAR)
+  DEF l
+  l := StrLen(name)
+  IF l < 5 THEN RETURN FALSE
+  IF (name[l - 4] <> ".") THEN RETURN FALSE
+  IF (name[l - 3] <> "i") AND (name[l - 3] <> "I") THEN RETURN FALSE
+  IF (name[l - 2] <> "s") AND (name[l - 2] <> "S") THEN RETURN FALSE
+  IF (name[l - 1] <> "o") AND (name[l - 1] <> "O") THEN RETURN FALSE
+ENDPROC TRUE
+
+PROC isomagic(path)
+  DEF fh, b[8]:ARRAY OF CHAR, ok=FALSE
+  IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN FALSE
+  IF Seek(fh, Shl(16, 11) + 1, OFFSET_BEGINNING) >= 0
+    IF Read(fh, b, 5) = 5
+      IF (b[0] = "C") AND (b[1] = "D") AND (b[2] = "0") AND
+         (b[3] = "0") AND (b[4] = "1") THEN ok := TRUE
+    ENDIF
+  ENDIF
+  Close(fh)
+ENDPROC ok
+
+-> enter/leave the image mode. ppath keeps the real directory under
+-> the image the whole time, exactly like the archive mode does.
+PROC enteriso(p, fpath)
+  DEF fh, rt, rsz
+  IF (fh := Open(fpath, OLDFILE)) = NIL
+    showmsg('cannot open the image file')
+    RETURN
+  ENDIF
+  IF isopvd(fh, {rt}, {rsz}) = FALSE
+    Close(fh)
+    showmsg('not an ISO 9660 image (or an unsupported one)')
+    RETURN
+  ENDIF
+  Close(fh)
+  StrCopy(isopath[p], fpath)
+  SetStr(isosub[p], 0)
+  isoroot[p] := rt
+  isorootsz[p] := rsz
+  esel[p] := 0
+  etop[p] := 0
+  readpane(p)
+  drawpaths()
+  drawpane(p)
+ENDPROC
+
+PROC leaveiso(p)
+  SetStr(isopath[p], 0)
+  SetStr(isosub[p], 0)
+  isoroot[p] := 0
+  isorootsz[p] := 0
+ENDPROC
+
+-> list the pane's current directory inside the image. Same MAXENT cap
+-> as a real directory listing (addentry stops quietly at 500).
+PROC readisodir(p)
+  DEF fh, ext, sz, isdir, b, s[1]:ARRAY OF isoscan, sc:PTR TO isoscan
+  clearmarks(p)
+  ecount[p] := 0
+  efail[p] := FALSE
+  IF (fh := Open(isopath[p], OLDFILE)) = NIL
+    efail[p] := TRUE
+    RETURN
+  ENDIF
+  IF isofind(fh, isoroot[p], isorootsz[p], isosub[p],
+             {ext}, {sz}, {isdir}) = FALSE
+    Close(fh)
+    efail[p] := TRUE
+    RETURN
+  ENDIF
+  b := p * MAXENT
+  sc := s
+  isodbegin(sc, fh, ext, sz)
+  WHILE isodnext(sc)
+    isdir := ecount[p]    -> reuse: slot this entry should land in
+    -> dirs list with size 0 so the size column shows <DIR>; their
+    -> extent size is re-resolved with isofind when actually needed
+    addentry(p, sc.rname, IF sc.rdir THEN 1 ELSE 0,
+             IF sc.rdir THEN 0 ELSE sc.rsize, 0)
+    IF ecount[p] > isdir
+      eext[b + isdir] := sc.rext    -> only when addentry took it (cap)
+    ENDIF
+  ENDWHILE
+  IF sc.err THEN efail[p] := TRUE
+  isodend(sc)
+  Close(fh)
+  sortpane(p)
+  IF esel[p] >= ecount[p] THEN esel[p] := ecount[p] - 1
+  IF esel[p] < 0 THEN esel[p] := 0
+  IF etop[p] > esel[p] THEN etop[p] := esel[p]
+ENDPROC
+
+-> pull `size` bytes at `ext` out of the open image into dst. tick =
+-> feed the progress bar and honour Esc (the copyfile discipline: a
+-> cancelled or failed target is deleted, never left partial).
+PROC isoextract(fh, ext, size, dst, tick)
+  DEF fo, left, n, ok=TRUE
+  IF (fo := Open(dst, NEWFILE)) = NIL THEN RETURN FALSE
+  IF Seek(fh, Shl(ext, 11), OFFSET_BEGINNING) < 0 THEN ok := FALSE
+  left := size
+  WHILE (left > 0) AND ok
+    IF tick
+      IF checkabort() THEN ok := FALSE
+    ENDIF
+    IF ok
+      n := IF left > cbufsz THEN cbufsz ELSE left
+      IF Read(fh, copybuf, n) <> n
+        ok := FALSE
+      ELSEIF Write(fo, copybuf, n) <> n
+        ok := FALSE
+      ELSE
+        left := left - n
+        IF tick THEN progadd(n)
+      ENDIF
+    ENDIF
+  ENDWHILE
+  Close(fo)
+  IF ok = FALSE THEN DeleteFile(dst)
+ENDPROC ok
+
+-> subdirectories collected per directory while walking (heap lists,
+-> recursion keeps a small frame like copytree does)
+CONST ISOSD=192
+
+-> total bytes of every file below a directory extent (pre-scan
+-> denominator for the smooth bar, and the = key inside an image).
+-> A directory with more than ISOSD subdirectories only understates
+-> the bar's denominator - the copy itself never drops anything.
+PROC isosum(fh, ext, sz, depth)
+  DEF s[1]:ARRAY OF isoscan, sc:PTR TO isoscan, n=0,
+      dext:PTR TO LONG, dsz:PTR TO LONG, nd=0, k
+  IF depth > 20 THEN RETURN 0
+  dext := New(ISOSD * 4)
+  dsz := New(ISOSD * 4)
+  IF (dext = NIL) OR (dsz = NIL)
+    IF dext THEN Dispose(dext)
+    IF dsz THEN Dispose(dsz)
+    RETURN 0
+  ENDIF
+  sc := s
+  isodbegin(sc, fh, ext, sz)
+  WHILE isodnext(sc)
+    IF sc.rdir
+      IF nd < ISOSD
+        dext[nd] := sc.rext
+        dsz[nd] := sc.rsize
+        nd++
+      ENDIF
+    ELSE
+      n := n + sc.rsize
+    ENDIF
+  ENDWHILE
+  isodend(sc)
+  FOR k := 0 TO nd - 1
+    n := n + isosum(fh, dext[k], dsz[k], depth + 1)
+  ENDFOR
+  Dispose(dext)
+  Dispose(dsz)
+ENDPROC n
+
+-> ---- ADF disk images: REAL mounts via 3.2's DAControl -------------
+-> (daprobe round 1, 30.7.26). Never a parser: the real filesystem
+-> does the thinking, every verb works on the mounted volume, and
+-> writes land in the .adf file (host-verified). The probe's lessons
+-> live here: DAControl will YANK a disk from under live locks, so
+-> the in-use discipline is OURS; eject right after create/write can
+-> fail transiently (validator) - retry once; an unformatted image
+-> mounts but requester-storms - refuse NDOS before mounting; and
+-> DAControl output is never parsed beyond pass/fail (DA_LASTDEVICE
+-> via SETENV carries the device name instead).
+
+PROC adfext(name:PTR TO CHAR)
+  DEF l
+  l := StrLen(name)
+  IF l < 5 THEN RETURN FALSE
+  IF (name[l - 4] <> ".") THEN RETURN FALSE
+  IF (name[l - 3] <> "a") AND (name[l - 3] <> "A") THEN RETURN FALSE
+  IF (name[l - 2] <> "d") AND (name[l - 2] <> "D") THEN RETURN FALSE
+  IF (name[l - 1] <> "f") AND (name[l - 1] <> "F") THEN RETURN FALSE
+ENDPROC TRUE
+
+-> 0 = no DAControl, 1 = ready
+PROC dacheck()
+  IF pathtype('C:DAControl') <> 1
+    showmsg('ADF mounting needs AmigaOS 3.2 (C:DAControl + trackfile.device)')
+    RETURN FALSE
+  ENDIF
+ENDPROC TRUE
+
+-> the mount table: slot by device name / by image file / first free
+PROC damfind(dev)
+  DEF k
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0
+      IF nccmp(damdev[k], dev) = 0 THEN RETURN k
+    ENDIF
+  ENDFOR
+ENDPROC -1
+
+PROC damfindfile(path)
+  DEF k
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0
+      IF nccmp(damfile[k], path) = 0 THEN RETURN k
+    ENDIF
+  ENDFOR
+ENDPROC -1
+
+PROC damfree()
+  DEF k
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) = 0 THEN RETURN k
+  ENDFOR
+ENDPROC -1
+
+-> the pane's real path sits inside a disk image WE mounted (any
+-> depth): slot index, or -1
+PROC damunder(p)
+  DEF k
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0
+      IF ncprefix(ppath[p], damdev[k], EstrLen(damdev[k])) THEN RETURN k
+    ENDIF
+  ENDFOR
+ENDPROC -1
+
+-> eject + stop one device, the probe-proven way: SAFEEJECT asks the
+-> filesystem to flush and let go; a transient "in use" right after
+-> writes gets one retry after a beat. TRUE = the unit is gone.
+PROC daeject(dev)
+  DEF cmd[200]:STRING, res
+  StringF(cmd, 'C:DAControl EJECT SAFEEJECT=YES TIMEOUT=5 STOP UNIT=\s QUIET',
+          dev)
+  res := runcapture(NIL, cmd, 'T:CFile-out')
+  IF res <> 0
+    Delay(100)    -> the validator may still be settling
+    res := runcapture(NIL, cmd, 'T:CFile-out')
+  ENDIF
+  DeleteFile('T:CFile-out')
+ENDPROC res = 0
+
+-> quit: best-effort unmount of everything WE mounted. First, any
+-> pane still sitting inside one of those volumes is pointed back at
+-> the directory holding its .adf - otherwise SAVEDIRS would remember
+-> a DAn: path and the next start would beg "insert DA3: in any
+-> drive" for a volume that no longer exists (his find, 30.7.26).
+PROC daunmountall()
+  DEF k, p
+  FOR p := 0 TO 1
+    k := damunder(p)
+    IF k >= 0 THEN StrCopy(ppath[p], damback[k])
+  ENDFOR
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0
+      daeject(damdev[k])
+      SetStr(damdev[k], 0)
+    ENDIF
+  ENDFOR
+ENDPROC
+
+-> Enter on a .adf: mount it writable and jump the pane inside. The
+-> image already mounted by us = just jump (mounting the same file
+-> twice is the crash DAControl's checksum option exists to prevent).
+PROC enteradf(p, fpath)
+  DEF k, fh, b[8]:ARRAY OF CHAR, n, cmd[CPATHLEN+80]:STRING,
+      res, dev[20]:STRING
+  k := damfindfile(fpath)
+  IF k >= 0
+    StrCopy(ppath[p], damdev[k])
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    drawpane(p)
+    RETURN
+  ENDIF
+  IF dacheck() = FALSE THEN RETURN
+  -> NDOS gate: an image whose bootblock does not open with "DOS"
+  -> would mount and then requester-storm on every access
+  n := 0
+  IF (fh := Open(fpath, OLDFILE))
+    n := Read(fh, b, 4)
+    Close(fh)
+  ENDIF
+  IF (n < 4) OR (b[0] <> "D") OR (b[1] <> "O") OR (b[2] <> "S")
+    showmsg('not a DOS disk image (a game/NDOS disk cannot be browsed)')
+    RETURN
+  ENDIF
+  IF (k := damfree()) = -1
+    showmsg('too many mounted images - unmount one first (Left at its root)')
+    RETURN
+  ENDIF
+  -> pin the device OURSELVES (b24). b23 read DA_LASTDEVICE back and
+  -> a stale value recorded the WRONG unit - the image then could
+  -> never be unmounted again (his find). Now: try each DAn: not in
+  -> our table until one takes; DAControl reuses stopped units, so
+  -> the first attempt normally answers. The table entry is CERTAIN.
+  res := -1
+  n := 0
+  WHILE (n < DAMAX) AND (res <> 0)
+    StringF(dev, 'DA\d:', n)
+    IF damfind(dev) = -1    -> not one of ours already
+      StringF(cmd, 'C:DAControl LOAD "\s" DEVICE=\s WRITEPROTECTED=NO QUIET',
+              fpath, dev)
+      res := runcapture(NIL, cmd, 'T:CFile-out')
+    ENDIF
+    IF res <> 0 THEN n++
+  ENDWHILE
+  DeleteFile('T:CFile-out')
+  IF res <> 0
+    showmsg('could not mount the image (already mounted, or units busy)')
+    RETURN
+  ENDIF
+  StrCopy(damdev[k], dev)
+  StrCopy(damfile[k], fpath)
+  StrCopy(damback[k], ppath[p])
+  StrCopy(damname[k], FilePart(fpath))
+  StrCopy(ppath[p], dev)
+  esel[p] := 0
+  etop[p] := 0
+  readpane(p)
+  drawpaths()
+  drawpane(p)
+ENDPROC
+
+-> n with a name ending .adf: create a formatted blank image (FFS,
+-> 880K, labeled after the file's stem) - DAControl CREATE formats
+-> AND mounts it writable in one stroke, so it is immediately usable
+PROC docreateadf(p, dpath, tname)
+  DEF lbl[110]:STRING, cmd[CPATHLEN+140]:STRING, res=-1, k, n=0,
+      dev[20]:STRING
+  IF dacheck() = FALSE THEN RETURN
+  IF pathtype(dpath) > 0
+    showmsg('that name already exists')
+    RETURN
+  ENDIF
+  -> CREATE mounts what it makes, so it needs a table slot up front -
+  -> an untracked mount is a file that can never be deleted (b24)
+  IF (k := damfree()) = -1
+    showmsg('too many mounted images - unmount one first (Left at its root)')
+    RETURN
+  ENDIF
+  StrCopy(lbl, tname)
+  SetStr(lbl, EstrLen(lbl) - 4)    -> the stem names the volume
+  -> pinned-device ladder, same reasoning as enteradf. A failed try
+  -> may leave the created file behind (CREATE makes the file, THEN
+  -> inserts it) - clear it so the next try is not "already exists".
+  WHILE (n < DAMAX) AND (res <> 0)
+    StringF(dev, 'DA\d:', n)
+    IF damfind(dev) = -1
+      StringF(cmd, 'C:DAControl CREATE LABEL="\s" FILESYSTEMTYPE=FFS DISKTYPE=DD DEVICE=\s QUIET "\s"', lbl, dev, dpath)
+      res := runcapture(NIL, cmd, 'T:CFile-out')
+      IF res <> 0
+        IF pathtype(dpath) = 1 THEN DeleteFile(dpath)
+      ENDIF
+    ENDIF
+    IF res <> 0 THEN n++
+  ENDWHILE
+  DeleteFile('T:CFile-out')
+  IF res <> 0
+    faultmsg('could not create the image')
+    RETURN
+  ENDIF
+  StrCopy(damdev[k], dev)
+  StrCopy(damfile[k], dpath)
+  StrCopy(damback[k], ppath[p])
+  StrCopy(damname[k], tname)
+  StrCopy(prevname, tname)
+  refreshpane(p, TRUE)
+  showmsg('image created and mounted - Enter goes inside')
+ENDPROC
+
 -> throw away a pane's uncommitted archive edits: drop the staging tree
 -> and reset every flag to CLEAN, so the arccommit that leavearchive runs
 -> next finds nothing to write and the archive on disk is left untouched.
@@ -813,14 +1405,15 @@ PROC addentry(p, name, isdir, size, date)
   edirs[(p * MAXENT) + i] := isdir
   esize[(p * MAXENT) + i] := size
   edate[(p * MAXENT) + i] := date
+  eext[(p * MAXENT) + i] := 0    -> ISO listings overwrite this after
   ecount[p] := i + 1
 ENDPROC
 
--> Every entry is really five parallel fields - name pointer, is-dir, size,
--> date and mark - that must move together. These three helpers are the ONE
--> place that enumerates them, so a listing that reorders or snapshots entries
--> can never again keep four in step and forget the fifth (the / filter's date
--> column once was). Add a field here and every mover follows.
+-> Every entry is really six parallel fields - name pointer, is-dir, size,
+-> date, mark and extent - that must move together. These three helpers are
+-> the ONE place that enumerates them, so a listing that reorders or snapshots
+-> entries can never again keep five in step and forget the sixth (the /
+-> filter's date column once was). Add a field here and every mover follows.
 
 -> swap two entries in place within the global arrays (b = p * MAXENT)
 PROC swapentry(b, i, j)
@@ -840,26 +1433,31 @@ PROC swapentry(b, i, j)
   t := emark[b + i]
   emark[b + i] := emark[b + j]
   emark[b + j] := t
+  t := eext[b + i]
+  eext[b + i] := eext[b + j]
+  eext[b + j] := t
 ENDPROC
 
 -> copy the global entry at b+gi out to the snapshot arrays at index si
 PROC snapentry(si, sn:PTR TO LONG, sd:PTR TO CHAR, ss:PTR TO LONG,
-               sdt:PTR TO LONG, sm:PTR TO CHAR, b, gi)
+               sdt:PTR TO LONG, sm:PTR TO CHAR, sx:PTR TO LONG, b, gi)
   sn[si]  := enames[b + gi]
   sd[si]  := edirs[b + gi]
   ss[si]  := esize[b + gi]
   sdt[si] := edate[b + gi]
   sm[si]  := emark[b + gi]
+  sx[si]  := eext[b + gi]
 ENDPROC
 
 -> copy the snapshot entry at si back into the global slot b+gi
 PROC unsnapentry(si, sn:PTR TO LONG, sd:PTR TO CHAR, ss:PTR TO LONG,
-                 sdt:PTR TO LONG, sm:PTR TO CHAR, b, gi)
+                 sdt:PTR TO LONG, sm:PTR TO CHAR, sx:PTR TO LONG, b, gi)
   enames[b + gi] := sn[si]
   edirs[b + gi]  := sd[si]
   esize[b + gi]  := ss[si]
   edate[b + gi]  := sdt[si]
   emark[b + gi]  := sm[si]
+  eext[b + gi]   := sx[si]
 ENDPROC
 
 -> a fresh listing never keeps marks (they are positional)
@@ -1688,6 +2286,8 @@ PROC readpane(p)
   pfreeok[p] := FALSE    -> free space may have changed; re-ask Info()
   IF inarchive(p)
     readarcdir(p)
+  ELSEIF iniso(p)
+    readisodir(p)
   ELSEIF involume(p)
     readvolumes(p)
   ELSE
@@ -2124,6 +2724,12 @@ PROC paneloc(p, dst)
       StrAdd(dst, '/')
       StrAdd(dst, arcsub[p])
     ENDIF
+  ELSEIF iniso(p)
+    StrCopy(dst, isopath[p])
+    IF EstrLen(isosub[p]) > 0
+      StrAdd(dst, '/')
+      StrAdd(dst, isosub[p])
+    ENDIF
   ELSEIF EstrLen(ppath[p]) = 0
     StrCopy(dst, '(volumes)')
   ELSE
@@ -2144,6 +2750,7 @@ PROC freebytes(p)
   pfree[p] := -1
   pfreeok[p] := TRUE
   IF inarchive(p) THEN RETURN -1
+  IF iniso(p) THEN RETURN -1
   IF EstrLen(ppath[p]) = 0 THEN RETURN -1
   IF (id := New(SIZEOF infodata)) = NIL THEN RETURN -1
   IF lock := Lock(ppath[p], SHARED_LOCK)
@@ -2423,7 +3030,7 @@ PROC refreshpane(p, place)
   q := 1 - p
   readpane(p)
   IF place THEN placebyname(p)
-  IF inarchive(q) = FALSE
+  IF (inarchive(q) = FALSE) AND (iniso(q) = FALSE)
     IF nccmp(ppath[p], ppath[q]) = 0
       readpane(q)
       drawpane(q)
@@ -2784,13 +3391,30 @@ PROC enterdir()
     drawpane(p)
     RETURN
   ENDIF
+  IF iniso(p)
+    IF edirs[i] = 0 THEN RETURN    -> a file: Right does nothing
+    IF EstrLen(isosub[p]) > 0 THEN StrAdd(isosub[p], '/')
+    StrAdd(isosub[p], enames[i])   -> descend inside the image
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    drawpane(p)
+    RETURN
+  ENDIF
   IF edirs[i] = 0
-    -> a file in a real directory: Right enters it only if it is an lha or
-    -> lzx archive (other types stay files)
+    -> a file in a real directory: Right enters it only if it is an
+    -> lha/lzx archive or an ISO image (other types stay files)
     IF involume(p) = FALSE
       buildfull(fpath, ppath[p], enames[i])
       ty := sniff(fpath)
-      IF (ty = TY_LHA) OR (ty = TY_LZX) THEN enterarchive(p, fpath, ty)
+      IF (ty = TY_LHA) OR (ty = TY_LZX)
+        enterarchive(p, fpath, ty)
+      ELSEIF ty = TY_ISO
+        enteriso(p, fpath)
+      ELSEIF ty = TY_ADF
+        enteradf(p, fpath)
+      ENDIF
     ENDIF
     RETURN
   ENDIF
@@ -2858,6 +3482,68 @@ PROC parentdir()
       drawpaths()
       selectbyname(p)
     ENDIF
+    RETURN
+  ENDIF
+  IF iniso(p)
+    IF EstrLen(isosub[p]) > 0
+      -> up one level inside the image: drop the last path component
+      s := isosub[p]
+      l := EstrLen(isosub[p])
+      cut := -1
+      FOR i := 0 TO l - 1
+        IF s[i] = "/" THEN cut := i
+      ENDFOR
+      IF cut >= 0
+        MidStr(prevname, isosub[p], cut + 1, ALL)   -> reselect the child
+        SetStr(isosub[p], cut)
+      ELSE
+        StrCopy(prevname, isosub[p])
+        SetStr(isosub[p], 0)
+      ENDIF
+    ELSE
+      -> at the image root: leave, back to the real directory, and
+      -> reselect the .iso file there (nothing to commit - read-only)
+      StrCopy(prevname, FilePart(isopath[p]))
+      leaveiso(p)
+    ENDIF
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    selectbyname(p)
+    RETURN
+  ENDIF
+  -> Left at the root of a disk image WE mounted: offer the way out
+  -> his ask specified. (y) unmounts and returns to the .adf's
+  -> directory; (n) keeps it mounted - quit will still clean it up;
+  -> Esc stays. The other pane is OUR in-use discipline: DAControl
+  -> would happily yank the disk from under it (daprobe lesson).
+  k := damfind(ppath[p])
+  IF k >= 0
+    promptrow('unmount the disk image? (y)es (n)o = keep mounted')
+    i := waitvanilla()
+    IF (i = "y") OR (i = "Y")
+      -> prefix, not equality: the other pane may be DEEPER inside
+      IF ncprefix(ppath[1 - p], ppath[p], EstrLen(ppath[p]))
+        showmsg('the other pane is inside the mounted disk')
+        RETURN
+      ENDIF
+      IF daeject(damdev[k])
+        SetStr(damdev[k], 0)    -> slot free again
+      ELSE
+        showmsg('the volume is busy - kept mounted (quit retries)')
+      ENDIF
+    ELSEIF (i <> "n") AND (i <> "N")
+      drawpaths()    -> Esc or anything else: stay put
+      RETURN
+    ENDIF
+    StrCopy(prevname, damname[k])
+    StrCopy(ppath[p], damback[k])
+    esel[p] := 0
+    etop[p] := 0
+    readpane(p)
+    drawpaths()
+    selectbyname(p)
     RETURN
   ENDIF
   s := ppath[p]
@@ -4528,6 +5214,211 @@ PROC arcpollrun(cmd, files:PTR TO LONG, sizes:PTR TO LONG, nf,
   UNTIL done
 ENDPROC res
 
+-> recreate one image directory as a real tree under dst: dirs made,
+-> files pulled straight out of the image (byte-smooth bar, Esc lands
+-> mid-file). More than ISOSD subdirectories in ONE directory is
+-> refused honestly rather than silently dropped.
+PROC isoextracttree(fh, ext, sz, dst, depth)
+  DEF s[1]:ARRAY OF isoscan, sc:PTR TO isoscan, ok=TRUE, lk,
+      child=NIL, dext=NIL:PTR TO LONG, dsz=NIL:PTR TO LONG,
+      dnames=NIL:PTR TO LONG, nd=0, k
+  IF depth > 20
+    showmsg('directory tree too deep')
+    RETURN FALSE
+  ENDIF
+  lk := CreateDir(dst)
+  IF lk
+    UnLock(lk)
+  ELSE
+    IF pathtype(dst) <> 2
+      faultmsg('cannot create the target directory')
+      RETURN FALSE
+    ENDIF
+  ENDIF
+  child := String(CPATHLEN)
+  dext := New(ISOSD * 4)
+  dsz := New(ISOSD * 4)
+  dnames := New(ISOSD * 4)
+  IF (child = NIL) OR (dext = NIL) OR (dsz = NIL) OR (dnames = NIL)
+    IF child THEN DisposeLink(child)
+    IF dext THEN Dispose(dext)
+    IF dsz THEN Dispose(dsz)
+    IF dnames THEN Dispose(dnames)
+    RETURN FALSE
+  ENDIF
+  sc := s
+  isodbegin(sc, fh, ext, sz)
+  WHILE isodnext(sc) AND ok    -> plain flags: safe despite eager AND
+    StrCopy(child, dst)
+    AddPart(child, sc.rname, CPATHLEN - 4)
+    SetStr(child, StrLen(child))
+    IF sc.rdir
+      IF nd >= ISOSD
+        showmsg('too many subdirectories in one folder')
+        ok := FALSE
+      ELSE
+        dext[nd] := sc.rext
+        dsz[nd] := sc.rsize
+        IF (dnames[nd] := String(EstrLen(child) + 2))
+          StrCopy(dnames[nd], child)
+          nd++
+        ELSE
+          ok := FALSE
+        ENDIF
+      ENDIF
+    ELSE
+      IF isoextract(fh, sc.rext, sc.rsize, child, TRUE) = FALSE
+        ok := FALSE
+      ENDIF
+    ENDIF
+  ENDWHILE
+  IF sc.err THEN ok := FALSE
+  isodend(sc)
+  FOR k := 0 TO nd - 1
+    IF ok
+      IF isoextracttree(fh, dext[k], dsz[k], dnames[k], depth + 1) = FALSE
+        ok := FALSE
+      ENDIF
+    ENDIF
+    DisposeLink(dnames[k])
+  ENDFOR
+  DisposeLink(child)
+  Dispose(dext)
+  Dispose(dsz)
+  Dispose(dnames)
+  IF abort THEN ok := FALSE
+ENDPROC ok
+
+-> c when the ACTIVE pane is inside an ISO image: copy the selected
+-> file(s)/folder(s) to the other pane, reading straight out of the
+-> image - no archiver, no staging, so the bar is byte-smooth by
+-> construction and Esc lands mid-file. m refuses: the image is
+-> read-only, a move could never drop its source.
+PROC isoxfer_out(p, q, ismove, force)
+  DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
+      dfile[CPATHLEN]:STRING, tname[110]:STRING, mb[130]:STRING,
+      fh=NIL, t, k, stop=FALSE, ndone=0, doit, total=0, ext, sz, isd
+  IF involume(q) OR efail[q]
+    showmsg('the other pane needs a directory to receive the files')
+    RETURN
+  ENDIF
+  IF inarchive(q) OR iniso(q)
+    showmsg('image-to-archive is not supported')
+    RETURN
+  ENDIF
+  IF ismove
+    showmsg('the CD image is read-only - c copies without moving')
+    RETURN
+  ENDIF
+  IF (fh := Open(isopath[p], OLDFILE)) = NIL
+    showmsg('cannot open the image file')
+    RETURN
+  ENDIF
+  b := p * MAXENT
+  nmark := markcount(p)
+  cancelok := TRUE    -> Esc cancels: the pre-scan and every copy
+  abort := FALSE
+  -> pre-scan: file bytes from the listing, folder bytes by walking
+  -> the subtree - the smooth bar's denominator
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick
+      IF edirs[b + i]
+        arcmember(member, isosub[p], enames[b + i])
+        IF isofind(fh, isoroot[p], isorootsz[p], member, {ext}, {sz}, {isd})
+          total := total + isosum(fh, ext, sz, 0)
+        ENDIF
+      ELSE
+        total := total + esize[b + i]
+      ENDIF
+    ENDIF
+  ENDFOR
+  IF total > 1 THEN progshow(total)
+  FOR i := 0 TO ecount[p] - 1
+    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    IF pick AND (stop = FALSE)
+      nm := enames[b + i]
+      IF edirs[b + i]
+        arcmember(member, isosub[p], nm)
+        buildfull(dfile, ppath[q], nm)
+        IF pathtype(dfile) = 1
+          showmsg('a file with that name is in the way')
+        ELSEIF isofind(fh, isoroot[p], isorootsz[p], member,
+                       {ext}, {sz}, {isd}) = FALSE
+          faultmsg('cannot find that folder in the image')
+          stop := TRUE
+        ELSEIF isoextracttree(fh, ext, sz, dfile, 0) = FALSE
+          IF abort = FALSE THEN faultmsg('could not copy the folder out')
+          stop := TRUE
+        ELSE
+          ndone := ndone + 1
+        ENDIF
+      ELSE
+        StrCopy(tname, nm)
+        buildfull(dfile, ppath[q], tname)
+        doit := TRUE
+        t := pathtype(dfile)
+        IF t > 0
+          IF force
+            k := "o"
+          ELSE
+            StringF(mb, '"\s" exists: (s)kip (o)verwrite (r)ename?', tname)
+            promptrow(mb)
+            k := waitvanilla()
+          ENDIF
+          IF (k = "o") OR (k = "O")
+            IF t = 2
+              showmsg('the target exists as a directory')
+              doit := FALSE
+            ENDIF
+          ELSEIF (k = "r") OR (k = "R")
+            IF lineinput('new name: ', tname, 30, TRUE) = 0
+              drawpaths()
+              doit := FALSE
+            ELSEIF EstrLen(tname) = 0
+              doit := FALSE
+            ELSE
+              buildfull(dfile, ppath[q], tname)
+              IF pathtype(dfile) = 2
+                showmsg('that name is a directory')
+                doit := FALSE
+              ENDIF
+            ENDIF
+          ELSEIF k = 27
+            drawpaths()
+            stop := TRUE
+            doit := FALSE
+          ELSE
+            doit := FALSE    -> skip
+          ENDIF
+        ENDIF
+        IF doit
+          IF isoextract(fh, eext[b + i], esize[b + i], dfile, TRUE)
+            ndone := ndone + 1
+          ELSE
+            IF abort = FALSE THEN faultmsg('could not copy that file out')
+            stop := TRUE
+          ENDIF
+        ENDIF
+      ENDIF
+      IF abort THEN stop := TRUE
+    ENDIF
+  ENDFOR
+  Close(fh)
+  cancelok := FALSE
+  progoff()
+  refreshall()
+  IF abort
+    StringF(mb, 'cancelled - \d of \d done', ndone,
+            IF nmark > 0 THEN nmark ELSE 1)
+    showmsg(mb)
+  ELSEIF ndone > 0
+    StringF(mb, '\d file\s copied out', ndone, IF ndone = 1 THEN '' ELSE 's')
+    showmsg(mb)
+  ENDIF
+  abort := FALSE
+ENDPROC
+
 PROC arcxfer_out(p, q, ismove, force)
   DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
@@ -4539,7 +5430,7 @@ PROC arcxfer_out(p, q, ismove, force)
     showmsg('the other pane needs a directory to receive the files')
     RETURN
   ENDIF
-  IF inarchive(q)
+  IF inarchive(q) OR iniso(q)
     showmsg('archive-to-archive is not supported')
     RETURN
   ENDIF
@@ -5035,6 +5926,14 @@ PROC doxfer(ismove, force)
       iname[120]:STRING, itname[120]:STRING, isrc[320]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF iniso(p)
+    isoxfer_out(p, q, ismove, force)    -> copy file(s) out of the image
+    RETURN
+  ENDIF
+  IF iniso(q)
+    showmsg('the CD image is read-only')
+    RETURN
+  ENDIF
   IF inarchive(p)
     arcxfer_out(p, q, ismove, force)    -> extract file(s) to the pane
     RETURN
@@ -5176,8 +6075,26 @@ PROC doxfer(ismove, force)
 ENDPROC
 
 PROC delone(p, i)
-  DEF dpath[310]:STRING, ok, pm[130]:STRING, ipath[320]:STRING
+  DEF dpath[310]:STRING, ok, pm[130]:STRING, ipath[320]:STRING, k
   buildfull(dpath, ppath[p], enames[i])
+  -> deleting a disk image WE have mounted: let go of it first -
+  -> trackfile holds the file while loaded, so the delete could
+  -> never succeed (his find, 30.7.26). The other pane inside the
+  -> volume still refuses: unmounting under it is the yank hazard.
+  k := damfindfile(dpath)
+  IF k >= 0
+    IF ncprefix(ppath[1 - p], damdev[k], EstrLen(damdev[k]))
+      showmsg('that image is mounted - the other pane is inside it')
+      gfails := gfails + 1
+      RETURN FALSE
+    ENDIF
+    IF daeject(damdev[k]) = FALSE
+      showmsg('that image is mounted and busy - try again in a moment')
+      gfails := gfails + 1
+      RETURN FALSE
+    ENDIF
+    SetStr(damdev[k], 0)    -> unmounted: the delete can now proceed
+  ENDIF
   IF edirs[i]
     ok := deltree(dpath, 0, TRUE)
   ELSE
@@ -5341,6 +6258,10 @@ PROC dodelete()
   DEF p, i, b, k, nmark, showbar=FALSE,
       dpath[310]:STRING, mb[120]:STRING
   p := active
+  IF iniso(p)
+    showmsg('the CD image is read-only')
+    RETURN
+  ENDIF
   IF inarchive(p)
     arcdelete(p)
     RETURN
@@ -5459,7 +6380,7 @@ PROC infowindow()
       db[20]:ARRAY OF CHAR, tb[20]:ARRAY OF CHAR,
       fl[10]:STRING, cmt[84]:STRING, ln[40]:STRING, cbuf[84]:STRING
   p := active
-  IF inarchive(p)
+  IF inarchive(p) OR iniso(p)
     showmsg('file info is not available inside an archive yet')
     RETURN
   ENDIF
@@ -5641,6 +6562,18 @@ ENDPROC TY_OTHER
 
 PROC sniff(path)
   DEF fh, buf[520]:ARRAY OF CHAR, n
+  -> ISO images first: their head is boot code or zeros (worthless to
+  -> sniffmem), the truth lives at sector 16. Suffix-gated so plain
+  -> files never pay the extra open.
+  IF isoext(path)
+    IF isomagic(path) THEN RETURN TY_ISO
+  ENDIF
+  -> ADF images: suffix + exactly a floppy's size (the only images
+  -> trackfile mounts; the DOS/NDOS verdict is enteradf's to give)
+  IF adfext(path)
+    n := arcsizeof(path)
+    IF (n = ADFDD) OR (n = ADFHD) THEN RETURN TY_ADF
+  ENDIF
   IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN TY_OTHER
   n := Read(fh, buf, 512)
   Close(fh)
@@ -6229,6 +7162,45 @@ PROC arcviewsel(p, sel)
   DeleteFile(out)
 ENDPROC
 
+-> view a file straight out of an ISO image: pulled into T:CFile-v
+-> (the arcviewsel scratch), sniffed, viewed, deleted. The size gate
+-> comes FIRST - a file the viewer would refuse anyway is never
+-> extracted at all (T: is RAM on most systems).
+PROC isoviewsel(p, sel)
+  DEF nm:PTR TO CHAR, i, out[CPATHLEN]:STRING, fh, ty
+  i := (p * MAXENT) + sel
+  nm := enames[i]
+  IF esize[i] > VIEWMAX
+    showmsg('file too large to view (512KB cap for now)')
+    RETURN
+  ENDIF
+  StrCopy(out, 'T:CFile-v/')
+  StrAdd(out, nm)
+  makepath(out)
+  DeleteFile(out)
+  IF (fh := Open(isopath[p], OLDFILE)) = NIL
+    showmsg('cannot open the image file')
+    RETURN
+  ENDIF
+  IF isoextract(fh, eext[i], esize[i], out, FALSE) = FALSE
+    Close(fh)
+    showmsg('could not read that file from the image')
+    RETURN
+  ENDIF
+  Close(fh)
+  ty := sniff(out)
+  IF ty = TY_ANSI
+    viewfile(out, nm, 2, FALSE)
+  ELSEIF ty = TY_TEXT
+    IF viewfile(out, nm, 0, FALSE) = 1
+      showmsg('the CD image is read-only')    -> 'e' in the viewer
+    ENDIF
+  ELSE
+    viewfile(out, nm, 1, FALSE)
+  ENDIF
+  DeleteFile(out)
+ENDPROC
+
 PROC doview()
   DEF p, i, ty, fpath[310]:STRING, cmd[680]:STRING
   p := active
@@ -6240,6 +7212,11 @@ PROC doview()
   IF inarchive(p)
     i := (p * MAXENT) + esel[p]
     IF edirs[i] THEN showmsg('cannot view a directory') ELSE arcviewsel(p, esel[p])
+    RETURN
+  ENDIF
+  IF iniso(p)
+    i := (p * MAXENT) + esel[p]
+    IF edirs[i] THEN showmsg('cannot view a directory') ELSE isoviewsel(p, esel[p])
     RETURN
   ENDIF
   IF markcount(p) > 0
@@ -6268,6 +7245,10 @@ PROC doview()
   ELSEIF ty = TY_ZIP
     StringF(cmd, 'unzip -l "\s"', fpath)
     capturecmd(p, cmd, enames[i], FALSE)
+  ELSEIF ty = TY_ISO
+    showmsg('a CD image: Enter goes inside')
+  ELSEIF ty = TY_ADF
+    showmsg('a disk image: Enter mounts and goes inside')
   ELSE
     viewfile(fpath, enames[i], 1, FALSE)
   ENDIF
@@ -6953,6 +7934,10 @@ ENDPROC
 PROC doedit()
   DEF p, i, ty, r, fpath[310]:STRING
   p := active
+  IF iniso(p)
+    showmsg('the CD image is read-only - v views')
+    RETURN
+  ENDIF
   IF inarchive(p)
     arcedit(p)
     RETURN
@@ -7529,7 +8514,7 @@ ENDPROC TRUE
 PROC dogoto()
   DEF p, mx, buf[CPATHLEN]:STRING
   p := active
-  IF inarchive(p)
+  IF inarchive(p) OR iniso(p)
     showmsg('leave the archive first (Left), then go to a path')
     RETURN
   ENDIF
@@ -7570,8 +8555,8 @@ ENDPROC
 -> the keymap to swallow). Any other key cancels. Jump with the bare digit.
 PROC dobookmark()
   DEF k
-  IF inarchive(active)
-    showmsg('cannot bookmark a spot inside an archive')
+  IF inarchive(active) OR iniso(active) OR (damunder(active) >= 0)
+    showmsg('cannot bookmark a spot inside an archive or disk image')
     RETURN
   ENDIF
   promptrow('bookmark this location as? (0-9)')
@@ -7708,7 +8693,7 @@ PROC dofind()
       parsed=NIL:PTR TO CHAR, isglob=FALSE, pick, pp:PTR TO CHAR,
       hit[CPATHLEN]:STRING, dir[CPATHLEN]:STRING, nm[120]:STRING
   p := active
-  IF inarchive(p)
+  IF inarchive(p) OR iniso(p)
     showmsg('find works in real directories - Left out of the archive')
     RETURN
   ENDIF
@@ -7918,7 +8903,7 @@ PROC docontent()
   DEF p, paths:PTR TO LONG, disp:PTR TO LONG, scanbuf=NIL:PTR TO CHAR, cnt=0,
       i, ty, needle[42]:STRING, pick, hit[CPATHLEN]:STRING, nm[120]:STRING
   p := active
-  IF inarchive(p)
+  IF inarchive(p) OR iniso(p)
     showmsg('text search works in real directories - Left out first')
     RETURN
   ENDIF
@@ -7985,7 +8970,7 @@ ENDPROC
 PROC bookmarkjump(d)
   DEF p, mb[40]:STRING
   p := active
-  IF inarchive(p)
+  IF inarchive(p) OR iniso(p)
     showmsg('leave the archive first (Left), then jump')
     RETURN
   ENDIF
@@ -8000,7 +8985,7 @@ ENDPROC
 -> : - a shell command line, run in the active pane's directory
 PROC docommand()
   DEF cmd[140]:STRING
-  IF inarchive(active)
+  IF inarchive(active) OR iniso(active)
     showmsg('shell commands do not run inside an archive - Left exits')
     RETURN
   ENDIF
@@ -8048,6 +9033,10 @@ PROC dopack()
       mb[130]:STRING, base[400]:STRING
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF iniso(p) OR iniso(q)
+    showmsg('this works in real directories - Left out of the image first')
+    RETURN
+  ENDIF
   IF inarchive(p) OR inarchive(q)
     arcreadonly()
     RETURN
@@ -8151,6 +9140,10 @@ PROC dounpack()
       hdr[130]:STRING, s:PTR TO CHAR, l, tyc=NIL:PTR TO CHAR
   p := active
   q := IF p = 0 THEN 1 ELSE 0
+  IF iniso(p) OR iniso(q)
+    showmsg('this works in real directories - Left out of the image first')
+    RETURN
+  ENDIF
   IF inarchive(p) OR inarchive(q)
     arcreadonly()
     RETURN
@@ -8253,6 +9246,10 @@ PROC doopen()
     arcviewsel(p, esel[p])
     RETURN
   ENDIF
+  IF iniso(p)        -> an image file: view it (read-only)
+    isoviewsel(p, esel[p])
+    RETURN
+  ENDIF
   buildfull(fpath, ppath[p], enames[i])
   ty := sniff(fpath)
   IF ty = TY_EXEC
@@ -8274,6 +9271,10 @@ PROC doopen()
     viewfile(fpath, enames[i], 2, FALSE)
   ELSEIF (ty = TY_LHA) OR (ty = TY_LZX)
     enterarchive(p, fpath, ty)    -> Enter goes inside, like Right
+  ELSEIF ty = TY_ISO
+    enteriso(p, fpath)            -> Enter goes inside, like Right
+  ELSEIF ty = TY_ADF
+    enteradf(p, fpath)            -> Enter mounts and goes inside
   ELSEIF ty = TY_ZIP
     showmsg('zip: u unpacks it to the other pane, v lists it')
   ELSE
@@ -8286,15 +9287,15 @@ ENDPROC
 -> are only reordered (pointers), never freed, so the saved arrays can
 -> put everything back on exit. Selection jumps to the first match.
 PROC filterapply(p, snames:PTR TO LONG, sdirs:PTR TO CHAR, ssize:PTR TO LONG,
-                 smark:PTR TO CHAR, sdate:PTR TO LONG, fsrc:PTR TO LONG,
-                 fullcount, filt:PTR TO CHAR)
+                 smark:PTR TO CHAR, sdate:PTR TO LONG, sext:PTR TO LONG,
+                 fsrc:PTR TO LONG, fullcount, filt:PTR TO CHAR)
   DEF b, i, j=0
   b := p * MAXENT
   FOR i := 0 TO fullcount - 1
     IF nchas(snames[i], filt)
-      -> restore saved entry i into the compacted visible slot j (all five
+      -> restore saved entry i into the compacted visible slot j (all six
       -> fields, so the date column stays in step with the name)
-      unsnapentry(i, snames, sdirs, ssize, sdate, smark, b, j)
+      unsnapentry(i, snames, sdirs, ssize, sdate, smark, sext, b, j)
       fsrc[j] := i    -> which saved entry this visible row came from
       j++
     ENDIF
@@ -8313,6 +9314,7 @@ PROC dofilter()
   DEF p, b, i, fullcount, origsel, esc=FALSE, done=FALSE, class, code, l,
       snames=NIL:PTR TO LONG, ssize=NIL:PTR TO LONG, sdate=NIL:PTR TO LONG,
       sdirs=NIL:PTR TO CHAR, smark=NIL:PTR TO CHAR, fsrc=NIL:PTR TO LONG,
+      sext=NIL:PTR TO LONG,
       filt[42]:STRING, keepname[110]:STRING
   p := active
   IF efail[p] OR (ecount[p] = 0) THEN RETURN
@@ -8325,18 +9327,20 @@ PROC dofilter()
   sdirs := New(MAXENT)
   smark := New(MAXENT)
   fsrc := New(MAXENT * 4)
+  sext := New(MAXENT * 4)
   IF (snames = NIL) OR (ssize = NIL) OR (sdate = NIL) OR (sdirs = NIL) OR
-     (smark = NIL) OR (fsrc = NIL)
+     (smark = NIL) OR (fsrc = NIL) OR (sext = NIL)
     IF snames THEN Dispose(snames)
     IF ssize THEN Dispose(ssize)
     IF sdate THEN Dispose(sdate)
     IF sdirs THEN Dispose(sdirs)
     IF smark THEN Dispose(smark)
     IF fsrc THEN Dispose(fsrc)
+    IF sext THEN Dispose(sext)
     RETURN
   ENDIF
   FOR i := 0 TO fullcount - 1
-    snapentry(i, snames, sdirs, ssize, sdate, smark, b, i)
+    snapentry(i, snames, sdirs, ssize, sdate, smark, sext, b, i)
     fsrc[i] := i    -> identity until the first filter compacts the view
   ENDFOR
   StrCopy(filt, '')
@@ -8371,7 +9375,7 @@ PROC dofilter()
         l := EstrLen(filt)
         IF l > 0
           SetStr(filt, l - 1)
-          filterapply(p, snames, sdirs, ssize, smark, sdate, fsrc, fullcount, filt)
+          filterapply(p, snames, sdirs, ssize, smark, sdate, sext, fsrc, fullcount, filt)
           drawpane(p)
           drawinput('/', filt, EstrLen(filt), 40)
         ENDIF
@@ -8380,7 +9384,7 @@ PROC dofilter()
         IF l < 40
           filt[l] := code
           SetStr(filt, l + 1)
-          filterapply(p, snames, sdirs, ssize, smark, sdate, fsrc, fullcount, filt)
+          filterapply(p, snames, sdirs, ssize, smark, sdate, sext, fsrc, fullcount, filt)
           drawpane(p)
           drawinput('/', filt, EstrLen(filt), 40)
         ENDIF
@@ -8407,7 +9411,7 @@ PROC dofilter()
   ENDWHILE
   -> restore the full listing exactly as it was
   FOR i := 0 TO fullcount - 1
-    unsnapentry(i, snames, sdirs, ssize, sdate, smark, b, i)
+    unsnapentry(i, snames, sdirs, ssize, sdate, smark, sext, b, i)
   ENDFOR
   ecount[p] := fullcount
   Dispose(snames)
@@ -8416,6 +9420,7 @@ PROC dofilter()
   Dispose(sdirs)
   Dispose(smark)
   Dispose(fsrc)
+  Dispose(sext)
   drawpaths()    -> clear the filter prompt from the border row
   IF esc OR (EstrLen(keepname) = 0)
     esel[p] := origsel
@@ -8573,7 +9578,8 @@ ENDPROC
 -> every directory on entry would freeze CFile on a real drive. The
 -> figure lasts until the pane is re-read (which resets dirs to <DIR>).
 PROC sizedir()
-  DEF p, i, path[CPATHLEN]:STRING, member[CPATHLEN]:STRING
+  DEF p, i, path[CPATHLEN]:STRING, member[CPATHLEN]:STRING,
+      lock, sb, sf, r
   p := active
   IF involume(p) THEN RETURN
   IF efail[p] OR (ecount[p] = 0) THEN RETURN
@@ -8584,6 +9590,15 @@ PROC sizedir()
     -> member bytes under this folder's prefix (instant, no walk)
     arcmember(member, arcsub[p], enames[i])
     esize[i] := arcsizeunder(p, member)
+  ELSEIF iniso(p)
+    -> inside an image: resolve the folder, walk its extents
+    arcmember(member, isosub[p], enames[i])
+    IF (lock := Open(isopath[p], OLDFILE))    -> lock reused as a fh
+      IF isofind(lock, isoroot[p], isorootsz[p], member, {sb}, {sf}, {r})
+        IF r THEN esize[i] := isosum(lock, sb, sf, 0)
+      ENDIF
+      Close(lock)
+    ENDIF
   ELSE
     buildfull(path, ppath[p], enames[i])
     showmsg('measuring - please wait')
@@ -8710,6 +9725,10 @@ PROC dorename()
       src2[310]:STRING, dst[310]:STRING, tname[110]:STRING,
       isrc[320]:STRING, idst[320]:STRING, itname[120]:STRING
   p := active
+  IF iniso(p)
+    showmsg('the CD image is read-only')
+    RETURN
+  ENDIF
   IF inarchive(p)
     arcrename(p)
     RETURN
@@ -8918,6 +9937,10 @@ PROC donew()
   DEF p, lock, tname[40]:STRING, dpath[310]:STRING,
       s:PTR TO CHAR, i, l, wantdir=FALSE, r
   p := active
+  IF iniso(p)
+    showmsg('the CD image is read-only')
+    RETURN
+  ENDIF
   IF inarchive(p)
     arcnew(p)
     RETURN
@@ -8928,7 +9951,7 @@ PROC donew()
   ENDIF
   IF efail[p] THEN RETURN
   StrCopy(tname, '')
-  IF lineinput('new (name/ = dir): ', tname, 31, FALSE) = 0
+  IF lineinput('new (/ = dir, .adf = blank disk image): ', tname, 31, FALSE) = 0
     drawpaths()
     RETURN
   ENDIF
@@ -8962,6 +9985,11 @@ PROC donew()
     ELSE
       faultmsg('cannot create')
     ENDIF
+  ELSEIF adfext(tname)
+    -> the name picks the type, like the trailing slash does: a name
+    -> ending .adf becomes a formatted blank disk image (his ask:
+    -> a standard empty ADF for easy transfer to UAE elsewhere)
+    docreateadf(p, dpath, tname)
   ELSE
     IF pathtype(dpath) > 0
       showmsg('that name already exists - e edits it')
@@ -9370,6 +10398,7 @@ PROC main() HANDLE
   ENDIF
   arccommit(0)    -> flush any pane still inside a modified archive
   arccommit(1)
+  daunmountall()  -> let go of every disk image we mounted
   closeui()
   IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
   dropassigns()
@@ -9471,4 +10500,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b21 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b26 (30.7.26) E build',0
