@@ -392,6 +392,18 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## Nice, cheap, no hurry
 
+- [ ] **(?) Datatypes for content, sniff for dispatch** (raised
+      30.7.26): keep the hand-rolled sniff as the verbs' truth (it
+      answers "what should Enter DO", costs a few hundred bytes of
+      reading, and works on 2.04 where datatypes.library does not
+      exist) - but where datatypes IS present (OS 3.0+, runtime
+      OpenLibrary like the DAControl detection), let it serve
+      CONTENT: `v` on a picture renders it on CFile's screen via
+      picture.datatype (every GIF/PNG/JPEG class the user installed
+      comes along free), sound preview via 8SVX, and the `i` window
+      names exotic files by datatype when sniff shrugs. The picture
+      viewer is the headline; feature-sized, 0.5-or-later.
+
 - [x] **Comment editing** — done. `c` in the `i` window edits the
       FileNote (lineinput, capped to the row width) and SetComment saves
       it. Also: copy/move now free-space-checks the target volume first
