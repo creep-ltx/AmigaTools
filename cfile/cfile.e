@@ -89,7 +89,7 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       RK_F5=$54,    -> re-read both panes
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
-      TY_ANSI=6, TY_ISO=7, TY_ADF=8, TY_MOD=9,
+      TY_ANSI=6, TY_ISO=7, TY_ADF=8, TY_MOD=9, TY_DMS=10,
       ISOSEC=2048,    -> ISO9660 logical sector (the only size supported)
       ADFDD=901120, ADFHD=1802240,    -> the only sizes trackfile mounts
       DAMAX=8,        -> disk images mounted by this CFile at once
@@ -1279,16 +1279,145 @@ ENDPROC -1
 -> filesystem to flush and let go; a transient "in use" right after
 -> writes gets one retry after a beat. TRUE = the unit is gone.
 PROC daeject(dev)
-  DEF cmd[200]:STRING, res
+  DEF cmd[200]:STRING, res, try=0
   StringF(cmd, 'C:DAControl EJECT SAFEEJECT=YES TIMEOUT=5 STOP UNIT=\s QUIET',
           dev)
   res := runcapture(NIL, cmd, 'T:CFile-out')
-  IF res <> 0
-    Delay(100)    -> the validator may still be settling
+  WHILE (res <> 0) AND (try < 2)
+    Delay(100)    -> the validator may still be settling (his orphan
+    try++         -> lesson: a fresh create needs longer than one beat)
     res := runcapture(NIL, cmd, 'T:CFile-out')
-  ENDIF
+  ENDWHILE
   DeleteFile('T:CFile-out')
 ENDPROC res = 0
+
+-> the mount table survives restarts (b37, his find: a quit whose
+-> eject failed transiently orphaned the unit - trackfile held the
+-> image forever with nobody left knowing which unit to free, and
+-> the file was undeletable until reboot). Every table change lands
+-> in PROGDIR:cfile.mounts; startup reads it back, so a later
+-> session can still eject what an earlier one mounted. Stale
+-> entries (rebooted since) cost a few fast eject failures and are
+-> cleared by the first successful delete.
+PROC damsync()
+  DEF fh, k, any=FALSE, nl[2]:ARRAY OF CHAR
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0 THEN any := TRUE
+  ENDFOR
+  IF any = FALSE
+    DeleteFile('PROGDIR:cfile.mounts')
+    RETURN
+  ENDIF
+  IF (fh := Open('PROGDIR:cfile.mounts', NEWFILE)) = NIL THEN RETURN
+  nl[0] := 10
+  FOR k := 0 TO DAMAX - 1
+    IF EstrLen(damdev[k]) > 0
+      Write(fh, damdev[k], EstrLen(damdev[k]))
+      Write(fh, nl, 1)
+      Write(fh, damfile[k], EstrLen(damfile[k]))
+      Write(fh, nl, 1)
+      Write(fh, damback[k], EstrLen(damback[k]))
+      Write(fh, nl, 1)
+      Write(fh, damname[k], EstrLen(damname[k]))
+      Write(fh, nl, 1)
+    ENDIF
+  ENDFOR
+  Close(fh)
+ENDPROC
+
+PROC damload()
+  DEF fh, buf=NIL:PTR TO CHAR, n, i=0, f=0, k=-1, j,
+      line[CPATHLEN]:STRING
+  IF (fh := Open('PROGDIR:cfile.mounts', OLDFILE)) = NIL THEN RETURN
+  buf := New(8192)
+  IF buf = NIL
+    Close(fh)
+    RETURN
+  ENDIF
+  n := Read(fh, buf, 8190)
+  Close(fh)
+  WHILE i < n
+    j := 0
+    WHILE (i < n) AND (buf[i] <> 10)
+      IF j < (CPATHLEN - 2)
+        line[j] := buf[i]
+        j++
+      ENDIF
+      i++
+    ENDWHILE
+    i++    -> past the newline
+    line[j] := 0
+    SetStr(line, j)
+    IF f = 0
+      k := damfree()
+      IF k >= 0 THEN StrCopy(damdev[k], line)
+    ELSEIF k >= 0
+      IF f = 1
+        StrCopy(damfile[k], line)
+      ELSEIF f = 2
+        StrCopy(damback[k], line)
+      ELSE
+        StrCopy(damname[k], line)
+      ENDIF
+    ENDIF
+    f := f + 1
+    IF f = 4 THEN f := 0
+  ENDWHILE
+  Dispose(buf)
+ENDPROC
+
+-> a held image nobody's table owns (a pre-b37 orphan, a crash, a
+-> second CFile): DAControl INFO is the only place the unit truth
+-> lives, so this is the ONE output parse allowed - and it matches
+-> rows by the FILE PATH we already know (the tail of the line),
+-> never by decoding the merged Device/Unit columns beyond their
+-> leading DAn. TRUE = dev holds the image's device name.
+PROC damfinddev(path:PTR TO CHAR, dev)
+  DEF buf=NIL:PTR TO CHAR, fh, n, i=0, ls, l, pl, j, ok=FALSE, c, d
+  IF pathtype('C:DAControl') <> 1 THEN RETURN FALSE
+  runcapture(NIL, 'C:DAControl INFO', 'T:CFile-out')
+  IF (fh := Open('T:CFile-out', OLDFILE)) = NIL THEN RETURN FALSE
+  buf := New(4096)
+  IF buf = NIL
+    Close(fh)
+    RETURN FALSE
+  ENDIF
+  n := Read(fh, buf, 4094)
+  Close(fh)
+  DeleteFile('T:CFile-out')
+  pl := StrLen(path)
+  WHILE (i < n) AND (ok = FALSE)
+    ls := i
+    WHILE (i < n) AND (buf[i] <> 10)
+      i++
+    ENDWHILE
+    l := i - ls
+    i++
+    IF l > pl
+      -> the file path is the line's tail (case-insensitive)
+      j := 0
+      ok := TRUE
+      WHILE (j < pl) AND ok
+        c := buf[ls + l - pl + j]
+        d := path[j]
+        IF (c >= "a") AND (c <= "z") THEN c := c - 32
+        IF (d >= "a") AND (d <= "z") THEN d := d - 32
+        IF c <> d THEN ok := FALSE
+        j++
+      ENDWHILE
+      IF ok
+        -> the device: the row's leading "DAn" + ":"
+        IF (buf[ls] = "D") AND (buf[ls + 1] = "A")
+          StrCopy(dev, '')
+          StringF(dev, 'DA\c:', buf[ls + 2])
+        ELSE
+          ok := FALSE
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDWHILE
+  Dispose(buf)
+ENDPROC ok
 
 -> quit: best-effort unmount of everything WE mounted. First, any
 -> pane still sitting inside one of those volumes is pointed back at
@@ -1303,10 +1432,12 @@ PROC daunmountall()
   ENDFOR
   FOR k := 0 TO DAMAX - 1
     IF EstrLen(damdev[k]) > 0
-      daeject(damdev[k])
-      SetStr(damdev[k], 0)
-    ENDIF
+      IF daeject(damdev[k])
+        SetStr(damdev[k], 0)
+      ENDIF    -> a failed eject KEEPS its entry: cfile.mounts hands
+    ENDIF      -> it to the next session instead of orphaning the unit
   ENDFOR
+  damsync()
 ENDPROC
 
 -> Enter on a .adf: mount it writable and jump the pane inside. The
@@ -1354,12 +1485,39 @@ PROC enteradf(p, fpath)
       StringF(cmd, 'C:DAControl LOAD "\s" DEVICE=\s WRITEPROTECTED=NO QUIET',
               fpath, dev)
       res := runcapture(NIL, cmd, 'T:CFile-out')
+      IF res <> 0
+        -> a STOPPED unit refuses LOAD ("unit is not active", ddiag3):
+        -> START revives it - without this the ladder silently ate one
+        -> unit per mount/unmount cycle, eight cycles and dead
+        StringF(cmd, 'C:DAControl START UNIT=\s QUIET', dev)
+        runcapture(NIL, cmd, 'T:CFile-out')
+        StringF(cmd, 'C:DAControl LOAD "\s" DEVICE=\s WRITEPROTECTED=NO QUIET',
+                fpath, dev)
+        res := runcapture(NIL, cmd, 'T:CFile-out')
+      ENDIF
     ENDIF
     IF res <> 0 THEN n++
   ENDWHILE
   DeleteFile('T:CFile-out')
   IF res <> 0
-    showmsg('could not mount the image (already mounted, or units busy)')
+    -> every unit refused: maybe the image is ALREADY loaded on a
+    -> unit nobody's table owns (an orphan). Find it by file path
+    -> and ADOPT it - browse, unmount and delete all work again.
+    IF damfinddev(fpath, dev)
+      StrCopy(damdev[k], dev)
+      StrCopy(damfile[k], fpath)
+      StrCopy(damback[k], ppath[p])
+      StrCopy(damname[k], FilePart(fpath))
+      damsync()
+      StrCopy(ppath[p], dev)
+      esel[p] := 0
+      etop[p] := 0
+      readpane(p)
+      drawpaths()
+      drawpane(p)
+      RETURN
+    ENDIF
+    showmsg('could not mount (units busy, or the emulator still holds it)')
     RETURN
   ENDIF
   StrCopy(damdev[k], dev)
@@ -1375,20 +1533,18 @@ PROC enteradf(p, fpath)
 ENDPROC
 
 -> n with a name ending .adf: create a formatted blank image (FFS,
--> 880K, labeled after the file's stem) - DAControl CREATE formats
--> AND mounts it writable in one stroke, so it is immediately usable
+-> 880K, labeled after the file's stem). DAControl CREATE formats
+-> and mounts it - and then we EJECT it at once (his call, 30.7.26,
+-> proven on the real A1200): a made thing should end in a NEUTRAL
+-> state like every other n result. Enter mounts it through the one
+-> well-tested road; the fresh-mount limbo that confused the real
+-> machine no longer exists.
 PROC docreateadf(p, dpath, tname)
-  DEF lbl[110]:STRING, cmd[CPATHLEN+140]:STRING, res=-1, k, n=0,
+  DEF lbl[110]:STRING, cmd[CPATHLEN+140]:STRING, res=-1, n=0,
       dev[20]:STRING
   IF dacheck() = FALSE THEN RETURN
   IF pathtype(dpath) > 0
     showmsg('that name already exists')
-    RETURN
-  ENDIF
-  -> CREATE mounts what it makes, so it needs a table slot up front -
-  -> an untracked mount is a file that can never be deleted (b24)
-  IF (k := damfree()) = -1
-    showmsg('too many mounted images - unmount one first (Left at its root)')
     RETURN
   ENDIF
   StrCopy(lbl, tname)
@@ -1403,6 +1559,13 @@ PROC docreateadf(p, dpath, tname)
       res := runcapture(NIL, cmd, 'T:CFile-out')
       IF res <> 0
         IF pathtype(dpath) = 1 THEN DeleteFile(dpath)
+        StringF(cmd, 'C:DAControl START UNIT=\s QUIET', dev)    -> revive
+        runcapture(NIL, cmd, 'T:CFile-out')
+        StringF(cmd, 'C:DAControl CREATE LABEL="\s" FILESYSTEMTYPE=FFS DISKTYPE=DD DEVICE=\s QUIET "\s"', lbl, dev, dpath)
+        res := runcapture(NIL, cmd, 'T:CFile-out')
+        IF res <> 0
+          IF pathtype(dpath) = 1 THEN DeleteFile(dpath)
+        ENDIF
       ENDIF
     ENDIF
     IF res <> 0 THEN n++
@@ -1412,13 +1575,103 @@ PROC docreateadf(p, dpath, tname)
     faultmsg('could not create the image')
     RETURN
   ENDIF
-  StrCopy(damdev[k], dev)
-  StrCopy(damfile[k], dpath)
-  StrCopy(damback[k], ppath[p])
-  StrCopy(damname[k], tname)
+  daeject(dev)    -> neutral state: created, formatted, let go of
   StrCopy(prevname, tname)
   refreshpane(p, TRUE)
-  showmsg('image created and mounted - Enter goes inside')
+  showmsg('image created - Enter mounts it')
+ENDPROC
+
+-> Enter on a .dms: a DMS is a COMPRESSED track archive, never
+-> mountable directly - and most of them are game rips with no DOS
+-> filesystem inside at all. So: unpack to a sibling .adf through
+-> C:xdms (detached, the byte-poller bar watching the .adf grow -
+-> the total is a floppy, Esc cancels via the b21 break machinery),
+-> then read the verdict from the bootblock: a DOS disk mounts and
+-> the pane walks in like any ADF; an NDOS rip keeps the .adf with
+-> an honest message - which is the useful outcome anyway, because
+-> a game rip's destiny is an emulator or a real floppy, and this
+-> just converted it with a progress bar.
+PROC dodms(p, fpath)
+  DEF adf[CPATHLEN]:STRING, cmd[CPATHLEN+CPATHLEN]:STRING, res, k, l,
+      pfiles[1]:ARRAY OF LONG, psizes[1]:ARRAY OF LONG, pidx, pcred,
+      fh, b[8]:ARRAY OF CHAR, n, mb[130]:STRING, unpack=TRUE
+  IF pathtype('C:xdms') <> 1
+    showmsg('DMS needs C:xdms (Aminet: arc/xdms)')
+    RETURN
+  ENDIF
+  StrCopy(adf, fpath)
+  l := EstrLen(adf)
+  IF l > 4
+    IF (adf[l - 4] = ".") AND
+       ((adf[l - 3] = "d") OR (adf[l - 3] = "D")) AND
+       ((adf[l - 2] = "m") OR (adf[l - 2] = "M")) AND
+       ((adf[l - 1] = "s") OR (adf[l - 1] = "S"))
+      SetStr(adf, l - 4)
+    ENDIF
+  ENDIF
+  StrAdd(adf, '.adf')
+  IF pathtype(adf) = 1
+    StringF(mb, '"\s" already exists: (u)se it (r)e-unpack?', FilePart(adf))
+    promptrow(mb)
+    k := waitvanilla()
+    IF (k = "u") OR (k = "U")
+      unpack := FALSE
+    ELSEIF (k = "r") OR (k = "R")
+      DeleteFile(adf)
+    ELSE
+      drawpaths()
+      RETURN
+    ENDIF
+  ENDIF
+  IF unpack
+    cancelok := TRUE    -> Esc breaks the unpacker, the partial dies
+    abort := FALSE
+    progbyfile := TRUE  -> the poller feeds the bar directly
+    progshow(ADFDD)
+    -> the + rides INSIDE the quotes: an Amiga child's startup only
+    -> honours a quote at the START of an argument, so +"path" hands
+    -> xdms a literal quote - and DOS then begs for a volume named
+    -> '"Amiga' (his find: the insert-volume requester)
+    StringF(cmd, 'C:xdms -q u "\s" "+\s"', fpath, adf)
+    pfiles[0] := adf
+    psizes[0] := ADFDD
+    pidx := 0
+    pcred := 0
+    res := arcpollrun(cmd, pfiles, psizes, 1, {pidx}, {pcred})
+    IF res = -1 THEN res := runcapture(NIL, cmd, 'T:CFile-out')
+    DeleteFile('T:CFile-out')
+    progoff()
+    progbyfile := FALSE
+    cancelok := FALSE
+    -> the bar overlay spans BOTH panes: only refreshall's full
+    -> frame erase removes it (the campaign rule dodms forgot -
+    -> his screenshot showed the black remnant in the other pane)
+    refreshall()
+    IF abort
+      DeleteFile(adf)    -> never keep a half-unpacked image
+      abort := FALSE
+      refreshall()
+      showmsg('cancelled')
+      RETURN
+    ENDIF
+    abort := FALSE
+    IF pathtype(adf) <> 1
+      faultmsg('could not unpack the DMS')
+      RETURN
+    ENDIF
+  ENDIF
+  n := 0
+  IF (fh := Open(adf, OLDFILE))
+    n := Read(fh, b, 4)
+    Close(fh)
+  ENDIF
+  IF (n = 4) AND (b[0] = "D") AND (b[1] = "O") AND (b[2] = "S")
+    enteradf(p, adf)    -> a real disk: mount it and walk in
+  ELSE
+    StrCopy(prevname, FilePart(adf))
+    selectbyname(p)
+    showmsg('not a DOS disk (game rip?) - kept as the .adf')
+  ENDIF
 ENDPROC
 
 -> throw away a pane's uncommitted archive edits: drop the staging tree
@@ -3457,6 +3710,8 @@ PROC enterdir()
         enteriso(p, fpath)
       ELSEIF ty = TY_ADF
         enteradf(p, fpath)
+      ELSEIF ty = TY_DMS
+        dodms(p, fpath)
       ENDIF
     ENDIF
     RETURN
@@ -3573,6 +3828,7 @@ PROC parentdir()
       ENDIF
       IF daeject(damdev[k])
         SetStr(damdev[k], 0)    -> slot free again
+        damsync()
       ELSE
         showmsg('the volume is busy - kept mounted (quit retries)')
       ENDIF
@@ -4153,6 +4409,8 @@ PROC zap(path, ask)
   err := IoErr()
   IF err = ERROR_OBJECT_NOT_FOUND THEN RETURN TRUE
   IF err = ERROR_DIRECTORY_NOT_EMPTY THEN RETURN FALSE  -> no bit fixes that
+  IF err = ERROR_OBJECT_IN_USE THEN RETURN FALSE  -> and no unprotect prompt
+                                                 -> for a file something holds
   IF ask
     IF unprotall = FALSE
       StringF(pm, '"\s" is protected - unprotect? (y)es (n)o (a)ll',
@@ -6145,10 +6403,33 @@ PROC delone(p, i)
       progadd(1)
       ok := TRUE
     ELSE
-      StringF(pm, 'cannot delete "\s"', enames[i])
-      faultmsg(pm)
-      gfails := gfails + 1
       ok := FALSE
+      -> a held .adf with no table entry: an orphaned mount (pre-b37,
+      -> a crash, another CFile). Find its unit in DAControl INFO by
+      -> the file path, eject, and try once more.
+      IF adfext(dpath)
+        IF damfinddev(dpath, pm)
+          IF daeject(pm)
+            IF zap(dpath, TRUE)
+              progadd(1)
+              ok := TRUE
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDIF
+      IF ok = FALSE
+        IF adfext(dpath)
+          -> ddiag rounds 1-3 (30.7.26): once trackfile has held an
+          -> image on an FS-UAE directory drive, NOTHING releases the
+          -> file until reboot - every eject variant was tried. Say
+          -> the truth instead of a generic failure.
+          showmsg('held until reboot (an emulator quirk - fine on real disks)')
+        ELSE
+          StringF(pm, 'cannot delete "\s"', enames[i])
+          faultmsg(pm)
+        ENDIF
+        gfails := gfails + 1
+      ENDIF
     ENDIF
   ENDIF
   -> take the icon along (a drawer's icon is a sibling .info as well);
@@ -6580,6 +6861,9 @@ PROC sniffmem(buf:PTR TO CHAR, n)
     ENDIF
     IF (buf[0] = "L") AND (buf[1] = "Z") AND (buf[2] = "X")
       RETURN TY_LZX
+    ENDIF
+    IF (buf[0] = "D") AND (buf[1] = "M") AND (buf[2] = "S") AND (buf[3] = "!")
+      RETURN TY_DMS
     ENDIF
   ENDIF
   IF n >= 7
@@ -7660,6 +7944,8 @@ PROC doview()
     showmsg('a CD image: Enter goes inside')
   ELSEIF ty = TY_ADF
     showmsg('a disk image: Enter mounts and goes inside')
+  ELSEIF ty = TY_DMS
+    showmsg('a DMS disk archive: Enter unpacks it to an .adf')
   ELSEIF ty = TY_MOD
     dtcall(3, fpath, enames[i], 0)
   ELSE
@@ -9697,6 +9983,8 @@ PROC doopen()
     enteriso(p, fpath)            -> Enter goes inside, like Right
   ELSEIF ty = TY_ADF
     enteradf(p, fpath)            -> Enter mounts and goes inside
+  ELSEIF ty = TY_DMS
+    dodms(p, fpath)               -> Enter unpacks (and mounts DOS disks)
   ELSEIF ty = TY_MOD
     dtcall(3, fpath, enames[i], 0)
   ELSEIF ty = TY_ZIP
@@ -10834,6 +11122,7 @@ PROC main() HANDLE
   configensure()    -> create/complete cfile.config before the args override
   parseargs()
   initpanes()
+  damload()    -> mounts an earlier session could not let go of
   readpane(0)
   readpane(1)
   openui()
@@ -10949,4 +11238,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b34 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b41 (30.7.26) E build',0

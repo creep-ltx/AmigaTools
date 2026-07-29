@@ -189,9 +189,54 @@ for easy transfer to UAE on other systems". Planning first.
    image volume (new damunder(p) prefix helper, also tidying the
    quit remap). Jumping an already-saved stale bookmark still fails
    soft ("cannot go there").**
-6. **DMS stage** — sniff `DMS!` magic, unpack via xdms beside the
-   file (detached + byte-poller bar against the known 880K? probe
-   xdms's output behavior), then enter the resulting ADF.
+6. **DMS stage — BUILT 30.7.26 = 0.4.1b35, BOOT TEST PENDING.**
+   His framing shaped it: most DMS are NDOS game rips, so browsing
+   is not the promise - CONVERSION is. Enter on a .dms (sniffed by
+   the DMS! magic at 0, no name gate needed - it rides sniffmem's
+   existing head read) unpacks to a sibling .adf via `C:xdms -q u
+   "src" +"dest"` (explicit output, spaces safe), DETACHED through
+   arcpollrun - the byte-poller bar watches the .adf grow against
+   the known 880K and Esc breaks the unpacker (b21 machinery,
+   partial deleted). Existing .adf asks (u)se/(r)e-unpack. Then
+   the bootblock gives the verdict: DOS -> enteradf mounts and
+   walks in; NDOS -> the .adf stays beside the .dms with an honest
+   "not a DOS disk (game rip?)" - the useful outcome regardless,
+   since a rip's destiny is an emulator or a real floppy. v hints.
+   Needs C:xdms (he has it); absent = clear message.
+   **The b35-b39 hardening ladder (his boot finds, 30.7.26):** b36
+   = the +"output" quoting trap (a child's startup only honours a
+   quote STARTING an argument - the insert-volume-'"Amiga' beggar;
+   host shells can never catch it). b37 = bar cleanup via
+   refreshall (the campaign's own rule), zap stops unprotect-
+   prompting for in-use files, and the mount table PERSISTS
+   (PROGDIR:cfile.mounts) so later sessions eject what earlier ones
+   could not. b38 = the sanctioned DAControl INFO parse (match rows
+   by FILE PATH tail only): Del rescues orphan-held images, Enter
+   ADOPTS them. b39, after ddiag rounds 1-3 (pure-shell proof, no
+   CFile involved): ON AN FS-UAE DIR-DRIVE, ANY trackfile-held
+   image file stays "in use" UNTIL REBOOT - no eject variant
+   releases it (safeeject/plain/no-stop/DiskChange all tried; LOAD
+   and CREATE roads stick identically; INFO empty, zero host fds) -
+   so Del says the truth ("held until reboot") instead of failing
+   generically; REAL-FFS/A1200 verdict pending (may be FS-UAE's
+   in-use accounting, not trackfile). Bonus ddiag3 find fixed in
+   b39: a STOPPED unit refuses LOAD ("unit is not active") - the
+   pinned ladder was silently consuming one unit per mount cycle;
+   both ladders now START-revive and retry. **b40 = the source
+   exoneration (his disassemble-it prompt): obarthel/trackfile-
+   device read - DAControl hands the HANDLE to the unit
+   (TF_ImageFileHandle), the unit task Closes it IMMEDIATELY on
+   eject (writeback, ACTION_FLUSH, Forbid-detach, Close) - the
+   Amiga code keeps its promise; FS-UAE's dir-drive miscounts the
+   cross-process open/close. Message reworded to blame the
+   emulator. b41 = HIS DESIGN CALL, proven on the REAL A1200
+   (where delete-after-mount works exactly per the docs -
+   attribution CONFIRMED on iron): a created image ends NEUTRAL -
+   create, format, EJECT - Enter mounts through the one tested
+   road; the fresh-mount limbo that confused the real machine no
+   longer exists. ALL GREEN ON THE A1200 30.7.26 ("It all seems
+   to work as intended... FS-UAE really had us running around in
+   circles").**
 7. **Docs/help/release.**
 
 **Decisions (Tobias, 30.7.26):** Enter on a `.adf` mounts + jumps

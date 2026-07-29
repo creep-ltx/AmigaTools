@@ -41,7 +41,7 @@ verb does the natural thing for the type.
 | `c` / `C` | copy the selection or marked set to the other pane (`C` overwrites collisions) |
 | `m` / `M` | move likewise (same volume is a rename; across volumes copies and deletes) |
 | `r` | rename; with marks, one prompt per entry |
-| `n` | new: a name ending in `/` makes a directory, a name ending in `.adf` makes a blank Amiga disk image (formatted FFS, mounted and ready), any other name opens the editor on a new file (created only when saved) |
+| `n` | new: a name ending in `/` makes a directory, a name ending in `.adf` makes a blank Amiga disk image (formatted FFS, ready to mount), any other name opens the editor on a new file (created only when saved) |
 | `Del` / `D` | delete the selection or marked set, directories recursively (asks first) |
 | `u` | unpack the selected archive — or every marked archive — into the other pane |
 | `p` | pack the selection or marked set into an archive in the other pane |
@@ -199,8 +199,12 @@ everything else in CFile, ISO browsing included, works without it.
 
 **`n` creates transfer disks.** A new name ending in `.adf` makes a
 blank 880K disk image — formatted FFS, volume named after the file's
-stem, mounted writable and immediately usable. Fill it, unmount it,
-and carry it to any emulator.
+stem, finished and let go of, like anything else `n` makes. `Enter`
+mounts it, fill it, unmount it, and carry it to any emulator. A
+`.dms` opens the other way: `Enter` unpacks it to a sibling `.adf`
+(byte-smooth bar, `Esc` cancels) and mounts DOS disks straight away —
+an NDOS game rip keeps the `.adf` with an honest message, which is
+the useful outcome anyway.
 
 ## Pictures, sounds and music
 

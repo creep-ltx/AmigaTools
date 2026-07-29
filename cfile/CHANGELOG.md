@@ -52,8 +52,11 @@ image file. `Left` at the root offers unmount; quit always unmounts
 what CFile mounted; deleting a mounted image unmounts it first;
 NDOS/game dumps are refused before they can requester-storm. `n`
 with a name ending `.adf` creates a formatted blank 880K FFS image,
-mounted and ready — a transfer disk for any emulator. ADF mounting
-needs 3.2; everything else works without it.
+ready to mount — a transfer disk for any emulator. `Enter` on a
+`.dms` unpacks it to a sibling `.adf` with the byte-smooth bar and
+mounts DOS disks straight away; NDOS game rips keep the `.adf` with
+an honest message. ADF mounting needs 3.2 (and `.dms` your own
+`C:xdms`); everything else works without them.
 
 ## 0.4 (2026-07-23)
 
