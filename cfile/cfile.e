@@ -160,9 +160,13 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     statbytes=0, statfiles=0,    -> pre-scan totals for the progress bar
     gfails=0,    -> entries a delete run could not remove
     unprotall=FALSE,    -> 'a' at the unprotect prompt covers the run
-    cancelok=FALSE,     -> a cancellable op is running (real copy/move/delete);
-                        -> only then does Esc during it set `abort`
-    abort=FALSE,        -> Esc pressed mid-op: the copy/tree loops bail out
+    cancelok=FALSE,     -> a cancellable op is running (copy/move/delete or an
+                        -> archive transfer); only then does Esc set `abort`
+    abort=FALSE,        -> Esc pressed mid-op: the copy/tree loops bail out,
+                        -> and a running archiver child is handed the break
+    runname[24]:STRING, -> the detached archiver's process name (NP_NAME),
+                        -> unique per CFile instance: Esc's break signal can
+                        -> only ever find OUR child (arcname/arcbreak)
     ccol=0, crow=0, cesc=0, cnum=0,    -> the in-frame console renderer
     cmodel=NIL, cmrow=0, cmfull=FALSE,  -> its text model: the scrollback
                                   -> (cmfull: R2 - model cap reached,
@@ -2936,7 +2940,9 @@ ENDPROC
 -> non-blocking: drain the window's pending input, and if Esc was pressed
 -> while a cancellable op is running, raise `abort` (other keys are dropped so
 -> nothing queued fires when the op ends). A no-op outside a cancellable op
--> (cancelok = FALSE), so archive/internal copies are never interrupted.
+-> (cancelok = FALSE), so helper copies inside non-cancellable verbs are
+-> never interrupted. The archive transfers set cancelok too (b21): their
+-> pump/poll loops call this each tick and hand the archiver the break.
 PROC checkabort()
   DEF msg:PTR TO intuimessage
   IF cancelok = FALSE THEN RETURN FALSE
@@ -2945,6 +2951,28 @@ PROC checkabort()
     ReplyMsg(msg)
   ENDWHILE
 ENDPROC abort
+
+-> the Esc-cancel family for archiver children (b21). The async runs
+-> (arcpollrun, arcrunprog) launch the child under NP_NAME = arcname():
+-> a name unique to THIS CFile instance, so the break can never land in
+-> another instance's run. SystemTagList passes NP_ tags through to
+-> CreateNewProc, and the command runs inside that named process itself.
+PROC arcname()
+  IF runname[0] = 0 THEN StringF(runname, 'CFile-arc.\h', FindTask(NIL))
+ENDPROC runname
+
+-> hand the running child the shell break. Inside Forbid the process
+-> cannot exit between find and Signal; if it is already gone, FindTask
+-> misses and this is a no-op. lha and lzx honour CTRL-C: they stop,
+-> drop their temp file, and the archive itself stays as it was (both
+-> rebuild to a temp and rename only at the very end).
+PROC arcbreak()
+  DEF t
+  Forbid()
+  t := FindTask(runname)
+  IF t THEN Signal(t, SIGBREAKF_CTRL_C)
+  Permit()
+ENDPROC
 
 PROC copyfile(src, dst)
   DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0, chunk
@@ -3754,7 +3782,8 @@ ENDPROC ok
 -> verified by the caller, not by an exit code the asynch run hides.
 PROC arcrunprog(dir, cmd)
   DEF wout=NIL, nin=NIL, rdr=NIL, dlock=NIL, old=NIL, res,
-      buf:PTR TO CHAR, n, i, c, st=0, prevtotal=0, curtot=0, memdone=0
+      buf:PTR TO CHAR, n, i, c, st=0, prevtotal=0, curtot=0, memdone=0,
+      killed=FALSE, w
   buf := pipebuf    -> I7a: 4KB shared pipe buffer, not 256B on the stack
   IF (wout := Open('PIPE:cfile-arc', NEWFILE)) = NIL
     RETURN runcapture(dir, cmd, 'T:CFile-out')    -> no PIPE: no bar
@@ -3768,6 +3797,7 @@ PROC arcrunprog(dir, cmd)
     [SYS_INPUT,  nin,
      SYS_OUTPUT, wout,
      SYS_ASYNCH, TRUE,
+     NP_NAME,    arcname(),
      TAG_DONE,   NIL])
   IF dlock
     CurrentDir(old)
@@ -3899,10 +3929,31 @@ PROC arcrunprog(dir, cmd)
           ENDIF
         ENDIF
       ENDFOR
+      -> Esc (b21): checked between pipe chunks - and, where PIPE:
+      -> supports WaitForChar, every 1/5s while the pipe is silent (a
+      -> big member packs for a long time without printing). The wait
+      -> is BOUNDED (~5s) so a handler that cannot wait, or one blind
+      -> at EOF, just falls through to the blocking Read as before -
+      -> correctness never rests on WaitForChar. After the break the
+      -> loop keeps draining to EOF, so the child's exit is still seen
+      -> the normal way and the run winds down cleanly.
+      w := IF (killed = FALSE) AND cancelok THEN 25 ELSE 0
+      WHILE w > 0
+        IF checkabort()
+          arcbreak()
+          killed := TRUE
+          w := 0
+        ELSEIF WaitForChar(rdr, 200000)
+          w := 0
+        ELSE
+          w := w - 1
+        ENDIF
+      ENDWHILE
       n := Read(rdr, buf, PIPESZ)
     ENDWHILE
     Close(rdr)
-    IF progbybytes THEN progadd(prevtotal)    -> the last member
+    -> a broken-off run never finished its last member: no credit
+    IF progbybytes AND (killed = FALSE) THEN progadd(prevtotal)
   ENDIF
 ENDPROC res
 
@@ -4013,7 +4064,7 @@ PROC arcextracttree(p, prefix, root)
   IF amcnt[p] > 0
     FOR k := 0 TO amcnt[p] - 1
       m := a[k]
-      IF ncprefix(m, pfx, pl)
+      IF ncprefix(m, pfx, pl) AND (abort = FALSE)    -> Esc: stop batching
         IF m[pl]    -> a real file below the dir, not the bare dir entry
           StrCopy(sfile, root)
           StrAdd(sfile, '/')
@@ -4030,7 +4081,7 @@ PROC arcextracttree(p, prefix, root)
             ELSE
               res := arcrunprog(NIL, cmd)
             ENDIF
-            IF res = -1 THEN ok := FALSE
+            IF (res = -1) OR abort THEN ok := FALSE
             StrCopy(cmd, base)
           ENDIF
           StrAdd(cmd, ' "')
@@ -4040,7 +4091,7 @@ PROC arcextracttree(p, prefix, root)
       ENDIF
     ENDFOR
   ENDIF
-  IF EstrLen(cmd) > baselen
+  IF (EstrLen(cmd) > baselen) AND (abort = FALSE)
     StrAdd(cmd, ' "')
     StrAdd(cmd, root)
     StrAdd(cmd, '/"')
@@ -4050,7 +4101,7 @@ PROC arcextracttree(p, prefix, root)
     ELSE
       res := arcrunprog(NIL, cmd)
     ENDIF
-    IF res = -1 THEN ok := FALSE
+    IF (res = -1) OR abort THEN ok := FALSE
   ENDIF
   FOR j := 0 TO nf - 1
     DisposeLink(pfiles[j])
@@ -4412,8 +4463,10 @@ ENDPROC
 -> capture file handle, so an EXCLUSIVE Lock on it succeeds only
 -> after the archiver exits. idxp/credp persist the cursor across
 -> BATCHED runs (arcextracttree splits big trees over several
--> commands). Esc cannot kill a detached archiver (it never could
--> kill a synchronous one either) - the poll just rides to the end.
+-> commands). Esc (b21): the child runs under a per-instance NP_NAME,
+-> so the poll can FindTask it and hand it the shell break - lha/lzx
+-> stop cleanly, the lock check sees the exit, and the caller's abort
+-> flag keeps the partial output from landing (the stage wipe eats it).
 PROC arcsizeof(path)
   DEF lock, fib:PTR TO fileinfoblock, n=-1
   IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN -1
@@ -4426,7 +4479,7 @@ ENDPROC n
 
 PROC arcpollrun(cmd, files:PTR TO LONG, sizes:PTR TO LONG, nf,
                 idxp:PTR TO LONG, credp:PTR TO LONG)
-  DEF wout=NIL, nin=NIL, res, lk, sz, done=FALSE, adv, d
+  DEF wout=NIL, nin=NIL, res, lk, sz, done=FALSE, adv, d, killed=FALSE
   DeleteFile('T:CFile-out')
   IF (wout := Open('T:CFile-out', NEWFILE)) = NIL THEN RETURN -1
   nin := Open('NIL:', OLDFILE)
@@ -4434,6 +4487,7 @@ PROC arcpollrun(cmd, files:PTR TO LONG, sizes:PTR TO LONG, nf,
     [SYS_INPUT,  nin,
      SYS_OUTPUT, wout,
      SYS_ASYNCH, TRUE,
+     NP_NAME,    arcname(),
      TAG_DONE,   NIL])
   IF res = -1
     Close(wout)
@@ -4443,6 +4497,12 @@ PROC arcpollrun(cmd, files:PTR TO LONG, sizes:PTR TO LONG, nf,
   -> the launched command owns nin/wout now (asynch closes them)
   REPEAT
     Delay(1)                    -> 1/50s: the poll IS the bar's tick
+    IF checkabort()             -> Esc (b21): break the child once; the
+      IF killed = FALSE         -> poll then just rides to its exit, and
+        arcbreak()              -> the drain keeps eating queued keys
+        killed := TRUE
+      ENDIF
+    ENDIF
     adv := TRUE
     WHILE adv AND (idxp[0] < nf)
       adv := FALSE
@@ -4485,6 +4545,8 @@ PROC arcxfer_out(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
+  cancelok := TRUE    -> Esc cancels (b21): the copies AND the archiver
+  abort := FALSE
   -> the RAM-disk lesson (his real find, 29.7.26: eight 880K ADFs
   -> against a 2MB machine): members used to stage through T: - RAM -
   -> on their way to the destination, so any member bigger than free
@@ -4526,7 +4588,7 @@ PROC arcxfer_out(p, q, ismove, force)
         IF pathtype(dfile) = 1
           showmsg('a file with that name is in the way')
         ELSEIF arcextracttree(p, member, stage) = FALSE
-          faultmsg('could not extract the folder')
+          IF abort = FALSE THEN faultmsg('could not extract the folder')
           stop := TRUE
         ELSE
           StrCopy(sfile, stage)
@@ -4614,7 +4676,9 @@ PROC arcxfer_out(p, q, ismove, force)
           IF res = -1 THEN res := arcrunprog(NIL, cmd)   -> old road
           DeleteFile('T:CFile-out')
           moved := FALSE
-          IF (res = -1) OR (pathtype(sfile) <> 1)
+          IF abort
+            stop := TRUE    -> cancelled: never land the partial extract
+          ELSEIF (res = -1) OR (pathtype(sfile) <> 1)
             faultmsg('could not extract from the archive')
             stop := TRUE
           ELSE
@@ -4650,6 +4714,7 @@ PROC arcxfer_out(p, q, ismove, force)
       ENDIF
     ENDIF
   ENDFOR
+  cancelok := FALSE
   progoff()
   progbyfile := FALSE
   progbybytes := FALSE
@@ -4657,10 +4722,18 @@ PROC arcxfer_out(p, q, ismove, force)
   arcwipe(stage)
   -> DIRECT move dropped members from the on-disk archive: reload the cache.
   -> A deferred (ONEXIT) move only flagged them - refreshall re-filters the
-  -> cache and the flags must survive, so it must NOT reload.
-  IF deld THEN loadarchive(p, arcpath[p])
+  -> cache and the flags must survive, so it must NOT reload. An abort that
+  -> may have broken a DIRECT delete mid-run reloads too: the archive is
+  -> whichever side of the rename the break landed on - read the truth.
+  IF deld OR (abort AND ismove AND (arcwrite = FALSE))
+    loadarchive(p, arcpath[p])
+  ENDIF
   refreshall()
-  IF ndone > 0
+  IF abort
+    StringF(mb, 'cancelled - \d of \d done', ndone,
+            IF nmark > 0 THEN nmark ELSE 1)
+    showmsg(mb)
+  ELSEIF ndone > 0
     IF deferred
       StringF(mb, '\d file\s moved out (on exit)', ndone,
               IF ndone = 1 THEN '' ELSE 's')
@@ -4670,6 +4743,7 @@ PROC arcxfer_out(p, q, ismove, force)
     ENDIF
     showmsg(mb)
   ENDIF
+  abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
 -> c/m when the OTHER pane is an archive: add the selected file(s) into
@@ -4690,6 +4764,8 @@ PROC arcxfer_indefer(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
+  cancelok := TRUE    -> Esc cancels (b21): the staging copies
+  abort := FALSE
   arcstage(q, stageroot)
   st := amst[q]
   z := amsz[q]
@@ -4710,8 +4786,8 @@ PROC arcxfer_indefer(p, q, ismove, force)
           ndone := ndone + 1
           IF ismove THEN arcwipe(src)
         ELSE
-          faultmsg('could not stage the folder')
-          stop := TRUE
+          IF abort = FALSE THEN faultmsg('could not stage the folder')
+          stop := TRUE    -> cancelled: the source tree is never dropped
         ENDIF
       ELSE
         doit := TRUE
@@ -4757,12 +4833,18 @@ PROC arcxfer_indefer(p, q, ismove, force)
       ENDIF
     ENDIF
   ENDFOR
+  cancelok := FALSE
   refreshall()
-  IF ndone > 0
+  IF abort
+    StringF(mb, 'cancelled - \d of \d done', ndone,
+            IF nmark > 0 THEN nmark ELSE 1)
+    showmsg(mb)
+  ELSEIF ndone > 0
     StringF(mb, '\d file\s \s (on exit)', ndone, IF ndone = 1 THEN '' ELSE 's',
             IF ismove THEN 'moved in' ELSE 'copied in')
     showmsg(mb)
   ENDIF
+  abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
 PROC arcxfer_in(p, q, ismove, force)
@@ -4782,6 +4864,8 @@ PROC arcxfer_in(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
+  cancelok := TRUE    -> Esc cancels (b21): staging, and the archiver run
+  abort := FALSE
   -> pre-scan BYTES: the add bar advances by each added member's size
   statbytes := 0
   statfiles := 0
@@ -4797,6 +4881,7 @@ PROC arcxfer_in(p, q, ismove, force)
     ENDIF
   ENDFOR
   total := statbytes
+  IF abort THEN stop := TRUE    -> Esc already, during the pre-scan
   progbyfile := TRUE
   IF islzx(q)
     proglzx := 1         -> lzx add: arcrunprog reads "Adding (<size>)"
@@ -4839,9 +4924,9 @@ PROC arcxfer_in(p, q, ismove, force)
           ENDIF
         ENDIF
         DeleteFile('T:CFile-out')
-        IF res = -1
-          faultmsg('could not add the folder')
-          stop := TRUE
+        IF (res = -1) OR abort
+          IF abort = FALSE THEN faultmsg('could not add the folder')
+          stop := TRUE    -> cancelled: the source tree is never dropped
         ELSE
           added := TRUE
           ndone := ndone + 1
@@ -4883,7 +4968,9 @@ PROC arcxfer_in(p, q, ismove, force)
               StrCopy(topname, nm)
             ENDIF
             -> now the source is safely staged, drop the old member so the
-            -> add is not skipped/duplicated as "already present"
+            -> add is not skipped/duplicated as "already present". (Esc
+            -> between this delete and the add's finish leaves the member
+            -> absent - the source file itself is never at risk.)
             IF replace
               IF islzx(q) THEN lzxdelmember(arcpath[q], member) ELSE arcdelmember(arcpath[q], member)
             ENDIF
@@ -4897,9 +4984,9 @@ PROC arcxfer_in(p, q, ismove, force)
             ENDIF
             res := arcrunprog('T:CFile-a', cmd)
             DeleteFile('T:CFile-out')
-            IF res = -1
-              faultmsg('could not add to the archive')
-              stop := TRUE
+            IF (res = -1) OR abort
+              IF abort = FALSE THEN faultmsg('could not add to the archive')
+              stop := TRUE    -> cancelled: the source file survives
             ELSE
               added := TRUE
               ndone := ndone + 1
@@ -4912,18 +4999,26 @@ PROC arcxfer_in(p, q, ismove, force)
       ENDIF
     ENDIF
   ENDFOR
+  cancelok := FALSE
   progoff()
   progbyfile := FALSE
   progbybytes := FALSE
   proglzx := 0
   arcwipe('T:CFile-a')
-  IF added THEN loadarchive(q, arcpath[q])    -> cache gained members
+  -> abort: the break may have raced the rebuild's finishing rename, so
+  -> the archive is whichever side it landed on - re-read the truth
+  IF added OR abort THEN loadarchive(q, arcpath[q])
   refreshall()
-  IF ndone > 0
+  IF abort
+    StringF(mb, 'cancelled - \d of \d done', ndone,
+            IF nmark > 0 THEN nmark ELSE 1)
+    showmsg(mb)
+  ELSEIF ndone > 0
     StringF(mb, '\d file\s \s', ndone, IF ndone = 1 THEN '' ELSE 's',
             IF ismove THEN 'moved in' ELSE 'copied in')
     showmsg(mb)
   ENDIF
+  abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
 -> copy or move to the other pane: the marked set if the active pane
@@ -9376,4 +9471,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b20 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b21 (30.7.26) E build',0

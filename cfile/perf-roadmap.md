@@ -366,7 +366,7 @@ Last, because it multiplies every blit the campaign just created.
 - [ ] fallback pubscreen run entirely unmasked (untested);
       real-A1200 scroll feel re-measured (drive not hooked up).
 
-## The bar chapter (post-campaign, 29-30.7.26, builds b17-b20)
+## The bar chapter (post-campaign, 29-30.7.26, builds b17-b21)
 
 His ask, verbatim: a true byte-by-byte progress bar, "not chunks,
 not per file" - the thing no Amiga file manager has.
@@ -392,6 +392,28 @@ not per file" - the thing no Amiga file manager has.
       Wired: arcxfer_out single-file + arcextracttree (one cursor
       across batched runs); pipe road kept as fallback only.
       **GREEN 30.7.26: "exactly what I wanted."**
+- [x] **b21** ESC CANCELS ARCHIVE TRANSFERS (his ask 30.7.26: "when
+      copying out (or into) an archive, Esc to cancel would be
+      nice"). The detached/piped child launches under a per-instance
+      NP_NAME (SystemTagList passes NP_ tags to CreateNewProc, and
+      the command runs INSIDE that named process), so Esc = FindTask
+      inside Forbid + Signal SIGBREAKF_CTRL_C - lha/lzx honour break
+      and rebuild to a temp, so the archive itself is never the
+      casualty. Wiring: arcpollrun checks Esc every tick; arcrunprog
+      checks between pipe chunks plus a BOUNDED (~5s) WaitForChar
+      pacing loop for silent stretches (correctness never rests on
+      PIPE: supporting it); the xfer verbs arm cancelok like the
+      plain-copy road. The landmine defused: async runs return
+      LAUNCH-success, so every caller now checks `abort` before
+      landing files (partial extracts never Rename into place),
+      before move-deletes (source survives a cancelled run), and
+      reloads the cache when a break may have raced a rebuild's
+      finishing rename. Cancel latency: extract ~a tick; add =
+      per-member at worst (per 1/5s where PIPE: can WaitForChar).
+      Known window, documented in-source: Esc between a DIRECT
+      replace's member-delete and its re-add leaves the member
+      absent (the source file is never at risk). **GREEN 30.7.26
+      ("All green!") - NP_NAME-through-SystemTagList proven on 3.2.**
 - [ ] Follow-ups parked: lha/lzx ADD-side polling (archive growth,
       clamped - total compressed size unknowable); arcrename's T:
       work area onto the arcsibling pattern; the pipewc probe is
