@@ -2947,7 +2947,7 @@ PROC checkabort()
 ENDPROC abort
 
 PROC copyfile(src, dst)
-  DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0
+  DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0, chunk
   IF (fhs := Open(src, OLDFILE)) = NIL
     faultmsg('cannot read the source')
     RETURN FALSE
@@ -2957,11 +2957,30 @@ PROC copyfile(src, dst)
     faultmsg('cannot write the target')
     RETURN FALSE
   ENDIF
+  -> the smooth bar (his ask, 29.7.26: byte-honest, not chunks, not
+  -> per file - the thing no Amiga file manager has). The bar already
+  -> fills at PIXEL resolution over its 248-px interior; the only
+  -> chunkiness was the update rate - one progadd per 256KB read. So
+  -> the chunk adapts to the RUN's bytes-per-pixel (progtotal spans
+  -> the whole marked set, so the bar is pixel-continuous across
+  -> files too): every completed chunk advances the fill ~one pixel,
+  -> and every pixel is genuinely completed bytes. Floored at 16KB
+  -> (the packet-cost floor - big runs have big pixels, so big runs
+  -> keep big chunks), capped at the I1 buffer. Bonus: Esc latency
+  -> rides the chunk rate and improves with it.
+  chunk := cbufsz
+  IF progon
+    IF progbyfile = FALSE
+      chunk := Shr(progtotal, 8)    -> ~bytes per bar pixel
+      IF chunk < 16384 THEN chunk := 16384
+      IF chunk > cbufsz THEN chunk := cbufsz
+    ENDIF
+  ENDIF
   REPEAT
     IF checkabort()    -> Esc mid-copy: stop like an error, dst is cleaned up
       ok := FALSE
     ELSE
-      n := Read(fhs, copybuf, cbufsz)
+      n := Read(fhs, copybuf, chunk)
       IF n < 0
         ok := FALSE
         err := IoErr()
@@ -3735,7 +3754,7 @@ ENDPROC ok
 -> verified by the caller, not by an exit code the asynch run hides.
 PROC arcrunprog(dir, cmd)
   DEF wout=NIL, nin=NIL, rdr=NIL, dlock=NIL, old=NIL, res,
-      buf:PTR TO CHAR, n, i, c, st=0, prevtotal=0, curtot=0
+      buf:PTR TO CHAR, n, i, c, st=0, prevtotal=0, curtot=0, memdone=0
   buf := pipebuf    -> I7a: 4KB shared pipe buffer, not 256B on the stack
   IF (wout := Open('PIPE:cfile-arc', NEWFILE)) = NIL
     RETURN runcapture(dir, cmd, 'T:CFile-out')    -> no PIPE: no bar
@@ -3796,15 +3815,22 @@ PROC arcrunprog(dir, cmd)
             st := 0
           ENDIF
         ELSEIF proglzx = 2
-          -> lzx EXTRACT: each file starts "( <run> / <total> )" with run 0;
-          -> progadd the total once, at that start (run = 0), so the many
-          -> "( x / total )" redraws and the "( total ) Extracted OK:" line
-          -> (no "/") don't double-count. prevtotal holds the running count.
+          -> lzx EXTRACT: the "( <run> / <total> )" line REDRAWS into
+          -> the pipe as lzx works - live intra-member byte progress.
+          -> The smooth bar (b18): progadd the run's DELTAS as they
+          -> stream (memdone = bytes already credited this member);
+          -> the no-slash "( total ) Extracted OK:" line closes the
+          -> member - reconcile to its full total and reset. Deltas
+          -> only ever grow (clamped), so redraw retransmissions and
+          -> split pipe reads cannot double-count.
           IF st = 12                   -> after "/", collect the total
             IF (c >= "0") AND (c <= "9")
               curtot := Mul(curtot, 10) + (c - "0")
             ELSEIF c = ")"
-              IF prevtotal = 0 THEN progadd(curtot)
+              IF prevtotal > memdone   -> live delta from the redraw
+                progadd(prevtotal - memdone)
+                memdone := prevtotal
+              ENDIF
               st := 0
             ENDIF
           ELSEIF st = 11               -> before "/", collect the running count
@@ -3814,6 +3840,9 @@ PROC arcrunprog(dir, cmd)
               curtot := 0
               st := 12
             ELSEIF c = ")"
+              -> no slash: "( total ) Extracted OK" - the member ends
+              IF prevtotal > memdone THEN progadd(prevtotal - memdone)
+              memdone := 0
               st := 0
             ENDIF
           ELSEIF c = "("
@@ -3920,14 +3949,52 @@ ENDPROC n
 -> lha takes several filespecs at once - and makepath pre-builds each
 -> target dir so lha never has to (the NIL:-input directory bug). The
 -> prefix dir itself is created even when it holds no files.
-PROC arcextracttree(p, prefix)
+PROC arcextracttree(p, prefix, root)
   DEF a:PTR TO LONG, k, pfx[CPATHLEN]:STRING, pl, m:PTR TO CHAR,
       cmd[700]:STRING, base[360]:STRING, sfile[CPATHLEN]:STRING,
-      res, ok=TRUE, baselen
+      res, ok=TRUE, baselen,
+      z:PTR TO LONG, pfiles=NIL:PTR TO LONG, psizes=NIL:PTR TO LONG,
+      nf=0, pidx, pcred, j
   StrCopy(pfx, prefix)
   StrAdd(pfx, '/')
   pl := StrLen(pfx)
-  StrCopy(sfile, 'T:CFile-x/')    -> make sure the prefix dir exists
+  -> the byte bar: collect the expected outputs (path + exact size,
+  -> cache order = archive order = extraction order) BEFORE any run;
+  -> arcpollrun walks them across the batched commands with one
+  -> shared cursor. Dir members and zero-size files sit in the list
+  -> harmlessly - they advance instantly. Allocation failure just
+  -> means no polling (nf stays 0, runs fall back to the pipe road).
+  z := amsz[p]
+  a := amem[p]
+  IF amcnt[p] > 0
+    pfiles := New(Mul(amcnt[p], 4))
+    psizes := New(Mul(amcnt[p], 4))
+    IF (pfiles = NIL) OR (psizes = NIL)
+      IF pfiles THEN Dispose(pfiles)
+      IF psizes THEN Dispose(psizes)
+      pfiles := NIL
+      psizes := NIL
+    ELSE
+      FOR k := 0 TO amcnt[p] - 1
+        m := a[k]
+        IF ncprefix(m, pfx, pl)
+          IF m[pl]
+            IF (pfiles[nf] := String(StrLen(root) + 1 + StrLen(m)))
+              StrCopy(pfiles[nf], root)
+              StrAdd(pfiles[nf], '/')
+              StrAdd(pfiles[nf], m)
+              psizes[nf] := z[k]
+              nf := nf + 1
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDFOR
+    ENDIF
+  ENDIF
+  pidx := 0
+  pcred := 0
+  StrCopy(sfile, root)            -> make sure the prefix dir exists
+  StrAdd(sfile, '/')
   StrAdd(sfile, pfx)
   StrAdd(sfile, '.')
   makepath(sfile)
@@ -3948,13 +4015,21 @@ PROC arcextracttree(p, prefix)
       m := a[k]
       IF ncprefix(m, pfx, pl)
         IF m[pl]    -> a real file below the dir, not the bare dir entry
-          StrCopy(sfile, 'T:CFile-x/')
+          StrCopy(sfile, root)
+          StrAdd(sfile, '/')
           StrAdd(sfile, m)
           makepath(sfile)
           DeleteFile(sfile)
           IF (EstrLen(cmd) + StrLen(m)) > 600
-            StrAdd(cmd, ' "T:CFile-x/"')
-            res := arcrunprog(NIL, cmd)
+            StrAdd(cmd, ' "')
+            StrAdd(cmd, root)
+            StrAdd(cmd, '/"')
+            IF nf > 0
+              res := arcpollrun(cmd, pfiles, psizes, nf, {pidx}, {pcred})
+              IF res = -1 THEN res := arcrunprog(NIL, cmd)
+            ELSE
+              res := arcrunprog(NIL, cmd)
+            ENDIF
             IF res = -1 THEN ok := FALSE
             StrCopy(cmd, base)
           ENDIF
@@ -3966,10 +4041,22 @@ PROC arcextracttree(p, prefix)
     ENDFOR
   ENDIF
   IF EstrLen(cmd) > baselen
-    StrAdd(cmd, ' "T:CFile-x/"')
-    res := arcrunprog(NIL, cmd)
+    StrAdd(cmd, ' "')
+    StrAdd(cmd, root)
+    StrAdd(cmd, '/"')
+    IF nf > 0
+      res := arcpollrun(cmd, pfiles, psizes, nf, {pidx}, {pcred})
+      IF res = -1 THEN res := arcrunprog(NIL, cmd)
+    ELSE
+      res := arcrunprog(NIL, cmd)
+    ENDIF
     IF res = -1 THEN ok := FALSE
   ENDIF
+  FOR j := 0 TO nf - 1
+    DisposeLink(pfiles[j])
+  ENDFOR
+  IF pfiles THEN Dispose(pfiles)
+  IF psizes THEN Dispose(psizes)
   DeleteFile('T:CFile-out')
 ENDPROC ok
 
@@ -4310,11 +4397,84 @@ ENDPROC
 
 -> c/m when the ACTIVE pane is inside an archive: extract the selected
 -> file(s) to the other pane. move = also delete the member afterwards.
+-> the bar he asked for from the beginning (30.7.26, arc edition):
+-> BYTE BY BYTE, no chunks, no per-member jumps. The archiver tells
+-> us nothing useful through the pipe - so we stop listening and
+-> WATCH THE DESTINATION FILES GROW instead. The expected outputs
+-> (paths + exact sizes, in archive order - lha extracts in archive
+-> order and the cache was built from the archive listing) are
+-> handed in; the run goes DETACHED (SYS_ASYNCH, output captured to
+-> T:CFile-out with no pump), and a Delay(1) poll walks the list:
+-> each tick Examines the file the archiver is currently writing
+-> and progadds the honest growth delta, advancing when a file
+-> reaches its full size (zero-size entries and dir members advance
+-> instantly). Run completion is unambiguous: the child owns the
+-> capture file handle, so an EXCLUSIVE Lock on it succeeds only
+-> after the archiver exits. idxp/credp persist the cursor across
+-> BATCHED runs (arcextracttree splits big trees over several
+-> commands). Esc cannot kill a detached archiver (it never could
+-> kill a synchronous one either) - the poll just rides to the end.
+PROC arcsizeof(path)
+  DEF lock, fib:PTR TO fileinfoblock, n=-1
+  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN -1
+  IF lock := Lock(path, SHARED_LOCK)
+    IF Examine(lock, fib) THEN n := fib.size
+    UnLock(lock)
+  ENDIF
+  FreeDosObject(DOS_FIB, fib)
+ENDPROC n
+
+PROC arcpollrun(cmd, files:PTR TO LONG, sizes:PTR TO LONG, nf,
+                idxp:PTR TO LONG, credp:PTR TO LONG)
+  DEF wout=NIL, nin=NIL, res, lk, sz, done=FALSE, adv, d
+  DeleteFile('T:CFile-out')
+  IF (wout := Open('T:CFile-out', NEWFILE)) = NIL THEN RETURN -1
+  nin := Open('NIL:', OLDFILE)
+  res := SystemTagList(cmd,
+    [SYS_INPUT,  nin,
+     SYS_OUTPUT, wout,
+     SYS_ASYNCH, TRUE,
+     TAG_DONE,   NIL])
+  IF res = -1
+    Close(wout)
+    IF nin THEN Close(nin)
+    RETURN -1
+  ENDIF
+  -> the launched command owns nin/wout now (asynch closes them)
+  REPEAT
+    Delay(1)                    -> 1/50s: the poll IS the bar's tick
+    adv := TRUE
+    WHILE adv AND (idxp[0] < nf)
+      adv := FALSE
+      sz := arcsizeof(files[idxp[0]])
+      IF sz < 0 THEN sz := 0
+      IF sz > sizes[idxp[0]] THEN sz := sizes[idxp[0]]
+      d := sz - credp[0]
+      IF d > 0
+        progadd(d)              -> honest bytes, straight off the disk
+        credp[0] := credp[0] + d
+      ENDIF
+      IF credp[0] >= sizes[idxp[0]]
+        idxp[0] := idxp[0] + 1  -> this output is whole: next
+        credp[0] := 0
+        adv := TRUE
+      ENDIF
+    ENDWHILE
+    lk := Lock('T:CFile-out', EXCLUSIVE_LOCK)
+    IF lk                       -> the child released its output:
+      UnLock(lk)                -> the run is over
+      done := TRUE
+    ENDIF
+  UNTIL done
+ENDPROC res
+
 PROC arcxfer_out(p, q, ismove, force)
   DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
       cmd[700]:STRING, mb[130]:STRING, res, t, k, stop=FALSE,
-      ndone=0, deld=FALSE, deferred=FALSE, doit, total=0
+      ndone=0, deld=FALSE, deferred=FALSE, doit, total=0,
+      stage[CPATHLEN]:STRING, moved,
+      pfiles[1]:ARRAY OF LONG, psizes[1]:ARRAY OF LONG, pidx, pcred
   IF involume(q) OR efail[q]
     showmsg('the other pane needs a directory to receive the files')
     RETURN
@@ -4325,6 +4485,16 @@ PROC arcxfer_out(p, q, ismove, force)
   ENDIF
   b := p * MAXENT
   nmark := markcount(p)
+  -> the RAM-disk lesson (his real find, 29.7.26: eight 880K ADFs
+  -> against a 2MB machine): members used to stage through T: - RAM -
+  -> on their way to the destination, so any member bigger than free
+  -> RAM killed the run with a full RAM disk. The staging dir now
+  -> lives BESIDE THE DESTINATION (its volume has the room by
+  -> definition - the bytes are headed there), and landing a file
+  -> becomes a same-volume Rename: instant, and the double write is
+  -> gone with it.
+  buildfull(stage, ppath[q], 'CFile-x.tmp')
+  arcwipe(stage)    -> a stale tree from an interrupted run
   -> pre-scan BYTES: the bar advances by each extracted member's size, so
   -> a big member weighs more than a small one. A move's delete pass has
   -> no byte counter, so the bar just rests full while it runs.
@@ -4355,11 +4525,12 @@ PROC arcxfer_out(p, q, ismove, force)
         buildfull(dfile, ppath[q], nm)
         IF pathtype(dfile) = 1
           showmsg('a file with that name is in the way')
-        ELSEIF arcextracttree(p, member) = FALSE
+        ELSEIF arcextracttree(p, member, stage) = FALSE
           faultmsg('could not extract the folder')
           stop := TRUE
         ELSE
-          StrCopy(sfile, 'T:CFile-x/')
+          StrCopy(sfile, stage)
+          StrAdd(sfile, '/')
           StrAdd(sfile, member)
           IF copytree(sfile, dfile, 0)
             ndone := ndone + 1
@@ -4423,23 +4594,40 @@ PROC arcxfer_out(p, q, ismove, force)
           ENDIF
         ENDIF
         IF doit
-          StrCopy(sfile, 'T:CFile-x/')
+          StrCopy(sfile, stage)
+          StrAdd(sfile, '/')
           StrAdd(sfile, member)
           makepath(sfile)
           DeleteFile(sfile)
+          StrCopy(mb, stage)
+          StrAdd(mb, '/')
           IF islzx(p)
-            StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member,
-                    'T:CFile-x/')
+            StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], member, mb)
           ELSE
-            StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member,
-                    'T:CFile-x/')
+            StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], member, mb)
           ENDIF
-          res := arcrunprog(NIL, cmd)
+          pfiles[0] := sfile
+          psizes[0] := esize[b + i]
+          pidx := 0
+          pcred := 0
+          res := arcpollrun(cmd, pfiles, psizes, 1, {pidx}, {pcred})
+          IF res = -1 THEN res := arcrunprog(NIL, cmd)   -> old road
           DeleteFile('T:CFile-out')
+          moved := FALSE
           IF (res = -1) OR (pathtype(sfile) <> 1)
             faultmsg('could not extract from the archive')
             stop := TRUE
-          ELSEIF copyfile(sfile, dfile)
+          ELSE
+            -> same volume by construction: land it with a Rename
+            -> (the overwrite decision was already made above)
+            IF pathtype(dfile) = 1 THEN DeleteFile(dfile)
+            IF Rename(sfile, dfile)
+              moved := TRUE
+            ELSEIF copyfile(sfile, dfile)
+              moved := TRUE    -> odd handler: the copy fallback
+            ENDIF
+          ENDIF
+          IF moved
             ndone := ndone + 1
             IF ismove
               -> ONEXIT (both): defer to commit. DIRECT: remove now.
@@ -4466,7 +4654,7 @@ PROC arcxfer_out(p, q, ismove, force)
   progbyfile := FALSE
   progbybytes := FALSE
   proglzx := 0
-  arcwipe('T:CFile-x')
+  arcwipe(stage)
   -> DIRECT move dropped members from the on-disk archive: reload the cache.
   -> A deferred (ONEXIT) move only flagged them - refreshall re-filters the
   -> cache and the flags must survive, so it must NOT reload.
@@ -8371,7 +8559,7 @@ PROC arcrename(p)
           ENDIF
           arcwipe('T:CFile-x')
           IF isdir
-            ok := arcextracttree(p, oldm)
+            ok := arcextracttree(p, oldm, 'T:CFile-x')
           ELSE
             ok := arcextractone(p, oldm)
           ENDIF
@@ -9188,4 +9376,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b16 (29.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b20 (30.7.26) E build',0

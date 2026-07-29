@@ -366,6 +366,37 @@ Last, because it multiplies every blit the campaign just created.
 - [ ] fallback pubscreen run entirely unmasked (untested);
       real-A1200 scroll feel re-measured (drive not hooked up).
 
+## The bar chapter (post-campaign, 29-30.7.26, builds b17-b20)
+
+His ask, verbatim: a true byte-by-byte progress bar, "not chunks,
+not per file" - the thing no Amiga file manager has.
+
+- [x] **b17** copies: the bar already filled at PIXEL resolution -
+      the chunkiness was the update rate. copyfile's chunk now
+      adapts to the RUN's bytes-per-pixel (Shr(progtotal,8), floor
+      16KB, cap cbufsz): one pixel per update, pixel-continuous
+      across a marked set. GREEN ("works great").
+- [x] **b18** lzx extract: harvest the "( run / total )" pipe
+      redraws as clamped deltas. (Superseded on the primary road by
+      b20; still serves the fallback.)
+- [x] **b19** THE RAM-DISK BUG (his real-iron find, 8x880K ADFs vs
+      2MB): copy-out staged members through T: - now stages BESIDE
+      THE DESTINATION and lands files by same-volume Rename (the
+      double write is gone). "Broken unpack" was fallout (PIPE: +
+      T:CFile-out suffocating on the full RAM disk). GREEN.
+- [x] **b20** THE BYTE-POLLER - the bar he asked for: archiver runs
+      DETACHED (SYS_ASYNCH, no pipe pump), a Delay(1) poll Examines
+      the file being written and progadds honest growth deltas
+      against the cache's known sizes in archive order; run-done =
+      EXCLUSIVE Lock on the child-owned T:CFile-out succeeds.
+      Wired: arcxfer_out single-file + arcextracttree (one cursor
+      across batched runs); pipe road kept as fallback only.
+      **GREEN 30.7.26: "exactly what I wanted."**
+- [ ] Follow-ups parked: lha/lzx ADD-side polling (archive growth,
+      clamped - total compressed size unknowable); arcrename's T:
+      work area onto the arcsibling pattern; the pipewc probe is
+      MOOT for the poller (kept in C: as a curiosity).
+
 ---
 
 ## Release ladder (after soak)

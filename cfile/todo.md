@@ -41,7 +41,7 @@ keyboard program by design (DOpus is for mouse users).
 
 ### Navigation
 
-- [ ] **Bookmarks** — `Alt`+`1`..`0` sets a slot to the ACTIVE pane's
+- [x] **Bookmarks** — DONE (shipped; SAVEBOOKMARKS included) — `Alt`+`1`..`0` sets a slot to the ACTIVE pane's
       location, bare `1`..`0` jumps back. 10 slots, real paths only (not a
       spot inside an archive). Digits are currently unbound; read `Alt`+digit
       as a raw key + `Alt` qualifier (a plain `Alt`+`1` through the keymap is
@@ -49,7 +49,7 @@ keyboard program by design (DOpus is for mouse users).
       (default OFF, parallels `SAVEDIRS`) persists the 10 slots to
       `cfile.config` on quit as `BOOKMARK1`..`BOOKMARK0`, self-maintaining
       like the other keys (`configensure` appends it to existing configs).
-- [ ] **Go-to-path** — `g` opens a prompt; type a path, the active pane
+- [x] **Go-to-path** — DONE (shipped) — `g` opens a prompt; type a path, the active pane
       jumps there (Lock it first; error if it won't open).
 - [ ] **Directory history** — back/forward through visited dirs. LOW prio.
 
