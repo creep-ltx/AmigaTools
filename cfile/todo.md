@@ -392,17 +392,80 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 
 ## Nice, cheap, no hurry
 
-- [ ] **(?) Datatypes for content, sniff for dispatch** (raised
-      30.7.26): keep the hand-rolled sniff as the verbs' truth (it
-      answers "what should Enter DO", costs a few hundred bytes of
-      reading, and works on 2.04 where datatypes.library does not
-      exist) - but where datatypes IS present (OS 3.0+, runtime
-      OpenLibrary like the DAControl detection), let it serve
-      CONTENT: `v` on a picture renders it on CFile's screen via
-      picture.datatype (every GIF/PNG/JPEG class the user installed
-      comes along free), sound preview via 8SVX, and the `i` window
-      names exotic files by datatype when sniff shrugs. The picture
-      viewer is the headline; feature-sized, 0.5-or-later.
+- [ ] **Datatypes for content, sniff for dispatch** (raised
+      30.7.26, DIG STARTED same day): keep the hand-rolled sniff as
+      the verbs' truth (semantic dispatch, 2.04-safe) - datatypes
+      serves CONTENT where present (runtime OpenLibrary v39, the
+      DAControl manners). RECON DONE on the host: his 3.2 install
+      is LOADED - stock classes incl. GIF/JPEG/PNG/BMP PLUS the
+      REGISTERED WarpDT pack (WarpJPEG/PNG/PCX/PSD/TIFF/WebP +
+      keyfile), and the E-VO emodules carry complete bindings
+      (datatypes.m lib functions + datatypes/datatypes,
+      datatypesclass, pictureclass with every PDTA_ tag and OBJECT
+      layout). The viewer design: NewDTObject(DTST_FILE,
+      GID_PICTURE, PDTA_REMAP FALSE) -> DTM_PROCLAYOUT ->
+      GetDTAttrs(BITMAPHEADER/BITMAP/MODEID/CREGS/NUMCOLORS) ->
+      open a screen in the IMAGE'S OWN modeid+depth, LoadRGB32 its
+      palette, blit centered - true colours incl. HAM, no remap to
+      CFile's 8-colour screen (the cheap-adjacent road is NOT the
+      feature). THE OPEN QUESTION the probe answers: what modeid/
+      depth stock vs Warp classes deliver for JPEG/PNG/WebP on AGA
+      with REMAP FALSE (Warp famously renders HAM8; stock may need
+      a remap road with PDTA_DESTMODE + dither tags as fallback).
+      **SIX PROBE ROUNDS 30.7.26 (sources cfile/tests/dtprobe*.e,
+      outputs Amiga:dtprobe*.out) = the recipe proven the hard way:**
+      r1: identify + extraction road (PROCLAYOUT in our process ->
+      PDTA_BITMAP) DISPLAYS ILBM/PNG/WebP perfectly; JPEG = header
+      yes, bitmap NIL. r2: not memory, not error attrs; remap road
+      also NIL; center-crop proven. r3: DESTMODE/HAM8 dead ends;
+      window road (AddDTObject) lays out fully (JPEG measures its
+      true 1440x1440!) but paints nothing. r4: listening for
+      IDCMPUPDATE - zero arrive. r5: ICA_TARGET added -> DEADLOCK
+      (out-file truncated). THEN THE GUIDE HAD IT ALL ALONG
+      (WarpJPEG.guide, on his disk): Warp's default OUTPUT_MODE=FULL
+      emits 24-bit - no palette bitmap EXISTS to extract; since
+      45.9 a LOCAL env var overrides the global prefs, and
+      PROCLAYOUT runs in OUR process so the local var binds. r6:
+      OUTPUT_MODE=REDUCED DITHER=FS -> bitmap at full size still
+      NIL (2MB planar > chip RAM!) but + SCALING=SMALLER WIDTH/
+      HEIGHT -> 360x360 depth-8 DECODED, DISPLAYED, his photo on
+      screen. Bonus r6 lesson: PAL hires LACED is $29004 - $29000
+      non-laced at 512 rows autoscrolls ("did not fit"). Only
+      WarpJPEG has OUTPUT_MODE/SCALING (other Warp guides checked:
+      smaller templates) - truecolour non-JPEG Warp images = known
+      gap, honest message.
+      **STAGE B SHIPPED AND GREEN 30.7.26 = b29-b33 ("All green!
+      blasting some mods right now!"). b29 the viewer: v /
+      Enter on any file sniff shrugs at asks datatypes; GID_PICTURE
+      -> dtviewpic: local WarpJPEG override (set + deleted around
+      the decode, globals untouched), extraction road, screen in
+      the image's world (lores $21000 small / hires-laced $29004
+      big, image's own palette via LoadRGB32, depth = the bitmap's),
+      input window FIRST then blit into its rastport (a window's
+      open fills its area - blit-then-open erases), center-crop for
+      oversize, decode freed before the key wait, any key returns.
+      datatypes.library opened lazily once (absent = message, all
+      else works), closed at quit. b29's boot found the STACK: the
+      descriptors' recognition code starved on a 4KB shell stack
+      (everything hex-viewed; `stack 65536` proved it) - b30 gives
+      every datatypes call its own 32KB via StackSwap in dtcall
+      (swap must balance inside ONE function - it is a dispatcher,
+      not a helper pair). b30 also: marked-picture TOUR (viewfile's
+      2/3/0 bulk protocol drives both viewers) + v plays SOUNDS
+      through sound.datatype (the 512KB viewer cap never applies).
+      b31: tour keys grew Down/Up, zoom + / - (1/4x-4x,
+      BitMapScale, decode stays alive for instant re-render), WAV
+      TEMPO fixed (set SDTA_PERIOD from the file's own sample rate,
+      3546895/rate PAL, clamp >= 124 - above ~28.6kHz is Paula's
+      ceiling, honestly slower). b32: Ctrl+arrows PAN (quarter of
+      the visible window per step, clamped, holds across zoom; E
+      trap: unary minus on a member needs 0-x). b33: MOD PLAYBACK -
+      sniff TY_MOD (.mod suffix OR mod. prefix + the magic at 1080:
+      M.K./M!K!/xCHN/FLTx), ptreplay.library (in his Libs:, module
+      in emodules) PtLoadModule/PtPlay/PtStop/PtUnloadModule, any
+      key stops.** Later: `i` names files by datatype (stage A),
+      sound/mod in the marked tour, truecolour non-JPEG road, RAW
+      sample playback, AHI for >28kHz. Feature-sized, 0.5-class.
 
 - [x] **Comment editing** — done. `c` in the `i` window edits the
       FileNote (lineinput, capped to the row width) and SetComment saves

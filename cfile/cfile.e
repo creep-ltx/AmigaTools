@@ -69,7 +69,10 @@ MODULE 'intuition/intuition','intuition/screens',
        'graphics/text','graphics/rastport',
        'utility/tagitem','dos/dos','dos/dosextens',
        'dos/datetime','dos/dostags','devices/inputevent','diskfont',
-       'dos/exall','graphics/gfx'
+       'dos/exall','graphics/gfx',
+       'datatypes','datatypes/datatypes','datatypes/datatypesclass',
+       'datatypes/pictureclass','datatypes/soundclass','dos/var',
+       'exec/tasks','graphics/scale','ptreplay'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
@@ -86,10 +89,13 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       RK_F5=$54,    -> re-read both panes
       VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
-      TY_ANSI=6, TY_ISO=7, TY_ADF=8,
+      TY_ANSI=6, TY_ISO=7, TY_ADF=8, TY_MOD=9,
       ISOSEC=2048,    -> ISO9660 logical sector (the only size supported)
       ADFDD=901120, ADFHD=1802240,    -> the only sizes trackfile mounts
       DAMAX=8,        -> disk images mounted by this CFile at once
+      DTSTACK=32768,  -> datatypes calls run on their own stack: the
+                      -> descriptors' recognition code and the decoders
+                      -> ate a 4KB shell stack alive (b29's boot find)
       -> per-member cache status for deferred archive writes (0.3b3):
       -> CLEAN, flagged for DELETE at commit, a new member ADDed since
       -> entry, or a committed member whose staged copy REPLACEs it (edit
@@ -144,6 +150,13 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     vescol=0,            -> where the view footer's Esc text sits
     fullfont[44]:STRING, diskfontbase=NIL,
     vertitle[44]:STRING,    -> help title, read from $VER at runtime
+    datatypesbase=NIL,      -> datatypes.library (v39+), opened lazily -
+    dttried=FALSE,          -> the picture viewer's engine; absent = the
+                            -> viewer says so and everything else works
+    dtstack=NIL,            -> the DTSTACK-byte stack dtcall swaps to
+    dtss[1]:ARRAY OF stackswapstruct,
+    ptreplaybase=NIL,       -> ptreplay.library, lazily opened: the
+    pttried=FALSE,          -> Amiga IS a tracker - mods play native
     appliedfont[44]:STRING, wantreload=FALSE,    -> live config reload
     bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
@@ -1187,6 +1200,35 @@ PROC adfext(name:PTR TO CHAR)
   IF (name[l - 2] <> "d") AND (name[l - 2] <> "D") THEN RETURN FALSE
   IF (name[l - 1] <> "f") AND (name[l - 1] <> "F") THEN RETURN FALSE
 ENDPROC TRUE
+
+-> ProTracker naming: "x.mod" or the Amiga way, "mod.x"
+PROC modext(path:PTR TO CHAR)
+  DEF n:PTR TO CHAR, l
+  n := FilePart(path)
+  l := StrLen(n)
+  IF l > 4
+    IF (n[l - 4] = ".") AND ((n[l - 3] = "m") OR (n[l - 3] = "M")) AND
+       ((n[l - 2] = "o") OR (n[l - 2] = "O")) AND
+       ((n[l - 1] = "d") OR (n[l - 1] = "D")) THEN RETURN TRUE
+    IF ((n[0] = "m") OR (n[0] = "M")) AND
+       ((n[1] = "o") OR (n[1] = "O")) AND
+       ((n[2] = "d") OR (n[2] = "D")) AND (n[3] = ".") THEN RETURN TRUE
+  ENDIF
+ENDPROC FALSE
+
+PROC modmagic(path)
+  DEF fh, b[8]:ARRAY OF CHAR, ok=FALSE
+  IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN FALSE
+  IF Seek(fh, 1080, OFFSET_BEGINNING) >= 0
+    IF Read(fh, b, 4) = 4
+      IF (b[0] = "M") AND (b[1] = ".") AND (b[2] = "K") AND (b[3] = ".") THEN ok := TRUE
+      IF (b[0] = "M") AND (b[1] = "!") AND (b[2] = "K") AND (b[3] = "!") THEN ok := TRUE
+      IF (b[1] = "C") AND (b[2] = "H") AND (b[3] = "N") THEN ok := TRUE
+      IF (b[0] = "F") AND (b[1] = "L") AND (b[2] = "T") THEN ok := TRUE
+    ENDIF
+  ENDIF
+  Close(fh)
+ENDPROC ok
 
 -> 0 = no DAControl, 1 = ready
 PROC dacheck()
@@ -6575,6 +6617,10 @@ PROC sniff(path)
     n := arcsizeof(path)
     IF (n = ADFDD) OR (n = ADFHD) THEN RETURN TY_ADF
   ENDIF
+  -> ProTracker modules: .mod/mod. name plus the magic at 1080
+  IF modext(path)
+    IF modmagic(path) THEN RETURN TY_MOD
+  ENDIF
   IF (fh := Open(path, OLDFILE)) = NIL THEN RETURN TY_OTHER
   n := Read(fh, buf, 512)
   Close(fh)
@@ -7063,7 +7109,13 @@ PROC bulkview(p)
     mode := 1
     IF ty = TY_TEXT THEN mode := 0
     IF ty = TY_ANSI THEN mode := 2
-    r := viewfile(fpath, enames[b + i], mode, TRUE)
+    -> a marked picture joins the tour as a picture (his ask): the
+    -> same 2/3/0 protocol drives both viewers
+    IF (mode = 1) AND (dtcall(0, fpath, 0, 0) = GID_PICTURE)
+      r := dtcall(1, fpath, enames[b + i], TRUE)
+    ELSE
+      r := viewfile(fpath, enames[b + i], mode, TRUE)
+    ENDIF
     IF r = 2    -> onward; this one is seen and its mark consumed
       emark[b + i] := 0
       pos := pos + 1
@@ -7163,6 +7215,364 @@ PROC arcviewsel(p, sel)
   DeleteFile(out)
 ENDPROC
 
+-> ---- the datatypes picture viewer (probe rounds 1-6, 30.7.26) ----
+-> Sniff stays the verbs' truth; datatypes serves CONTENT. The probes
+-> proved: extraction (PROCLAYOUT in OUR process + PDTA_BITMAP) works
+-> for every palette class (ILBM/PNG/WebP...); WarpJPEG emits 24-bit
+-> by default and yields NO bitmap - but honours a LOCAL env override
+-> (OUTPUT_MODE=REDUCED + decode-time SCALING, its own guide's tags),
+-> which also keeps a scaled image inside chip RAM. Screens must use
+-> the image's world: lores $21000 small, hires-LACED $29004 big (a
+-> non-laced $29000 at 512 rows autoscrolls - the round-6 lesson).
+
+PROC dtopen()
+  IF datatypesbase = NIL
+    IF dttried = FALSE
+      dttried := TRUE
+      datatypesbase := OpenLibrary('datatypes.library', 39)
+    ENDIF
+  ENDIF
+ENDPROC datatypesbase
+
+-> every datatypes entry point comes through here: the recognition
+-> hooks and decoders run on OUR stack, and a 4KB shell stack dies
+-> quietly under them (his boot find: everything hex-viewed until a
+-> `stack 65536` shell proved why). StackSwap must balance inside
+-> ONE function, so this is a dispatcher, not a pair of helpers.
+-> op: 0 = group(a), 1 = viewpic(a, b, c), 2 = playsound(a, b)
+PROC dtcall(op, a, b, c)
+  DEF r=0, ss:PTR TO stackswapstruct
+  IF dtstack = NIL
+    dtstack := New(DTSTACK)
+    IF dtstack = NIL THEN RETURN 0
+  ENDIF
+  ss := dtss
+  ss.lower := dtstack
+  ss.upper := dtstack + DTSTACK
+  ss.pointer := dtstack + DTSTACK
+  StackSwap(ss)
+  IF op = 0
+    r := dtgroup(a)
+  ELSEIF op = 1
+    r := dtviewpic(a, b, c)
+  ELSEIF op = 2
+    r := dtplaysound(a, b)
+  ELSEIF op = 3
+    r := dtplaymod(a, b)
+  ENDIF
+  StackSwap(ss)
+ENDPROC r
+
+-> v/Enter on a ProTracker module: the Amiga plays its own music.
+-> ptreplay.library does everything - loads to chip RAM itself,
+-> plays on its own control task - any key stops and returns.
+PROC dtplaymod(path, name)
+  DEF mod=NIL, mb[130]:STRING
+  IF ptreplaybase = NIL
+    IF pttried = FALSE
+      pttried := TRUE
+      ptreplaybase := OpenLibrary('ptreplay.library', 0)
+    ENDIF
+  ENDIF
+  IF ptreplaybase = NIL
+    showmsg('mod playback needs ptreplay.library (Aminet: mus/misc)')
+    RETURN 0
+  ENDIF
+  promptrow('loading module...')
+  IF (mod := PtLoadModule(path)) = NIL
+    drawpaths()
+    showmsg('could not load that module')
+    RETURN 0
+  ENDIF
+  StringF(mb, 'playing "\s" - any key stops', name)
+  promptrow(mb)
+  PtPlay(mod)
+  waitvanilla()
+  PtStop(mod)
+  PtUnloadModule(mod)
+  drawpaths()
+ENDPROC 0
+
+-> v on a sound: load it through the datatype and play it - any key
+-> stops it and returns (the 512KB viewer cap never applies: the
+-> sound never goes through the viewer at all)
+PROC dtplaysound(path, name)
+  DEF o=NIL, mb[130]:STRING, rate, per
+  IF dtopen() = NIL
+    showmsg('sound playing needs datatypes.library v39+')
+    RETURN 0
+  ENDIF
+  promptrow('loading sound...')
+  o := NewDTObjectA(path,
+    [DTA_SOURCETYPE, DTST_FILE,
+     DTA_GROUPID,    GID_SOUND,
+     TAG_DONE,       NIL])
+  IF o = NIL
+    drawpaths()
+    showmsg('could not load that sound')
+    RETURN 0
+  ENDIF
+  -> tempo (his find: WAVs played slow): set the Paula period from
+  -> the file's own sample rate - the class does not always do it.
+  -> Rates above ~28.6kHz clamp to the hardware ceiling (period 124)
+  -> and genuinely play slower; that is Paula, not CFile.
+  rate := 0
+  GetDTAttrsA(o, [SDTA_SAMPLESPERSEC, {rate}, TAG_DONE, NIL])
+  IF rate > 0
+    per := Div(3546895, rate)    -> PAL colour clock
+    IF per < 124 THEN per := 124
+    SetDTAttrsA(o, NIL, NIL,
+      [SDTA_PERIOD, per, SDTA_VOLUME, 64, TAG_DONE, NIL])
+  ENDIF
+  StringF(mb, 'playing "\s" - any key returns', name)
+  promptrow(mb)
+  DoDTMethodA(o, NIL, NIL, [DTM_TRIGGER, NIL, STM_PLAY, NIL])
+  waitvanilla()
+  DoDTMethodA(o, NIL, NIL, [DTM_TRIGGER, NIL, STM_STOP, NIL])
+  DisposeDTObject(o)
+  drawpaths()
+ENDPROC 0
+
+-> the file's datatype GROUP ('pict', 'soun', ...) or 0
+PROC dtgroup(path)
+  DEF lock, dtn:PTR TO datatype, hdr:PTR TO datatypeheader, g=0
+  IF dtopen() = NIL THEN RETURN 0
+  IF (lock := Lock(path, SHARED_LOCK)) = NIL THEN RETURN 0
+  IF (dtn := ObtainDataTypeA(DTST_FILE, lock, NIL))
+    hdr := dtn.header
+    g := hdr.groupid
+    ReleaseDataType(dtn)
+  ENDIF
+  UnLock(lock)
+ENDPROC g
+
+PROC dtnum(z)
+ENDPROC IF z = 2 THEN 4 ELSE (IF z = 1 THEN 2 ELSE 1)
+
+PROC dtden(z)
+ENDPROC IF z = -2 THEN 4 ELSE (IF z = -1 THEN 2 ELSE 1)
+
+-> paint the picture at a zoom step: z = -2..2 maps to 1/4x..4x,
+-> px/py pan the visible window around the image (source pixels,
+-> clamped here so the caller can be sloppy). Center-anchored, the
+-> blitter's BitMapScale does the spreading; 1x is a plain blit.
+-> The screen is cleared first so smaller renders leave no rim.
+PROC dtrender(bm:PTR TO bitmap, bmh:PTR TO bitmapheader,
+              scr:PTR TO screen, z, px, py)
+  DEF num, den, srcw, srch, srx, sry, dstw, dsth,
+      bs[1]:ARRAY OF bitscaleargs, bsa:PTR TO bitscaleargs
+  num := dtnum(z)
+  den := dtden(z)
+  srcw := Div(Mul(scr.width, den), num)
+  IF srcw > bmh.width THEN srcw := bmh.width
+  srch := Div(Mul(scr.height, den), num)
+  IF srch > bmh.height THEN srch := bmh.height
+  srx := Shr(bmh.width - srcw, 1) + px
+  IF srx < 0 THEN srx := 0
+  IF srx > (bmh.width - srcw) THEN srx := bmh.width - srcw
+  sry := Shr(bmh.height - srch, 1) + py
+  IF sry < 0 THEN sry := 0
+  IF sry > (bmh.height - srch) THEN sry := bmh.height - srch
+  dstw := Div(Mul(srcw, num), den)
+  IF dstw > scr.width THEN dstw := scr.width
+  dsth := Div(Mul(srch, num), den)
+  IF dsth > scr.height THEN dsth := scr.height
+  SetRast(scr.rastport, 0)
+  IF (num = 1) AND (den = 1)
+    BltBitMap(bm, srx, sry, scr.rastport.bitmap,
+              Shr(scr.width - dstw, 1), Shr(scr.height - dsth, 1),
+              dstw, dsth, $C0, $FF, NIL)
+  ELSE
+    bsa := bs
+    bsa.srcx := srx
+    bsa.srcy := sry
+    bsa.srcwidth := srcw
+    bsa.srcheight := srch
+    bsa.xsrcfactor := den
+    bsa.ysrcfactor := den
+    bsa.destx := Shr(scr.width - dstw, 1)
+    bsa.desty := Shr(scr.height - dsth, 1)
+    bsa.destwidth := 0
+    bsa.destheight := 0
+    bsa.xdestfactor := num
+    bsa.ydestfactor := num
+    bsa.srcbitmap := bm
+    bsa.destbitmap := scr.rastport.bitmap
+    bsa.flags := 0
+    BitMapScale(bsa)
+  ENDIF
+ENDPROC
+
+-> show a picture full-screen: decode via the datatype, open a screen
+-> in the picture's world, its own palette, centered (cropped if it
+-> still overflows). Solo AND tour: + zooms in, - zooms out (1/4x to
+-> 4x, center-anchored). Solo: any other key returns (0). In a tour:
+-> Right/Down/Space/Enter = next (2), Left/Up = back (3), anything
+-> else = abort (0) - viewfile's bulk protocol, so bulkview drives
+-> both viewers with one loop.
+PROC dtviewpic(path, name, tour)
+  DEF o=NIL, bmh=NIL:PTR TO bitmapheader, bm=NIL:PTR TO bitmap,
+      cregs=NIL:PTR TO LONG, ncol=0, scr=NIL:PTR TO screen,
+      vwin=NIL:PTR TO window, tab=NIL:PTR TO LONG, k, qual, step,
+      sw, sh, mid, msg:PTR TO intuimessage, done=FALSE, cls, r=0, zq=0,
+      panx=0, pany=0
+  IF dtopen() = NIL
+    showmsg('picture viewing needs datatypes.library v39+')
+    RETURN 0
+  ENDIF
+  promptrow('decoding picture...')    -> a big jpeg takes seconds
+  -> WarpJPEG's local override (probe round 6): reduced colours,
+  -> Floyd-Steinberg, scaled ON DECODE to the target - our process
+  -> only, deleted below, the user's global prefs never touched
+  SetVar('Datatypes/WarpJPEG.prefs',
+         'OUTPUT_MODE=REDUCED DITHER=FS SCALING=SMALLER WIDTH=640 HEIGHT=512',
+         -1, GVF_LOCAL_ONLY)
+  o := NewDTObjectA(path,
+    [DTA_SOURCETYPE, DTST_FILE,
+     DTA_GROUPID,    GID_PICTURE,
+     PDTA_REMAP,     FALSE,
+     TAG_DONE,       NIL])
+  IF o
+    DoDTMethodA(o, NIL, NIL, [DTM_PROCLAYOUT, NIL, 1])
+    GetDTAttrsA(o,
+      [PDTA_BITMAPHEADER, {bmh},
+       PDTA_BITMAP,       {bm},
+       PDTA_CREGS,        {cregs},
+       PDTA_NUMCOLORS,    {ncol},
+       TAG_DONE,          NIL])
+  ENDIF
+  DeleteVar('Datatypes/WarpJPEG.prefs', GVF_LOCAL_ONLY)
+  IF (o = NIL) OR (bm = NIL) OR (bmh = NIL)
+    IF o THEN DisposeDTObject(o)
+    drawpaths()
+    showmsg('could not decode that picture')
+    RETURN IF tour THEN 2 ELSE 0
+  ENDIF
+  IF bm.depth > 8
+    DisposeDTObject(o)
+    drawpaths()
+    showmsg('that picture is deeper than this display can show')
+    RETURN IF tour THEN 2 ELSE 0
+  ENDIF
+  IF (bmh.width <= 320) AND (bmh.height <= 256)
+    sw := 320
+    sh := 256
+    mid := $21000    -> PAL lores
+  ELSE
+    sw := 640
+    sh := 512
+    mid := $29004    -> PAL hires LACED
+  ENDIF
+  scr := OpenScreenTagList(NIL,
+    [SA_WIDTH, sw, SA_HEIGHT, sh, SA_DEPTH, bm.depth,
+     SA_DISPLAYID, mid, SA_QUIET, TRUE, SA_SHOWTITLE, FALSE,
+     TAG_DONE, NIL])
+  IF scr = NIL
+    DisposeDTObject(o)
+    drawpaths()
+    showmsg('could not open a screen for the picture')
+    RETURN 0
+  ENDIF
+  IF cregs
+    IF ncol > 0
+      IF ncol > 256 THEN ncol := 256
+      IF (tab := New((Mul(ncol, 3) + 2) * 4))
+        tab[0] := Shl(ncol, 16)
+        FOR k := 0 TO Mul(ncol, 3) - 1
+          tab[k + 1] := cregs[k]
+        ENDFOR
+        tab[Mul(ncol, 3) + 1] := 0
+        LoadRGB32(scr.viewport, tab)
+        Dispose(tab)
+      ENDIF
+    ENDIF
+  ENDIF
+  -> the input window opens BEFORE any painting: a window's open
+  -> fills its area, so painting first would be erased. The object
+  -> stays alive while viewing - zoom re-renders from its bitmap.
+  vwin := OpenWindowTagList(NIL,
+    [WA_CUSTOMSCREEN, scr,
+     WA_LEFT, 0, WA_TOP, 0, WA_WIDTH, sw, WA_HEIGHT, sh,
+     WA_BORDERLESS, TRUE, WA_BACKDROP, TRUE, WA_ACTIVATE, TRUE,
+     WA_RMBTRAP, TRUE,
+     WA_IDCMP, IDCMP_VANILLAKEY OR IDCMP_RAWKEY,
+     TAG_DONE, NIL])
+  dtrender(bm, bmh, scr, 0, 0, 0)
+  IF vwin
+    WHILE done = FALSE
+      WaitPort(vwin.userport)
+      WHILE (msg := GetMsg(vwin.userport))
+        cls := msg.class
+        k := msg.code
+        qual := msg.qualifier
+        ReplyMsg(msg)
+        IF cls = IDCMP_VANILLAKEY
+          IF (k = "+") OR (k = "=")
+            IF zq < 2
+              zq++
+              dtrender(bm, bmh, scr, zq, panx, pany)
+            ENDIF
+          ELSEIF k = "-"
+            IF zq > -2
+              zq--
+              dtrender(bm, bmh, scr, zq, panx, pany)
+            ENDIF
+          ELSE
+            IF tour
+              IF (k = 32) OR (k = 13) THEN r := 2 ELSE r := 0
+            ENDIF
+            done := TRUE
+          ENDIF
+        ELSEIF cls = IDCMP_RAWKEY
+          IF k < $60    -> bare qualifiers keep the picture up
+            IF qual AND IEQUALIFIER_CONTROL
+              -> Ctrl+arrows: walk around the picture (his ask) - a
+              -> quarter of the visible window per step, any zoom
+              step := Div(Mul(sw, dtden(zq)), Mul(dtnum(zq), 4))
+              IF k = RK_RIGHT
+                panx := panx + step
+              ELSEIF k = RK_LEFT
+                panx := panx - step
+              ELSEIF k = RK_DOWN
+                pany := pany + step
+              ELSEIF k = RK_UP
+                pany := pany - step
+              ENDIF
+              IF panx > bmh.width THEN panx := bmh.width
+              IF panx < (0 - bmh.width) THEN panx := 0 - bmh.width
+              IF pany > bmh.height THEN pany := bmh.height
+              IF pany < (0 - bmh.height) THEN pany := 0 - bmh.height
+              IF (k = RK_UP) OR (k = RK_DOWN) OR (k = RK_LEFT) OR (k = RK_RIGHT)
+                dtrender(bm, bmh, scr, zq, panx, pany)
+              ELSE
+                done := TRUE    -> Ctrl+other still returns
+              ENDIF
+            ELSE
+              IF tour
+                IF (k = RK_RIGHT) OR (k = RK_DOWN)
+                  r := 2
+                ELSEIF (k = RK_LEFT) OR (k = RK_UP)
+                  r := 3
+                ELSE
+                  r := 0
+                ENDIF
+              ENDIF
+              done := TRUE
+            ENDIF
+          ENDIF
+        ENDIF
+      ENDWHILE
+    ENDWHILE
+    CloseWindow(vwin)
+  ELSE
+    Delay(250)    -> no input window: hold five seconds, then return
+    IF tour THEN r := 2
+  ENDIF
+  DisposeDTObject(o)
+  CloseScreen(scr)
+  drawall()
+ENDPROC r
+
 -> view a file straight out of an ISO image: pulled into T:CFile-v
 -> (the arcviewsel scratch), sniffed, viewed, deleted. The size gate
 -> comes FIRST - a file the viewer would refuse anyway is never
@@ -7250,8 +7660,19 @@ PROC doview()
     showmsg('a CD image: Enter goes inside')
   ELSEIF ty = TY_ADF
     showmsg('a disk image: Enter mounts and goes inside')
+  ELSEIF ty = TY_MOD
+    dtcall(3, fpath, enames[i], 0)
   ELSE
-    viewfile(fpath, enames[i], 1, FALSE)
+    -> sniff shrugged: ask datatypes - a picture views as a picture,
+    -> a sound plays, anything else keeps the honest hex dump
+    ty := dtcall(0, fpath, 0, 0)
+    IF ty = GID_PICTURE
+      dtcall(1, fpath, enames[i], FALSE)
+    ELSEIF ty = GID_SOUND
+      dtcall(2, fpath, enames[i], 0)
+    ELSE
+      viewfile(fpath, enames[i], 1, FALSE)
+    ENDIF
   ENDIF
 ENDPROC
 
@@ -9276,10 +9697,19 @@ PROC doopen()
     enteriso(p, fpath)            -> Enter goes inside, like Right
   ELSEIF ty = TY_ADF
     enteradf(p, fpath)            -> Enter mounts and goes inside
+  ELSEIF ty = TY_MOD
+    dtcall(3, fpath, enames[i], 0)
   ELSEIF ty = TY_ZIP
     showmsg('zip: u unpacks it to the other pane, v lists it')
   ELSE
-    viewfile(fpath, enames[i], 1, FALSE)
+    ty := dtcall(0, fpath, 0, 0)
+    IF ty = GID_PICTURE
+      dtcall(1, fpath, enames[i], FALSE)
+    ELSEIF ty = GID_SOUND
+      dtcall(2, fpath, enames[i], 0)
+    ELSE
+      viewfile(fpath, enames[i], 1, FALSE)
+    ENDIF
   ENDIF
 ENDPROC
 
@@ -10415,6 +10845,8 @@ PROC main() HANDLE
   arccommit(0)    -> flush any pane still inside a modified archive
   arccommit(1)
   daunmountall()  -> let go of every disk image we mounted
+  IF datatypesbase THEN CloseLibrary(datatypesbase)
+  IF ptreplaybase THEN CloseLibrary(ptreplaybase)
   closeui()
   IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
   dropassigns()
@@ -10516,4 +10948,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.4.1b28 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.4.1b33 (30.7.26) E build',0
