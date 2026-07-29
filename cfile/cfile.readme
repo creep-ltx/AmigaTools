@@ -152,8 +152,12 @@ THE EDITOR
   Backspace/Del join across line ends, tabs become spaces on load.
   Esc asks about saving only when something changed. n opens the
   same editor on a new file, which is created only if it is saved.
-  A line grows as long as you type it; a file is capped at 8192
-  lines, and bigger files stay view-only.
+  A line grows as long as you type it and the file grows as many
+  lines as it needs - the only limit is real memory, and running
+  out says so. The viewer streams: text and hex read through a
+  sliding window, so a multi-megabyte file opens instantly and
+  Ctrl still jumps straight to either end (ANSI art keeps its
+  whole-file load - escape state replays from the first byte).
 
 ARCHIVES
 

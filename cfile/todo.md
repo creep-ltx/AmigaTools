@@ -40,6 +40,22 @@ their numbering as 0.5bNN (historical entries below keep the
 0.4.1bNN names they wore when built). Configurable keys + user
 commands move to 0.6.
 
+**0.5 POLISH RUN (30.7.26, b43-b45, ALL GREEN):** b43 = the pointer
+hides over CFile windows (blank chip sprite, main + fallback +
+picture windows, freed at quit — the mouse does nothing here by
+charter so it shows nothing). b44 = the editor's 8192-line cap dead
+(edensure doubles the line table; the 512KB edit gate replaced by an
+honest attempt — real memory is the only wall). b45 = THE STREAMING
+VIEWER: text/hex read through a sliding 256KB window (vbrun/
+vbskipline/vbprevline translate file offsets; the run-pointer trick
+`viewrow(run-off, off+a, off, ...)` keeps every render path and the
+hex labels unchanged; one-row blits and Ctrl jumps survive) — no
+size cap; a window-sized file loads once = old behaviour byte for
+byte; ANSI keeps whole-load+cap (escape replay, stated in its
+message); big ISO members stage beside the image, not T:. Follow-up
+noted: grep/t still scans <=512KB per file (scanbuf) — the odd one
+out now.
+
 ## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
 
 **The ask (30.7.26):** `.iso` and `.adf` support. ISO read-only

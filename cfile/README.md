@@ -118,8 +118,12 @@ page and line ends, `Ctrl` = first/last line), `Enter` splits a line,
 `Esc` asks `(y)es (n)o` about saving only when something changed —
 otherwise it just closes. `n` opens the same editor on a new file,
 which is created only if it is saved. A line grows as long as you
-type it; a file is capped at 8192 lines, and bigger files stay
-view-only.
+type it and the file grows as many lines as it needs — the only
+limit is real memory, and running out says so instead of inventing
+a number. The viewer streams: text and hex read through a sliding
+window, so a multi-megabyte log or a 30MB binary opens instantly
+and `Ctrl` still jumps straight to either end (ANSI art keeps its
+whole-file load — escape state must replay from the first byte).
 
 ## Archives
 

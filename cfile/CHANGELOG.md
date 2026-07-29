@@ -35,6 +35,15 @@ archive, read-only — CFile reads the ISO 9660 structures itself, no
 mounting, no dependencies. View, copy out files and folders with the
 smooth bar, measure with `=`; write verbs refuse politely.
 
+**The caps died, and the pointer too.** The viewer streams text and
+hex through a sliding window — no more 512KB limit, a 30MB binary
+opens instantly and `Ctrl` jumps to either end (ANSI art keeps its
+whole-load; escape state replays from byte 0). The editor's
+8192-line table now grows without limit — real memory is the only
+wall, and hitting it says so. And the mouse pointer hides whenever
+a CFile window is active: the mouse does nothing here by design,
+so it shows nothing either.
+
 **Pictures, sounds and music.** `v` on a picture shows it
 full-screen through the system's datatypes — ILBM out of the box,
 GIF/JPEG/PNG/BMP on 3.2, PCX/PSD/TIFF/WebP with the WarpDT pack —

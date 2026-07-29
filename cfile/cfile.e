@@ -72,7 +72,7 @@ MODULE 'intuition/intuition','intuition/screens',
        'dos/exall','graphics/gfx',
        'datatypes','datatypes/datatypes','datatypes/datatypesclass',
        'datatypes/pictureclass','datatypes/soundclass','dos/var',
-       'exec/tasks','graphics/scale','ptreplay'
+       'exec/tasks','exec/memory','graphics/scale','ptreplay'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
@@ -80,14 +80,20 @@ CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       FINDMAX=500,    -> find: results collected before the search stops
       FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
       CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
-      EDMAXL=8192, EDLINIT=120,    -> editor: line count cap, initial
+      EDMAXL=8192, EDLINIT=120,    -> editor: INITIAL line table size
+                                   -> (grows without limit), initial
                                    -> per-line buffer (lines grow on demand,
                                    -> so there is no line-length limit)
       CMAXL=4000,    -> console scrollback, lines of 80
       MAXMEM=1500,   -> members cached when going inside one lha archive
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F, RK_HELP=$5F,
       RK_F5=$54,    -> re-read both panes
-      VIEWMAX=524288,    -> the viewers load whole files; cap at 512KB
+      VIEWMAX=524288,    -> ANSI view + grep whole-load cap (escape
+                         -> state must replay from byte 0; text/hex
+                         -> STREAM uncapped since 0.5b45)
+      VBWIN=262144,      -> the view window: 256KB slides over any file
+      VBMARGIN=4096,     -> re-center when a row starts this close to
+                         -> the window's edge (rows stay contiguous)
       TY_OTHER=0, TY_EXEC=1, TY_TEXT=2, TY_LHA=3, TY_LZX=4, TY_ZIP=5,
       TY_ANSI=6, TY_ISO=7, TY_ADF=8, TY_MOD=9, TY_DMS=10,
       ISOSEC=2048,    -> ISO9660 logical sector (the only size supported)
@@ -157,6 +163,14 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     dtss[1]:ARRAY OF stackswapstruct,
     ptreplaybase=NIL,       -> ptreplay.library, lazily opened: the
     pttried=FALSE,          -> Amiga IS a tracker - mods play native
+    mpblank=NIL,            -> 12 zeroed CHIP bytes: the blank sprite
+                            -> that hides the pointer over our windows
+                            -> (the mouse does nothing here by charter)
+    vbfh=NIL,               -> the streaming viewer (0.5b45): file
+    vbbuf=NIL:PTR TO CHAR,  -> handle, sliding window buffer, its file
+    vbstart=0, vblen=0,     -> offset + valid bytes, the file's size,
+    vbsize=0, vbcap=0,      -> and the window's allocated capacity
+                            -> (viewer is modal - never two at once)
     appliedfont[44]:STRING, wantreload=FALSE,    -> live config reload
     bulkpos=0, bulktot=0,    -> bulk view: position shown in the title
     prevname[108]:STRING,
@@ -214,6 +228,8 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     savebmarks=FALSE,       -> SAVEBOOKMARKS key: persist slots across runs
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
+    edcap=0,    -> its allocated slots: EDMAXL to start, DOUBLING
+                -> forever after (the 8192-line cap died in 0.5b44)
     edcur=0, edcol=0, edvtop=0, edxoff=0, edmod=FALSE, ednew=FALSE,
     -> "inside an archive": a third pane mode beside real-dir and the
     -> volume list. arcpath[p] holds the real .lha (empty = not inside);
@@ -2794,6 +2810,11 @@ PROC openui()
   IF win = NIL THEN Throw("UI", 'window')
   IF ownscr THEN PubScreenStatus(scr, 0)    -> console windows visit us
   rp := win.rport
+  -> hide the pointer while a CFile window is active (his ask): a
+  -> blank sprite is the classic way, ClearPointer would bring it
+  -> back. Chip RAM, allocated once, freed at quit.
+  IF mpblank = NIL THEN mpblank := AllocMem(12, MEMF_CHIP OR MEMF_CLEAR)
+  IF mpblank THEN SetPointer(win, mpblank, 1, 16, 0, 0)
   SetFont(rp, tf)
   SetDrMd(rp, RP_JAM2)
   softmask := AskSoftStyle(rp)
@@ -7084,6 +7105,71 @@ ENDPROC
 -> prefix, RectFill the tail (the space-pad Text of a full ncols is
 -> gone). Returns the NEXT offset in text mode; hex advances by 16
 -> at the caller. A row at/past EOF blanks and returns off as-is.
+-> ---- the streaming view window (0.5b45: the 512KB cap dies) -----
+-> Every offset in the viewer is a FILE offset; these helpers slide a
+-> 256KB window under them. A file that fits the window loads once -
+-> the old behaviour, byte for byte.
+
+PROC vbload(o)    -> position the window to include file offset o
+  DEF ns
+  ns := o - Shr(vbcap, 2)    -> keep backward context for prevline
+  IF ns > (vbsize - vbcap) THEN ns := vbsize - vbcap
+  IF ns < 0 THEN ns := 0
+  Seek(vbfh, ns, OFFSET_BEGINNING)
+  vblen := Read(vbfh, vbbuf, vbcap)
+  IF vblen < 0 THEN vblen := 0
+  vbstart := ns
+  vbbuf[vblen] := 0          -> the one-past peek stays safe (X3)
+ENDPROC
+
+-> pointer to the bytes at file offset o; {lenp} = contiguous count.
+-> Re-centers when o is outside, or within VBMARGIN of the edge with
+-> more file beyond it - so a row's line never splits mid-render.
+PROC vbrun(o, lenp:PTR TO LONG)
+  IF (o < 0) OR (o >= vbsize)
+    lenp[] := 0
+    RETURN vbbuf
+  ENDIF
+  IF (o < vbstart) OR (o >= (vbstart + vblen))
+    vbload(o)
+  ELSEIF (((vbstart + vblen) - o) < VBMARGIN) AND ((vbstart + vblen) < vbsize)
+    vbload(o)
+  ENDIF
+  lenp[] := (vbstart + vblen) - o
+  IF lenp[] < 0 THEN lenp[] := 0
+ENDPROC vbbuf + (o - vbstart)
+
+-> offset just past this line's LF (window-correct for any length)
+PROC vbskipline(o)
+  DEF p:PTR TO CHAR, a, i
+  WHILE o < vbsize
+    p := vbrun(o, {a})
+    IF a = 0 THEN RETURN vbsize
+    i := 0
+    WHILE (i < a) AND (p[i] <> 10)
+      i++
+    ENDWHILE
+    o := o + i
+    IF i < a THEN RETURN o + 1
+  ENDWHILE
+ENDPROC vbsize
+
+-> start of the line BEFORE offset o (the streamed prevline)
+PROC vbprevline(o)
+  DEF i, s
+  IF o <= 0 THEN RETURN 0
+  s := o - 2    -> skip the LF that ends the previous line
+  WHILE s >= 0
+    IF (s < vbstart) OR (s >= (vbstart + vblen)) THEN vbload(s)
+    i := s - vbstart
+    WHILE i >= 0
+      IF vbbuf[i] = 10 THEN RETURN vbstart + i + 1
+      i := i - 1
+    ENDWHILE
+    s := vbstart - 1
+  ENDWHILE
+ENDPROC 0
+
 PROC viewrow(buf, len, off, mode, r)
   DEF rb[204]:ARRAY OF CHAR, i, w=0, y, n
   FOR i := 0 TO ncols - 1
@@ -7150,38 +7236,63 @@ PROC viewfile(path, name, mode, bulk)
     faultmsg('cannot view')
     RETURN
   ENDIF
-  IF size > VIEWMAX
-    showmsg('file too large to view (512KB cap for now)')
-    RETURN
+  IF mode = 2
+    IF size > VIEWMAX
+      -> ANSI must replay escape state from byte 0: whole-load stays,
+      -> and no real ANSI art is half a megabyte
+      showmsg('ANSI too large to view whole (512KB)')
+      RETURN
+    ENDIF
   ENDIF
-  IF size > 0
-    IF (buf := New(size + 1)) = NIL    -> X3: the line scans and the
-                                       -> ANSI parser peek one past len
+  IF mode = 2
+    IF size > 0
+      IF (buf := New(size + 1)) = NIL    -> X3: the ANSI parser peeks
+        showmsg('not enough memory to view this file')
+        RETURN
+      ENDIF
+      IF (fh := Open(path, OLDFILE)) = NIL
+        Dispose(buf)
+        faultmsg('cannot view')
+        RETURN
+      ENDIF
+      len := Read(fh, buf, size)
+      Close(fh)
+      IF len < 0 THEN len := 0
+    ELSE
+      len := 0
+    ENDIF
+    bp := buf
+  ELSE
+    -> text/hex STREAM through the sliding window (0.5b45): no size
+    -> cap - a file that fits the window loads exactly once
+    len := size
+    vbsize := size
+    vbcap := IF size < VBWIN THEN size ELSE VBWIN
+    IF vbcap < 16 THEN vbcap := 16
+    IF (vbbuf := New(vbcap + 2)) = NIL
       showmsg('not enough memory to view this file')
       RETURN
     ENDIF
-    IF (fh := Open(path, OLDFILE)) = NIL
-      Dispose(buf)
+    IF (vbfh := Open(path, OLDFILE)) = NIL
+      Dispose(vbbuf)
+      vbbuf := NIL
       faultmsg('cannot view')
       RETURN
     ENDIF
-    len := Read(fh, buf, size)
-    Close(fh)
-    IF len < 0 THEN len := 0
-  ELSE
-    len := 0
+    vbstart := 0
+    vblen := 0
+    vbload(0)
   ENDIF
-  bp := buf
   IF mode = 0
     -> the last line belongs on the BOTTOM row: the highest top2 is
     -> the start of the final 22-line window
-    vmax := len
+    vmax := size
     FOR r := 1 TO visrows
-      IF vmax > 0 THEN vmax := prevline(buf, vmax)
+      IF vmax > 0 THEN vmax := vbprevline(vmax)
     ENDFOR
     IF vmax < 0 THEN vmax := 0
   ELSEIF mode = 1
-    vmax := Shr(len + 15, 4) - visrows
+    vmax := Shr(size + 15, 4) - visrows
     IF vmax < 0 THEN vmax := 0
     vmax := Mul(vmax, 16)
   ENDIF
@@ -7209,9 +7320,9 @@ PROC viewfile(path, name, mode, bulk)
   RectFill(rp, x0, panetop, x0 + Mul(ncols, cw) - 1,
            panetop + Mul(visrows, ch) - 1)
   IF bulktot > 0
-    StringF(mb, '\s "\s" (\d/\d) - \d bytes', mn, name, bulkpos, bulktot, len)
+    StringF(mb, '\s "\s" (\d/\d) - \d bytes', mn, name, bulkpos, bulktot, size)
   ELSE
-    StringF(mb, '\s "\s" - \d bytes', mn, name, len)
+    StringF(mb, '\s "\s" - \d bytes', mn, name, size)
   ENDIF
   promptrow(mb)
   WHILE done = FALSE
@@ -7229,11 +7340,13 @@ PROC viewfile(path, name, mode, bulk)
         rp.mask := 255
         off := top2
         FOR r := 0 TO visrows - 1
+          bp := vbrun(off, {o2})    -> o2 = contiguous bytes here
           IF mode = 1
-            viewrow(buf, len, off, 1, r)
+            viewrow(bp - off, off + o2, off, 1, r)
             off := off + 16
           ELSE
-            off := viewrow(buf, len, off, 0, r)
+            viewrow(bp - off, off + o2, off, 0, r)
+            off := vbskipline(off)
           ENDIF
         ENDFOR
       ENDIF
@@ -7310,11 +7423,7 @@ PROC viewfile(path, name, mode, bulk)
       IF mode = 1
         o2 := top2 + 16
       ELSE
-        o2 := top2
-        WHILE (o2 < len) AND (bp[o2] <> 10)    -> plain reads, safe
-          o2 := o2 + 1
-        ENDWHILE
-        o2 := o2 + 1
+        o2 := vbskipline(top2)
       ENDIF
       IF o2 <= vmax THEN top2 := o2
       pgd := pgd - 1
@@ -7326,7 +7435,7 @@ PROC viewfile(path, name, mode, bulk)
           top2 := top2 - 16
           IF top2 < 0 THEN top2 := 0
         ELSE
-          top2 := prevline(buf, top2)
+          top2 := vbprevline(top2)
         ENDIF
       ELSE
         pgd := 0
@@ -7342,26 +7451,39 @@ PROC viewfile(path, name, mode, bulk)
         u1 := otop - 16
         IF u1 < 0 THEN u1 := 0
       ELSE
-        d1 := textskip(bp, len, otop, 1)
-        u1 := IF otop > 0 THEN prevline(buf, otop) ELSE 0
+        d1 := vbskipline(otop)
+        u1 := IF otop > 0 THEN vbprevline(otop) ELSE 0
       ENDIF
       IF top2 = d1
         scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), 1, flatmask)
         IF mode = 1
-          viewrow(buf, len, top2 + Mul(16, visrows - 1), 1, visrows - 1)
+          off := top2 + Mul(16, visrows - 1)
         ELSE
-          viewrow(buf, len, textskip(bp, len, top2, visrows - 1), 0,
-                  visrows - 1)
+          off := top2
+          FOR r := 1 TO visrows - 1
+            off := vbskipline(off)
+          ENDFOR
         ENDIF
+        bp := vbrun(off, {o2})
+        viewrow(bp - off, off + o2, off, mode, visrows - 1)
       ELSEIF top2 = u1
         scrollone(x0, panetop, Mul(ncols, cw), Mul(visrows, ch), -1, flatmask)
-        viewrow(buf, len, top2, mode, 0)
+        bp := vbrun(top2, {o2})
+        viewrow(bp - top2, top2 + o2, top2, mode, 0)
       ELSE
         dirty := TRUE
       ENDIF
     ENDIF
   ENDWHILE
   IF buf THEN Dispose(buf)
+  IF vbfh
+    Close(vbfh)
+    vbfh := NIL
+  ENDIF
+  IF vbbuf
+    Dispose(vbbuf)
+    vbbuf := NIL
+  ENDIF
   IF mode = 2 THEN setlightpal()
   IF bulk = FALSE THEN drawall()    -> a bulk tour redraws at its end
 ENDPROC res2
@@ -7781,6 +7903,9 @@ PROC dtviewpic(path, name, tour)
      WA_RMBTRAP, TRUE,
      WA_IDCMP, IDCMP_VANILLAKEY OR IDCMP_RAWKEY,
      TAG_DONE, NIL])
+  IF vwin
+    IF mpblank THEN SetPointer(vwin, mpblank, 1, 16, 0, 0)
+  ENDIF
   dtrender(bm, bmh, scr, 0, 0, 0)
   IF vwin
     WHILE done = FALSE
@@ -7865,12 +7990,16 @@ PROC isoviewsel(p, sel)
   DEF nm:PTR TO CHAR, i, out[CPATHLEN]:STRING, fh, ty
   i := (p * MAXENT) + sel
   nm := enames[i]
-  IF esize[i] > VIEWMAX
-    showmsg('file too large to view (512KB cap for now)')
-    RETURN
+  -> no size cap since 0.5b45 - but WHERE the member stages still
+  -> honours the RAM lesson: small ones ride T:, big ones go to a
+  -> temp beside the image (its volume can hold them by definition)
+  IF esize[i] <= VBWIN
+    StrCopy(out, 'T:CFile-v/')
+    StrAdd(out, nm)
+  ELSE
+    StrCopy(out, isopath[p])
+    StrAdd(out, '.vtmp')
   ENDIF
-  StrCopy(out, 'T:CFile-v/')
-  StrAdd(out, nm)
   makepath(out)
   DeleteFile(out)
   IF (fh := Open(isopath[p], OLDFILE)) = NIL
@@ -8048,6 +8177,24 @@ PROC edfix()
   ENDIF
 ENDPROC fix
 
+-> room for at least `need` line slots: double the table, copy the
+-> pointers over, swap it in. FALSE only when memory itself is gone -
+-> the caller stops honestly where it stands.
+PROC edensure(need)
+  DEF nc, nl:PTR TO LONG
+  IF need <= edcap THEN RETURN TRUE
+  nc := edcap
+  IF nc < EDMAXL THEN nc := EDMAXL
+  WHILE nc < need
+    nc := nc + nc
+  ENDWHILE
+  IF (nl := New(Mul(nc, 4))) = NIL THEN RETURN FALSE
+  IF ednum > 0 THEN CopyMem(edl, nl, Mul(ednum, 4))
+  IF edl THEN Dispose(edl)
+  edl := nl
+  edcap := nc
+ENDPROC TRUE
+
 PROC edfree()
   DEF i
   IF ednum > 0
@@ -8096,13 +8243,15 @@ PROC edinsch(c)
 ENDPROC TRUE
 
 -> load for editing: LF splits, CR dropped, tabs to spaces (8-stops).
--> Lines grow to any length; only the line COUNT (8192) and whole-file
--> size (512KB) are capped. -1 = failed (message shown).
+-> Lines grow to any length, the line table doubles without limit and
+-> there is no size cap (0.5b44) - real memory is the only wall, and
+-> failure says so honestly. -1 = failed (message shown).
 PROC edload(path)
   DEF fh, buf=NIL, n, size=-1, i, c, col, s, ok=TRUE, le, k, rs,
       lock, fib:PTR TO fileinfoblock, bp:PTR TO CHAR, ln:PTR TO CHAR
   IF edl = NIL
     IF (edl := New(Mul(EDMAXL, 4))) = NIL THEN RETURN FALSE
+    edcap := EDMAXL
   ENDIF
   edfree()
   ednew := FALSE
@@ -8121,13 +8270,11 @@ PROC edload(path)
     faultmsg('cannot edit')
     RETURN FALSE
   ENDIF
-  IF size > VIEWMAX
-    showmsg('file too large to edit (512KB cap)')
-    RETURN FALSE
-  ENDIF
   IF size > 0
+    -> no size cap since 0.5b44: the only limit is real memory, and
+    -> the failure says so instead of inventing a number
     IF (buf := New(size)) = NIL
-      showmsg('not enough memory')
+      showmsg('not enough memory to load that file for editing')
       RETURN FALSE
     ENDIF
     IF (fh := Open(path, OLDFILE)) = NIL
@@ -8199,8 +8346,8 @@ PROC edload(path)
       ENDIF
       IF ok
         IF le < n                    -> the LF opens the next line
-          IF ednum >= EDMAXL
-            showmsg('too many lines to edit (8192 cap)')
+          IF edensure(ednum + 1) = FALSE
+            showmsg('not enough memory for more lines')
             ok := FALSE
           ELSEIF (s := String(EDLINIT)) = NIL
             showmsg('not enough memory')
@@ -8306,7 +8453,7 @@ PROC editfile(path, name)
           done2 := TRUE
         ENDIF
       ELSEIF code = 13    -> split the line at the cursor
-        IF ednum < EDMAXL
+        IF edensure(ednum + 1)
           l := EstrLen(edl[edcur]) - edcol    -> the tail after the cursor
           IF l < EDLINIT THEN l := EDLINIT
           IF (nl := String(l)) <> NIL
@@ -11140,6 +11287,10 @@ PROC main() HANDLE
   daunmountall()  -> let go of every disk image we mounted
   IF datatypesbase THEN CloseLibrary(datatypesbase)
   IF ptreplaybase THEN CloseLibrary(ptreplaybase)
+  IF mpblank
+    FreeMem(mpblank, 12)
+    mpblank := NIL
+  ENDIF
   closeui()
   IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
   dropassigns()
@@ -11241,4 +11392,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b42 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.5b45 (30.7.26) E build',0
