@@ -47,7 +47,9 @@ hex through a sliding window — no more 512KB limit, a 30MB binary
 opens instantly and `Ctrl` jumps to either end (ANSI art keeps its
 whole-load; escape state replays from byte 0). The editor's
 8192-line table now grows without limit — real memory is the only
-wall, and hitting it says so. And the mouse pointer hides whenever
+wall, and hitting it says so. The viewer also learned to search:
+`/` prompts, `n` next, `p` previous, case-insensitive, wrapping
+once with a notice — in hex mode too. And the mouse pointer hides whenever
 a CFile window is active: the mouse does nothing here by design,
 so it shows nothing either.
 

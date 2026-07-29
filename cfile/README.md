@@ -124,6 +124,10 @@ a number. The viewer streams: text and hex read through a sliding
 window, so a multi-megabyte log or a 30MB binary opens instantly
 and `Ctrl` still jumps straight to either end (ANSI art keeps its
 whole-file load — escape state must replay from the first byte).
+And the viewer searches: `/` prompts for text, `n` finds the next
+match and `p` the previous, case-insensitively, wrapping once with
+a notice — in hex mode too, so a string can be hunted through a
+binary of any size.
 
 ## Archives
 

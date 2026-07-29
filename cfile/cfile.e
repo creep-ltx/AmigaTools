@@ -7243,6 +7243,71 @@ PROC vbprevline(o)
   ENDWHILE
 ENDPROC 0
 
+-> case-insensitive streamed search: first match at offset >= from,
+-> or -1. The needle arrives pre-lowered; only the haystack byte is
+-> folded in the inner loop. vbrun's margin guarantees a window run
+-> always holds a whole needle except at true EOF.
+PROC vbfind(needle:PTR TO CHAR, nl, from)
+  DEF p:PTR TO CHAR, a, o, i, j, c, lim, ok
+  IF nl < 1 THEN RETURN -1
+  o := from
+  IF o < 0 THEN o := 0
+  WHILE o <= (vbsize - nl)
+    p := vbrun(o, {a})
+    IF a < nl THEN RETURN -1
+    lim := a - nl
+    i := 0
+    WHILE i <= lim
+      c := p[i]
+      IF (c >= "A") AND (c <= "Z") THEN c := c + 32
+      IF c = needle[0]
+        j := 1
+        ok := TRUE
+        WHILE (j < nl) AND ok
+          c := p[i + j]
+          IF (c >= "A") AND (c <= "Z") THEN c := c + 32
+          IF c <> needle[j] THEN ok := FALSE
+          j++
+        ENDWHILE
+        IF ok THEN RETURN o + i
+      ENDIF
+      i++
+    ENDWHILE
+    o := o + lim + 1
+  ENDWHILE
+ENDPROC -1
+
+-> the same, backwards: last match at offset <= from, or -1
+PROC vbfindb(needle:PTR TO CHAR, nl, from)
+  DEF p:PTR TO CHAR, i, j, c, hi, ok, ws
+  IF nl < 1 THEN RETURN -1
+  IF from > (vbsize - nl) THEN from := vbsize - nl
+  WHILE from >= 0
+    IF (from < vbstart) OR (from >= (vbstart + vblen)) THEN vbload(from)
+    p := vbbuf
+    hi := from - vbstart
+    IF hi > (vblen - nl) THEN hi := vblen - nl
+    i := hi
+    WHILE i >= 0
+      c := p[i]
+      IF (c >= "A") AND (c <= "Z") THEN c := c + 32
+      IF c = needle[0]
+        j := 1
+        ok := TRUE
+        WHILE (j < nl) AND ok
+          c := p[i + j]
+          IF (c >= "A") AND (c <= "Z") THEN c := c + 32
+          IF c <> needle[j] THEN ok := FALSE
+          j++
+        ENDWHILE
+        IF ok THEN RETURN vbstart + i
+      ENDIF
+      i := i - 1
+    ENDWHILE
+    from := vbstart - 1
+  ENDWHILE
+ENDPROC -1
+
 PROC viewrow(buf, len, off, mode, r)
   DEF rb[204]:ARRAY OF CHAR, i, w=0, y, n
   FOR i := 0 TO ncols - 1
@@ -7294,7 +7359,8 @@ PROC viewfile(path, name, mode, bulk)
   DEF buf=NIL, bp:PTR TO CHAR, len, size, fh, top2=0, r, off, o2,
       class, code, qual, done=FALSE, dirty=TRUE, res2=0,
       mb[120]:STRING, mn:PTR TO CHAR, i, otop, d1, u1,
-      pgd, lock, fib:PTR TO fileinfoblock, nrows2=0, maxtop=0, vmax=0
+      pgd, lock, fib:PTR TO fileinfoblock, nrows2=0, maxtop=0, vmax=0,
+      sneedle[44]:STRING, slow[44]:STRING, smatch=-1, hit, back
   -> size via the pane data is stale-proof enough, but re-examine to
   -> be safe for files just written
   size := -1
@@ -7437,6 +7503,63 @@ PROC viewfile(path, name, mode, bulk)
         done := TRUE
       ELSEIF code = 32
         pgd := visrows - 1
+      ELSEIF ((code = "/") OR (code = "n") OR (code = "N") OR (code = "p") OR (code = "P")) AND (mode <> 2)
+        -> /-search (0.5b47), less-style: / prompts, n next, N back,
+        -> case-insensitive, streamed - a 30MB log is searchable.
+        -> Wraps once and says so; text lands on the hit's line, hex
+        -> on its 16-byte row.
+        back := FALSE
+        IF code = "/"
+          IF lineinput('find: ', sneedle, 40, TRUE) = 0 THEN SetStr(sneedle, 0)
+          smatch := -1
+        ELSEIF (code = "p") OR (code = "P")
+          back := TRUE    -> n = next, p = previous, nothing else
+        ENDIF
+        IF EstrLen(sneedle) = 0
+          promptrow('no search - / starts one')
+        ELSE
+          StrCopy(slow, sneedle)
+          FOR i := 0 TO EstrLen(slow) - 1
+            IF (slow[i] >= "A") AND (slow[i] <= "Z") THEN slow[i] := slow[i] + 32
+          ENDFOR
+          promptrow('searching...')
+          IF back
+            hit := vbfindb(slow, EstrLen(slow),
+                           IF smatch >= 0 THEN smatch - 1 ELSE top2)
+            IF hit = -1
+              hit := vbfindb(slow, EstrLen(slow), vbsize)    -> wrap
+              IF hit >= 0 THEN mn := 'find (wrapped)' ELSE mn := 'find'
+            ENDIF
+          ELSE
+            hit := vbfind(slow, EstrLen(slow),
+                          IF smatch >= 0 THEN smatch + 1 ELSE top2)
+            IF hit = -1
+              hit := vbfind(slow, EstrLen(slow), 0)          -> wrap
+              IF hit >= 0 THEN mn := 'find (wrapped)' ELSE mn := 'find'
+            ENDIF
+          ENDIF
+          IF hit >= 0
+            smatch := hit
+            IF mode = 1
+              o2 := hit AND $FFFFFFF0
+            ELSE
+              o2 := vbprevline(hit + 1)
+            ENDIF
+            IF o2 > vmax THEN o2 := vmax
+            IF o2 <> top2
+              top2 := o2
+              dirty := TRUE
+            ENDIF
+            StringF(mb, '\s "\s" - byte \d  (n = next, p = previous)',
+                    mn, sneedle, hit)
+            promptrow(mb)
+          ELSE
+            StringF(mb, '"\s" not found', sneedle)
+            promptrow(mb)
+          ENDIF
+          mn := 'view'
+          IF mode = 1 THEN mn := 'hex'
+        ENDIF
       ENDIF
     ELSEIF class = IDCMP_RAWKEY
       IF code < $80
@@ -11009,6 +11132,7 @@ PROC helpscreen()
             'v .......... view text/ANSI/hex/pictures, play sounds/mods',
             '             (pictures: + - zoom, Ctrl+arrows walk around)',
             '             (marked tour: Right/Down next, Left/Up back)',
+            '             (in the viewer: / find, n next, p previous)',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
             'Space ...... mark/unmark (ops take the marks if any)',
@@ -11487,4 +11611,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b46 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.5b47 (30.7.26) E build',0

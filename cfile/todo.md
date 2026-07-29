@@ -54,7 +54,13 @@ size cap; a window-sized file loads once = old behaviour byte for
 byte; ANSI keeps whole-load+cap (escape replay, stated in its
 message); big ISO members stage beside the image, not T:. Follow-up
 noted: grep/t still scans <=512KB per file (scanbuf) — the odd one
-out now.
+out now. **b47 (GREEN): /-SEARCH IN THE VIEWER — less-style, n
+next / p previous (his key bikeshed settled: exactly those two,
+no aliases), case-insensitive, streamed via vbfind/vbfindb (the
+needle pre-lowered, only haystack bytes folded in the loop),
+wraps once with a notice, text lands the hit's line, hex its
+16-byte row, ANSI sits out; help knew from birth (the habit
+works).**
 
 ## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
 
