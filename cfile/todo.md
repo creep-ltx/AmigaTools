@@ -62,6 +62,49 @@ wraps once with a notice, text lands the hit's line, hex its
 16-byte row, ANSI sits out; help knew from birth (the habit
 works).**
 
+**b48-b49 (31.7.26, b48 BOOT-GREEN — "Yes, it's working", both the
+sidecar and the select-the-.info-itself roads; his first boot ran
+the pre-fix binary and re-proved why the fix mattered. b49
+BOOT-GREEN on lha same day: "copied in/out of lha. icon followed."
+lzx rides the identical road but has not had its own pass) — built
+away from the desktop:** the laptop grew a twin dev environment first
+(E-VO 3.9.4 + vamos via amitools; `ecompile`/`vamos` wrappers in
+~/.local/bin; parity PROVEN by an md5-identical rebuild of the
+committed b47 binary; the trap for the record: the E runtime's
+startup opens intuition AND graphics, which vamos must serve as
+fake libs or every E binary exits silently before main). b48 = THE
+i WINDOW LEARNS WHAT IT SEES: the box grows to 12 rows and adds
+`type:` (the file named by its datatype, "jpeg (picture)" style -
+stage A of the datatypes plan, identification only, the sniff
+stays the verbs' truth; new dtcall op 4 so recognition runs on the
+fat stack) and the DOpus-style icon rows - `icon:` type, `tool:`
+default tool, `tooltypes:` count with `t` paging each one out
+(icon.library opened lazily like datatypes, absent = the rows say
+so; ? and the header comment know). His review question ("does it
+really recognize ALL icon types?") found the gap same day: the WB
+type constants were verified 1..8 under vamos, but WBDISK was
+UNREACHABLE - a disk.info has no base file to select, and b48 read
+icons only as sidecars. Fixed before boot: selecting a .info entry
+ITSELF now shows THAT icon's info (base = name minus suffix), which
+also covers orphan icons. b49 = ICONS RIDE THROUGH
+ARCHIVES: arcsideout/arcsidein/arcsideindirect carry `<name>.info`
+on copy/move out of AND into lha/lzx, all three roads (out,
+deferred in, direct in), silent best-effort like the filesystem
+rule; the marked file+icon pair is deduped via markednodup in
+every pick loop INCLUDING the pre-scans (so the bar total matches
+what actually transfers); a move flags/deletes the icon member
+like its file. Follow-ups, stated: Del/rename INSIDE an archive
+still leave icon members behind; ISO copy-out does not carry
+`.info` members yet; an uncommitted (staged) icon member cannot
+extract out until the archive commits (best-effort shrugs).
+
+**b50 (31.7.26, BOOT-GREEN same day — "Works as intended."):
+DIRECTORY HISTORY** — designed in conversation, his shape
+confirmed twice ("file view replaced by path histories, walk,
+Enter" and "h again closes and returns"). Details under the
+Navigation item below. Compile-gated on the laptop, boot-proven
+on his machine.
+
 ## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
 
 **The ask (30.7.26):** `.iso` and `.adf` support. ISO read-only
@@ -295,9 +338,20 @@ keyboard program by design (DOpus is for mouse users).
       like the other keys (`configensure` appends it to existing configs).
 - [x] **Go-to-path** — DONE (shipped) — `g` opens a prompt; type a path, the active pane
       jumps there (Lock it first; error if it won't open).
-- [ ] **Directory history** — back/forward through visited dirs. LOW
-      prio. **The `h` key is reserved for it since 0.4.1b27** (30.7.26,
-      his call): help answers only to `?` and the Help key now.
+- [x] **Directory history** — DONE 31.7.26 = 0.5b50, BOOT-GREEN
+      same day ("Works as intended"), designed together: `h` shows the ACTIVE
+      pane's trail in the findlist surface (most-recent-first,
+      current dir excluded), Enter jumps via gotopath, **h again or
+      Esc closes unchanged (his call: h toggles)**. Per-pane ring of
+      HISTMAX=20 real dirs, move-to-front dedup (nccmp - Amiga paths
+      are case-insensitive), recorded in readpane (the funnel), so
+      F5/auto-refresh re-reads are no-ops. The bookmark rule holds:
+      container interiors and mounted-image volumes never recorded,
+      the dir you dove FROM is (it was recorded on arrival).
+      Session-only. Browser-style back/forward stepping DECIDED
+      AGAINST for now (blind two-key stepping vs the visible list;
+      0.6 configurable keys could bind a direct "back" later).
+      **The `h` key was reserved for this since 0.4.1b27.**
 
 ### Search
 
@@ -365,8 +419,11 @@ keyboard program by design (DOpus is for mouse users).
 - [ ] **Editor find / replace + goto-line + block copy-paste** — the
       built-in editor is cursor/insert/split/join only. LOW prio, but yes
       eventually.
-- [ ] **DOpus-style icon info** — icon type, default tool, tooltypes in the
-      `i` window. (Deferred since 0.1.)
+- [x] **DOpus-style icon info** — DONE 31.7.26 = 0.5b48 (boot test
+      pending) — icon type, default tool, tooltypes (`t` pages them)
+      in the `i` window, read via lazily-opened icon.library.
+      Display-only; editing the default tool/tooltypes stays future
+      (PutDiskObject is how icons get mangled — not without a reason).
 
 ## 0.3b3 — deferred archive writes (done)
 
@@ -458,8 +515,9 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
 - [x] **.info sidecars** — done. `ICONS ON` (default) makes
       copy/move/delete/rename carry a file or drawer's `<name>.info`
       along; a file and its icon both marked is handled once (infodup).
-      `ICONS OFF` restores the old behaviour. Filesystem ops only for
-      now — archive copy/move does not carry sidecars yet.
+      `ICONS OFF` restores the old behaviour. 0.5b49 (31.7.26, boot
+      test pending) extended it to lha/lzx copy/move in AND out;
+      still not carried: Del/rename inside an archive, ISO copy-out.
 - [x] **`s` sort options** — done. `s` picks name/size/date or
       reverse; both panes re-sort in place (marks and cursor kept),
       dirs stay first, size default largest-first and date newest-first.
@@ -549,9 +607,10 @@ Follow-ups (batching done in 0.3b3; lzx/zip is the b4 roadmap above):
       sniff TY_MOD (.mod suffix OR mod. prefix + the magic at 1080:
       M.K./M!K!/xCHN/FLTx), ptreplay.library (in his Libs:, module
       in emodules) PtLoadModule/PtPlay/PtStop/PtUnloadModule, any
-      key stops.** Later: `i` names files by datatype (stage A),
-      sound/mod in the marked tour, truecolour non-JPEG road, RAW
-      sample playback, AHI for >28kHz. Feature-sized, 0.5-class.
+      key stops.** Later: sound/mod in the marked tour, truecolour
+      non-JPEG road, RAW sample playback, AHI for >28kHz. Stage A
+      (`i` names files by datatype) SHIPPED 31.7.26 = 0.5b48.
+      Feature-sized, 0.5-class.
       **b42 (GREEN @18fc9aa) closed the chapter's docs: his audit
       found the ? screen missing the tour keys, the .dms line and
       the prompt-editing keys - added; standing habit since: every

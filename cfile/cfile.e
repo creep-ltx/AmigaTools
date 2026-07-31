@@ -27,7 +27,9 @@
 ->               Enter splits, Backspace/Del join; Esc asks to save
 ->               when something changed
 ->   i           info window: size/date/comment plus the protection
-->               bits, which h/s/p/a/r/w/e/d toggle live
+->               bits, which h/s/p/a/r/w/e/d toggle live; also the
+->               file's datatype name and its icon DOpus-style
+->               (type, default tool, tooltypes - t pages them)
 ->   Space       mark/unmark the entry (marked sets make c/m/Del bulk)
 ->   c / C       copy the selection or marked set - directories
 ->               recursively - to the other pane's directory
@@ -73,12 +75,13 @@ MODULE 'intuition/intuition','intuition/screens',
        'datatypes','datatypes/datatypes','datatypes/datatypesclass',
        'datatypes/pictureclass','datatypes/soundclass','dos/var',
        'exec/tasks','exec/memory','exec/ports','dos/notify',
-       'graphics/scale','ptreplay'
+       'graphics/scale','ptreplay','icon','workbench/workbench'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
       DTCHUNK=100,    -> I7b: names snapshotted per deltree scan round
       FINDMAX=500,    -> find: results collected before the search stops
+      HISTMAX=20,     -> h: directories remembered per pane, most recent first
       FLDW=10,    -> fixed border-row status slot (widest: "500* 1023K")
       CSZW=5,     -> pane size column (widest: "1023K", "<DIR>")
       EDMAXL=8192, EDLINIT=120,    -> editor: INITIAL line table size
@@ -164,6 +167,8 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     dtss[1]:ARRAY OF stackswapstruct,
     ptreplaybase=NIL,       -> ptreplay.library, lazily opened: the
     pttried=FALSE,          -> Amiga IS a tracker - mods play native
+    iconbase=NIL,           -> icon.library, lazily opened: the i
+    icontried=FALSE,        -> window reads .info sidecars through it
     mpblank=NIL,            -> 12 zeroed CHIP bytes: the blank sprite
                             -> that hides the pointer over our windows
                             -> (the mouse does nothing here by charter)
@@ -232,6 +237,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
                                  -> the digit i (0-9).
     bmarkset[10]:ARRAY OF CHAR,  -> nonzero = that slot holds a bookmark
     savebmarks=FALSE,       -> SAVEBOOKMARKS key: persist slots across runs
+    hpath[40]:ARRAY OF LONG,     -> h history: HISTMAX String slots per
+                                 -> pane, most-recent-first (real dirs
+                                 -> only, session-only)
+    hcnt[2]:ARRAY OF LONG,       -> entries held per pane
     madeenv=FALSE, madet=FALSE,    -> assigns CFile itself created
     edl=NIL:PTR TO LONG, ednum=0,    -> the editor's line table
     edcap=0,    -> its allocated slots: EDMAXL to start, DOUBLING
@@ -327,6 +336,11 @@ PROC initbookmarks()
     IF (bmark[i] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     bmarkset[i] := 0
   ENDFOR
+  FOR i := 0 TO (2 * HISTMAX) - 1
+    IF (hpath[i] := String(CPATHLEN)) = NIL THEN Raise("MEM")
+  ENDFOR
+  hcnt[0] := 0
+  hcnt[1] := 0
 ENDPROC
 
 -> without a Startup-Sequence there is no ENV: or T:; CFile makes
@@ -2677,6 +2691,7 @@ PROC readpane(p)
   ELSE
     readdir(p)
   ENDIF
+  histpush(p)    -> the trail records real-dir arrivals (h shows it)
   renotify(p)    -> every location change funnels through here
 ENDPROC
 
@@ -5814,6 +5829,126 @@ PROC isoxfer_out(p, q, ismove, force)
   abort := FALSE
 ENDPROC
 
+-> ---- icon sidecars through archives (0.5b49) ----------------------
+-> The ICONS ON promise reaches lha/lzx: copy/move in or out carries
+-> "<name>.info" along, silent and best-effort like the filesystem
+-> roads - a missing or stubborn icon never fails the file's own op.
+
+-> carry an icon OUT: if "<member>.info" is a cached member, extract
+-> it beside the landed file as "<dfile>.info" (overwriting, the way
+-> the file itself did); a move removes the icon member like its file.
+-> A member staged this session but uncommitted extracts as nothing -
+-> lha does not have it yet - and best-effort shrugs.
+PROC arcsideout(p, member, dfile, stage, ismove)
+  DEF imember[CPATHLEN]:STRING, isfile[CPATHLEN]:STRING,
+      idfile[CPATHLEN]:STRING, cmd[700]:STRING, dstr[CPATHLEN]:STRING, res
+  IF icons = FALSE THEN RETURN FALSE
+  StrCopy(imember, member)
+  StrAdd(imember, '.info')
+  IF archasmember(p, imember) = FALSE THEN RETURN FALSE
+  StrCopy(isfile, stage)
+  StrAdd(isfile, '/')
+  StrAdd(isfile, imember)
+  makepath(isfile)
+  DeleteFile(isfile)
+  StrCopy(dstr, stage)
+  StrAdd(dstr, '/')
+  IF islzx(p)
+    StringF(cmd, 'lzx x "\s" "\s" "\s"', arcpath[p], imember, dstr)
+  ELSE
+    StringF(cmd, 'lha -M x "\s" "\s" "\s"', arcpath[p], imember, dstr)
+  ENDIF
+  res := arcrunprog(NIL, cmd)
+  DeleteFile('T:CFile-out')
+  IF (res = -1) OR abort OR (pathtype(isfile) <> 1) THEN RETURN FALSE
+  StrCopy(idfile, dfile)
+  StrAdd(idfile, '.info')
+  IF pathtype(idfile) = 1 THEN DeleteFile(idfile)
+  IF Rename(isfile, idfile) = FALSE
+    IF copyfile(isfile, idfile) = FALSE
+      DeleteFile(isfile)
+      RETURN FALSE
+    ENDIF
+    DeleteFile(isfile)
+  ENDIF
+  IF ismove
+    IF arcwrite
+      arcflagdel(p, imember, FALSE)
+    ELSEIF islzx(p)
+      lzxdelmember(arcpath[p], imember)
+    ELSE
+      arcdelmember(arcpath[p], imember)
+    ENDIF
+  ENDIF
+ENDPROC TRUE
+
+-> carry an icon IN, deferred road: a "<nm>.info" beside the source
+-> stages as "<member>.info" and joins the cache like any add; an
+-> existing icon member replaces silently (the filesystem rule: the
+-> icon's target overwrites the way the file's did)
+PROC arcsidein(p, q, nm, member, stageroot, ismove)
+  DEF isrc[CPATHLEN]:STRING, imember[CPATHLEN]:STRING,
+      isfile[CPATHLEN]:STRING, slot, st:PTR TO LONG, z:PTR TO LONG, sz
+  IF icons = FALSE THEN RETURN FALSE
+  IF isinfo(nm) THEN RETURN FALSE
+  IF sidecarof(ppath[p], nm, isrc) = FALSE THEN RETURN FALSE
+  StrCopy(imember, member)
+  StrAdd(imember, '.info')
+  StrCopy(isfile, stageroot)
+  AddPart(isfile, imember, CPATHLEN - 4)
+  SetStr(isfile, StrLen(isfile))
+  makepath(isfile)
+  IF copyfile(isrc, isfile) = FALSE THEN RETURN FALSE
+  sz := arcsizeof(isrc)
+  IF sz < 0 THEN sz := 0
+  st := amst[q]
+  z := amsz[q]
+  slot := arccacheslot(q, imember)
+  IF slot >= 0
+    IF st[slot] <> MST_ADD THEN st[slot] := MST_REPLACE
+    z[slot] := sz
+  ELSE
+    slot := arcadd(q, imember, sz)
+    IF slot >= 0 THEN st[slot] := MST_ADD
+  ENDIF
+  IF ismove THEN zap(isrc, FALSE)
+ENDPROC TRUE
+
+-> carry an icon IN, direct road: its own staged lha/lzx add run after
+-> the file's, replacing an existing icon member first (silently)
+PROC arcsideindirect(p, q, nm, member, ismove)
+  DEF isrc[CPATHLEN]:STRING, imember[CPATHLEN]:STRING,
+      isfile[CPATHLEN]:STRING, topname[CPATHLEN]:STRING,
+      cmd[700]:STRING, res
+  IF icons = FALSE THEN RETURN FALSE
+  IF isinfo(nm) THEN RETURN FALSE
+  IF sidecarof(ppath[p], nm, isrc) = FALSE THEN RETURN FALSE
+  StrCopy(imember, member)
+  StrAdd(imember, '.info')
+  arcwipe('T:CFile-a')
+  StrCopy(isfile, 'T:CFile-a/')
+  StrAdd(isfile, imember)
+  makepath(isfile)
+  IF copyfile(isrc, isfile) = FALSE THEN RETURN FALSE
+  IF archasmember(q, imember)
+    IF islzx(q) THEN lzxdelmember(arcpath[q], imember) ELSE arcdelmember(arcpath[q], imember)
+  ENDIF
+  IF EstrLen(arcsub[q]) > 0
+    firstcomp(topname, arcsub[q])
+  ELSE
+    StrCopy(topname, imember)
+  ENDIF
+  IF islzx(q)
+    StringF(cmd, 'lzx -r -e a "\s" "\s"', arcpath[q], topname)
+  ELSE
+    StringF(cmd, 'lha -M -r a "\s" "\s"', arcpath[q], topname)
+  ENDIF
+  res := arcrunprog('T:CFile-a', cmd)
+  DeleteFile('T:CFile-out')
+  IF (res = -1) OR abort THEN RETURN FALSE
+  IF ismove THEN zap(isrc, FALSE)
+ENDPROC TRUE
+
 PROC arcxfer_out(p, q, ismove, force)
   DEF b, nmark, i, pick, nm:PTR TO CHAR, member[CPATHLEN]:STRING,
       sfile[CPATHLEN]:STRING, dfile[CPATHLEN]:STRING, tname[110]:STRING,
@@ -5846,8 +5981,10 @@ PROC arcxfer_out(p, q, ismove, force)
   -> pre-scan BYTES: the bar advances by each extracted member's size, so
   -> a big member weighs more than a small one. A move's delete pass has
   -> no byte counter, so the bar just rests full while it runs.
+  -> (markednodup: a marked icon member whose base file is also marked
+  -> travels as its sidecar - out of the count, out of the loop)
   FOR i := 0 TO ecount[p] - 1
-    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    pick := IF nmark > 0 THEN markednodup(p, b + i) ELSE i = esel[p]
     IF pick
       IF edirs[b + i]
         arcmember(member, arcsub[p], enames[b + i])
@@ -5865,7 +6002,7 @@ PROC arcxfer_out(p, q, ismove, force)
   ENDIF
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
-    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    pick := IF nmark > 0 THEN markednodup(p, b + i) ELSE i = esel[p]
     IF pick AND (stop = FALSE)
       IF edirs[b + i]
         nm := enames[b + i]
@@ -5896,6 +6033,7 @@ PROC arcxfer_out(p, q, ismove, force)
                 deld := TRUE
               ENDIF
             ENDIF
+            arcsideout(p, member, dfile, stage, ismove)   -> the drawer's icon
           ELSE
             stop := TRUE
           ENDIF
@@ -5992,6 +6130,7 @@ PROC arcxfer_out(p, q, ismove, force)
                 deld := TRUE
               ENDIF
             ENDIF
+            arcsideout(p, member, dfile, stage, ismove)   -> its icon rides
           ELSE
             stop := TRUE
           ENDIF
@@ -6055,8 +6194,10 @@ PROC arcxfer_indefer(p, q, ismove, force)
   arcstage(q, stageroot)
   st := amst[q]
   z := amsz[q]
+  -> markednodup: a marked icon whose base is also marked rides as
+  -> that file's sidecar (the filesystem loops' rule, since 0.5b49)
   FOR i := 0 TO ecount[p] - 1
-    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    pick := IF nmark > 0 THEN markednodup(p, b + i) ELSE i = esel[p]
     IF pick AND (stop = FALSE)
       nm := enames[b + i]
       arcmember(member, arcsub[q], nm)
@@ -6071,6 +6212,7 @@ PROC arcxfer_indefer(p, q, ismove, force)
           arccachetree(q, sfile, member, 0)  -> and everything inside it
           ndone := ndone + 1
           IF ismove THEN arcwipe(src)
+          arcsidein(p, q, nm, member, stageroot, ismove)   -> its icon
         ELSE
           IF abort = FALSE THEN faultmsg('could not stage the folder')
           stop := TRUE    -> cancelled: the source tree is never dropped
@@ -6112,6 +6254,7 @@ PROC arcxfer_indefer(p, q, ismove, force)
             ENDIF
             ndone := ndone + 1
             IF ismove THEN zap(src, FALSE)
+            arcsidein(p, q, nm, member, stageroot, ismove)   -> its icon
           ELSE
             stop := TRUE
           ENDIF
@@ -6155,8 +6298,10 @@ PROC arcxfer_in(p, q, ismove, force)
   -> pre-scan BYTES: the add bar advances by each added member's size
   statbytes := 0
   statfiles := 0
+  -> (markednodup here and below: a marked icon whose base is also
+  -> marked rides as that file's sidecar, not as its own add)
   FOR i := 0 TO ecount[p] - 1
-    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    pick := IF nmark > 0 THEN markednodup(p, b + i) ELSE i = esel[p]
     IF pick
       IF edirs[b + i]
         buildfull(src, ppath[p], enames[b + i])
@@ -6176,7 +6321,7 @@ PROC arcxfer_in(p, q, ismove, force)
   ENDIF
   IF total > 1 THEN progshow(total)
   FOR i := 0 TO ecount[p] - 1
-    pick := IF nmark > 0 THEN emark[b + i] <> 0 ELSE i = esel[p]
+    pick := IF nmark > 0 THEN markednodup(p, b + i) ELSE i = esel[p]
     IF pick AND (stop = FALSE)
       IF edirs[b + i]
         nm := enames[b + i]
@@ -6217,6 +6362,7 @@ PROC arcxfer_in(p, q, ismove, force)
           added := TRUE
           ndone := ndone + 1
           IF ismove THEN arcwipe(src)    -> move: drop the source tree
+          arcsideindirect(p, q, nm, member, ismove)   -> its icon
         ENDIF
       ELSE
         nm := enames[b + i]
@@ -6277,6 +6423,7 @@ PROC arcxfer_in(p, q, ismove, force)
               added := TRUE
               ndone := ndone + 1
               IF ismove THEN zap(src, FALSE)
+              arcsideindirect(p, q, nm, member, ismove)   -> its icon
             ENDIF
           ELSE
             stop := TRUE
@@ -6760,6 +6907,33 @@ ENDPROC
 
 -> ---- the info/protect window ---------------------------------------
 
+-> icon.library, the i window's .info reader - lazily opened like
+-> datatypes; absent = the icon rows say so, all else works
+PROC iconopen()
+  IF iconbase = NIL
+    IF icontried = FALSE
+      icontried := TRUE
+      iconbase := OpenLibrary('icon.library', 33)
+    ENDIF
+  ENDIF
+ENDPROC iconbase
+
+-> a diskobject type as the word DOpus would use
+PROC wbtypename(t)
+  DEF s
+  SELECT t
+    CASE WBDISK;    s := 'disk'
+    CASE WBDRAWER;  s := 'drawer'
+    CASE WBTOOL;    s := 'tool'
+    CASE WBPROJECT; s := 'project'
+    CASE WBGARBAGE; s := 'trashcan'
+    CASE WBDEVICE;  s := 'device'
+    CASE WBKICK;    s := 'kickstart'
+    CASE WBAPPICON; s := 'appicon'
+    DEFAULT;        s := 'unknown'
+  ENDSELECT
+ENDPROC s
+
 -> one line inside the info box, padded to the full 31-cell interior
 PROC infline(xx, yy, row, s)
   DEF l
@@ -6790,13 +6964,19 @@ ENDPROC
 
 -> i: a floating window (exact footprint, like the progress box) with
 -> the entry's details; h/s/p/a/r/w/e/d toggle the protection bits
--> live via SetProtection, Esc closes
+-> live via SetProtection, Esc closes. Since 0.5b48 it also names the
+-> file by its datatype (stage A: identification only, the sniff
+-> stays the verbs' truth) and reads the .info sidecar DOpus-style:
+-> icon type, default tool, tooltypes (t pages through them)
 PROC infowindow()
   DEF p, i, xx, yy, r, k, mask, isdir, done=FALSE, changed,
       fpath[310]:STRING, lock=NIL, fib=NIL:PTR TO fileinfoblock,
       dtb[26]:ARRAY OF CHAR, dt:PTR TO datetime,
       db[20]:ARRAY OF CHAR, tb[20]:ARRAY OF CHAR,
-      fl[10]:STRING, cmt[84]:STRING, ln[40]:STRING, cbuf[84]:STRING
+      fl[10]:STRING, cmt[84]:STRING, ln[120]:STRING, cbuf[84]:STRING,
+      tyb[40]:STRING, ipath[330]:STRING, dob=NIL:PTR TO diskobject,
+      ntt=0, tti=0, tts=NIL:PTR TO LONG, dtool:PTR TO CHAR,
+      ibase[120]:STRING, hasicon=FALSE
   p := active
   IF inarchive(p) OR iniso(p)
     showmsg('file info is not available inside an archive yet')
@@ -6838,18 +7018,41 @@ PROC infowindow()
   ENDIF
   StrCopy(cmt, fib.comment)
   FreeDosObject(DOS_FIB, fib)
-  -> the box: 8 rows, borders from the progress art (same width)
+  -> what the file IS, per datatypes (identification costs a beat of
+  -> disk, done before any drawing); absent library = "-"
+  IF dtcall(4, fpath, tyb, 0) = FALSE THEN StrCopy(tyb, '-')
+  -> which icon to read: the entry's own sidecar - or the entry
+  -> ITSELF when it is a .info (the only road to a disk.info, whose
+  -> base "disk" is no file anyone can select; orphan icons too).
+  -> GetDiskObject wants the path WITHOUT the .info suffix.
+  IF isinfo(enames[i])
+    infobase(enames[i], ibase)
+    buildfull(ipath, ppath[p], ibase)
+    hasicon := TRUE
+  ELSEIF sidecarof(ppath[p], enames[i], ipath)
+    StrCopy(ipath, fpath)
+    hasicon := TRUE
+  ENDIF
+  IF hasicon
+    IF iconopen() THEN dob := GetDiskObject(ipath)
+    IF dob
+      IF (tts := dob.tooltypes)
+        WHILE tts[ntt] DO ntt++
+      ENDIF
+    ENDIF
+  ENDIF
+  -> the box: 12 rows, borders from the progress art (same width)
   xx := x0 + (((ncols - 33) / 2) * cw)
-  yy := top + (((nrows / 2) - 4) * ch)
+  yy := top + (((nrows / 2) - 6) * ch)
   SetAPen(rp, txtpen)
   SetBPen(rp, 0)
   Move(rp, xx, yy + baseline)
   Text(rp, {progart}, 33)
-  FOR r := 1 TO 6
+  FOR r := 1 TO 10
     Move(rp, xx, yy + (r * ch) + baseline)
     Text(rp, {progart} + 33, 33)
   ENDFOR
-  Move(rp, xx, yy + (7 * ch) + baseline)
+  Move(rp, xx, yy + (11 * ch) + baseline)
   Text(rp, {progart} + 66, 33)
   infline(xx, yy, 1, enames[i])
   IF isdir
@@ -6866,7 +7069,35 @@ PROC infowindow()
     StrCopy(ln, 'comment: -')
   ENDIF
   infline(xx, yy, 5, ln)
-  infline(xx, yy, 6, 'hsparwed=bits c=note Esc=close')
+  StringF(ln, 'type: \s', tyb)
+  infline(xx, yy, 6, ln)
+  IF dob
+    StringF(ln, 'icon: \s', wbtypename(dob.type))
+    infline(xx, yy, 7, ln)
+    dtool := dob.defaulttool
+    IF dtool
+      IF dtool[0] THEN StringF(ln, 'tool: \s', dtool) ELSE StrCopy(ln, 'tool: -')
+    ELSE
+      StrCopy(ln, 'tool: -')
+    ENDIF
+    infline(xx, yy, 8, ln)
+    IF ntt > 0
+      StringF(ln, 'tooltypes: \d', ntt)
+    ELSE
+      StrCopy(ln, 'tooltypes: -')
+    ENDIF
+    infline(xx, yy, 9, ln)
+  ELSE
+    -> no icon at all = a plain "-"; one we could not read says why
+    IF hasicon
+      infline(xx, yy, 7, IF iconbase THEN 'icon: (unreadable)' ELSE 'icon: (needs icon.library)')
+    ELSE
+      infline(xx, yy, 7, 'icon: -')
+    ENDIF
+    infline(xx, yy, 8, 'tool: -')
+    infline(xx, yy, 9, 'tooltypes: -')
+  ENDIF
+  infline(xx, yy, 10, 'hsparwed=bits c=note t=tt Esc')
   REPEAT
     flagstr(fl, mask)
     StringF(ln, 'flags: \s', fl)
@@ -6922,6 +7153,14 @@ PROC infowindow()
     ELSEIF (k = "d") OR (k = "D")
       mask := Eor(mask, FIBF_DELETE)
       changed := TRUE
+    ELSEIF (k = "t") OR (k = "T")
+      -> page through the tooltypes on their own row, wrapping
+      IF ntt > 0
+        StringF(ln, 'tt \d/\d: \s', tti + 1, ntt, tts[tti])
+        infline(xx, yy, 9, ln)
+        tti++
+        IF tti >= ntt THEN tti := 0
+      ENDIF
     ENDIF
     IF changed
       IF SetProtection(fpath, mask) = FALSE
@@ -6930,6 +7169,7 @@ PROC infowindow()
       ENDIF
     ENDIF
   UNTIL done
+  IF dob THEN FreeDiskObject(dob)
   drawall()
   IF msgup THEN remsg()
 ENDPROC
@@ -7841,7 +8081,8 @@ ENDPROC datatypesbase
 -> quietly under them (his boot find: everything hex-viewed until a
 -> `stack 65536` shell proved why). StackSwap must balance inside
 -> ONE function, so this is a dispatcher, not a pair of helpers.
--> op: 0 = group(a), 1 = viewpic(a, b, c), 2 = playsound(a, b)
+-> op: 0 = group(a), 1 = viewpic(a, b, c), 2 = playsound(a, b),
+-> 3 = playmod(a, b), 4 = name(a, b)
 PROC dtcall(op, a, b, c)
   DEF r=0, ss:PTR TO stackswapstruct
   IF dtstack = NIL
@@ -7861,6 +8102,8 @@ PROC dtcall(op, a, b, c)
     r := dtplaysound(a, b)
   ELSEIF op = 3
     r := dtplaymod(a, b)
+  ELSEIF op = 4
+    r := dtname(a, b)
   ENDIF
   StackSwap(ss)
 ENDPROC r
@@ -7934,6 +8177,36 @@ PROC dtplaysound(path, name)
   DisposeDTObject(o)
   drawpaths()
 ENDPROC 0
+
+-> the datatype's own name for a file, "jpeg (picture)" style - stage
+-> A of the datatypes plan: identification serves the i window; the
+-> hand-rolled sniff stays the verbs' dispatch truth
+PROC dtname(path, dst)
+  DEF lock, dtn:PTR TO datatype, hdr:PTR TO datatypeheader, w, g
+  IF dtopen() = NIL THEN RETURN FALSE
+  IF (lock := Lock(path, SHARED_LOCK)) = NIL THEN RETURN FALSE
+  IF (dtn := ObtainDataTypeA(DTST_FILE, lock, NIL)) = NIL
+    UnLock(lock)
+    RETURN FALSE
+  ENDIF
+  hdr := dtn.header
+  g := hdr.groupid
+  SELECT g
+    CASE GID_SYSTEM;     w := 'system'
+    CASE GID_TEXT;       w := 'text'
+    CASE GID_DOCUMENT;   w := 'document'
+    CASE GID_SOUND;      w := 'sound'
+    CASE GID_INSTRUMENT; w := 'instrument'
+    CASE GID_MUSIC;      w := 'music'
+    CASE GID_PICTURE;    w := 'picture'
+    CASE GID_ANIMATION;  w := 'animation'
+    CASE GID_MOVIE;      w := 'movie'
+    DEFAULT;             w := 'other'
+  ENDSELECT
+  StringF(dst, '\s (\s)', hdr.name, w)
+  ReleaseDataType(dtn)
+  UnLock(lock)
+ENDPROC TRUE
 
 -> the file's datatype GROUP ('pict', 'soun', ...) or 0
 PROC dtgroup(path)
@@ -9619,6 +9892,70 @@ PROC dobookmark()
   ENDIF
 ENDPROC
 
+-> ---- directory history (0.5b50) ------------------------------------
+
+-> record pane p's arrival in its trail: real directories only (the
+-> bookmark rule - container interiors and DAn: volumes are lies once
+-> the archive closes or the image ejects), most-recent-first with
+-> move-to-front dedup so F5 and auto-refresh re-reads are no-ops.
+-> Called from readpane - every location change funnels through there.
+PROC histpush(p)
+  DEF base, i, f=-1, s
+  IF EstrLen(ppath[p]) = 0 THEN RETURN     -> the volume list
+  IF inarchive(p) OR iniso(p) THEN RETURN  -> container interiors
+  IF damunder(p) >= 0 THEN RETURN          -> inside a mounted image
+  IF efail[p] THEN RETURN                  -> unreadable = not a place
+  base := p * HISTMAX
+  IF hcnt[p] > 0
+    IF nccmp(hpath[base], ppath[p]) = 0 THEN RETURN   -> already the front
+  ENDIF
+  FOR i := 0 TO hcnt[p] - 1
+    IF nccmp(hpath[base + i], ppath[p]) = 0 THEN f := i
+  ENDFOR
+  IF f < 0
+    -> a new place: take the last slot (the oldest falls off when full)
+    f := hcnt[p]
+    IF f >= HISTMAX THEN f := HISTMAX - 1
+    IF hcnt[p] < HISTMAX THEN hcnt[p] := hcnt[p] + 1
+    StrCopy(hpath[base + f], ppath[p])
+  ENDIF
+  -> move slot f to the front by rotating the String pointers
+  s := hpath[base + f]
+  FOR i := f TO 1 STEP -1
+    hpath[base + i] := hpath[base + i - 1]
+  ENDFOR
+  hpath[base] := s
+ENDPROC
+
+-> h: the active pane's trail - where it has been this session, most
+-> recent first, the current directory left out. Enter jumps there
+-> through gotopath (the g/bookmark road), h again or Esc closes with
+-> everything untouched.
+PROC dohistory()
+  DEF p, res[HISTMAX]:ARRAY OF LONG, cnt=0, i, base, pick,
+      hit[CPATHLEN]:STRING
+  p := active
+  IF inarchive(p) OR iniso(p)
+    showmsg('leave the archive first (Left), then history')
+    RETURN
+  ENDIF
+  base := p * HISTMAX
+  FOR i := 0 TO hcnt[p] - 1
+    IF nccmp(hpath[base + i], ppath[p]) <> 0
+      res[cnt] := hpath[base + i]
+      cnt++
+    ENDIF
+  ENDFOR
+  IF cnt = 0
+    showmsg('no history yet - this pane has not been anywhere else')
+    RETURN
+  ENDIF
+  pick := findlist(res, cnt, TRUE, 'jumps', "h")
+  IF pick >= 0 THEN StrCopy(hit, res[pick])
+  drawall()
+  IF pick >= 0 THEN gotopath(p, hit)    -> a gone path says so itself
+ENDPROC
+
 -> one page of a results list: visrows rows from `vtop`, the selected one
 -> inverted. tail TRUE = a long row shows its END (find-file: the filename);
 -> FALSE = its START (content search: the path:line prefix).
@@ -9666,7 +10003,9 @@ ENDPROC
 -> show a results list as a selectable, scrollable page; Up/Down move
 -> (Shift = page, Ctrl = ends), Enter picks (returns the index), Esc = -1.
 -> tail controls the long-row truncation direction (see drawfindpage).
-PROC findlist(res:PTR TO LONG, cnt, tail, verb)
+-> closekey: a vanilla key (either case) that closes like Esc - so the
+-> key that opened a list can toggle it shut (h does; f/t pass 0).
+PROC findlist(res:PTR TO LONG, cnt, tail, verb, closekey)
   DEF sel=0, vtop=0, ns, class, code, qual, done=FALSE, pick=-1, hb[130]:STRING,
       osel, ovtop
   drawviewframe(TRUE)
@@ -9685,6 +10024,10 @@ PROC findlist(res:PTR TO LONG, cnt, tail, verb)
       ELSEIF code = 13
         pick := sel
         done := TRUE
+      ELSEIF closekey > 0
+        IF (code = closekey) OR (code = (closekey - $20))
+          done := TRUE
+        ENDIF
       ENDIF
     ELSEIF class = IDCMP_RAWKEY
       IF code < $80
@@ -9796,7 +10139,7 @@ PROC dofind()
     showmsg('nothing found')
     RETURN
   ENDIF
-  pick := findlist(res, cnt, TRUE, 'jumps')    -> tail: show the filename end
+  pick := findlist(res, cnt, TRUE, 'jumps', 0)    -> tail: show the filename end
   IF pick >= 0 THEN StrCopy(hit, res[pick])
   FOR i := 0 TO cnt - 1
     IF res[i] THEN DisposeLink(res[i])
@@ -9995,7 +10338,7 @@ PROC docontent()
     showmsg('no matches')
     RETURN
   ENDIF
-  pick := findlist(disp, cnt, FALSE, 'opens')    -> show the line start
+  pick := findlist(disp, cnt, FALSE, 'opens', 0)    -> show the line start
   IF pick >= 0 THEN StrCopy(hit, paths[pick])
   FOR i := 0 TO cnt - 1
     IF paths[i] THEN DisposeLink(paths[i])
@@ -11126,6 +11469,7 @@ PROC helpscreen()
             'f .......... find by name or #? pattern (recursive)',
             't .......... text search inside files (recursive grep)',
             'b + 0-9 .... set a bookmark here; a bare digit jumps to it',
+            'h .......... history: recent dirs of this pane (h closes too)',
             '/ .......... filter: type to narrow, Space marks a match',
             'F5 ......... rescan: re-read both panes from disk',
             'Enter ...... open by type: dir/archive/image, view/play, run',
@@ -11135,6 +11479,7 @@ PROC helpscreen()
             '             (in the viewer: / find, n next, p previous)',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
+            '             (shows datatype + icon info, t pages tooltypes)',
             'Space ...... mark/unmark (ops take the marks if any)',
             'a A * + .... mark all / none / invert / by pattern',
             '= / s ...... measure dir size / sort (name/size/date)',
@@ -11284,6 +11629,8 @@ PROC eventloop()
         docontent()
       ELSEIF (code = "b") OR (code = "B")    -> set a bookmark (b then a digit)
         dobookmark()
+      ELSEIF (code = "h") OR (code = "H")    -> this pane's directory history
+        dohistory()
       ELSEIF (code >= "0") AND (code <= "9")    -> jump to bookmark slot (digit)
         bookmarkjump(code - "0")
       ELSEIF code = ":"    -> a shell command in the active directory
@@ -11506,6 +11853,7 @@ PROC main() HANDLE
   ENDIF
   IF datatypesbase THEN CloseLibrary(datatypesbase)
   IF ptreplaybase THEN CloseLibrary(ptreplaybase)
+  IF iconbase THEN CloseLibrary(iconbase)
   IF mpblank
     FreeMem(mpblank, 12)
     mpblank := NIL
@@ -11611,4 +11959,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b47 (30.7.26) E build',0
+version: CHAR '$VER: CFile 0.5b50 (31.7.26) E build',0

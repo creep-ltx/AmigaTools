@@ -79,6 +79,33 @@ mounts DOS disks straight away; NDOS game rips keep the `.adf` with
 an honest message. ADF mounting needs 3.2 (and `.dms` your own
 `C:xdms`); everything else works without them.
 
+**The `i` window knows what it is looking at.** The info window now
+names the file by its datatype — "jpeg (picture)", "ascii (text)" —
+through the same descriptors the viewer uses, while CFile's own
+sniffing stays in charge of what the verbs do. And it reads the
+Workbench icon DOpus-style: a `.info` sidecar shows its icon type
+(tool, project, drawer…), the default tool, and its tooltypes —
+`t` pages through them. Selecting a `.info` file itself shows that
+icon's own info — the only road to a volume's `disk.info`. Both
+degrade gracefully when the libraries are absent.
+
+**Directory history (`h`).** Each pane remembers the last twenty
+real directories it visited. `h` shows the trail in the same
+selectable list the searches use — most recent first, the current
+directory left out — `Enter` jumps there, `h` again or `Esc` closes
+with everything untouched. Paths inside archives, CD images and
+mounted disk images are never recorded (they stop meaning anything
+once the container closes), and the trail is session-only:
+bookmarks are for places you keep, history is for where you just
+were.
+
+**Icons ride through archives.** The `ICONS ON` promise now reaches
+lha and lzx: copying or moving a file or drawer into or out of an
+archive carries its `.info` sidecar along — silent and best-effort,
+exactly like the filesystem ops — and a marked file-plus-icon pair
+is handled once. Works on both the deferred (commit-on-exit) and
+direct roads.
+
 ## 0.4 (2026-07-23)
 
 Getting around and finding things — go straight to a path, keep ten
