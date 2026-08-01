@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b23 (1.8.26)";
+    "$VER: cdiff 0.1b24 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -292,8 +292,11 @@ static void dadd(char *rel, int isdir, int st)
     if (st == 'R') gnright++;
 }
 
-/* walk both roots, sort, merge: presence decides L/R, size decides
- * S/D; both-sided dirs get no row (their children speak) */
+static int filesdiffer(const char *rel, long sz);
+
+/* walk both roots, sort, merge: presence decides L/R, then the
+ * BYTES decide S/D (size shortcut first); both-sided dirs get no
+ * row (their children speak) */
 static void scandirs(void)
 {
     SList la, lb;
@@ -327,8 +330,13 @@ static void scandirs(void)
                 dadd(la.e[i].rel, la.e[i].isdir ? 2 : 3, 'D');
                 la.e[i].rel = NULL;
             } else {
-                dadd(la.e[i].rel, 0,
-                     la.e[i].sz == lb.e[j].sz ? 'S' : 'D');
+                int st;
+                if (la.e[i].sz != lb.e[j].sz)
+                    st = 'D';
+                else
+                    st = filesdiffer(la.e[i].rel, la.e[i].sz)
+                         ? 'D' : 'S';
+                dadd(la.e[i].rel, 0, st);
                 la.e[i].rel = NULL;
             }
             i++;
@@ -337,6 +345,38 @@ static void scandirs(void)
     }
     slfree(&la);
     slfree(&lb);
+}
+
+/* same-size pair: do the BYTES differ? Chunked compare with an
+ * early-out - a differing pair usually betrays itself in the first
+ * chunk, an identical pair costs one full read at scan time (his
+ * find: samesize.txt hid behind the size verdict; the dupcheck
+ * road). Unreadable = differ, so Enter surfaces the fault. */
+static int filesdiffer(const char *rel, long sz)
+{
+    static char q1[730], q2[730], cb1[8192], cb2[8192];
+    FILE *f1, *f2;
+    size_t n1, n2;
+    int differ = 0;
+    if (sz == 0) return 0;
+    strcpy(q1, gdir1);
+    AddPart((STRPTR)q1, (STRPTR)rel, 730);
+    strcpy(q2, gdir2);
+    AddPart((STRPTR)q2, (STRPTR)rel, 730);
+    f1 = fopen(q1, "rb");
+    if (f1 == NULL) return 1;
+    f2 = fopen(q2, "rb");
+    if (f2 == NULL) { fclose(f1); return 1; }
+    for (;;) {
+        n1 = fread(cb1, 1, sizeof(cb1), f1);
+        n2 = fread(cb2, 1, sizeof(cb2), f2);
+        if (n1 != n2) { differ = 1; break; }
+        if (n1 == 0) break;
+        if (memcmp(cb1, cb2, n1) != 0) { differ = 1; break; }
+    }
+    fclose(f1);
+    fclose(f2);
+    return differ;
 }
 
 /* is the path a directory? (drives both the CLI arm and Enter) */
