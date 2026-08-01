@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b24 (1.8.26)";
+    "$VER: cdiff 0.1b25 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -438,6 +438,14 @@ static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
 
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
+/* border scrollers (his verdict: "a CLI program in a GUI") - raw
+ * prop gadgets, border-relative so resize repositions them free */
+static struct Gadget vgad, hgad;
+static struct PropInfo vpi, hpi;
+static struct Image vim, him;
+static int gadsok;
+#define HTOT 512                /* drawtext's pan range */
+
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -532,6 +540,57 @@ static int vcount(void)
 {
     return view == 0 ? gnrows : view == 1 ? gna :
            view == 2 ? gnb : ndents;
+}
+
+/* keep both knobs honest: body = visible share, pot = position */
+static void updscrollers(void)
+{
+    ULONG vbody, vpot, hbody, hpot;
+    long total = vcount(), vis = crows, top = *vtop();
+    if (!gadsok) return;
+    if (total < 1) total = 1;
+    if (vis > total) vis = total;
+    vbody = (0xFFFFUL * vis) / total;
+    vpot = total > vis ? (0xFFFFUL * top) / (total - vis) : 0;
+    hbody = (0xFFFFUL * (viscols < HTOT ? viscols : HTOT)) / HTOT;
+    hpot = HTOT > viscols ? (0xFFFFUL * hoff) / (HTOT - viscols) : 0;
+    NewModifyProp(&vgad, win, NULL, vpi.Flags, 0, vpot, 0, vbody, 1);
+    NewModifyProp(&hgad, win, NULL, hpi.Flags, hpot, 0, hbody, 0, 1);
+}
+
+/* the border scrollers: vertical right, horizontal bottom (beside
+ * the size gadget), AUTOKNOB props in the new look */
+static void addscrollers(void)
+{
+    int brw = win->BorderRight, bbh = win->BorderBottom;
+    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
+    vgad.LeftEdge = -(brw - 4);
+    vgad.TopEdge = win->BorderTop + 1;
+    vgad.Width = brw - 6;
+    vgad.Height = -(win->BorderTop + bbh + 3);
+    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
+    vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
+    vgad.GadgetType = GTYP_PROPGADGET;
+    vgad.GadgetRender = (APTR)&vim;
+    vgad.SpecialInfo = (APTR)&vpi;
+    vgad.GadgetID = 1;
+    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
+    hgad.LeftEdge = win->BorderLeft;
+    hgad.TopEdge = -(bbh - 3);
+    hgad.Width = -(win->BorderLeft + brw + 20);
+    hgad.Height = bbh - 5;
+    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
+    hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
+    hgad.GadgetType = GTYP_PROPGADGET;
+    hgad.GadgetRender = (APTR)&him;
+    hgad.SpecialInfo = (APTR)&hpi;
+    hgad.GadgetID = 2;
+    vgad.NextGadget = &hgad;
+    AddGList(win, &vgad, -1, 2, NULL);
+    RefreshGList(&vgad, win, NULL, 2);
+    gadsok = 1;
 }
 
 /* one row of the Tree tab: selection arrow, status marker, path.
@@ -700,6 +759,7 @@ static void drawpage(void)
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
         RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
+    updscrollers();
     if (ga == NULL && !gdirmode) {  /* WB start, nothing loaded -
                                      * in dirmode the Tree IS the
                                      * content (his find: the hint
@@ -788,8 +848,12 @@ static void scrollto(int target)
             for (vr = 0; vr < -d; vr++)
                 drawone(vr);
         }
+        updscrollers();
     } else
-        drawrows();
+        drawrows();             /* full path: no tabs, but the
+                                 * knob still needs the new top */
+    if (d <= -crows || d >= crows)
+        updscrollers();
 }
 
 /* next/previous hunk in the active view: rows in the overview,
@@ -1299,6 +1363,8 @@ static void keysreq(void)
         "F5 - reload both files, keep position\n"
         "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
         "Open Files with two DRAWERS - tree compare\n"
+        "mouse: scrollbars; in the Tree click selects,\n"
+        "double-click opens\n"
         "Esc (at the top) or Amiga+Q - quit");
 }
 
@@ -1411,15 +1477,19 @@ static void guimode(void)
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
-                  IDCMP_NEWSIZE,
+                  IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
+                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE,
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   /* SMART: Intuition itself restores regions a
                    * requester covered - the app is BLOCKED inside
                    * EasyRequest and cannot repaint (his find: move
                    * the requester, holes stay). Backing store is
-                   * the price, correctness is the product. */
+                   * the price, correctness is the product.
+                   * SIZEBRIGHT widens the right border for the
+                   * vertical scroller. */
                   WFLG_CLOSEGADGET | WFLG_SMART_REFRESH |
-                  WFLG_ACTIVATE | WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM,
+                  WFLG_ACTIVATE | WFLG_SIZEGADGET |
+                  WFLG_SIZEBBOTTOM | WFLG_SIZEBRIGHT,
         WA_MinWidth, 240,
         WA_MinHeight, 120,
         WA_MaxWidth, ~0,
@@ -1467,6 +1537,7 @@ static void guimode(void)
     fw = font->tf_XSize;
     fh = font->tf_YSize;
     fbase = font->tf_Baseline;
+    addscrollers();
     calcgrid();
 
     if (gdirmode) {                 /* CLI gave two directories */
@@ -1485,8 +1556,30 @@ static void guimode(void)
             UWORD code = msg->Code;
             UWORD qual = msg->Qualifier;
             WORD mx = msg->MouseX, my = msg->MouseY;
+            APTR iaddr = msg->IAddress;
+            ULONG csec = msg->Seconds, cmic = msg->Micros;
             ReplyMsg((struct Message *)msg);
             if (class == IDCMP_CLOSEWINDOW) done = 1;
+            if (class == IDCMP_GADGETDOWN ||
+                class == IDCMP_GADGETUP ||
+                class == IDCMP_MOUSEMOVE) {
+                if (iaddr == (APTR)&vgad) {
+                    long total = vcount(), vis = crows;
+                    if (total > vis)
+                        scrollto(((ULONG)vpi.VertPot *
+                                  (total - vis) + 0x7FFF) / 0xFFFF);
+                } else if (iaddr == (APTR)&hgad) {
+                    if (HTOT > viscols) {
+                        int nh = ((ULONG)hpi.HorizPot *
+                                  (HTOT - viscols) + 0x7FFF) / 0xFFFF;
+                        if (nh != hoff) {
+                            hoff = nh;
+                            drawrows();
+                            updscrollers();
+                        }
+                    }
+                }
+            }
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
@@ -1506,6 +1599,25 @@ static void guimode(void)
                     for (i = 0; i < gntabs; i++)
                         if (mx >= tabx[i] && mx < tabe[i])
                             setview(gtabvid[i]);
+                } else if (view == 3 && my >= conty &&
+                           my < conty + crows * fh) {
+                    /* Tree rows: click selects, double-click
+                     * opens (his verdict: a GUI must click) */
+                    static ULONG lsec, lmic;
+                    static int lrow = -1;
+                    int row = dtop + (my - conty) / fh;
+                    if (row < ndents) {
+                        if (row == dsel && lrow == row &&
+                            DoubleClick(lsec, lmic, csec, cmic)) {
+                            lrow = -1;
+                            opensel();
+                        } else {
+                            movesel(row);
+                            lrow = row;
+                            lsec = csec;
+                            lmic = cmic;
+                        }
+                    }
                 }
             }
             if (class == IDCMP_VANILLAKEY) {
@@ -1595,6 +1707,7 @@ static void guimode(void)
                     if (nh != hoff) {
                         hoff = nh;
                         drawrows();
+                        updscrollers();
                     }
                 }
             }
