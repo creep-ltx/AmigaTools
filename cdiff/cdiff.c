@@ -31,7 +31,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b43 (1.8.26)";
+    "$VER: cdiff 0.1b44 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -993,13 +993,6 @@ static void drawpage(void)
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
         RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
-    /* the size gadget's own left edge is a white rule; the shadow
-     * line that should sit immediately left of it is missing (his
-     * eye), so draw it - down the full height of the bottom border */
-    SetAPen(rp, pshadow);
-    s = win->Width - win->BorderRight - 1;
-    Move(rp, s, win->Height - win->BorderBottom);
-    Draw(rp, s, win->Height - 1);
     updscrollers();
     if (ga == NULL && !gdirmode) {  /* WB start, nothing loaded -
                                      * in dirmode the Tree IS the
