@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b15 (1.8.26)";
+    "$VER: cdiff 0.1b16 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -139,6 +139,213 @@ static void textmode(const DLine *a, const DLine *b,
            hunks == 1 ? "" : "s", adds, dels);
 }
 
+/* ---- directory mode --------------------------------------------- */
+/* view 3 = the Tree tab: both trees walked and merged into one
+ * list, status per entry from presence + size (S same-size, D
+ * differ, L/R one-sided; Enter runs the real diff - content truth
+ * on demand, the roadmap rule). Selection cursor, CFile-style. */
+typedef struct {
+    char *rel;                  /* path relative to both roots */
+    char st;                    /* 'S' 'D' 'L' 'R' */
+    char isdir;
+} DEnt;
+
+static int gdirmode;
+static char gdir1[310], gdir2[310];
+static DEnt *dents;
+static int ndents, dtop, dsel;
+static int gndiff, gnleft, gnright;
+
+typedef struct {
+    char *rel;
+    long sz;
+    char isdir;
+} SEnt;
+
+typedef struct {
+    SEnt *e;
+    int n, cap, oom;
+} SList;
+
+static void sladd(SList *l, const char *rel, long sz, int isdir)
+{
+    char *r;
+    if (l->oom) return;
+    if (l->n >= l->cap) {
+        int nc = l->cap ? l->cap * 2 : 64;
+        SEnt *ne = realloc(l->e, nc * sizeof(SEnt));
+        if (ne == NULL) { l->oom = 1; return; }
+        l->e = ne;
+        l->cap = nc;
+    }
+    r = malloc(strlen(rel) + 1);
+    if (r == NULL) { l->oom = 1; return; }
+    strcpy(r, rel);
+    l->e[l->n].rel = r;
+    l->e[l->n].sz = sz;
+    l->e[l->n].isdir = isdir;
+    l->n++;
+}
+
+static void slfree(SList *l)
+{
+    int i;
+    for (i = 0; i < l->n; i++) free(l->e[i].rel);
+    free(l->e);
+}
+
+/* AmigaDOS names are case-insensitive; '/' sorts children under
+ * their parent naturally */
+static int relcmp(const char *a, const char *b)
+{
+    int ca, cb;
+    for (;;) {
+        ca = (unsigned char)*a++;
+        cb = (unsigned char)*b++;
+        if (ca >= 'a' && ca <= 'z') ca -= 32;
+        if (cb >= 'a' && cb <= 'z') cb -= 32;
+        if (ca != cb || ca == 0) return ca - cb;
+    }
+}
+
+static int sentcmp(const void *pa, const void *pb)
+{
+    return relcmp(((const SEnt *)pa)->rel, ((const SEnt *)pb)->rel);
+}
+
+/* recursive collector: every file and dir under base as rel paths.
+ * Each level owns its lock and DOS-aligned fib (AllocDosObject);
+ * the shared rel buffer rolls back after each child. ExNext for
+ * now - the CFile I3 ExAll lesson applies on real media, noted in
+ * the roadmap. */
+static void walkdir(const char *base, char *rel, SList *out, int depth)
+{
+    char full[730];
+    BPTR lock;
+    struct FileInfoBlock *fib;
+    if (depth > 12 || out->oom) return;
+    strcpy(full, base);
+    if (rel[0]) AddPart((STRPTR)full, (STRPTR)rel, 730);
+    lock = Lock((STRPTR)full, SHARED_LOCK);
+    if (lock == 0) return;
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (fib && Examine(lock, fib)) {
+        while (ExNext(lock, fib)) {
+            int ol = strlen(rel);
+            if (ol + strlen((char *)fib->fib_FileName) + 2 > 400)
+                continue;
+            if (ol) {
+                rel[ol] = '/';
+                strcpy(rel + ol + 1, (char *)fib->fib_FileName);
+            } else
+                strcpy(rel, (char *)fib->fib_FileName);
+            if (fib->fib_DirEntryType > 0) {
+                sladd(out, rel, 0, 1);
+                walkdir(base, rel, out, depth + 1);
+            } else
+                sladd(out, rel, fib->fib_Size, 0);
+            rel[ol] = 0;
+        }
+    }
+    if (fib) FreeDosObject(DOS_FIB, fib);
+    UnLock(lock);
+}
+
+static void freedirs(void)
+{
+    int i;
+    for (i = 0; i < ndents; i++) free(dents[i].rel);
+    free(dents);
+    dents = NULL;
+    ndents = 0; dtop = 0; dsel = 0;
+    gndiff = gnleft = gnright = 0;
+    gdirmode = 0;
+}
+
+/* takes ownership of rel */
+static void dadd(char *rel, int isdir, int st)
+{
+    static int dcap;
+    if (rel == NULL) return;
+    if (dents == NULL) dcap = 0;
+    if (ndents >= dcap) {
+        int nc = dcap ? dcap * 2 : 128;
+        DEnt *nd = realloc(dents, nc * sizeof(DEnt));
+        if (nd == NULL) { free(rel); return; }
+        dents = nd;
+        dcap = nc;
+    }
+    dents[ndents].rel = rel;
+    dents[ndents].st = st;
+    dents[ndents].isdir = isdir;
+    ndents++;
+    if (st == 'D') gndiff++;
+    if (st == 'L') gnleft++;
+    if (st == 'R') gnright++;
+}
+
+/* walk both roots, sort, merge: presence decides L/R, size decides
+ * S/D; both-sided dirs get no row (their children speak) */
+static void scandirs(void)
+{
+    SList la, lb;
+    static char rel[420];
+    int i = 0, j = 0;
+    memset(&la, 0, sizeof(la));
+    memset(&lb, 0, sizeof(lb));
+    rel[0] = 0;
+    walkdir(gdir1, rel, &la, 0);
+    rel[0] = 0;
+    walkdir(gdir2, rel, &lb, 0);
+    qsort(la.e, la.n, sizeof(SEnt), sentcmp);
+    qsort(lb.e, lb.n, sizeof(SEnt), sentcmp);
+    while (i < la.n || j < lb.n) {
+        int c = i >= la.n ? 1 : j >= lb.n ? -1 :
+                relcmp(la.e[i].rel, lb.e[j].rel);
+        if (c < 0) {
+            dadd(la.e[i].rel, la.e[i].isdir, 'L');
+            la.e[i].rel = NULL;
+            i++;
+        } else if (c > 0) {
+            dadd(lb.e[j].rel, lb.e[j].isdir, 'R');
+            lb.e[j].rel = NULL;
+            j++;
+        } else {
+            if (la.e[i].isdir && lb.e[j].isdir) {
+                ;               /* both dirs: children carry it */
+            } else if (la.e[i].isdir != lb.e[j].isdir) {
+                dadd(la.e[i].rel, 1, 'D');   /* dir vs file clash */
+                la.e[i].rel = NULL;
+            } else {
+                dadd(la.e[i].rel, 0,
+                     la.e[i].sz == lb.e[j].sz ? 'S' : 'D');
+                la.e[i].rel = NULL;
+            }
+            i++;
+            j++;
+        }
+    }
+    slfree(&la);
+    slfree(&lb);
+}
+
+/* is the path a directory? (drives both the CLI arm and Enter) */
+static int ispathdir(const char *p)
+{
+    BPTR l;
+    struct FileInfoBlock *fib;
+    int r = 0;
+    l = Lock((STRPTR)p, SHARED_LOCK);
+    if (l == 0) return 0;
+    fib = AllocDosObject(DOS_FIB, NULL);
+    if (fib) {
+        if (Examine(l, fib) && fib->fib_DirEntryType > 0) r = 1;
+        FreeDosObject(DOS_FIB, fib);
+    }
+    UnLock(l);
+    return r;
+}
+
 /* ---- the window ------------------------------------------------- */
 
 static struct Window *win;
@@ -169,7 +376,7 @@ static int hoff;                /* horizontal column offset - text
                                  * only, the gutter stays pinned */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
 static int conty, crows;        /* content grid below the tab bar */
-static int tabx[3], tabe[3];    /* tab bar hit ranges (pixels) */
+static int tabx[4], tabe[4];    /* tab bar hit ranges (pixels) */
 static int tabsok;              /* tab bar live (files loaded) */
 static int tabh;                /* tab bar height in pixels */
 
@@ -178,6 +385,8 @@ static int tabh;                /* tab bar height in pixels */
  * tabs, not text cells), so they follow the user's WB palette */
 static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
            ptext = 1, pback = 0;
+
+static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
@@ -262,15 +471,59 @@ static void drawrow(int vr)
         drawside(x1, y, &gb[r->bl], r->bl, bar, halfw);
 }
 
-/* the active view's scroll top and extent */
+/* the active view's scroll top and extent (3 = the Tree tab) */
 static int *vtop(void)
 {
-    return view == 0 ? &gtop : view == 1 ? &ltop : &rtop;
+    return view == 0 ? &gtop : view == 1 ? &ltop :
+           view == 2 ? &rtop : &dtop;
 }
 
 static int vcount(void)
 {
-    return view == 0 ? gnrows : view == 1 ? gna : gnb;
+    return view == 0 ? gnrows : view == 1 ? gna :
+           view == 2 ? gnb : ndents;
+}
+
+/* one row of the Tree tab: selection arrow, status marker, path.
+ * One-sided and differing rows bar like changed lines do. */
+static void drawdirrow(int vr)
+{
+    int idx = dtop + vr;
+    int y = conty + vr * fh;
+    int bar;
+    char st;
+    static char pbuf[440];
+    DLine tl;
+    DEnt *d;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+    if (idx >= ndents) return;
+    d = &dents[idx];
+    bar = d->st != 'S';
+    st = d->st == 'S' ? ' ' : d->st == 'D' ? '|' :
+         d->st == 'L' ? '<' : '>';
+    if (bar) {
+        SetAPen(rp, 3);
+        RectFill(rp, x0 + 2 * fw, y,
+                 x0 + viscols * fw - 1, y + fh - 1);
+    }
+    SetAPen(rp, bar ? 2 : 1);
+    SetBPen(rp, bar ? 3 : 0);
+    Move(rp, x0 + 2 * fw, y + fbase);
+    Text(rp, (STRPTR)&st, 1);
+    sprintf(pbuf, "%.400s%s", d->rel, d->isdir ? "/" : "");
+    tl.ptr = pbuf;
+    tl.len = strlen(pbuf);
+    tl.hash = 0;
+    drawtext(x0 + 4 * fw, y, &tl, viscols - 4,
+             bar ? 2 : 1, bar ? 3 : 0);
+    if (idx == dsel) {          /* the cursor, always on the gray */
+        static const char arrow = 0xBB;    /* Latin-1 >> */
+        SetAPen(rp, 1);
+        SetBPen(rp, 0);
+        Move(rp, x0, y + fbase);
+        Text(rp, (STRPTR)&arrow, 1);
+    }
 }
 
 /* one full-width line of a single-file tab */
@@ -296,20 +549,32 @@ static void drawline(int vr)
 
 /* the tab bar: real GUI tabs (his ask) - beveled boxes in the
  * screen's DrawInfo pens, the active one filled and opening into
- * the content through a gap in the base rule */
+ * the content through a gap in the base rule. Directory mode adds
+ * a Tree tab ahead of the file three. */
 static void drawtabs(void)
 {
-    static char lab[3][40];
+    static char lab[4][40];
     int i, x, w, yr = y0 + tabh, winr = x0 + viscols * fw - 1;
+    int nt = 0, act = 0;
     SetAPen(rp, pback);
     RectFill(rp, x0, y0, winr, yr + 1);
-    tabsok = ga != NULL;
-    if (!tabsok) return;
-    strcpy(lab[0], "Both");
-    sprintf(lab[1], "%.30s", (char *)FilePart((STRPTR)gf1));
-    sprintf(lab[2], "%.30s", (char *)FilePart((STRPTR)gf2));
+    tabsok = (ga != NULL) || gdirmode;
+    if (!tabsok) { gntabs = 0; return; }
+    if (gdirmode) {
+        strcpy(lab[nt], "Tree");
+        gtabvid[nt++] = 3;
+    }
+    if (ga) {
+        strcpy(lab[nt], "Both");
+        gtabvid[nt++] = 0;
+        sprintf(lab[nt], "%.30s", (char *)FilePart((STRPTR)gf1));
+        gtabvid[nt++] = 1;
+        sprintf(lab[nt], "%.30s", (char *)FilePart((STRPTR)gf2));
+        gtabvid[nt++] = 2;
+    }
+    gntabs = nt;
     x = x0 + 2;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < nt; i++) {
         int lw = strlen(lab[i]);
         w = lw * fw + 12;               /* label + side padding */
         /* clip into the window - narrow windows must not get
@@ -325,8 +590,9 @@ static void drawtabs(void)
         }
         tabx[i] = x;
         tabe[i] = x + w;
+        if (gtabvid[i] == view) act = i;
         /* body */
-        SetAPen(rp, i == view ? pfill : pback);
+        SetAPen(rp, gtabvid[i] == view ? pfill : pback);
         RectFill(rp, x + 1, y0 + 1, x + w - 2, yr - 1);
         /* bevel: shine top+left, shadow right */
         SetAPen(rp, pshine);
@@ -337,8 +603,8 @@ static void drawtabs(void)
         Move(rp, x + w - 1, y0 + 1);
         Draw(rp, x + w - 1, yr - 1);
         /* label, centred in the tab */
-        SetAPen(rp, i == view ? pfilltext : ptext);
-        SetBPen(rp, i == view ? pfill : pback);
+        SetAPen(rp, gtabvid[i] == view ? pfilltext : ptext);
+        SetBPen(rp, gtabvid[i] == view ? pfill : pback);
         Move(rp, x + 6, y0 + 2 + fbase);
         Text(rp, (STRPTR)lab[i], lw);
         x += w + 3;
@@ -346,17 +612,17 @@ static void drawtabs(void)
     /* base rule in shine, broken open under the active tab - the
      * classic "this tab is the page you are on" statement */
     SetAPen(rp, pshine);
-    if (tabx[view] > x0) {
+    if (tabx[act] > x0) {
         Move(rp, x0, yr);
-        Draw(rp, tabx[view], yr);
+        Draw(rp, tabx[act], yr);
     }
-    Move(rp, tabe[view] - 1, yr);
+    Move(rp, tabe[act] - 1, yr);
     Draw(rp, winr, yr);
     /* the active tab's floor is its fill colour: erase the rule
      * span so page and tab read as one surface */
     SetAPen(rp, pfill);
-    Move(rp, tabx[view] + 1, yr);
-    Draw(rp, tabe[view] - 2, yr);
+    Move(rp, tabx[act] + 1, yr);
+    Draw(rp, tabe[act] - 2, yr);
 }
 
 static void drawpage(void)
@@ -364,7 +630,9 @@ static void drawpage(void)
     int vr, s, e;
     drawtabs();
     for (vr = 0; vr < crows; vr++) {
-        if (view == 0)
+        if (view == 3)
+            drawdirrow(vr);
+        else if (view == 0)
             drawrow(vr);
         else
             drawline(vr);
@@ -401,8 +669,12 @@ static void drawpage(void)
 
 static void settitle(void)
 {
-    static char t[220];
-    if (ga)
+    static char t[260];
+    if (gdirmode && view == 3)
+        sprintf(t, "cdiff: %.60s | %.60s"
+                "  (%d entries: %d differ, %d left-only, %d right-only)",
+                gdir1, gdir2, ndents, gndiff, gnleft, gnright);
+    else if (ga)
         sprintf(t, "cdiff: %.70s | %.70s  (%d rows)", gf1, gf2, gnrows);
     else if (gf1[0])
         sprintf(t, "cdiff: %.70s | (now open the right file)", gf1);
@@ -416,7 +688,9 @@ static void settitle(void)
 /* one content row of whatever view is active */
 static void drawone(int vr)
 {
-    if (view == 0)
+    if (view == 3)
+        drawdirrow(vr);
+    else if (view == 0)
         drawrow(vr);
     else
         drawline(vr);
@@ -466,11 +740,16 @@ static void scrollto(int target)
 }
 
 /* next/previous hunk in the active view: rows in the overview,
- * tagged lines in a single-file tab */
+ * tagged lines in a single-file tab, non-same entries in the Tree */
 static int nexthunk(int from, int dir)
 {
     const char *tg = view == 1 ? gatag : gbtag;
     int n = vcount(), i = from + dir;
+    if (view == 3) {
+        while (i >= 0 && i < n && dents[i].st == 'S') i += dir;
+        if (i < 0 || i >= n) return from;
+        return i;
+    }
     if (view == 0) {
         while (i > 0 && i < n && grows[i].tag != ' ') i += dir;
         while (i >= 0 && i < n && grows[i].tag == ' ') i += dir;
@@ -485,12 +764,45 @@ static int nexthunk(int from, int dir)
     return i;
 }
 
+/* move the Tree selection to `target`: keep it visible (the edge
+ * cross rides scrollto's blit), repaint just the two cursor rows */
+static void movesel(int target)
+{
+    int old = dsel;
+    if (ndents <= 0) return;
+    if (target < 0) target = 0;
+    if (target >= ndents) target = ndents - 1;
+    if (target == dsel) return;
+    dsel = target;
+    if (dsel < dtop)
+        scrollto(dsel);
+    else if (dsel >= dtop + crows)
+        scrollto(dsel - crows + 1);
+    if (old >= dtop && old < dtop + crows)
+        drawone(old - dtop);
+    if (dsel >= dtop && dsel < dtop + crows)
+        drawone(dsel - dtop);
+}
+
 /* switch tabs, keeping the position: the top row/line carries over
- * through the row list so all three views stay anchored */
+ * through the row list so all three views stay anchored. The Tree
+ * (3) keeps its own cursor - no anchor mapping to or from it. */
 static void setview(int v)
 {
     int i, row = 0;
-    if (v == view || ga == NULL) return;
+    if (v == view) return;
+    if (v == 3) {
+        if (!gdirmode) return;
+        view = 3;
+        drawpage();
+        return;
+    }
+    if (ga == NULL) return;
+    if (view == 3) {
+        view = v;
+        drawpage();
+        return;
+    }
     if (view == 0) {
         for (i = gtop; i < gnrows; i++) {
             if (v == 1 && grows[i].al >= 0) { ltop = grows[i].al; break; }
@@ -597,6 +909,8 @@ static void clamptops(void)
     if (ltop > m) ltop = m;
     m = gnb - crows; if (m < 0) m = 0;
     if (rtop > m) rtop = m;
+    m = ndents - crows; if (m < 0) m = 0;
+    if (dtop > m) dtop = m;
 }
 
 /* load gf1/gf2 and diff them; replaces whatever was loaded */
@@ -646,6 +960,8 @@ static int loaddiff(void)
     return 0;
 }
 
+/* 0 = cancelled, 1 = a file, 2 = a drawer (empty File field - the
+ * road into directory mode) */
 static int askfile(const char *title, char *dest)
 {
     if (AslBase == NULL) {
@@ -661,6 +977,8 @@ static int askfile(const char *title, char *dest)
             TAG_DONE))
         return 0;
     strcpy(dest, (char *)freq->fr_Drawer);
+    if (freq->fr_File == NULL || freq->fr_File[0] == 0)
+        return 2;
     AddPart((STRPTR)dest, freq->fr_File, 310);
     return 1;
 }
@@ -695,6 +1013,48 @@ static void refreshdiff(void)
     }
     settitle();
     drawpage();
+}
+
+/* Enter on a Tree entry: run the real diff on that file pair */
+static void opensel(void)
+{
+    DEnt *d;
+    if (!gdirmode || view != 3 || ndents <= 0) return;
+    d = &dents[dsel];
+    if (d->isdir) {
+        erq(d->st == 'D' ?
+            "a directory on one side, a file on the other" :
+            "that directory exists on one side only");
+        return;
+    }
+    if (d->st == 'L') { erq("only in the left directory"); return; }
+    if (d->st == 'R') { erq("only in the right directory"); return; }
+    strcpy(gf1, gdir1);
+    AddPart((STRPTR)gf1, (STRPTR)d->rel, 310);
+    strcpy(gf2, gdir2);
+    AddPart((STRPTR)gf2, (STRPTR)d->rel, 310);
+    if (loaddiff() == 0) {
+        calcgut();
+        view = 0;
+    } else
+        view = 3;               /* freediff reset it - stay in the Tree */
+    settitle();
+    drawpage();
+}
+
+/* Tab / Shift+Tab: cycle the LIVE views - the Tree only exists in
+ * directory mode, the file three only once a pair is loaded */
+static void cycleview(int dir)
+{
+    int v = view, i;
+    for (i = 0; i < 4; i++) {
+        v = (v + (dir > 0 ? 1 : 3)) & 3;
+        if (v == 3) {
+            if (gdirmode) break;
+        } else if (ga)
+            break;
+    }
+    setview(v);
 }
 
 /* hand a side to an editor, synchronously, then rediff in place.
@@ -847,22 +1207,25 @@ static void aboutreq(void)
      * the real version string */
     sprintf(t, "%s\n\na visual diff for AmigaOS\n"
                "patience engine, side-by-side view\n\n"
-               "by Tobias Karlsson & Claude, 2026",
+               "Tobias Karlsson, 2026",
             verstag + 6);
     centerreq(t);
 }
 
 static void keysreq(void)
 {
-    centerreq("1 / 2 / 3 - view: Both / Left / Right\n"
+    centerreq("1 / 2 / 3 / 0 - view: Both / Left / Right / Tree\n"
         "Tab / Shift+Tab - cycle views (bar is clickable)\n"
         "cursor up/down - scroll (shift = page), wheel works\n"
         "cursor left/right - scroll long lines (shift = more)\n"
         "space / b - page down / up\n"
         "t / e - top / end\n"
-        "n / p - next / previous hunk\n"
+        "n / p - next / previous hunk (or tree entry)\n"
+        "Enter - diff the selected tree entry\n"
+        "Backspace - back to the Tree\n"
         "F5 - reload both files, keep position\n"
         "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
+        "Open Files with two DRAWERS - tree compare\n"
         "Esc or q - quit");
 }
 
@@ -873,21 +1236,62 @@ static int domenu(UWORD code)   /* returns 1 = quit */
         struct MenuItem *item = ItemAddress(gmenu, c);
         if (MENUNUM(c) == 0) {
             switch (ITEMNUM(c)) {
-            case 0:             /* Open Files... - one by one, his ask */
-                if (askfile("cdiff: select the LEFT file", gf1)) {
+            case 0: {           /* Open Files... - one by one, his ask;
+                                 * two drawers = directory mode */
+                static char t1[310], t2[310];
+                int r1, r2;
+                r1 = askfile("cdiff: select the LEFT file or drawer", t1);
+                if (!r1) break;
+                r2 = askfile("cdiff: select the RIGHT file or drawer", t2);
+                if (!r2) break;
+                if (r1 == 2 && r2 == 2) {
+                    freediff();
+                    freedirs();
+                    strcpy(gdir1, t1);
+                    strcpy(gdir2, t2);
+                    gf1[0] = 0;
+                    gf2[0] = 0;
+                    gdirmode = 1;
+                    scandirs();
+                    view = 3;
                     settitle();
-                    askfile("cdiff: select the RIGHT file", gf2);
+                    drawpage();
+                } else if (r1 == 2 || r2 == 2) {
+                    erq("pick two files - or two drawers for a "
+                        "tree compare\n(a drawer = leave the File "
+                        "field empty)");
+                } else {
+                    freedirs();
+                    strcpy(gf1, t1);
+                    strcpy(gf2, t2);
+                    reload();
                 }
-                reload();
                 break;
-            case 1:             /* Open Left... */
-                if (askfile("cdiff: select the LEFT file", gf1))
+            }
+            case 1: {           /* Open Left... */
+                static char t1[310];
+                int r = askfile("cdiff: select the LEFT file", t1);
+                if (r == 2)
+                    erq("that is a drawer - Open Files... with two "
+                        "drawers runs a tree compare");
+                else if (r == 1) {
+                    strcpy(gf1, t1);
                     reload();
+                }
                 break;
-            case 2:             /* Open Right... */
-                if (askfile("cdiff: select the RIGHT file", gf2))
+            }
+            case 2: {           /* Open Right... */
+                static char t2[310];
+                int r = askfile("cdiff: select the RIGHT file", t2);
+                if (r == 2)
+                    erq("that is a drawer - Open Files... with two "
+                        "drawers runs a tree compare");
+                else if (r == 1) {
+                    strcpy(gf2, t2);
                     reload();
+                }
                 break;
+            }
             case 4:             /* Quit (3 is the bar) */
                 return 1;
             }
@@ -987,7 +1391,10 @@ static void guimode(void)
     fbase = font->tf_Baseline;
     calcgrid();
 
-    if (gf1[0] && gf2[0]) {         /* CLI gave the pair up front */
+    if (gdirmode) {                 /* CLI gave two directories */
+        scandirs();
+        view = 3;
+    } else if (gf1[0] && gf2[0]) {  /* CLI gave the pair up front */
         if (loaddiff() == 0) calcgut();
     }
     settitle();
@@ -1018,51 +1425,78 @@ static void guimode(void)
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
                 if (tabsok && my >= y0 && my <= y0 + tabh) {
                     int i;
-                    for (i = 0; i < 3; i++)
+                    for (i = 0; i < gntabs; i++)
                         if (mx >= tabx[i] && mx < tabe[i])
-                            setview(i);
+                            setview(gtabvid[i]);
                 }
             }
             if (class == IDCMP_VANILLAKEY) {
+                int tree = view == 3;
                 switch (code) {
                 case 27: case 'q': case 'Q': done = 1; break;
+                case 13: opensel(); break;             /* Enter */
+                case 8:             /* Backspace: file -> Tree */
+                    if (gdirmode && view != 3) setview(3);
+                    break;
                 case 9:             /* Tab cycles; Shift+Tab back */
-                    if (qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT))
-                        setview((view + 2) % 3);
-                    else
-                        setview((view + 1) % 3);
+                    cycleview((qual & (IEQUALIFIER_LSHIFT |
+                                       IEQUALIFIER_RSHIFT)) ? -1 : 1);
                     break;
                 case '1': setview(0); break;
                 case '2': setview(1); break;
                 case '3': setview(2); break;
-                case ' ': scrollto(*vtop() + crows); break;
-                case 'b': case 'B': scrollto(*vtop() - crows); break;
-                case 't': case 'T': scrollto(0); break;
-                case 'e': case 'E': scrollto(vcount()); break;
+                case '0': setview(3); break;
+                case ' ':
+                    if (tree) movesel(dsel + crows);
+                    else scrollto(*vtop() + crows);
+                    break;
+                case 'b': case 'B':
+                    if (tree) movesel(dsel - crows);
+                    else scrollto(*vtop() - crows);
+                    break;
+                case 't': case 'T':
+                    if (tree) movesel(0);
+                    else scrollto(0);
+                    break;
+                case 'e': case 'E':
+                    if (tree) movesel(ndents);
+                    else scrollto(vcount());
+                    break;
                 case 'n': case 'N':
-                    scrollto(nexthunk(*vtop(), 1)); break;
+                    if (tree) movesel(nexthunk(dsel, 1));
+                    else scrollto(nexthunk(*vtop(), 1));
+                    break;
                 case 'p': case 'P':
-                    scrollto(nexthunk(*vtop(), -1)); break;
+                    if (tree) movesel(nexthunk(dsel, -1));
+                    else scrollto(nexthunk(*vtop(), -1));
+                    break;
                 }
             }
             if (class == IDCMP_RAWKEY) {
                 int page = (qual & (IEQUALIFIER_LSHIFT |
                                     IEQUALIFIER_RSHIFT)) != 0;
-                if (code == 0x4C)      /* cursor up */
-                    scrollto(*vtop() - (page ? crows : 1));
-                else if (code == 0x4D) /* cursor down */
-                    scrollto(*vtop() + (page ? crows : 1));
+                int tree = view == 3;
+                if (code == 0x4C) {    /* cursor up */
+                    if (tree) movesel(dsel - (page ? crows : 1));
+                    else scrollto(*vtop() - (page ? crows : 1));
+                } else if (code == 0x4D) { /* cursor down */
+                    if (tree) movesel(dsel + (page ? crows : 1));
+                    else scrollto(*vtop() + (page ? crows : 1));
+                }
                 else if (code == 0x54) /* F5: reload, the CFile reflex */
                     refreshdiff();
                 else if (code == 0x42 && page)
                     /* Shift+Tab has NO vanilla translation - it
                      * falls through as RAWKEY (plain Tab arrives
                      * as VANILLAKEY 9 and never gets here) */
-                    setview((view + 2) % 3);
-                else if (code == 0x7A) /* NewMouse: wheel up */
-                    scrollto(*vtop() - (page ? crows : 3));
-                else if (code == 0x7B) /* NewMouse: wheel down */
-                    scrollto(*vtop() + (page ? crows : 3));
+                    cycleview(-1);
+                else if (code == 0x7A) { /* NewMouse: wheel up */
+                    if (tree) movesel(dsel - (page ? crows : 3));
+                    else scrollto(*vtop() - (page ? crows : 3));
+                } else if (code == 0x7B) { /* NewMouse: wheel down */
+                    if (tree) movesel(dsel + (page ? crows : 3));
+                    else scrollto(*vtop() + (page ? crows : 3));
+                }
                 else if (code == 0x4F || code == 0x4E) {
                     /* horizontal: every row's text moves, so this
                      * stays a content repaint (the CFile editor's
@@ -1121,6 +1555,28 @@ int main(int argc, char **argv)
         DLine *la, *lb;
         DOp *ops;
         int na, nb, nops;
+        if (ispathdir((char *)argarr[0]) &&
+            ispathdir((char *)argarr[1])) {
+            /* two dirs: print the tree compare - the scanner's
+             * harness road under vamos, and a CLI tool for free */
+            int i;
+            strncpy(gdir1, (char *)argarr[0], sizeof(gdir1) - 1);
+            strncpy(gdir2, (char *)argarr[1], sizeof(gdir2) - 1);
+            scandirs();
+            for (i = 0; i < ndents; i++) {
+                char m = dents[i].st == 'S' ? '=' :
+                         dents[i].st == 'D' ? '|' :
+                         dents[i].st == 'L' ? '<' : '>';
+                printf("%c %s%s\n", m, dents[i].rel,
+                       dents[i].isdir ? "/" : "");
+            }
+            printf("cdiff: %d entries: %d differ, "
+                   "%d left-only, %d right-only\n",
+                   ndents, gndiff, gnleft, gnright);
+            freedirs();
+            FreeArgs(rda);
+            return 0;
+        }
         buf1 = loadfile((char *)argarr[0], &sz1);
         buf2 = loadfile((char *)argarr[1], &sz2);
         if (buf1 == NULL || buf2 == NULL) {
@@ -1144,10 +1600,24 @@ int main(int argc, char **argv)
         free(buf1);
         free(buf2);
     } else {
-        strncpy(gf1, (char *)argarr[0], sizeof(gf1) - 1);
-        strncpy(gf2, (char *)argarr[1], sizeof(gf2) - 1);
+        int d1 = ispathdir((char *)argarr[0]);
+        int d2 = ispathdir((char *)argarr[1]);
+        if (d1 && d2) {         /* two directories: tree compare */
+            strncpy(gdir1, (char *)argarr[0], sizeof(gdir1) - 1);
+            strncpy(gdir2, (char *)argarr[1], sizeof(gdir2) - 1);
+            gdirmode = 1;
+        } else if (d1 || d2) {
+            printf("cdiff: mixing a file and a directory - "
+                   "give two of the same kind\n");
+            FreeArgs(rda);
+            return 20;
+        } else {
+            strncpy(gf1, (char *)argarr[0], sizeof(gf1) - 1);
+            strncpy(gf2, (char *)argarr[1], sizeof(gf2) - 1);
+        }
         guimode();
         freediff();
+        freedirs();
     }
     FreeArgs(rda);
     return 0;

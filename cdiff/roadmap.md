@@ -71,10 +71,21 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## 0.1b3 — directory mode
 
-- [ ] `cdiff DIR1 DIR2` — tree compare: added / missing / differing
-      (size+date first, content hash on demand), drill into a file
-      diff with Enter, Left back out. The CFile two-pane instincts,
-      pointed at trees.
+- [~] **DIRECTORY MODE (build b16, 1.8.26)** — `cdiff DIR1 DIR2`
+      or Open Files... with two DRAWERS (empty File field in the
+      requester): both trees walked (recursive ExNext, own lock +
+      AllocDosObject fib per level), sorted case-insensitively,
+      merged - L/R one-sided, D size-differ, S same-size; content
+      truth on demand via Enter (the real diff). The Tree tab
+      joins the bar ahead of the file three; selection cursor
+      (Latin-1 >> on the gray), Enter opens the pair, Backspace
+      returns, n/p walk non-same entries, 0 jumps to the Tree.
+      TEXT mode with two dirs prints the compare listing - the
+      scanner's vamos harness road (crafted-tree cases + the
+      cfile/cfile13 pair GREEN before any boot) and a CLI tool for
+      free. Boot gate pending. Parked knowingly: ExAll batching
+      (CFile I3 - matters on real media), content hash for
+      same-size pairs, a busy pointer during big scans.
 
 ## 0.1b4 — engine deepening
 
