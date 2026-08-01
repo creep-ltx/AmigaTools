@@ -10,6 +10,7 @@
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
+#include <intuition/imageclass.h>   /* sysiclass: the arrow images */
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
@@ -27,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b29 (1.8.26)";
+    "$VER: cdiff 0.1b30 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -449,28 +450,29 @@ static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
 
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
-/* border scrollers (his verdict: "a CLI program in a GUI") - real
- * gadtools.library SCROLLER_KIND gadgets, not hand-rolled ones
- * (his correction: "do not reinvent the wheel" - GadTools already
- * builds a correctly-imaged scroller with its own arrow buttons
- * and its own click-and-hold auto-repeat; a hand-rolled sysiclass
- * arrow pair was reinventing exactly that, and worse, badly - the
- * images never showed because a plain struct Gadget cannot render
- * a class-based image without GFLG_GADGIMAGE). CreateGadget still
- * returns a normal struct Gadget*, so it takes the same border-
- * relative GFLG_RELxxx trick as any other window-border gadget;
- * everything else (repeat, imagery, NEWLOOK style) is GadTools'
- * problem now, not ours. */
-static struct Gadget *vgad, *hgad;
-static int gadsok;
-
-/* on-target telemetry (toolchain-and-testing.md's own house rule:
- * "instrument until the failure has a name" - two blind fixes in a
- * row produced the identical symptom, so the third move is data,
- * not another guess). addscrollers fills this; settitle appends it
- * to whatever's already on screen, so it rides every screenshot
- * for free. Strip before a real release. */
-static char sbdiag[140] = "";
+/* BORDER SCROLLERS - raw Intuition prop gadgets + sysiclass arrow
+ * images. This is the MultiView anatomy and the ONLY road that
+ * works here: GadTools gadgets are client-area widgets, they are
+ * not designed to live in a window's border, which is why the
+ * b27/b28 SCROLLER_KIND rewrite rendered nothing at all on his
+ * machine (twice). Raw prop gadgets in the border DID render from
+ * b25 on - his own screenshot proves it - so this restores that
+ * proven half and fixes the one real defect the arrows had:
+ *
+ *   GFLG_GADGIMAGE (intuition.h 0x0004) - "set if GadgetRender
+ *   and SelectRender point to an Image structure, clear if they
+ *   point to Border structures"
+ *
+ * b26 built the arrow gadgets with GadgetRender = a sysiclass
+ * Image but never set that flag, so Intuition walked the Image as
+ * a struct Border and drew nothing. One bit. */
+static struct Gadget vgad, hgad;
+static struct Gadget agup, agdn, aglt, agrt;
+static APTR iup, idn, ilt, irt;     /* sysiclass arrow images */
+static struct PropInfo vpi, hpi;
+static struct Image vim, him;       /* AUTOKNOB fills these in */
+static int gadsok, arrowsok;
+static int arrheld;                 /* 1 up 2 down 3 left 4 right */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
@@ -612,43 +614,54 @@ static void calcmaxw(void)
     maxwdirty = 0;
 }
 
-/* push the real (view/scroll) state onto the GadTools scrollers -
- * real unit counts (GTSC_Total/Visible/Top), not a normalized pot;
- * GadTools owns the knob/arrow imagery and their auto-repeat
- * entirely, we just report what there is to scroll. Total==Visible
- * for a side that fits gives a full-body knob - the honest "nothing
- * to scroll here" a fixed pan-range guess could never show (his
- * find on the Tree screenshot). */
-static void updscrollers(void)
+/* the horizontal scroll range in columns: the widest line there is,
+ * or the window width when everything already fits */
+static int htotal(void)
 {
-    long total = vcount(), vis = crows;
-    int htotal;
-    if (!gadsok) return;
     if (maxwdirty) calcmaxw();
-    if (total < 1) total = 1;
-    if (vis > total) vis = total;
-    htotal = gmaxw > viscols ? gmaxw : viscols;
-    if (hoff > htotal - viscols) hoff = htotal - viscols;
-    if (hoff < 0) hoff = 0;
-    if (vgad)
-        GT_SetGadgetAttrs(vgad, win, NULL,
-                          GTSC_Total, total, GTSC_Visible, vis,
-                          GTSC_Top, *vtop(), TAG_DONE);
-    if (hgad)
-        GT_SetGadgetAttrs(hgad, win, NULL,
-                          GTSC_Total, htotal, GTSC_Visible, viscols,
-                          GTSC_Top, hoff, TAG_DONE);
+    return gmaxw > viscols ? gmaxw : viscols;
 }
 
-/* the one place hoff ever changes - keyboard, the horizontal
- * scroller readback, all of it - so the clamp and the redraw can
- * never drift apart between call sites */
+/* push view/scroll state onto both knobs. NewModifyProp wants a
+ * normalized 0..MAXPOT pot and a MAXBODY-scaled body (the visible
+ * share) - a view that fits gives body = MAXBODY, i.e. a full-length
+ * knob, the honest "nothing to scroll here" (his find: the Tree
+ * showed a part-length horizontal knob when nothing overflowed). */
+/* pot/body arithmetic that cannot overflow a 32-bit multiply:
+ * MAXPOT * 40000 lines already exceeds a signed long, so both
+ * sides shift down until the total is small enough - the same
+ * guard CFile's progadd uses for exactly this reason. */
+static ULONG propfrac(long part, long whole, long scale)
+{
+    if (whole < 1) return 0;
+    while (whole > 30000) { whole >>= 1; part >>= 1; }
+    if (part < 0) part = 0;
+    if (part > whole) part = whole;
+    return (ULONG)((scale * part) / whole);
+}
+
+static void updscrollers(void)
+{
+    long total = vcount(), vis = crows, ht = htotal();
+    if (!gadsok) return;
+    if (total < 1) total = 1;
+    if (vis > total) vis = total;
+    if (hoff > ht - viscols) hoff = ht - viscols;
+    if (hoff < 0) hoff = 0;
+    NewModifyProp(&vgad, win, NULL, vpi.Flags,
+                  0, propfrac(*vtop(), total - vis, MAXPOT),
+                  0, propfrac(vis, total, MAXBODY), 1);
+    NewModifyProp(&hgad, win, NULL, hpi.Flags,
+                  propfrac(hoff, ht - viscols, MAXPOT), 0,
+                  propfrac(viscols, ht, MAXBODY), 0, 1);
+}
+
+/* the one place hoff ever changes - keyboard, arrows, the knob -
+ * so the clamp and the redraw can never drift apart */
 static void sethoff(int nh)
 {
-    int htotal;
-    if (maxwdirty) calcmaxw();
-    htotal = gmaxw > viscols ? gmaxw : viscols;
-    if (nh > htotal - viscols) nh = htotal - viscols;
+    int ht = htotal();
+    if (nh > ht - viscols) nh = ht - viscols;
     if (nh < 0) nh = 0;
     if (nh == hoff) return;
     hoff = nh;
@@ -656,85 +669,150 @@ static void sethoff(int nh)
     updscrollers();
 }
 
-/* the border scrollers, GadTools-native (his correction, "do not
- * reinvent the wheel"): CreateGadget(SCROLLER_KIND) builds its own
- * correctly-imaged knob AND its own arrow-button pair - orientation
- * is inferred from aspect (Width<Height = vertical, the documented
- * convention; there is no freedom tag). NewGadget only takes plain
- * pixels, so the border-relative trick is applied by hand to the
- * RETURNED Gadget afterwards, same as any window-border gadget
- * (the size/close/zoom gadgets work exactly this way). The corner
- * the size gadget sits in is left alone by construction: the
- * vertical scroller stops above the bottom border row, the
- * horizontal scroller stops left of the right border column -
- * both derived from real border widths, no guessed constant. */
-static void addscrollers(APTR gvi)
+static void scrollto(int target);
+static void movesel(int target);
+
+/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. The Tree
+ * moves its selection (matching click-to-select); every other view
+ * scrolls the content or pans it. */
+static void arrowstep(int which)
 {
-    struct NewGadget ng;
+    if (which == 1) {
+        if (view == 3) movesel(dsel - 1); else scrollto(*vtop() - 1);
+    } else if (which == 2) {
+        if (view == 3) movesel(dsel + 1); else scrollto(*vtop() + 1);
+    } else
+        sethoff(hoff + (which == 4 ? 8 : -8));
+}
+
+/* THE fix (his boot, twice): a plain struct Gadget renders a
+ * class-based image ONLY with GFLG_GADGIMAGE set - without it
+ * Intuition reads GadgetRender as a struct Border and draws
+ * nothing at all. b26 had everything else right and omitted this
+ * one bit, which is what sent b27/b28 chasing GadTools instead. */
+static void mkarrow(struct Gadget *g, APTR im, int le, int te,
+                    int rel, int act, int id)
+{
+    struct Image *i = (struct Image *)im;
+    g->LeftEdge = le;
+    g->TopEdge = te;
+    g->Width = i->Width;
+    g->Height = i->Height;
+    g->Flags = rel | GFLG_GADGIMAGE | GFLG_GADGHCOMP;
+    g->Activation = act | GACT_RELVERIFY | GACT_IMMEDIATE;
+    g->GadgetType = GTYP_BOOLGADGET;
+    g->GadgetRender = im;
+    g->GadgetID = id;
+    g->NextGadget = NULL;
+}
+
+/* The MultiView border anatomy, on raw Intuition prop gadgets -
+ * NOT GadTools. GadTools gadgets are client-area widgets and do
+ * not belong in a window border; putting SCROLLER_KIND there is
+ * what made b27/b28 render nothing. Raw props in the border have
+ * rendered correctly since b25 (his screenshot), so that stays;
+ * only the arrows needed fixing.
+ *
+ * Layout, all derived from the real border sizes: the vertical
+ * prop runs from below the title to just above its two arrows,
+ * which stack directly above the size gadget; the horizontal prop
+ * runs from the left border to just before its two arrows, which
+ * sit immediately left of the size gadget's corner. */
+static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
+{
     int brw = win->BorderRight, bbh = win->BorderBottom;
-    int bl = win->BorderLeft, bt = win->BorderTop;
-    int vw = brw - 4, hh = bbh - 4;
-    memset(&ng, 0, sizeof(ng));
-    ng.ng_VisualInfo = gvi;
+    int bt = win->BorderTop, bl = win->BorderLeft;
+    int aw = 0, ah = 0, sysz;
+    struct Gadget *tail;
+    int n = 2;
 
-    /* PGA_Freedom (intuition/gadgetclass.h, confirmed against the
-     * real installed NDK - NOT inferred from Width vs Height, that
-     * was a wrong guess) defaults to LORIENT_HORIZ: every scroller
-     * that omits it is built horizontal regardless of its box, the
-     * exact shape of the b27 "nothing renders" screenshot (a
-     * narrow/tall box holding a horizontal-oriented widget). Both
-     * scrollers now say what they are explicitly. GTSC_Arrows also
-     * has to be ASKED for - arrows are opt-in, not automatic; its
-     * value is the arrow's cross-axis size (height for a vertical
-     * scroller, width for a horizontal one), matched to the
-     * gadget's own thickness so the buttons come out roughly
-     * square instead of a guessed constant. */
-    ng.ng_LeftEdge = win->Width - brw + 3;
-    ng.ng_TopEdge = bt + 1;
-    ng.ng_Width = vw;
-    ng.ng_Height = win->Height - bt - bbh - 1;
-    ng.ng_GadgetID = 1;
-    vgad = CreateGadget(SCROLLER_KIND, NULL, &ng,
-                        PGA_Freedom, LORIENT_VERT,
-                        GTSC_Arrows, vw,
-                        GTSC_Total, 1, GTSC_Visible, 1, TAG_DONE);
-    if (vgad == NULL) {
-        /* two blind fixes produced the identical symptom - the
-         * third move is data, not a third guess (the house rule
-         * from toolchain-and-testing.md). This tells us CreateGadget
-         * itself is refusing, and with what geometry, rather than
-         * an orientation/imagery nuance on an otherwise-live gadget */
-        sprintf(sbdiag, "  [SB: vCreateGadget=NULL brw=%d bt=%d bbh=%d "
-                "vw=%d ng.W=%d ng.H=%d]",
-                brw, bt, bbh, vw, ng.ng_Width, ng.ng_Height);
-        return;
+    /* medium-res arrows on a tall screen, low-res on a short one -
+     * sysiclass sizes its own imagery from this */
+    sysz = scr->Height >= 400 ? SYSISIZE_MEDRES : SYSISIZE_LOWRES;
+    if (dri) {
+        iup = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, UPIMAGE,
+                        SYSIA_Size, sysz, TAG_DONE);
+        idn = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, DOWNIMAGE,
+                        SYSIA_Size, sysz, TAG_DONE);
+        ilt = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, LEFTIMAGE,
+                        SYSIA_Size, sysz, TAG_DONE);
+        irt = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, RIGHTIMAGE,
+                        SYSIA_Size, sysz, TAG_DONE);
     }
-    vgad->LeftEdge = 3 - brw;
-    vgad->Height = -(bt + bbh + 1);
-    vgad->Flags |= GFLG_RELRIGHT | GFLG_RELHEIGHT;
-
-    ng.ng_LeftEdge = bl;
-    ng.ng_TopEdge = win->Height - bbh + 3;
-    ng.ng_Width = win->Width - bl - brw - 1;
-    ng.ng_Height = hh;
-    ng.ng_GadgetID = 2;
-    hgad = CreateGadget(SCROLLER_KIND, vgad, &ng,
-                        PGA_Freedom, LORIENT_HORIZ,
-                        GTSC_Arrows, hh,
-                        GTSC_Total, 1, GTSC_Visible, 1, TAG_DONE);
-    if (hgad) {
-        hgad->TopEdge = 3 - bbh;
-        hgad->Width = -(bl + brw + 1);
-        hgad->Flags |= GFLG_RELBOTTOM | GFLG_RELWIDTH;
+    arrowsok = iup && idn && ilt && irt;
+    if (arrowsok) {
+        aw = ((struct Image *)iup)->Width;
+        ah = ((struct Image *)iup)->Height;
     }
 
-    AddGList(win, vgad, -1, hgad ? 2 : 1, NULL);
-    RefreshGList(vgad, win, NULL, hgad ? 2 : 1);
+    /* vertical prop: right border, stopping above its arrows */
+    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
+    vgad.LeftEdge = 3 - brw;
+    vgad.TopEdge = bt + 1;
+    vgad.Width = brw - 5;
+    vgad.Height = -(bt + bbh + 2 * ah + 1);
+    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
+    vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
+    vgad.GadgetType = GTYP_PROPGADGET;
+    vgad.GadgetRender = (APTR)&vim;
+    vgad.SpecialInfo = (APTR)&vpi;
+    vgad.GadgetID = 1;
+    vgad.NextGadget = &hgad;
+
+    /* horizontal prop: bottom border, stopping before its arrows */
+    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
+    hgad.LeftEdge = bl;
+    hgad.TopEdge = 3 - bbh;
+    hgad.Width = -(bl + brw + 2 * aw + 1);
+    hgad.Height = bbh - 5;
+    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
+    hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
+    hgad.GadgetType = GTYP_PROPGADGET;
+    hgad.GadgetRender = (APTR)&him;
+    hgad.SpecialInfo = (APTR)&hpi;
+    hgad.GadgetID = 2;
+    hgad.NextGadget = NULL;
+    tail = &hgad;
+
+    if (arrowsok) {
+        /* Up/down stack in the right border directly above the size
+         * gadget, sharing the vertical prop's own x inset so track
+         * and buttons line up; left/right sit in the bottom border
+         * directly left of the size gadget, sharing the horizontal
+         * prop's y inset. All offsets are exact: with RELRIGHT the
+         * real x is win->Width + LeftEdge, with RELBOTTOM the real
+         * y is win->Height + TopEdge - so -(bbh + ah) puts a
+         * button's last row exactly one pixel above the bottom
+         * border, and -(brw + aw) puts its last column exactly one
+         * pixel left of the right border. */
+        mkarrow(&agup, iup, 3 - brw, -(bbh + 2 * ah),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
+        mkarrow(&agdn, idn, 3 - brw, -(bbh + ah),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
+        mkarrow(&aglt, ilt, -(brw + 2 * aw), 3 - bbh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
+        mkarrow(&agrt, irt, -(brw + aw), 3 - bbh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
+        tail->NextGadget = &agup;
+        agup.NextGadget = &agdn;
+        agdn.NextGadget = &aglt;
+        aglt.NextGadget = &agrt;
+        n += 4;
+    }
+
+    AddGList(win, &vgad, -1, n, NULL);
+    RefreshGList(&vgad, win, NULL, n);
     gadsok = 1;
-    sprintf(sbdiag, "  [SB: OK brw=%d bbh=%d v(L=%d T=%d W=%d H=%d) "
-            "h=%s]",
-            brw, bbh, vgad->LeftEdge, vgad->TopEdge,
-            vgad->Width, vgad->Height, hgad ? "OK" : "NULL");
 }
 
 /* one row of the Tree tab: selection arrow, status marker, path.
@@ -926,7 +1004,7 @@ static void drawpage(void)
 
 static void settitle(void)
 {
-    static char t[400];
+    static char t[260];
     if (gdirmode && view == 3)
         sprintf(t, "cdiff: %.60s | %.60s"
                 "  (%d entries: %d differ, %d left-only, %d right-only)",
@@ -939,7 +1017,6 @@ static void settitle(void)
         sprintf(t, "cdiff: (now open the left file) | %.70s", gf2);
     else
         strcpy(t, "cdiff");
-    strcat(t, sbdiag);
     SetWindowTitles(win, (STRPTR)t, (STRPTR)~0);
 }
 
@@ -1607,19 +1684,17 @@ static void guimode(void)
     struct Screen *scr;
     struct IntuiMessage *msg;
     int done = 0;
-    int usegt;      /* GT_GetIMsg/GT_ReplyIMsg once gadtools opens -
-                     * required once real GadTools gadgets exist in
-                     * the window (the scrollers' own arrow-repeat
-                     * runs inside gadtools.library's message
-                     * preprocessing, which plain GetMsg bypasses);
-                     * falls back to raw Intuition when it doesn't */
 
+    /* GadTools is used for the MENUS only now - the scrollers are
+     * raw Intuition gadgets, so the plain GetMsg/ReplyMsg pair is
+     * correct again (GT_GetIMsg is required only when GadTools
+     * GADGETS are in the window; GadTools menus never needed it,
+     * as b25/b26 already demonstrated) */
     IntuitionBase = (struct IntuitionBase *)
         OpenLibrary((STRPTR)"intuition.library", 37);
     GfxBase = (struct GfxBase *)
         OpenLibrary((STRPTR)"graphics.library", 37);
     GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
-    usegt = GadToolsBase != NULL;
     AslBase = OpenLibrary((STRPTR)"asl.library", 37);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
 
@@ -1660,7 +1735,9 @@ static void guimode(void)
     }
     {
         /* the screen's GUI pens for the tab bevels; fall back to
-         * the 4-colour defaults if DrawInfo is unavailable */
+         * the 4-colour defaults if DrawInfo is unavailable. The
+         * sysiclass arrow images need the same DrawInfo, so the
+         * scrollers are built here, while it is still held. */
         struct DrawInfo *dri = GetScreenDrawInfo(scr);
         if (dri) {
             pshine = dri->dri_Pens[SHINEPEN];
@@ -1669,15 +1746,13 @@ static void guimode(void)
             pfilltext = dri->dri_Pens[FILLTEXTPEN];
             ptext = dri->dri_Pens[TEXTPEN];
             pback = dri->dri_Pens[BACKGROUNDPEN];
-            FreeScreenDrawInfo(scr, dri);
         }
+        addscrollers(dri, scr);
+        if (dri) FreeScreenDrawInfo(scr, dri);
     }
     if (GadToolsBase) {
-        /* gvi first - the scrollers need it as much as the menu
-         * does (GadTools gadgets render from it, same as menus) */
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
-            addscrollers(gvi);
             gmenu = CreateMenus(newmenu, TAG_DONE);
             if (gmenu) {
                 if (LayoutMenus(gmenu, gvi,
@@ -1711,35 +1786,46 @@ static void guimode(void)
 
     while (!done) {
         WaitPort(win->UserPort);
-        while ((msg = usegt ? GT_GetIMsg(win->UserPort)
-                            : (struct IntuiMessage *)
-                              GetMsg(win->UserPort))) {
+        while ((msg = (struct IntuiMessage *)
+                      GetMsg(win->UserPort))) {
             ULONG class = msg->Class;
             UWORD code = msg->Code;
             UWORD qual = msg->Qualifier;
             WORD mx = msg->MouseX, my = msg->MouseY;
             APTR iaddr = msg->IAddress;
             ULONG csec = msg->Seconds, cmic = msg->Micros;
-            if (usegt) GT_ReplyIMsg(msg);
-            else ReplyMsg((struct Message *)msg);
+            ReplyMsg((struct Message *)msg);
             if (class == IDCMP_CLOSEWINDOW) done = 1;
-            /* the scroller gadgets: GadTools owns the knob, the
-             * arrow buttons AND their click-and-hold auto-repeat
-             * entirely - on any message that names one of them
-             * (drag, arrow click, arrow repeat tick, release), just
-             * read back where it landed and follow. GTSC_Top comes
-             * back in real units already, no pot math needed. */
-            if (vgad && iaddr == (APTR)vgad) {
-                ULONG newtop;
-                GT_GetGadgetAttrs(vgad, win, NULL,
-                                  GTSC_Top, (ULONG)&newtop, TAG_DONE);
-                if ((int)newtop != *vtop()) scrollto((int)newtop);
-            } else if (hgad && iaddr == (APTR)hgad) {
-                ULONG newtop;
-                GT_GetGadgetAttrs(hgad, win, NULL,
-                                  GTSC_Top, (ULONG)&newtop, TAG_DONE);
-                sethoff((int)newtop);
+            /* knob dragged: Intuition has already updated the pot,
+             * so read it back and convert to real units. Arrows are
+             * plain boolean gadgets - GADGETDOWN starts a repeat,
+             * INTUITICKS continues it, GADGETUP ends it. */
+            if (class == IDCMP_GADGETDOWN ||
+                class == IDCMP_GADGETUP ||
+                class == IDCMP_MOUSEMOVE) {
+                if (iaddr == (APTR)&vgad) {
+                    long total = vcount(), vis = crows;
+                    if (total > vis)
+                        scrollto((int)(((long)vpi.VertPot *
+                                        (total - vis) + MAXPOT / 2)
+                                       / MAXPOT));
+                } else if (iaddr == (APTR)&hgad) {
+                    int ht = htotal();
+                    if (ht > viscols)
+                        sethoff((int)(((long)hpi.HorizPot *
+                                       (ht - viscols) + MAXPOT / 2)
+                                      / MAXPOT));
+                } else if (class == IDCMP_GADGETDOWN) {
+                    arrheld = iaddr == (APTR)&agup ? 1 :
+                              iaddr == (APTR)&agdn ? 2 :
+                              iaddr == (APTR)&aglt ? 3 :
+                              iaddr == (APTR)&agrt ? 4 : 0;
+                    if (arrheld) arrowstep(arrheld);
+                } else if (class == IDCMP_GADGETUP)
+                    arrheld = 0;
             }
+            if (class == IDCMP_INTUITICKS && arrheld)
+                arrowstep(arrheld);
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
@@ -1749,12 +1835,12 @@ static void guimode(void)
                 EndRefresh(win, TRUE);
             }
             if (class == IDCMP_NEWSIZE) {
-                /* the RELxxx flags make Intuition reposition the
-                 * scroller gadgets' pixel boxes as part of its own
-                 * resize handling; RefreshGList forces them to
-                 * actually repaint at the new box rather than
-                 * waiting on the next attribute change to notice */
-                if (gadsok) RefreshGList(vgad, win, NULL, hgad ? 2 : 1);
+                /* the RELxxx flags let Intuition reposition each
+                 * gadget's box during its own resize handling;
+                 * RefreshGList makes them actually repaint there */
+                if (gadsok)
+                    RefreshGList(&vgad, win, NULL,
+                                 arrowsok ? 6 : 2);
                 calcgrid();
                 clamptops();
                 drawpage();
@@ -1875,14 +1961,18 @@ static void guimode(void)
         }
     }
     if (gmenu) ClearMenuStrip(win);
-    if (gadsok) RemoveGList(win, vgad, -1);
+    if (gadsok) RemoveGList(win, &vgad, -1);
     CloseWindow(win);
 out:
-    /* FreeGadgets, not a bare free() - CreateGadget's allocation
-     * includes gadtools.library's own imagery/SpecialInfo, and
-     * FreeGadgets is the documented pairing (walks NextGadget,
-     * same idea as FreeMenus for CreateMenus) */
-    if (vgad) FreeGadgets(vgad);
+    /* the gadgets themselves are static structs - nothing to free.
+     * Only the sysiclass images were allocated, and they outlive
+     * the window on purpose: RemoveGList detached the gadgets that
+     * referenced them first. DisposeObject is NULL-safe here by
+     * the guards. */
+    if (iup) DisposeObject(iup);
+    if (idn) DisposeObject(idn);
+    if (ilt) DisposeObject(ilt);
+    if (irt) DisposeObject(irt);
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);

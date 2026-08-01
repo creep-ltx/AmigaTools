@@ -141,20 +141,35 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       assumption never actually verified) is failing the same way
       both times, and a third blind C-level fix would just be a
       third guess.
-- [~] **b29: on-target telemetry instead of a third guess** -
-      vamos cannot open real Intuition windows (it emulates exec/
-      dos, explicitly not Intuition/graphics per
-      toolchain-and-testing.md), so there is no way to test this
-      GUI path from Linux at all; the only instrument left is the
-      machine itself. Following this project's own house rule
-      ("instrument until the failure has a name"): addscrollers now
-      writes real numbers into the window title, riding every
-      screenshot for free - CreateGadget's outcome (NULL or not),
-      the measured win->BorderRight/Bottom, and the computed
-      gadget geometry. Whatever the next screenshot shows in the
-      title bar decides the actual fix; this build changes no
-      scroller logic at all, only visibility into it. Strip the
-      diagnostic once the real cause has a name.
+- [x] **b29: telemetry build** - window-title diagnostics instead
+      of a third guess. Superseded by b30 before he had to boot it:
+      re-reading the build history answered the question the
+      telemetry was going to ask.
+- [x] **b30: THE ANSWER - one flag, and a wrong turn undone.**
+      Read from the git history rather than guessed. The chain:
+      **b25 put raw Intuition prop gadgets in the window borders
+      and they RENDERED** (his screenshot #14 shows both tracks).
+      **b26 added sysiclass arrow images and they did not** -
+      because `mkarrow` set `Flags = rel` and never set
+      **`GFLG_GADGIMAGE`** (intuition.h 0x0004: *"set if
+      GadgetRender and SelectRender point to an Image structure,
+      clear if they point to Border structures"*). Without it
+      Intuition walked each sysiclass Image as a `struct Border`
+      and drew nothing. **b27 then diagnosed that flag correctly
+      in its own source comment - and instead of setting it, threw
+      away the working prop gadgets for GadTools SCROLLER_KIND**,
+      which is a client-area widget kind, not a border one: hence
+      "nothing at all", twice, and hence b28's PGA_Freedom fix
+      being real but irrelevant to the actual blocker.
+      b30 restores b25/b26's proven border props verbatim and adds
+      the single missing bit. Kept from the detour: the real
+      per-view max-width scan (a fitting view now shows a
+      full-length knob) and `sethoff()` as the one clamp path.
+      Added: `propfrac()` shift-down guard so MAXPOT x line-count
+      cannot overflow a 32-bit multiply on files past ~32K lines
+      (CFile's own progadd pattern). Event loop back to plain
+      GetMsg/ReplyMsg - GT_GetIMsg is only required for GadTools
+      *gadgets*, never for its menus.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode
