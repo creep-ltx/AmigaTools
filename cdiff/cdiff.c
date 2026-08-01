@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b13 (1.8.26)";
+    "$VER: cdiff 0.1b14 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -310,7 +310,19 @@ static void drawtabs(void)
     sprintf(lab[2], "%.30s", (char *)FilePart((STRPTR)gf2));
     x = x0 + 2;
     for (i = 0; i < 3; i++) {
-        w = strlen(lab[i]) * fw + 12;   /* label + side padding */
+        int lw = strlen(lab[i]);
+        w = lw * fw + 12;               /* label + side padding */
+        /* clip into the window - narrow windows must not get
+         * their border overpainted (his find, the hint lesson) */
+        if (x + w > winr) {
+            w = winr - x;
+            lw = (w - 12) / fw;
+            if (lw < 1) {               /* no room left at all */
+                tabx[i] = winr;
+                tabe[i] = winr;
+                continue;
+            }
+        }
         tabx[i] = x;
         tabe[i] = x + w;
         /* body */
@@ -328,7 +340,7 @@ static void drawtabs(void)
         SetAPen(rp, i == view ? pfilltext : ptext);
         SetBPen(rp, i == view ? pfill : pback);
         Move(rp, x + 6, y0 + 2 + fbase);
-        Text(rp, (STRPTR)lab[i], strlen(lab[i]));
+        Text(rp, (STRPTR)lab[i], lw);
         x += w + 3;
     }
     /* base rule in shine, broken open under the active tab - the
@@ -349,7 +361,7 @@ static void drawtabs(void)
 
 static void drawpage(void)
 {
-    int vr;
+    int vr, s, e;
     drawtabs();
     for (vr = 0; vr < crows; vr++) {
         if (view == 0)
@@ -357,14 +369,33 @@ static void drawpage(void)
         else
             drawline(vr);
     }
+    /* the slack margins: window size is rarely an exact multiple
+     * of the cell, and the sub-cell strips below the last row and
+     * right of the last column keep STALE pixels across a resize
+     * (his find - "the blue": old bar rows surviving there) */
+    SetAPen(rp, 0);
+    s = x0 + viscols * fw;
+    e = win->Width - win->BorderRight - 1;
+    if (s <= e)
+        RectFill(rp, s, y0, e, win->Height - win->BorderBottom - 1);
+    s = conty + crows * fh;
+    e = win->Height - win->BorderBottom - 1;
+    if (s <= e)
+        RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
     if (ga == NULL) {           /* WB start, nothing loaded yet */
         static const char hint[] =
             "no files loaded - Project / Open Files... "
             "(right mouse button)";
-        SetAPen(rp, 1);
-        SetBPen(rp, 0);
-        Move(rp, x0 + 2 * fw, conty + fh + fbase);
-        Text(rp, (STRPTR)hint, sizeof(hint) - 1);
+        int hl = sizeof(hint) - 1;
+        /* a window RastPort includes the borders - clip by hand or
+         * a narrow window gets its border overpainted (his find) */
+        if (hl > viscols - 4) hl = viscols - 4;
+        if (hl > 0) {
+            SetAPen(rp, 1);
+            SetBPen(rp, 0);
+            Move(rp, x0 + 2 * fw, conty + fh + fbase);
+            Text(rp, (STRPTR)hint, hl);
+        }
     }
 }
 
