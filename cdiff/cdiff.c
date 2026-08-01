@@ -28,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b32 (1.8.26)";
+    "$VER: cdiff 0.1b33 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -728,29 +728,30 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     int bl = scr->WBorLeft;
     int upw = 0, uph = 0, dnh = 0;      /* right-border arrows */
     int ltw = 0, lth = 0, rtw = 0;      /* bottom-border arrows */
-    int vw, hh, sysz;
+    int vw, hh;
     struct Gadget *tail;
 
-    /* medium-res arrows on a tall screen, low-res on a short one -
-     * sysiclass sizes its own imagery from this */
-    sysz = scr->Height >= 400 ? SYSISIZE_MEDRES : SYSISIZE_LOWRES;
+    /* No SYSIA_Size: the previous "medium-res if the screen is
+     * over 400 tall" rule was invented here, not documented
+     * anywhere, and it is what made the arrows come out the wrong
+     * shape for the screen. Given only SYSIA_DrawInfo, sysiclass
+     * sizes each image for the screen it will be drawn on - which
+     * is the same imagery, at the same size, that Intuition uses
+     * for the window's own system gadgets. That is precisely what
+     * we want the border thickness to agree with. */
     if (dri) {
         iup = NewObject(NULL, (STRPTR)"sysiclass",
                         SYSIA_DrawInfo, (ULONG)dri,
-                        SYSIA_Which, UPIMAGE,
-                        SYSIA_Size, sysz, TAG_DONE);
+                        SYSIA_Which, UPIMAGE, TAG_DONE);
         idn = NewObject(NULL, (STRPTR)"sysiclass",
                         SYSIA_DrawInfo, (ULONG)dri,
-                        SYSIA_Which, DOWNIMAGE,
-                        SYSIA_Size, sysz, TAG_DONE);
+                        SYSIA_Which, DOWNIMAGE, TAG_DONE);
         ilt = NewObject(NULL, (STRPTR)"sysiclass",
                         SYSIA_DrawInfo, (ULONG)dri,
-                        SYSIA_Which, LEFTIMAGE,
-                        SYSIA_Size, sysz, TAG_DONE);
+                        SYSIA_Which, LEFTIMAGE, TAG_DONE);
         irt = NewObject(NULL, (STRPTR)"sysiclass",
                         SYSIA_DrawInfo, (ULONG)dri,
-                        SYSIA_Which, RIGHTIMAGE,
-                        SYSIA_Size, sysz, TAG_DONE);
+                        SYSIA_Which, RIGHTIMAGE, TAG_DONE);
     }
     arrowsok = iup && idn && ilt && irt;
     if (arrowsok) {
@@ -780,7 +781,12 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 
     /* vertical prop: right border, from below the title down to
      * exactly where the up arrow starts */
-    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
+    /* NO PROPBORDERLESS: intuition.h says of it, plainly, "if set,
+     * no border will be rendered" - which is why both scrollers
+     * came out as flat solid bars with no channel and no visible
+     * knob edge, nothing like MultiView's recessed track. Dropping
+     * it lets Intuition draw the V36 framed scroller. */
+    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK;
     vgad.LeftEdge = -vw;
     vgad.TopEdge = bt;
     vgad.Width = vw;
@@ -796,7 +802,7 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 
     /* horizontal prop: bottom border, from the left border across
      * to exactly where the left arrow starts */
-    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
+    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK;
     hgad.LeftEdge = bl;
     hgad.TopEdge = -hh;
     hgad.Width = -(bl + vw + ltw + rtw);
