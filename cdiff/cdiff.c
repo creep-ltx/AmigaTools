@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b20 (1.8.26)";
+    "$VER: cdiff 0.1b21 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -322,7 +322,9 @@ static void scandirs(void)
             if (la.e[i].isdir && lb.e[j].isdir) {
                 ;               /* both dirs: children carry it */
             } else if (la.e[i].isdir != lb.e[j].isdir) {
-                dadd(la.e[i].rel, 1, 'D');   /* dir vs file clash */
+                /* dir vs file clash: 2 = drawer on the left side,
+                 * 3 = drawer on the right (the message names them) */
+                dadd(la.e[i].rel, la.e[i].isdir ? 2 : 3, 'D');
                 la.e[i].rel = NULL;
             } else {
                 dadd(la.e[i].rel, 0,
@@ -1034,16 +1036,32 @@ static void refreshdiff(void)
 static void opensel(void)
 {
     DEnt *d;
+    static char eb[220];
     if (!gdirmode || view != 3 || ndents <= 0) return;
     d = &dents[dsel];
+    /* name the actual drawers (his point: we KNOW them - vague
+     * "left/right" helps nobody) */
     if (d->isdir) {
-        erq(d->st == 'D' ?
-            "a directory on one side, a file on the other" :
-            "that directory exists on one side only");
+        if (d->isdir == 2)
+            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
+                    "but a plain file in\n%.64s",
+                    d->rel, gdir1, gdir2);
+        else if (d->isdir == 3)
+            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
+                    "but a plain file in\n%.64s",
+                    d->rel, gdir2, gdir1);
+        else
+            sprintf(eb, "the drawer \"%.40s\"\nexists only in\n%.64s",
+                    d->rel, d->st == 'L' ? gdir1 : gdir2);
+        erq(eb);
         return;
     }
-    if (d->st == 'L') { erq("only in the left directory"); return; }
-    if (d->st == 'R') { erq("only in the right directory"); return; }
+    if (d->st == 'L' || d->st == 'R') {
+        sprintf(eb, "\"%.40s\"\nexists only in\n%.64s",
+                d->rel, d->st == 'L' ? gdir1 : gdir2);
+        erq(eb);
+        return;
+    }
     strcpy(gf1, gdir1);
     AddPart((STRPTR)gf1, (STRPTR)d->rel, 310);
     strcpy(gf2, gdir2);
