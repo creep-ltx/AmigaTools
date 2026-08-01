@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b19 (1.8.26)";
+    "$VER: cdiff 0.1b20 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -805,12 +805,16 @@ static void setview(int v)
     if (v == 3) {
         if (!gdirmode) return;
         view = 3;
+        settitle();             /* the title follows the view (his
+                                 * find: stale file title over the
+                                 * Tree) */
         drawpage();
         return;
     }
     if (ga == NULL) return;
     if (view == 3) {
         view = v;
+        settitle();
         drawpage();
         return;
     }
@@ -1145,7 +1149,7 @@ static void centerreq(const char *text)
         WA_IDCMP, IDCMP_MOUSEBUTTONS | IDCMP_VANILLAKEY |
                   IDCMP_REFRESHWINDOW,
         WA_Flags, WFLG_BORDERLESS | WFLG_ACTIVATE |
-                  WFLG_SIMPLE_REFRESH | WFLG_RMBTRAP,
+                  WFLG_SMART_REFRESH | WFLG_RMBTRAP,
         TAG_DONE);
     UnlockPubScreen(NULL, scr);
     if (w == NULL) return;
@@ -1351,7 +1355,12 @@ static void guimode(void)
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
                   IDCMP_NEWSIZE,
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
-                  WFLG_CLOSEGADGET | WFLG_SIMPLE_REFRESH |
+                  /* SMART: Intuition itself restores regions a
+                   * requester covered - the app is BLOCKED inside
+                   * EasyRequest and cannot repaint (his find: move
+                   * the requester, holes stay). Backing store is
+                   * the price, correctness is the product. */
+                  WFLG_CLOSEGADGET | WFLG_SMART_REFRESH |
                   WFLG_ACTIVATE | WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM,
         WA_MinWidth, 240,
         WA_MinHeight, 120,
