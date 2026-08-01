@@ -32,7 +32,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b36 (1.8.26)";
+    "$VER: cdiff 0.1b37 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -478,6 +478,23 @@ static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 static Object *vgad, *hgad;     /* ScrollerBase: proto/scroller.h */
 static int gadsok;
 
+/* Set while it is NOT safe to push attributes at the scrollers.
+ * Two cases, and the first one froze his machine outright:
+ *
+ * 1. Inside BeginRefresh/EndRefresh. Those bracket a LAYER LOCK, and
+ *    the autodocs allow only plain graphics rendering between them.
+ *    drawpage() ended with updscrollers(), so a refresh drove a full
+ *    class render - SetGadgetAttrs -> OM_SET -> GM_RENDER - straight
+ *    into the held lock. The old raw prop gadget got away with it;
+ *    scroller.gadget does enough more work to deadlock, and a wedged
+ *    Intuition takes the mouse and the keyboard with it.
+ *
+ * 2. While handling a message FROM a scroller. Writing SCROLLER_Top
+ *    back to the gadget the user is currently dragging means fighting
+ *    it mid-drag, and invites a set -> notify -> set feedback loop. It
+ *    already knows where it is; just follow it. */
+static int noscrollset;
+
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -631,10 +648,18 @@ static int htotal(void)
 static void updscrollers(void)
 {
     long total = vcount(), vis = crows, ht = htotal();
-    if (!gadsok) return;
+    long hvis = viscols;
+    if (!gadsok || noscrollset) return;
+    /* nothing handed to the class may be zero or inverted: a tiny
+     * window can make viscols 0, and Total/Visible of 0 is a
+     * division waiting to happen inside somebody else's code */
     if (total < 1) total = 1;
+    if (vis < 1) vis = 1;
     if (vis > total) vis = total;
-    if (hoff > ht - viscols) hoff = ht - viscols;
+    if (ht < 1) ht = 1;
+    if (hvis < 1) hvis = 1;
+    if (hvis > ht) hvis = ht;
+    if (hoff > ht - hvis) hoff = ht - hvis;
     if (hoff < 0) hoff = 0;
     if (vgad)
         SetGadgetAttrs((struct Gadget *)vgad, win, NULL,
@@ -644,7 +669,7 @@ static void updscrollers(void)
     if (hgad)
         SetGadgetAttrs((struct Gadget *)hgad, win, NULL,
                        SCROLLER_Total, ht,
-                       SCROLLER_Visible, viscols,
+                       SCROLLER_Visible, hvis,
                        SCROLLER_Top, hoff, TAG_DONE);
 }
 
@@ -1750,19 +1775,30 @@ static void guimode(void)
                 ULONG newtop = 0;
                 if (vgad && iaddr == (APTR)vgad) {
                     GetAttr(SCROLLER_Top, vgad, &newtop);
-                    if ((int)newtop != *vtop()) scrollto((int)newtop);
+                    if ((int)newtop != *vtop()) {
+                        noscrollset = 1;    /* do not fight the drag */
+                        scrollto((int)newtop);
+                        noscrollset = 0;
+                    }
                 } else if (hgad && iaddr == (APTR)hgad) {
                     GetAttr(SCROLLER_Top, hgad, &newtop);
+                    noscrollset = 1;
                     sethoff((int)newtop);
+                    noscrollset = 0;
                 }
             }
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
             if (class == IDCMP_REFRESHWINDOW) {
+                /* graphics rendering ONLY between these two - the
+                 * scrollers are updated after the lock is released */
+                noscrollset = 1;
                 BeginRefresh(win);
                 drawpage();
                 EndRefresh(win, TRUE);
+                noscrollset = 0;
+                updscrollers();
             }
             if (class == IDCMP_NEWSIZE) {
                 /* the RELxxx flags let Intuition reposition each
