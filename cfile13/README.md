@@ -7,7 +7,14 @@ a floppy on the machines that started it all.
 Born from a forum question: *can CFile go on a bootable floppy in a
 KS1.3 environment?* CFile proper needs Kickstart 2.04. This fork is
 the answer for everything below that — an A500 with 1.3 ROMs, a
-rescue disk, a machine with 1MB and no hard drive.
+rescue disk, a machine with 1MB — or 512K — and no hard drive.
+
+**Boot-proven.** [cfile13.adf](cfile13.adf) in this directory is the
+shipping artifact: write it to a floppy (or mount it in an
+emulator) and a stock A500 with Kickstart 1.3 boots straight into
+CFile13. On 512K it adapts itself — a 4-colour screen in the same
+palette, smaller buffers — and leaves ~40K of working room; on 1MB
+it runs full-dress with ~460K free.
 
 ## What it is
 
@@ -25,7 +32,10 @@ are cherry-picked from the main line when they apply.
   byte-weighted progress bar
 - Marks (all / none / invert), sorting, the `/` filter
 - Text, ANSI and hex viewing; the internal text editor
-- lha / lzx / zip archives through the external binaries
+- lha / lzx / zip archives through the external binaries (the
+  boot disk ships LhA 1.38 — the one LhA that runs on 1.3; LZX
+  extracts but its encoder cannot fit a 1MB machine, so packing
+  is lha's job)
 - **ISO browsing** — CFile reads ISO 9660 itself, no OS support
   needed, so it works even on 1.3
 - Protection bits and file comments; bookmarks; directory history
@@ -45,17 +55,23 @@ are cherry-picked from the main line when they apply.
 
 ## Status
 
-**Not yet bootable on 1.3 — work in progress.** See
-[PORT-STATUS.md](PORT-STATUS.md) for the honest state of the
-API back-port (stage 1: feature cuts; stage 2: replacing every
-2.0-only OS call with its 1.3 equivalent). Until stage 2 lands,
-the binary still requires 2.04+ like its parent.
+**Boot-proven on Kickstart 1.3 (0.1b17, 1.8.26)** — seventeen
+builds in one day, from first source copy to a 512K boot with room
+to spare. [PORT-STATUS.md](PORT-STATUS.md) is the full ledger:
+every cut, every V36 call rebuilt on a V33 road, and the
+boot-gate evening's one-find-per-build history (PROGDIR:, the
+VANILLAKEY swallow, the ram-handler's 100%-full report, the
+FS-UAE overlay trap, the OS2.0-only LhA 2.15...).
+[cfile13.readme](cfile13.readme) is the on-disk user readme:
+what works, the limitations, and which files the boot floppy
+needs.
 
-## Requirements (target)
+## Requirements
 
-- Kickstart 1.3 (V34); should also run on anything later
-- 1MB RAM (512K chip + 512K any); 512K-only is a stretch goal
-- lha / lzx / zip binaries for archive work (on the floppy)
+- Kickstart 1.3 (V34) through 3.2 — one binary, runtime-adaptive
+- 512K RAM minimum (4-colour screen, ~40K working room);
+  1MB+ recommended (full 8-colour screen, big buffers)
+- Panes hold 300 entries each (main CFile: 500)
 
 ## Building
 
