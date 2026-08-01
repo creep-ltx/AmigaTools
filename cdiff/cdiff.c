@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b18 (1.8.26)";
+    "$VER: cdiff 0.1b19 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -1646,6 +1646,17 @@ static char *bigstk;
 static int sargc, sret;
 static char **sargv;
 
+/* the swapped work MUST be an argument-less noinline call: gcc
+ * merges stack-pointer cleanups across calls, so argument bytes
+ * pushed before the swap-back get double-popped after it (his
+ * exit guru, read straight out of the disassembly - an addql #8
+ * paying for two pushes that lived on DIFFERENT stacks). With no
+ * arguments, no SP bookkeeping crosses the swap boundary. */
+static void __attribute__((noinline)) runswapped(void)
+{
+    sret = smain(sargc, sargv);
+}
+
 int main(int argc, char **argv)
 {
     struct Task *me = FindTask(NULL);
@@ -1668,7 +1679,7 @@ int main(int argc, char **argv)
     sss.stk_Upper = (ULONG)(bigstk + STACKSZ);
     sss.stk_Pointer = (APTR)(bigstk + STACKSZ);
     StackSwap(&sss);
-    sret = smain(sargc, sargv);
+    runswapped();
     StackSwap(&sss);
     free(bigstk);
     return sret;
