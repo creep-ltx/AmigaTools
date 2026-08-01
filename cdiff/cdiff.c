@@ -21,7 +21,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b3 (1.8.26)";
+    "$VER: cdiff 0.1b4 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -175,7 +175,11 @@ static void drawnum(int x, int y, long line, int pen, int bg)
     Text(rp, (STRPTR)nb, gutw);
 }
 
-/* one side of a row: optional bar fill, gutter number, the text */
+/* one side of a row: optional bar fill, gutter number, the text.
+ * The gutter recedes by palette hierarchy (his ask - there is no
+ * dark grey on a 4-colour WB): blue-on-gray for plain rows, and
+ * black-on-blue under the bar - always a step quieter than the
+ * content beside it. */
 static void drawside(int x, int y, const DLine *l, long line, int bar)
 {
     int tx = x, tw = halfw;
@@ -184,7 +188,7 @@ static void drawside(int x, int y, const DLine *l, long line, int bar)
         RectFill(rp, x, y, x + halfw * fw - 1, y + fh - 1);
     }
     if (gutw > 0) {
-        drawnum(x, y, line, bar ? 2 : 1, bar ? 3 : 0);
+        drawnum(x, y, line, bar ? 1 : 3, bar ? 3 : 0);
         tx += (gutw + 1) * fw;
         tw -= gutw + 1;
     }
