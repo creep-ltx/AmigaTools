@@ -28,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b30 (1.8.26)";
+    "$VER: cdiff 0.1b31 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -722,7 +722,9 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 {
     int brw = win->BorderRight, bbh = win->BorderBottom;
     int bt = win->BorderTop, bl = win->BorderLeft;
-    int aw = 0, ah = 0, sysz;
+    int upw = 0, uph = 0, dnh = 0;      /* right-border arrows */
+    int ltw = 0, lth = 0, rtw = 0;      /* bottom-border arrows */
+    int vx, vw, hy, hh, sysz;
     struct Gadget *tail;
     int n = 2;
 
@@ -749,16 +751,43 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     }
     arrowsok = iup && idn && ilt && irt;
     if (arrowsok) {
-        aw = ((struct Image *)iup)->Width;
-        ah = ((struct Image *)iup)->Height;
+        /* EVERY arrow measured from ITS OWN image. b30 took all
+         * four sizes off the up-arrow, but left/right arrows are
+         * wide-and-short where up/down are narrow-and-tall, so the
+         * bottom pair was placed with the wrong width entirely. */
+        upw = ((struct Image *)iup)->Width;
+        uph = ((struct Image *)iup)->Height;
+        dnh = ((struct Image *)idn)->Height;
+        ltw = ((struct Image *)ilt)->Width;
+        lth = ((struct Image *)ilt)->Height;
+        rtw = ((struct Image *)irt)->Width;
     }
 
-    /* vertical prop: right border, stopping above its arrows */
+    /* The track and its buttons share one column (right border) or
+     * one row (bottom border), centred in the border strip, so they
+     * line up the way MultiView's do. b30 placed the arrows at the
+     * PROP's inset but sized them from their own image - when the
+     * image is as wide as the border that pushed them past the
+     * window edge, which is the "arrows outside the borders" he
+     * photographed. Centring from each image's real size cannot do
+     * that: an arrow is never wider than the strip it is centred
+     * in, and the offset is clamped at 0 if it somehow is. */
+    vw = arrowsok ? upw : brw - 4;
+    if (vw > brw) vw = brw;
+    vx = (brw - vw) / 2;
+    if (vx < 0) vx = 0;
+    hh = arrowsok ? lth : bbh - 4;
+    if (hh > bbh) hh = bbh;
+    hy = (bbh - hh) / 2;
+    if (hy < 0) hy = 0;
+
+    /* vertical prop: right border, from below the title down to
+     * exactly where the up arrow starts */
     vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
-    vgad.LeftEdge = 3 - brw;
+    vgad.LeftEdge = vx - brw;
     vgad.TopEdge = bt + 1;
-    vgad.Width = brw - 5;
-    vgad.Height = -(bt + bbh + 2 * ah + 1);
+    vgad.Width = vw;
+    vgad.Height = -(bt + bbh + uph + dnh + 1);
     vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
     vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
@@ -768,12 +797,13 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     vgad.GadgetID = 1;
     vgad.NextGadget = &hgad;
 
-    /* horizontal prop: bottom border, stopping before its arrows */
+    /* horizontal prop: bottom border, from the left border across
+     * to exactly where the left arrow starts */
     hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
     hgad.LeftEdge = bl;
-    hgad.TopEdge = 3 - bbh;
-    hgad.Width = -(bl + brw + 2 * aw + 1);
-    hgad.Height = bbh - 5;
+    hgad.TopEdge = hy - bbh;
+    hgad.Width = -(bl + brw + ltw + rtw + 1);
+    hgad.Height = hh;
     hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
     hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
@@ -785,23 +815,19 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     tail = &hgad;
 
     if (arrowsok) {
-        /* Up/down stack in the right border directly above the size
-         * gadget, sharing the vertical prop's own x inset so track
-         * and buttons line up; left/right sit in the bottom border
-         * directly left of the size gadget, sharing the horizontal
-         * prop's y inset. All offsets are exact: with RELRIGHT the
-         * real x is win->Width + LeftEdge, with RELBOTTOM the real
-         * y is win->Height + TopEdge - so -(bbh + ah) puts a
-         * button's last row exactly one pixel above the bottom
-         * border, and -(brw + aw) puts its last column exactly one
-         * pixel left of the right border. */
-        mkarrow(&agup, iup, 3 - brw, -(bbh + 2 * ah),
+        /* Exact placement (RELRIGHT: real x = Width + LeftEdge;
+         * RELBOTTOM: real y = Height + TopEdge). The down arrow's
+         * last row lands one pixel above the bottom border and the
+         * right arrow's last column one pixel left of the right
+         * border, so the size gadget's corner stays clear without
+         * reserving anything for it by hand. */
+        mkarrow(&agup, iup, vx - brw, -(bbh + dnh + uph),
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
-        mkarrow(&agdn, idn, 3 - brw, -(bbh + ah),
+        mkarrow(&agdn, idn, vx - brw, -(bbh + dnh),
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
-        mkarrow(&aglt, ilt, -(brw + 2 * aw), 3 - bbh,
+        mkarrow(&aglt, ilt, -(brw + rtw + ltw), hy - bbh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
-        mkarrow(&agrt, irt, -(brw + aw), 3 - bbh,
+        mkarrow(&agrt, irt, -(brw + rtw), hy - bbh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
         tail->NextGadget = &agup;
         agup.NextGadget = &agdn;
