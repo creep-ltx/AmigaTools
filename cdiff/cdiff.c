@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b12 (1.8.26)";
+    "$VER: cdiff 0.1b13 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -165,6 +165,8 @@ static DOp *gops;
  * bar their changed lines without walking the row list. */
 static int view;
 static int ltop, rtop;          /* single-view scroll tops (lines) */
+static int hoff;                /* horizontal column offset - text
+                                 * only, the gutter stays pinned */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
 static int conty, crows;        /* content grid below the tab bar */
 static int tabx[3], tabe[3];    /* tab bar hit ranges (pixels) */
@@ -177,24 +179,25 @@ static int tabh;                /* tab bar height in pixels */
 static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
            ptext = 1, pback = 0;
 
-/* draw one text cell run, tab-expanded, clipped to width cells */
+/* draw one text cell run, tab-expanded, clipped to width cells,
+ * starting hoff source columns in (tab stops stay absolute) */
 static void drawtext(int x, int y, const DLine *l, int width,
                      int pen, int bg)
 {
     static char ex[512];
-    int i, o = 0;
-    if (width > 512) width = 512;
-    for (i = 0; i < l->len && o < width; i++) {
+    int i, o = 0, end = hoff + width;
+    if (end > 512) end = 512;
+    for (i = 0; i < l->len && o < end; i++) {
         char ch = l->ptr[i];
         if (ch == '\t') {
-            do { ex[o++] = ' '; } while ((o & 7) && o < width);
+            do { ex[o++] = ' '; } while ((o & 7) && o < end);
         } else
             ex[o++] = (ch >= 32 || ch < 0) ? ch : '.';
     }
     SetAPen(rp, pen);
     SetBPen(rp, bg);
     Move(rp, x, y + fbase);
-    if (o > 0) Text(rp, (STRPTR)ex, o);
+    if (o > hoff) Text(rp, (STRPTR)ex + hoff, o - hoff);
 }
 
 /* right-aligned 1-based line number in the gutter cells */
@@ -525,6 +528,7 @@ static void freediff(void)
     ga = gb = NULL;
     gna = gnb = 0;
     gtop = 0; ltop = 0; rtop = 0;
+    hoff = 0;
     view = 0;
 }
 
@@ -534,6 +538,34 @@ static void calcgut(void)
     gutw = 1;
     while (m >= 10) { m /= 10; gutw++; }
     if (halfw < gutw + 12) gutw = 0;    /* too narrow: no gutter */
+}
+
+/* the whole text grid from the window's current size - run at
+ * open and again on every IDCMP_NEWSIZE */
+static void calcgrid(void)
+{
+    x0 = win->BorderLeft;
+    y0 = win->BorderTop;
+    viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
+    visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
+    halfw = (viscols - 3) / 2;
+    tabh = fh + 4;
+    conty = y0 + tabh + 2;
+    crows = (win->Height - win->BorderBottom - conty) / fh;
+    if (crows < 1) crows = 1;
+    calcgut();
+}
+
+/* clamp every view's top against the current extents */
+static void clamptops(void)
+{
+    int m;
+    m = gnrows - crows; if (m < 0) m = 0;
+    if (gtop > m) gtop = m;
+    m = gna - crows; if (m < 0) m = 0;
+    if (ltop > m) ltop = m;
+    m = gnb - crows; if (m < 0) m = 0;
+    if (rtop > m) rtop = m;
 }
 
 /* load gf1/gf2 and diff them; replaces whatever was loaded */
@@ -693,7 +725,8 @@ static void keysreq(void)
 {
     erq("1 / 2 / 3 - view: Both / Left / Right\n"
         "Tab / Shift+Tab - cycle views (bar is clickable)\n"
-        "cursor up/down - scroll (shift = page)\n"
+        "cursor up/down - scroll (shift = page), wheel works\n"
+        "cursor left/right - scroll long lines (shift = more)\n"
         "space / b - page down / up\n"
         "t / e - top / end\n"
         "n / p - next / previous hunk\n"
@@ -769,10 +802,15 @@ static void guimode(void)
         WA_PubScreen, (ULONG)scr,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
-                  IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS,
+                  IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
+                  IDCMP_NEWSIZE,
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   WFLG_CLOSEGADGET | WFLG_SIMPLE_REFRESH |
-                  WFLG_ACTIVATE,
+                  WFLG_ACTIVATE | WFLG_SIZEGADGET | WFLG_SIZEBBOTTOM,
+        WA_MinWidth, 240,
+        WA_MinHeight, 120,
+        WA_MaxWidth, ~0,
+        WA_MaxHeight, ~0,
         WA_NewLookMenus, TRUE,
         TAG_DONE);
     if (win == NULL) {
@@ -816,15 +854,7 @@ static void guimode(void)
     fw = font->tf_XSize;
     fh = font->tf_YSize;
     fbase = font->tf_Baseline;
-    x0 = win->BorderLeft;
-    y0 = win->BorderTop;
-    viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
-    visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
-    halfw = (viscols - 3) / 2;
-    tabh = fh + 4;                  /* bevel + padding around a label */
-    conty = y0 + tabh + 2;          /* content sits below bar + rule */
-    crows = (win->Height - win->BorderBottom - conty) / fh;
-    if (crows < 1) crows = 1;
+    calcgrid();
 
     if (gf1[0] && gf2[0]) {         /* CLI gave the pair up front */
         if (loaddiff() == 0) calcgut();
@@ -848,6 +878,11 @@ static void guimode(void)
                 BeginRefresh(win);
                 drawpage();
                 EndRefresh(win, TRUE);
+            }
+            if (class == IDCMP_NEWSIZE) {
+                calcgrid();
+                clamptops();
+                drawpage();
             }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
                 if (tabsok && my >= y0 && my <= y0 + tabh) {
@@ -897,6 +932,19 @@ static void guimode(void)
                     scrollto(*vtop() - (page ? crows : 3));
                 else if (code == 0x7B) /* NewMouse: wheel down */
                     scrollto(*vtop() + (page ? crows : 3));
+                else if (code == 0x4F || code == 0x4E) {
+                    /* horizontal: every row's text moves, so this
+                     * stays a content repaint (the CFile editor's
+                     * edxoff precedent) - the gutter is pinned */
+                    int step = page ? 40 : 8;
+                    int nh = hoff + (code == 0x4E ? step : -step);
+                    if (nh < 0) nh = 0;
+                    if (nh > 440) nh = 440;
+                    if (nh != hoff) {
+                        hoff = nh;
+                        drawrows();
+                    }
+                }
             }
         }
     }
