@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b27 (1.8.26)";
+    "$VER: cdiff 0.1b28 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -665,15 +665,30 @@ static void addscrollers(APTR gvi)
     struct NewGadget ng;
     int brw = win->BorderRight, bbh = win->BorderBottom;
     int bl = win->BorderLeft, bt = win->BorderTop;
+    int vw = brw - 4, hh = bbh - 4;
     memset(&ng, 0, sizeof(ng));
     ng.ng_VisualInfo = gvi;
 
+    /* PGA_Freedom (intuition/gadgetclass.h, confirmed against the
+     * real installed NDK - NOT inferred from Width vs Height, that
+     * was a wrong guess) defaults to LORIENT_HORIZ: every scroller
+     * that omits it is built horizontal regardless of its box, the
+     * exact shape of the b27 "nothing renders" screenshot (a
+     * narrow/tall box holding a horizontal-oriented widget). Both
+     * scrollers now say what they are explicitly. GTSC_Arrows also
+     * has to be ASKED for - arrows are opt-in, not automatic; its
+     * value is the arrow's cross-axis size (height for a vertical
+     * scroller, width for a horizontal one), matched to the
+     * gadget's own thickness so the buttons come out roughly
+     * square instead of a guessed constant. */
     ng.ng_LeftEdge = win->Width - brw + 3;
     ng.ng_TopEdge = bt + 1;
-    ng.ng_Width = brw - 4;
+    ng.ng_Width = vw;
     ng.ng_Height = win->Height - bt - bbh - 1;
     ng.ng_GadgetID = 1;
     vgad = CreateGadget(SCROLLER_KIND, NULL, &ng,
+                        PGA_Freedom, LORIENT_VERT,
+                        GTSC_Arrows, vw,
                         GTSC_Total, 1, GTSC_Visible, 1, TAG_DONE);
     if (vgad == NULL) return;
     vgad->LeftEdge = 3 - brw;
@@ -683,9 +698,11 @@ static void addscrollers(APTR gvi)
     ng.ng_LeftEdge = bl;
     ng.ng_TopEdge = win->Height - bbh + 3;
     ng.ng_Width = win->Width - bl - brw - 1;
-    ng.ng_Height = bbh - 4;
+    ng.ng_Height = hh;
     ng.ng_GadgetID = 2;
     hgad = CreateGadget(SCROLLER_KIND, vgad, &ng,
+                        PGA_Freedom, LORIENT_HORIZ,
+                        GTSC_Arrows, hh,
                         GTSC_Total, 1, GTSC_Visible, 1, TAG_DONE);
     if (hgad) {
         hgad->TopEdge = 3 - bbh;

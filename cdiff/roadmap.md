@@ -114,8 +114,28 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       constant): the vertical scroller stops above the bottom
       border row, the horizontal stops left of the right border
       column, leaving exactly the corner cell for the system size
-      gadget. Boot gate: his verdict on the visible arrows +
-      honest horizontal knob still owed.
+      gadget. **His boot: NOTHING rendered - not even a bare
+      track** (worse than b26's arrow-less-but-visible knob).
+- [x] **b28: PGA_Freedom, the tag that was missing all along** -
+      root cause of b27's blank scrollers, found by chasing real
+      documentation instead of guessing again: orientation is NOT
+      inferred from a gadget's Width-vs-Height aspect (that b27
+      claim was fabricated from vague memory, never verified).
+      GadTools scrollers take an explicit `PGA_Freedom` tag
+      (LORIENT_VERT / LORIENT_HORIZ, `intuition/gadgetclass.h`)
+      and DEFAULT TO HORIZONTAL when it's omitted - so both
+      scrollers, including the narrow/tall vertical one, were
+      silently built horizontal, a degenerate box in the wrong
+      axis that rendered as nothing. Also: GTSC_Arrows must be
+      explicitly requested (arrows are opt-in, not automatic) -
+      value is the arrow's cross-axis size, matched to the
+      gadget's own thickness. Sourcing note: a Blitz Basic 2
+      gadtools wrapper guide found on the FS-UAE drive named the
+      tag first, but the FACT that decided the fix was independently
+      confirmed straight from the real C NDK header the toolchain
+      ships (`grep -rn PGA_Freedom /opt/amiga/.../gadtools.h`) -
+      not trusted from the Blitz source itself. Boot gate: his
+      verdict on arrows + orientation both owed.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode
