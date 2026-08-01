@@ -18,9 +18,11 @@ test-host: tests/difftest.c diff.c diff.h
 	$(HOSTCC) -O2 -Wall -I. -o tests/difftest-host tests/difftest.c diff.c
 	tests/difftest-host
 
+# -s 64: a 64K vamos stack so cdiff's StackSwap trampoline never
+# engages there (vamos's StackSwap is broken; real shells need it)
 test-vamos: tests/difftest.c diff.c diff.h
 	$(CC) $(CFLAGS) -I. tests/difftest.c diff.c -o tests/difftest
-	vamos -q tests/difftest
+	vamos -q -s 64 tests/difftest
 
 deploy: cdiff
 	cp cdiff "$(DEPLOY)/cdiff"

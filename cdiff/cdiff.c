@@ -8,6 +8,7 @@
  *   TEXT: unified-style listing to stdout (and the vamos test road).
  */
 #include <exec/types.h>
+#include <exec/tasks.h>
 #include <intuition/intuition.h>
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
@@ -26,9 +27,11 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b16 (1.8.26)";
+    "$VER: cdiff 0.1b17 (1.8.26)";
 
-unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
+/* NO __stack here: his guru proved this libnix never reads it (nm
+ * shows nothing referencing ___stack) - main swaps to a real 64K
+ * stack itself via exec StackSwap, see the bottom of the file */
 
 /* initialized on purpose: a strong definition keeps libnix's
  * auto-open modules out of the link - TEXT mode must run where
@@ -220,13 +223,18 @@ static int sentcmp(const void *pa, const void *pb)
  * the roadmap. */
 static void walkdir(const char *base, char *rel, SList *out, int depth)
 {
-    char full[730];
+    char *full;                 /* heap, NOT the frame - a deep tree
+                                 * with 730B frames ate the stack:
+                                 * his guru 8000 0009 on Unpacked/ */
     BPTR lock;
     struct FileInfoBlock *fib;
     if (depth > 12 || out->oom) return;
+    full = malloc(730);
+    if (full == NULL) { out->oom = 1; return; }
     strcpy(full, base);
     if (rel[0]) AddPart((STRPTR)full, (STRPTR)rel, 730);
     lock = Lock((STRPTR)full, SHARED_LOCK);
+    free(full);
     if (lock == 0) return;
     fib = AllocDosObject(DOS_FIB, NULL);
     if (fib && Examine(lock, fib)) {
@@ -1527,7 +1535,7 @@ out:
 
 /* ---- main ------------------------------------------------------- */
 
-int main(int argc, char **argv)
+static int smain(int argc, char **argv)
 {
     static const char tmpl[] = "FILE1/A,FILE2/A,TEXT/S";
     LONG argarr[3] = { 0, 0, 0 };
@@ -1621,4 +1629,44 @@ int main(int argc, char **argv)
     }
     FreeArgs(rda);
     return 0;
+}
+
+/* the stack trampoline: this libnix ignores __stack (proven by
+ * the Unpacked/ guru - nothing in the archive references it), so
+ * main itself swaps onto a 64K heap stack before any real work.
+ * Everything that crosses the swap lives in statics: after
+ * StackSwap the old frame's SP-relative locals are meaningless. */
+#define STACKSZ 65536
+
+static struct StackSwapStruct sss;
+static char *bigstk;
+static int sargc, sret;
+static char **sargv;
+
+int main(int argc, char **argv)
+{
+    struct Task *me = FindTask(NULL);
+    long have = (char *)me->tc_SPUpper - (char *)me->tc_SPLower;
+    /* swap only when the stack is measurably small. Zero bounds =
+     * an environment that does not fill them in (vamos leaves both
+     * NULL, measured 1.8.26 - and its StackSwap wrecks the exit
+     * path) - there, run as given. Real exec always fills them, so
+     * every real Amiga launch road gets the trampoline; his guru
+     * proof: 4096-stack shell + Unpacked/ = guru, 40960 = fine. */
+    if (me->tc_SPLower == NULL || me->tc_SPUpper == NULL ||
+        have >= 32768)
+        return smain(argc, argv);
+    sargc = argc;
+    sargv = argv;
+    bigstk = malloc(STACKSZ);
+    if (bigstk == NULL)
+        return smain(argc, argv);   /* degrade: run on what we have */
+    sss.stk_Lower = bigstk;
+    sss.stk_Upper = (ULONG)(bigstk + STACKSZ);
+    sss.stk_Pointer = (APTR)(bigstk + STACKSZ);
+    StackSwap(&sss);
+    sret = smain(sargc, sargv);
+    StackSwap(&sss);
+    free(bigstk);
+    return sret;
 }
