@@ -25,7 +25,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b5 (1.8.26)";
+    "$VER: cdiff 0.1b6 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -406,8 +406,32 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Open Right...", (STRPTR)"R",  0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,             NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Quit",          (STRPTR)"Q",  0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Keys...",       (STRPTR)"K",  0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"About...",      NULL,         0, 0, NULL },
     { NM_END,   NULL,                    NULL,         0, 0, NULL },
 };
+
+static void aboutreq(void)
+{
+    static char t[300];
+    /* verstag + 6 skips "$VER: " - the About can never drift from
+     * the real version string */
+    sprintf(t, "%s\n\na visual diff for AmigaOS\n"
+               "patience engine, side-by-side view\n\n"
+               "by Tobias Karlsson & Claude, 2026",
+            verstag + 6);
+    erq(t);
+}
+
+static void keysreq(void)
+{
+    erq("cursor up/down - scroll (shift = page)\n"
+        "space / b - page down / up\n"
+        "t / e - top / end\n"
+        "n / p - next / previous hunk\n"
+        "Esc or q - quit");
+}
 
 static int domenu(UWORD code)   /* returns 1 = quit */
 {
@@ -433,6 +457,11 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                 break;
             case 4:             /* Quit (3 is the bar) */
                 return 1;
+            }
+        } else if (MENUNUM(c) == 1) {
+            switch (ITEMNUM(c)) {
+            case 0: keysreq(); break;
+            case 1: aboutreq(); break;
             }
         }
         if (item == NULL) break;
