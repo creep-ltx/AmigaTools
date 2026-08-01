@@ -3455,6 +3455,24 @@ PROC refreshpane(p, place)
   drawpaths()
 ENDPROC
 
+-> refreshpanes: re-read and redraw both panes. If boxed=TRUE, only
+-> redraw the 3 frame rows that a progress box straddled (the box was at
+-> row nrows/2-2 to nrows/2, three cells high). For operations whose
+-> screen debris is confined to the progress box — use this after progoff.
+PROC refreshpanes(boxed)
+  DEF r
+  readpane(0)
+  readpane(1)
+  IF boxed
+    FOR r := (nrows / 2) - 2 TO nrows / 2
+      frow(r)
+    ENDFOR
+  ENDIF
+  drawpane(0)
+  drawpane(1)
+  drawpaths()
+ENDPROC
+
 -> F5: re-read both panes from disk (a shell or Workbench may have
 -> changed a directory behind CFile's back), keeping each cursor on the
 -> entry it was on if that entry is still there.
@@ -5827,7 +5845,7 @@ PROC isoxfer_out(p, q, ismove, force)
   Close(fh)
   cancelok := FALSE
   progoff()
-  refreshall()
+  refreshpanes(IF total > 1 THEN TRUE ELSE FALSE)
   IF abort
     StringF(mb, 'cancelled - \d of \d done', ndone,
             IF nmark > 0 THEN nmark ELSE 1)
@@ -6616,7 +6634,7 @@ PROC doxfer(ismove, force)
   ENDFOR
   cancelok := FALSE
   progoff()
-  refreshall()
+  refreshpanes(showbar)
   IF abort
     StringF(mb, 'cancelled - \d of \d done', ndone, nsel)
     showmsg(mb)
@@ -6902,7 +6920,7 @@ PROC dodelete()
   ENDIF
   cancelok := FALSE
   progoff()
-  refreshall()
+  refreshpanes(showbar)
   IF abort
     showmsg('delete cancelled')
   ELSEIF gfails = 1
