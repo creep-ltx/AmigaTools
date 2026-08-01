@@ -25,7 +25,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b6 (1.8.26)";
+    "$VER: cdiff 0.1b7 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -159,6 +159,16 @@ static char *gbuf1, *gbuf2;
 static DLine *gla, *glb;
 static DOp *gops;
 
+/* tabs (his ask): 0 = Both side-by-side, 1 = Left full-width,
+ * 2 = Right full-width. Per-line change tags let the single views
+ * bar their changed lines without walking the row list. */
+static int view;
+static int ltop, rtop;          /* single-view scroll tops (lines) */
+static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
+static int conty, crows;        /* content grid below the tab row */
+static int tabx[3], tabe[3];    /* tab bar hit ranges */
+static int tabsok;              /* tab bar drawn (files loaded) */
+
 /* draw one text cell run, tab-expanded, clipped to width cells */
 static void drawtext(int x, int y, const DLine *l, int width,
                      int pen, int bg)
@@ -190,17 +200,19 @@ static void drawnum(int x, int y, long line, int pen, int bg)
     Text(rp, (STRPTR)nb, gutw);
 }
 
-/* one side of a row: optional bar fill, gutter number, the text.
- * The gutter recedes by palette hierarchy (his ask - there is no
- * dark grey on a 4-colour WB): blue-on-gray for plain rows, and
- * black-on-blue under the bar - always a step quieter than the
- * content beside it. */
-static void drawside(int x, int y, const DLine *l, long line, int bar)
+/* one side of a row: optional bar fill, gutter number, the text,
+ * within a `w`-column budget (halfw in the overview, viscols in a
+ * single-file tab). The gutter recedes by palette hierarchy (his
+ * ask - there is no dark grey on a 4-colour WB): blue-on-gray for
+ * plain rows, black-on-blue under the bar - always a step quieter
+ * than the content beside it. */
+static void drawside(int x, int y, const DLine *l, long line,
+                     int bar, int w)
 {
-    int tx = x, tw = halfw;
+    int tx = x, tw = w;
     if (bar) {
         SetAPen(rp, 3);
-        RectFill(rp, x, y, x + halfw * fw - 1, y + fh - 1);
+        RectFill(rp, x, y, x + w * fw - 1, y + fh - 1);
     }
     if (gutw > 0) {
         drawnum(x, y, line, bar ? 1 : 3, bar ? 3 : 0);
@@ -218,7 +230,7 @@ static void drawside(int x, int y, const DLine *l, long line, int bar)
 static void drawrow(int vr)
 {
     int idx = gtop + vr;
-    int y = y0 + vr * fh;
+    int y = conty + vr * fh;
     int bar, x1;
     Row *r;
     SetAPen(rp, 0);
@@ -228,7 +240,7 @@ static void drawrow(int vr)
     bar = r->tag != ' ';
     x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
     if (r->al >= 0)
-        drawside(x0, y, &ga[r->al], r->al, bar);
+        drawside(x0, y, &ga[r->al], r->al, bar, halfw);
     if (bar) {
         SetAPen(rp, 3);
         SetBPen(rp, 0);
@@ -236,21 +248,86 @@ static void drawrow(int vr)
         Text(rp, (STRPTR)&r->tag, 1);
     }
     if (r->bl >= 0)
-        drawside(x1, y, &gb[r->bl], r->bl, bar);
+        drawside(x1, y, &gb[r->bl], r->bl, bar, halfw);
+}
+
+/* the active view's scroll top and extent */
+static int *vtop(void)
+{
+    return view == 0 ? &gtop : view == 1 ? &ltop : &rtop;
+}
+
+static int vcount(void)
+{
+    return view == 0 ? gnrows : view == 1 ? gna : gnb;
+}
+
+/* one full-width line of a single-file tab */
+static void drawline(int vr)
+{
+    int line = *vtop() + vr;
+    int y = conty + vr * fh;
+    const DLine *l;
+    char tag;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+    if (view == 1) {
+        if (line >= gna) return;
+        l = &ga[line];
+        tag = gatag[line];
+    } else {
+        if (line >= gnb) return;
+        l = &gb[line];
+        tag = gbtag[line];
+    }
+    drawside(x0, y, l, line, tag != ' ', viscols);
+}
+
+/* the tab bar: Both | left name | right name, active tab barred */
+static void drawtabs(void)
+{
+    static char lab[3][40];
+    int i, x = x0, w;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y0, x0 + viscols * fw - 1, y0 + fh - 1);
+    tabsok = ga != NULL;
+    if (!tabsok) return;
+    strcpy(lab[0], " Both ");
+    sprintf(lab[1], " %.30s ", (char *)FilePart((STRPTR)gf1));
+    sprintf(lab[2], " %.30s ", (char *)FilePart((STRPTR)gf2));
+    for (i = 0; i < 3; i++) {
+        w = strlen(lab[i]);
+        tabx[i] = x;
+        tabe[i] = x + w * fw;
+        if (i == view) {
+            SetAPen(rp, 3);
+            RectFill(rp, x, y0, x + w * fw - 1, y0 + fh - 1);
+        }
+        SetAPen(rp, i == view ? 2 : 1);
+        SetBPen(rp, i == view ? 3 : 0);
+        Move(rp, x, y0 + fbase);
+        Text(rp, (STRPTR)lab[i], w);
+        x += (w + 1) * fw;
+    }
 }
 
 static void drawpage(void)
 {
     int vr;
-    for (vr = 0; vr < visrows; vr++)
-        drawrow(vr);
+    drawtabs();
+    for (vr = 0; vr < crows; vr++) {
+        if (view == 0)
+            drawrow(vr);
+        else
+            drawline(vr);
+    }
     if (ga == NULL) {           /* WB start, nothing loaded yet */
         static const char hint[] =
             "no files loaded - Project / Open Files... "
             "(right mouse button)";
         SetAPen(rp, 1);
         SetBPen(rp, 0);
-        Move(rp, x0 + 2 * fw, y0 + fh + fbase);
+        Move(rp, x0 + 2 * fw, conty + fh + fbase);
         Text(rp, (STRPTR)hint, sizeof(hint) - 1);
     }
 }
@@ -269,28 +346,78 @@ static void settitle(void)
     SetWindowTitles(win, (STRPTR)t, (STRPTR)~0);
 }
 
-/* scroll so row `target` is on top, clamped; full repaint (the
- * ScrollRaster road is roadmap b3, deliberately) */
+/* scroll the ACTIVE view so `target` is on top, clamped; full
+ * repaint (the ScrollRaster road is roadmap b2, deliberately) */
 static void scrollto(int target)
 {
-    int max = gnrows - visrows;
+    int *t = vtop();
+    int max = vcount() - crows;
     if (max < 0) max = 0;
     if (target > max) target = max;
     if (target < 0) target = 0;
-    if (target == gtop) return;
-    gtop = target;
+    if (target == *t) return;
+    *t = target;
     drawpage();
 }
 
+/* next/previous hunk in the active view: rows in the overview,
+ * tagged lines in a single-file tab */
 static int nexthunk(int from, int dir)
 {
-    int i = from + dir;
-    while (i > 0 && i < gnrows && grows[i].tag != ' ') i += dir;
-    while (i >= 0 && i < gnrows && grows[i].tag == ' ') i += dir;
-    if (i < 0 || i >= gnrows) return from;
-    /* walk back to the hunk's first row */
-    while (i > 0 && grows[i - 1].tag != ' ') i--;
+    const char *tg = view == 1 ? gatag : gbtag;
+    int n = vcount(), i = from + dir;
+    if (view == 0) {
+        while (i > 0 && i < n && grows[i].tag != ' ') i += dir;
+        while (i >= 0 && i < n && grows[i].tag == ' ') i += dir;
+        if (i < 0 || i >= n) return from;
+        while (i > 0 && grows[i - 1].tag != ' ') i--;
+    } else {
+        while (i > 0 && i < n && tg[i] != ' ') i += dir;
+        while (i >= 0 && i < n && tg[i] == ' ') i += dir;
+        if (i < 0 || i >= n) return from;
+        while (i > 0 && tg[i - 1] != ' ') i--;
+    }
     return i;
+}
+
+/* switch tabs, keeping the position: the top row/line carries over
+ * through the row list so all three views stay anchored */
+static void setview(int v)
+{
+    int i, row = 0;
+    if (v == view || ga == NULL) return;
+    if (view == 0) {
+        for (i = gtop; i < gnrows; i++) {
+            if (v == 1 && grows[i].al >= 0) { ltop = grows[i].al; break; }
+            if (v == 2 && grows[i].bl >= 0) { rtop = grows[i].bl; break; }
+        }
+    } else {
+        int line = view == 1 ? ltop : rtop;
+        for (i = 0; i < gnrows; i++) {
+            long here = view == 1 ? grows[i].al : grows[i].bl;
+            if (here >= line) { row = i; break; }
+        }
+        if (v == 0) {
+            gtop = row;
+        } else {
+            for (i = row; i < gnrows; i++) {
+                long other = v == 1 ? grows[i].al : grows[i].bl;
+                if (other >= 0) {
+                    if (v == 1) ltop = other; else rtop = other;
+                    break;
+                }
+            }
+        }
+    }
+    view = v;
+    /* re-clamp the landing view */
+    {
+        int *t = vtop(), max = vcount() - crows;
+        if (max < 0) max = 0;
+        if (*t > max) *t = max;
+        if (*t < 0) *t = 0;
+    }
+    drawpage();
 }
 
 /* ---- loading, requesters, menus --------------------------------- */
@@ -322,9 +449,12 @@ static void freediff(void)
     free(glb); glb = NULL;
     free(gbuf1); gbuf1 = NULL;
     free(gbuf2); gbuf2 = NULL;
+    free(gatag); gatag = NULL;
+    free(gbtag); gbtag = NULL;
     ga = gb = NULL;
     gna = gnb = 0;
-    gtop = 0;
+    gtop = 0; ltop = 0; rtop = 0;
+    view = 0;
 }
 
 static void calcgut(void)
@@ -358,10 +488,22 @@ static int loaddiff(void)
     if (diff_split(gbuf1, sz1, &gla, &na) != 0 ||
         diff_split(gbuf2, sz2, &glb, &nb) != 0 ||
         diff_run(gla, na, glb, nb, &gops, &nops) != 0 ||
-        (grows = buildrows(gops, nops, &nrows)) == NULL) {
+        (grows = buildrows(gops, nops, &nrows)) == NULL ||
+        (gatag = malloc(na > 0 ? na : 1)) == NULL ||
+        (gbtag = malloc(nb > 0 ? nb : 1)) == NULL) {
         erq("out of memory");
         freediff();
         return -1;
+    }
+    /* per-line tags for the single-file tabs */
+    memset(gatag, ' ', na > 0 ? na : 1);
+    memset(gbtag, ' ', nb > 0 ? nb : 1);
+    {
+        int i;
+        for (i = 0; i < nrows; i++) {
+            if (grows[i].al >= 0) gatag[grows[i].al] = grows[i].tag;
+            if (grows[i].bl >= 0) gbtag[grows[i].bl] = grows[i].tag;
+        }
     }
     ga = gla; gb = glb;
     gna = na; gnb = nb;
@@ -426,7 +568,9 @@ static void aboutreq(void)
 
 static void keysreq(void)
 {
-    erq("cursor up/down - scroll (shift = page)\n"
+    erq("1 / 2 / 3 or Tab - view: Both / Left / Right\n"
+        "(the tab bar is clickable too)\n"
+        "cursor up/down - scroll (shift = page)\n"
         "space / b - page down / up\n"
         "t / e - top / end\n"
         "n / p - next / previous hunk\n"
@@ -494,7 +638,7 @@ static void guimode(void)
         WA_PubScreen, (ULONG)scr,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
-                  IDCMP_MENUPICK,
+                  IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS,
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   WFLG_CLOSEGADGET | WFLG_SIMPLE_REFRESH |
                   WFLG_ACTIVATE,
@@ -532,6 +676,9 @@ static void guimode(void)
     viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
     visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
     halfw = (viscols - 3) / 2;
+    conty = y0 + fh;                /* content sits below the tab row */
+    crows = visrows - 1;
+    if (crows < 1) crows = 1;
 
     if (gf1[0] && gf2[0]) {         /* CLI gave the pair up front */
         if (loaddiff() == 0) calcgut();
@@ -545,6 +692,7 @@ static void guimode(void)
             ULONG class = msg->Class;
             UWORD code = msg->Code;
             UWORD qual = msg->Qualifier;
+            WORD mx = msg->MouseX, my = msg->MouseY;
             ReplyMsg((struct Message *)msg);
             if (class == IDCMP_CLOSEWINDOW) done = 1;
             if (class == IDCMP_MENUPICK) {
@@ -555,24 +703,38 @@ static void guimode(void)
                 drawpage();
                 EndRefresh(win, TRUE);
             }
+            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
+                if (tabsok && my >= y0 && my < y0 + fh) {
+                    int i;
+                    for (i = 0; i < 3; i++)
+                        if (mx >= tabx[i] && mx < tabe[i])
+                            setview(i);
+                }
+            }
             if (class == IDCMP_VANILLAKEY) {
                 switch (code) {
                 case 27: case 'q': case 'Q': done = 1; break;
-                case ' ': scrollto(gtop + visrows); break;
-                case 'b': case 'B': scrollto(gtop - visrows); break;
+                case 9:  setview((view + 1) % 3); break;   /* Tab */
+                case '1': setview(0); break;
+                case '2': setview(1); break;
+                case '3': setview(2); break;
+                case ' ': scrollto(*vtop() + crows); break;
+                case 'b': case 'B': scrollto(*vtop() - crows); break;
                 case 't': case 'T': scrollto(0); break;
-                case 'e': case 'E': scrollto(gnrows); break;
-                case 'n': case 'N': scrollto(nexthunk(gtop, 1)); break;
-                case 'p': case 'P': scrollto(nexthunk(gtop, -1)); break;
+                case 'e': case 'E': scrollto(vcount()); break;
+                case 'n': case 'N':
+                    scrollto(nexthunk(*vtop(), 1)); break;
+                case 'p': case 'P':
+                    scrollto(nexthunk(*vtop(), -1)); break;
                 }
             }
             if (class == IDCMP_RAWKEY) {
                 int page = (qual & (IEQUALIFIER_LSHIFT |
                                     IEQUALIFIER_RSHIFT)) != 0;
                 if (code == 0x4C)      /* cursor up */
-                    scrollto(gtop - (page ? visrows : 1));
+                    scrollto(*vtop() - (page ? crows : 1));
                 else if (code == 0x4D) /* cursor down */
-                    scrollto(gtop + (page ? visrows : 1));
+                    scrollto(*vtop() + (page ? crows : 1));
             }
         }
     }

@@ -39,6 +39,12 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       libnix auto-open drags gadtools/asl into startup and the
       binary dies where they don't exist - vamos caught it, the
       TEXT road is the regression gate that matters.
+- [~] **b7: TABS** (his ask, after loading real .e files - "a
+      chopped-off version of the two files"): Both / Left / Right,
+      the single tabs full-width with per-line change bars; 1/2/3
+      or Tab switches, the bar is clickable; a tab switch carries
+      the scroll position through the row list so all three views
+      stay anchored on the same spot.
 - [ ] Horizontal scroll (left/right keys) for long lines.
 - [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
 - [ ] A status row: hunk i/N, +a −d, position %.
