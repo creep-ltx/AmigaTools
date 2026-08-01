@@ -25,7 +25,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b7 (1.8.26)";
+    "$VER: cdiff 0.1b8 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -165,9 +165,16 @@ static DOp *gops;
 static int view;
 static int ltop, rtop;          /* single-view scroll tops (lines) */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
-static int conty, crows;        /* content grid below the tab row */
-static int tabx[3], tabe[3];    /* tab bar hit ranges */
-static int tabsok;              /* tab bar drawn (files loaded) */
+static int conty, crows;        /* content grid below the tab bar */
+static int tabx[3], tabe[3];    /* tab bar hit ranges (pixels) */
+static int tabsok;              /* tab bar live (files loaded) */
+static int tabh;                /* tab bar height in pixels */
+
+/* the screen's own GUI pens (DrawInfo), with 4-colour WB fallbacks -
+ * the tabs are drawn in Intuition's bevel language (his ask: GUI
+ * tabs, not text cells), so they follow the user's WB palette */
+static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
+           ptext = 1, pback = 0;
 
 /* draw one text cell run, tab-expanded, clipped to width cells */
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -283,32 +290,57 @@ static void drawline(int vr)
     drawside(x0, y, l, line, tag != ' ', viscols);
 }
 
-/* the tab bar: Both | left name | right name, active tab barred */
+/* the tab bar: real GUI tabs (his ask) - beveled boxes in the
+ * screen's DrawInfo pens, the active one filled and opening into
+ * the content through a gap in the base rule */
 static void drawtabs(void)
 {
     static char lab[3][40];
-    int i, x = x0, w;
-    SetAPen(rp, 0);
-    RectFill(rp, x0, y0, x0 + viscols * fw - 1, y0 + fh - 1);
+    int i, x, w, yr = y0 + tabh, winr = x0 + viscols * fw - 1;
+    SetAPen(rp, pback);
+    RectFill(rp, x0, y0, winr, yr + 1);
     tabsok = ga != NULL;
     if (!tabsok) return;
-    strcpy(lab[0], " Both ");
-    sprintf(lab[1], " %.30s ", (char *)FilePart((STRPTR)gf1));
-    sprintf(lab[2], " %.30s ", (char *)FilePart((STRPTR)gf2));
+    strcpy(lab[0], "Both");
+    sprintf(lab[1], "%.30s", (char *)FilePart((STRPTR)gf1));
+    sprintf(lab[2], "%.30s", (char *)FilePart((STRPTR)gf2));
+    x = x0 + 2;
     for (i = 0; i < 3; i++) {
-        w = strlen(lab[i]);
+        w = strlen(lab[i]) * fw + 12;   /* label + side padding */
         tabx[i] = x;
-        tabe[i] = x + w * fw;
-        if (i == view) {
-            SetAPen(rp, 3);
-            RectFill(rp, x, y0, x + w * fw - 1, y0 + fh - 1);
-        }
-        SetAPen(rp, i == view ? 2 : 1);
-        SetBPen(rp, i == view ? 3 : 0);
-        Move(rp, x, y0 + fbase);
-        Text(rp, (STRPTR)lab[i], w);
-        x += (w + 1) * fw;
+        tabe[i] = x + w;
+        /* body */
+        SetAPen(rp, i == view ? pfill : pback);
+        RectFill(rp, x + 1, y0 + 1, x + w - 2, yr - 1);
+        /* bevel: shine top+left, shadow right */
+        SetAPen(rp, pshine);
+        Move(rp, x, yr - 1);
+        Draw(rp, x, y0);
+        Draw(rp, x + w - 2, y0);
+        SetAPen(rp, pshadow);
+        Move(rp, x + w - 1, y0 + 1);
+        Draw(rp, x + w - 1, yr - 1);
+        /* label, centred in the tab */
+        SetAPen(rp, i == view ? pfilltext : ptext);
+        SetBPen(rp, i == view ? pfill : pback);
+        Move(rp, x + 6, y0 + 2 + fbase);
+        Text(rp, (STRPTR)lab[i], strlen(lab[i]));
+        x += w + 3;
     }
+    /* base rule in shine, broken open under the active tab - the
+     * classic "this tab is the page you are on" statement */
+    SetAPen(rp, pshine);
+    if (tabx[view] > x0) {
+        Move(rp, x0, yr);
+        Draw(rp, tabx[view], yr);
+    }
+    Move(rp, tabe[view] - 1, yr);
+    Draw(rp, winr, yr);
+    /* the active tab's floor is its fill colour: erase the rule
+     * span so page and tab read as one surface */
+    SetAPen(rp, pfill);
+    Move(rp, tabx[view] + 1, yr);
+    Draw(rp, tabe[view] - 2, yr);
 }
 
 static void drawpage(void)
@@ -648,6 +680,20 @@ static void guimode(void)
         UnlockPubScreen(NULL, scr);
         goto out;
     }
+    {
+        /* the screen's GUI pens for the tab bevels; fall back to
+         * the 4-colour defaults if DrawInfo is unavailable */
+        struct DrawInfo *dri = GetScreenDrawInfo(scr);
+        if (dri) {
+            pshine = dri->dri_Pens[SHINEPEN];
+            pshadow = dri->dri_Pens[SHADOWPEN];
+            pfill = dri->dri_Pens[FILLPEN];
+            pfilltext = dri->dri_Pens[FILLTEXTPEN];
+            ptext = dri->dri_Pens[TEXTPEN];
+            pback = dri->dri_Pens[BACKGROUNDPEN];
+            FreeScreenDrawInfo(scr, dri);
+        }
+    }
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
@@ -676,8 +722,9 @@ static void guimode(void)
     viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
     visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
     halfw = (viscols - 3) / 2;
-    conty = y0 + fh;                /* content sits below the tab row */
-    crows = visrows - 1;
+    tabh = fh + 4;                  /* bevel + padding around a label */
+    conty = y0 + tabh + 2;          /* content sits below bar + rule */
+    crows = (win->Height - win->BorderBottom - conty) / fh;
     if (crows < 1) crows = 1;
 
     if (gf1[0] && gf2[0]) {         /* CLI gave the pair up front */
@@ -704,7 +751,7 @@ static void guimode(void)
                 EndRefresh(win, TRUE);
             }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
-                if (tabsok && my >= y0 && my < y0 + fh) {
+                if (tabsok && my >= y0 && my <= y0 + tabh) {
                     int i;
                     for (i = 0; i < 3; i++)
                         if (mx >= tabx[i] && mx < tabe[i])
