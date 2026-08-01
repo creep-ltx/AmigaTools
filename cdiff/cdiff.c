@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b17 (1.8.26)";
+    "$VER: cdiff 0.1b18 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -658,7 +658,10 @@ static void drawpage(void)
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
         RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
-    if (ga == NULL) {           /* WB start, nothing loaded yet */
+    if (ga == NULL && !gdirmode) {  /* WB start, nothing loaded -
+                                     * in dirmode the Tree IS the
+                                     * content (his find: the hint
+                                     * stamped over the rows) */
         static const char hint[] =
             "no files loaded - Project / Open Files... "
             "(right mouse button)";
