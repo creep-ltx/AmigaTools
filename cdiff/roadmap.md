@@ -81,17 +81,41 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       argument-less noinline function - verified by re-reading the
       disassembly tail. **BOOT-GREEN on real 3.2, stack 4096, no
       Stack/STACK tooltype needed.**
-- [x] **b25/b26: mouse citizenship** (his verdict: "a CLI program
-      in a GUI, no scrollbar, can't click anything") — proportional
-      border prop-gadgets (vertical right, horizontal bottom,
-      AUTOKNOB/NEWLOOK, border-relative so resize repositions them
-      free) synced to every scroll source (keys, wheel, hunk jump,
-      tab switch); Tree click selects, double-click opens
-      (DoubleClick() timing). b26: the MultiView border anatomy
-      (his reference screenshot) - sysiclass UP/DOWN/LEFT/RIGHT
-      arrow gadgets at the scroller ends, sized from the real
-      image dimensions so the props stop short exactly at the
-      arrows; IDCMP_INTUITICKS drives press-and-hold repeat.
+- [x] **b25/b26: mouse citizenship, first pass** (his verdict: "a
+      CLI program in a GUI, no scrollbar, can't click anything") —
+      proportional border prop-gadgets synced to every scroll
+      source (keys, wheel, hunk jump, tab switch); Tree click
+      selects, double-click opens (DoubleClick() timing). b26
+      tried hand-rolled sysiclass arrow images at the scroller
+      ends - built clean, but **his boot screenshot showed no
+      arrows at all**, just the bare knob track.
+- [x] **b27: scrap the hand-rolled arrows, use GadTools' own**
+      (his correction: "please do not reinvent the wheel", after
+      he pointed at the ReAction and GadTools wiki pages himself)
+      — root cause of b26's invisible arrows: a plain struct
+      Gadget cannot render a BOOPSI class image without
+      GFLG_GADGIMAGE, never set. Rather than patch that, switched
+      the whole scroller to gadtools.library's own SCROLLER_KIND
+      (CreateGadget) - it builds its own correctly-imaged knob AND
+      arrow-button pair, and drives their click-and-hold repeat
+      itself via IDCMP_INTUITICKS entirely inside gadtools.library
+      (confirmed against the real installed NDK headers, not
+      memory: ARROWIDCMP/SCROLLERIDCMP, GTSC_Total/Visible/Top,
+      GT_SetGadgetAttrs/GT_GetGadgetAttrs, GT_GetIMsg/GT_ReplyIMsg
+      required once real GadTools gadgets exist). Also fixed the
+      OTHER b26 finding in the same screenshot: the horizontal
+      scrollbar showed a partial knob from a fixed 512-column
+      guess even when nothing on screen overflowed. GTSC_Total now
+      comes from a real per-view max-line-width scan (tab-expanded
+      to match rendering, cached, invalidated on load/scandirs/
+      view-switch) - a side that fits shows a full-body knob, the
+      honest "nothing to scroll" signal. Border geometry derived
+      from real border widths only (no guessed corner-reservation
+      constant): the vertical scroller stops above the bottom
+      border row, the horizontal stops left of the right border
+      column, leaving exactly the corner cell for the system size
+      gadget. Boot gate: his verdict on the visible arrows +
+      honest horizontal knob still owed.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode
