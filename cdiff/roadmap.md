@@ -39,12 +39,30 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       libnix auto-open drags gadtools/asl into startup and the
       binary dies where they don't exist - vamos caught it, the
       TEXT road is the regression gate that matters.
-- [~] **b7: TABS** (his ask, after loading real .e files - "a
+- [x] **b7: TABS** (his ask, after loading real .e files - "a
       chopped-off version of the two files"): Both / Left / Right,
       the single tabs full-width with per-line change bars; 1/2/3
       or Tab switches, the bar is clickable; a tab switch carries
       the scroll position through the row list so all three views
       stay anchored on the same spot.
+- [x] **b8: the tab bar goes GUI** (his ask) - Intuition bevels in
+      the screen's DrawInfo pens, active tab filled and breaking
+      the base rule open.
+- [x] **b9: the edit road + F5** (his ask "what do we do when we
+      want to edit") - Edit menu hands a side to ENV:EDITOR (Ed
+      fallback) via SystemTags + AUTO console; rediff-in-place
+      keeps view and position. Reload for external changes.
+- [x] **b10: Shift+Tab cycles back** - the keymap lesson: Shift+Tab
+      has NO vanilla translation, it falls through as RAWKEY 0x42.
+- [x] **b11: mouse wheel** - NewMouse RAWKEY 0x7A/0x7B, 3 lines a
+      notch, shift = page.
+- [x] **b12: the R1 scroll rule** (his find: "artifacts/stutter...
+      maybe learn from CCon and CFile") - a step was drawpage();
+      now ONE ScrollWindowRaster of the content rect + only the
+      entering rows, tab bar untouched by scrolling, jumps repaint
+      content only. **BOOT-GREEN 1.8.26: "Amazing, what a
+      difference."** The campaign lesson holds: blit count is the
+      metric, and it transfers to a new codebase in one build.
 - [ ] Horizontal scroll (left/right keys) for long lines.
 - [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
 - [ ] A status row: hunk i/N, +a −d, position %.
