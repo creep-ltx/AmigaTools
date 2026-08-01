@@ -75,7 +75,8 @@ MODULE 'intuition/intuition','intuition/screens',
        'datatypes','datatypes/datatypes','datatypes/datatypesclass',
        'datatypes/pictureclass','datatypes/soundclass','dos/var',
        'exec/tasks','exec/memory','exec/ports','dos/notify',
-       'graphics/scale','ptreplay','icon','workbench/workbench'
+       'graphics/scale','ptreplay','icon','workbench/workbench',
+       'exec/libraries'
 
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
@@ -2921,9 +2922,18 @@ PROC openui()
     -> at 255. Text/fills stay full-depth: every surface ENTRY
     -> repaints unmasked, which is what scrubs another surface's
     -> planes (the ccon narrowing rule).
-    IF GetBitMapAttr(rp.bitmap, BMA_FLAGS) AND BMF_STANDARD
-      panemask := %101
-      flatmask := %001
+    -> 0.5b51: the PROBE is V39-only - GetBitMapAttr is not in the
+    -> 2.04 jump table, and E jumps through LVOs blind, so on a real
+    -> 2.04 this line WAS the crash (the only V39 call in the
+    -> mandatory path; his audit found it). Guarded: 3.0+ asks the
+    -> question, 2.04 keeps the full-depth 255 masks - the trick is
+    -> an optimization, never a requirement, and the lying-RTG
+    -> bitmaps it screens for do not exist on a stock 2.04 anyway.
+    IF gfxversion() >= 39
+      IF GetBitMapAttr(rp.bitmap, BMA_FLAGS) AND BMF_STANDARD
+        panemask := %101
+        flatmask := %001
+      ENDIF
     ENDIF
   ELSE
     txtpen := 1
@@ -6905,6 +6915,105 @@ PROC dodelete()
   abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
 
+-> ---- icon tooltype surgery (0.5b51) --------------------------------
+
+-> The tooltype WRITE road does not go through PutDiskObject: the
+-> library rewrites the whole .info from its in-memory parse, and
+-> anything the running icon.library did not understand is silently
+-> gone - an OS3.5 color-icon IFF appendix under a 3.1 icon.library
+-> being the killer. Instead the file is spliced: every byte before
+-> and after the tooltype block is copied untouched, only the block
+-> itself is rebuilt - a save with no changes writes an IDENTICAL
+-> file. The reader side of the same walker also SEEDS the editor,
+-> so nothing a patched icon.library might filter from
+-> GetDiskObject's view can be lost by a round trip.
+->
+-> The on-disk DiskObject (magic $E310) is its RAM image: 78-byte
+-> header (2 magic + 2 version + 44 embedded Gadget + 1 type + 1 pad
+-> + 8 pointer/long fields of 4), then optional 56-byte DrawerData,
+-> the two gadget images (20-byte Image header + planes), the
+-> length-prefixed default tool string, THE TOOLTYPE BLOCK, and a
+-> suffix (tool window, DrawerData2, any 3.5+ appendix) this code
+-> never interprets. Pointer fields in the header are came-from-RAM
+-> leftovers that on disk mean only present/absent.
+
+PROC rdword(b:PTR TO CHAR, o)
+ENDPROC Shl(b[o], 8) OR b[o + 1]
+
+PROC rdlong(b:PTR TO CHAR, o)
+ENDPROC Shl(b[o], 24) OR Shl(b[o + 1], 16) OR Shl(b[o + 2], 8) OR b[o + 3]
+
+PROC wrlong(b:PTR TO CHAR, o, v)
+  b[o]     := Shr(v, 24) AND $FF
+  b[o + 1] := Shr(v, 16) AND $FF
+  b[o + 2] := Shr(v, 8) AND $FF
+  b[o + 3] := v AND $FF
+ENDPROC
+
+-> skip one on-disk Image at off: 20-byte header, then depth planes
+-> of word-padded width x height. -1 = the numbers do not add up
+-> (the caps also keep Mul inside what a sane icon can be).
+PROC skipimage(b:PTR TO CHAR, size, off)
+  DEF w, h, d
+  IF (off + 20) > size THEN RETURN -1
+  w := rdword(b, off + 4)
+  h := rdword(b, off + 6)
+  d := rdword(b, off + 8)
+  IF (w < 1) OR (h < 1) OR (d < 1) THEN RETURN -1
+  IF (w > 4096) OR (h > 4096) OR (d > 8) THEN RETURN -1
+  off := off + 20 + Mul(Mul(Shr(w + 15, 4), 2), Mul(h, d))
+  IF off > size THEN RETURN -1
+ENDPROC off
+
+-> locate the tooltype block: res[0] = where it starts, res[1] =
+-> where the suffix after it begins (equal when the icon has none).
+-> TRUE only when the magic checks out and the whole walk stays
+-> inside the file - anything else and the icon is left alone.
+PROC ttlocate(b:PTR TO CHAR, size, res:PTR TO LONG)
+  DEF off, n, nent, j, l
+  IF size < 78 THEN RETURN FALSE
+  IF rdword(b, 0) <> $E310 THEN RETURN FALSE
+  off := 78
+  IF rdlong(b, 66) THEN off := off + 56    -> DrawerData present
+  IF off > size THEN RETURN FALSE
+  IF rdlong(b, 22)                         -> GadgetRender image
+    IF (off := skipimage(b, size, off)) = -1 THEN RETURN FALSE
+  ENDIF
+  IF rdlong(b, 26)                         -> SelectRender image
+    IF (off := skipimage(b, size, off)) = -1 THEN RETURN FALSE
+  ENDIF
+  IF rdlong(b, 50)                         -> default tool string
+    IF (off + 4) > size THEN RETURN FALSE
+    l := rdlong(b, off)
+    IF (l < 0) OR ((off + 4 + l) > size) THEN RETURN FALSE
+    off := off + 4 + l
+  ENDIF
+  res[0] := off
+  IF rdlong(b, 54)                         -> the block: count long,
+    IF (off + 4) > size THEN RETURN FALSE  -> then len-prefixed entries
+    n := rdlong(b, off)
+    nent := Shr(n, 2) - 1                  -> count = n/4 - 1, the format's rule
+    IF (nent < 0) OR (nent > 4096) THEN RETURN FALSE
+    off := off + 4
+    FOR j := 1 TO nent
+      IF (off + 4) > size THEN RETURN FALSE
+      l := rdlong(b, off)
+      IF (l < 0) OR ((off + 4 + l) > size) THEN RETURN FALSE
+      off := off + 4 + l
+    ENDFOR
+  ENDIF
+  res[1] := off
+ENDPROC TRUE
+
+-> graphics.library's version, read from the base every kickstart
+-> shares - the guard that keeps V39-only probes off a 2.04 jump
+-> table (E resolves LVOs blind; a missing vector is a crash, not
+-> an error)
+PROC gfxversion()
+  DEF l:PTR TO lib
+  l := gfxbase
+ENDPROC l.version
+
 -> ---- the info/protect window ---------------------------------------
 
 -> icon.library, the i window's .info reader - lazily opened like
@@ -6967,7 +7076,8 @@ ENDPROC
 -> live via SetProtection, Esc closes. Since 0.5b48 it also names the
 -> file by its datatype (stage A: identification only, the sniff
 -> stays the verbs' truth) and reads the .info sidecar DOpus-style:
--> icon type, default tool, tooltypes (t pages through them)
+-> icon type, default tool, tooltypes (t pages through them; T opens
+-> the whole list in the editor since 0.5b51 - save writes the icon)
 PROC infowindow()
   DEF p, i, xx, yy, r, k, mask, isdir, done=FALSE, changed,
       fpath[310]:STRING, lock=NIL, fib=NIL:PTR TO fileinfoblock,
@@ -6976,7 +7086,10 @@ PROC infowindow()
       fl[10]:STRING, cmt[84]:STRING, ln[120]:STRING, cbuf[84]:STRING,
       tyb[40]:STRING, ipath[330]:STRING, dob=NIL:PTR TO diskobject,
       ntt=0, tti=0, tts=NIL:PTR TO LONG, dtool:PTR TO CHAR,
-      ibase[120]:STRING, hasicon=FALSE
+      ibase[120]:STRING, hasicon=FALSE,
+      fh2, j, r2, l2, ntt2, ok2, nent, isz, nsz, o2,
+      ibuf=NIL:PTR TO CHAR, nbuf=NIL:PTR TO CHAR,
+      tres[2]:ARRAY OF LONG, ettl[140]:STRING, sfi[340]:STRING
   p := active
   IF inarchive(p) OR iniso(p)
     showmsg('file info is not available inside an archive yet')
@@ -7097,7 +7210,7 @@ PROC infowindow()
     infline(xx, yy, 8, 'tool: -')
     infline(xx, yy, 9, 'tooltypes: -')
   ENDIF
-  infline(xx, yy, 10, 'hsparwed=bits c=note t=tt Esc')
+  infline(xx, yy, 10, 'hsparwed=bits c=note t/T=tt Esc')
   REPEAT
     flagstr(fl, mask)
     StringF(ln, 'flags: \s', fl)
@@ -7153,13 +7266,129 @@ PROC infowindow()
     ELSEIF (k = "d") OR (k = "D")
       mask := Eor(mask, FIBF_DELETE)
       changed := TRUE
-    ELSEIF (k = "t") OR (k = "T")
+    ELSEIF k = "t"
       -> page through the tooltypes on their own row, wrapping
       IF ntt > 0
         StringF(ln, 'tt \d/\d: \s', tti + 1, ntt, tts[tti])
         infline(xx, yy, 9, ln)
         tti++
         IF tti >= ntt THEN tti := 0
+      ENDIF
+    ELSEIF k = "T"
+      -> T (0.5b51): the whole tooltype list in the internal editor,
+      -> one per line - the overview t's one-row paging cannot give,
+      -> and the road to EDITING them. The list is read from and
+      -> written back to the .info by the splice walker above -
+      -> PutDiskObject never touches the file, so images, position,
+      -> and any 3.5+ color appendix survive byte-for-byte; a save
+      -> with no changes writes an IDENTICAL file. Empty lines drop
+      -> out; saving an emptied list writes an icon with no
+      -> tooltypes. Works whenever the entry HAS an icon file,
+      -> icon.library or not. The editor paints over the whole
+      -> frame, so the window closes after any session that drew.
+      IF hasicon
+        StringF(sfi, '\s.info', ipath)
+        isz := -1
+        IF (lock := Lock(sfi, SHARED_LOCK))
+          IF (fib := AllocDosObject(DOS_FIB, NIL))
+            IF Examine(lock, fib) THEN isz := fib.size
+            FreeDosObject(DOS_FIB, fib)
+          ENDIF
+          UnLock(lock)
+        ENDIF
+        ok2 := FALSE
+        ibuf := NIL
+        IF isz > 0
+          IF (ibuf := New(isz))
+            IF (fh2 := Open(sfi, OLDFILE))
+              IF Read(fh2, ibuf, isz) = isz THEN ok2 := TRUE
+              Close(fh2)
+            ENDIF
+          ENDIF
+        ENDIF
+        IF ok2 THEN ok2 := ttlocate(ibuf, isz, tres)
+        IF ok2 = FALSE
+          -> unreadable or a layout the walker cannot prove: the
+          -> icon is left alone - never guess at somebody's pixels
+          showmsg('cannot read that icon file')
+        ELSEIF (fh2 := Open('T:CFile-tt', NEWFILE)) = NIL
+          faultmsg('cannot stage tooltypes')
+        ELSE
+          -> seed the editor from the block's own bytes (each entry
+          -> length counts its NUL; the line is the string before it)
+          o2 := tres[0]
+          IF rdlong(ibuf, 54)
+            nent := Shr(rdlong(ibuf, o2), 2) - 1
+            o2 := o2 + 4
+            FOR j := 1 TO nent
+              l2 := rdlong(ibuf, o2)
+              IF l2 > 1 THEN Write(fh2, ibuf + o2 + 4, l2 - 1)
+              Write(fh2, '\n', 1)
+              o2 := o2 + 4 + l2
+            ENDFOR
+          ENDIF
+          Close(fh2)
+          StringF(ettl, '\s tooltypes', enames[i])
+          r2 := editfile('T:CFile-tt', ettl)
+          IF r2 = 1
+            -> assemble prefix + fresh block + suffix, ONE Write
+            ntt2 := 0
+            nsz := tres[0] + (isz - tres[1])
+            FOR j := 0 TO ednum - 1
+              l2 := EstrLen(edl[j])
+              IF l2 > 0
+                ntt2 := ntt2 + 1
+                nsz := nsz + 4 + l2 + 1
+              ENDIF
+            ENDFOR
+            IF ntt2 > 0 THEN nsz := nsz + 4
+            IF (nbuf := New(nsz)) = NIL
+              showmsg('not enough memory')
+            ELSE
+              CopyMem(ibuf, nbuf, tres[0])
+              o2 := tres[0]
+              IF ntt2 > 0
+                -> the header's present/absent flag flips only when
+                -> it must: an icon that had tooltypes keeps its
+                -> original bytes there, part of the identical-file
+                -> promise
+                IF rdlong(nbuf, 54) = 0 THEN wrlong(nbuf, 54, 1)
+                wrlong(nbuf, o2, Mul(ntt2 + 1, 4))
+                o2 := o2 + 4
+                FOR j := 0 TO ednum - 1
+                  l2 := EstrLen(edl[j])
+                  IF l2 > 0
+                    wrlong(nbuf, o2, l2 + 1)
+                    o2 := o2 + 4
+                    CopyMem(edl[j], nbuf + o2, l2)
+                    o2 := o2 + l2
+                    nbuf[o2] := 0
+                    o2 := o2 + 1
+                  ENDIF
+                ENDFOR
+              ELSE
+                wrlong(nbuf, 54, 0)
+              ENDIF
+              IF (isz - tres[1]) > 0
+                CopyMem(ibuf + tres[1], nbuf + o2, isz - tres[1])
+              ENDIF
+              IF (fh2 := Open(sfi, NEWFILE))
+                IF Write(fh2, nbuf, nsz) < nsz THEN faultmsg('icon write failed')
+                Close(fh2)
+              ELSE
+                faultmsg('cannot write icon')
+              ENDIF
+              Dispose(nbuf)
+              nbuf := NIL
+            ENDIF
+          ENDIF
+          DeleteFile('T:CFile-tt')
+          IF r2 >= 0 THEN done := TRUE    -> the editor owned the screen
+        ENDIF
+        IF ibuf
+          Dispose(ibuf)
+          ibuf := NIL
+        ENDIF
       ENDIF
     ENDIF
     IF changed
@@ -11479,7 +11708,8 @@ PROC helpscreen()
             '             (in the viewer: / find, n next, p previous)',
             'e .......... edit a text file (e in the viewer works too)',
             'i .......... file info; h s p a r w e d toggle protection',
-            '             (shows datatype + icon info, t pages tooltypes)',
+            '             (datatype + icon info, t pages tooltypes,',
+            '              T opens them in the editor - save writes back)',
             'Space ...... mark/unmark (ops take the marks if any)',
             'a A * + .... mark all / none / invert / by pattern',
             '= / s ...... measure dir size / sort (name/size/date)',
@@ -11959,4 +12189,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b50 (31.7.26) E build',0
+version: CHAR '$VER: CFile 0.5b51 (1.8.26) E build',0

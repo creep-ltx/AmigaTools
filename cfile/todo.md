@@ -105,6 +105,126 @@ Enter" and "h again closes and returns"). Details under the
 Navigation item below. Compile-gated on the laptop, boot-proven
 on his machine.
 
+**b51 (1.8.26, compile-gated on the laptop — AWAITING BOOT):
+TOOLTYPES IN THE EDITOR + THE 2.04 FLOOR RESTORED** — his ask,
+verbatim shape: the i window's one-row `t` paging "can only display
+this information in a very limited way", so "open this information
+in our editor so the user can get a better overwiev and also edit
+the information". `T` in the i window stages the tooltype list
+through `T:CFile-tt` (one per line, the arcedit road), opens the
+internal editor, and a save writes the icon back. The first cut
+wrote through `PutDiskObject` — his review killed it the same hour
+("no 'non destructive' way to just edit the icon text? I'm sure
+there is!"): the library rewrites the whole file from its parse and
+drops what it didn't understand (a 3.5 color appendix under a 3.1
+icon.library). The shipped road is FILE SURGERY instead: ttlocate
+walks the on-disk DiskObject (78-byte header, optional DrawerData,
+the two Images + planes, the default tool) to the tooltype block;
+the editor is seeded from the block's own bytes (not from
+GetDiskObject's view — a patched library can filter that); a save
+splices prefix + rebuilt block + suffix in one Write. A no-change
+save writes a BYTE-IDENTICAL file; the header's present/absent
+long keeps its original bytes when it can. Empty lines drop out;
+emptying the list writes an icon with zero tooltypes; `t` still
+pages; no icon = `T` dead like `t`; the window closes after any
+editor session that painted. HOST-PROVEN before boot: the walker
+mirrored in python against 400 real .info files from the FS-UAE
+drives — 400/400 walked, 107/107 with tooltypes round-tripped
+byte-identical (the 1 "differ" was an icon whose two tooltypes
+were single NULs — dropped by the empty-line rule, by design).
+SAME BUILD, HIS AUDIT: the V39 blocker at openui's own-screen path
+— `GetBitMapAttr` (V39) ran unguarded on the mandatory path, and E
+jumps through LVOs blind, so stock 2.04 crashed at startup while
+README claimed 2.0+; `SA_LIKEWORKBENCH` being silently skipped by
+V37's tag parser is what walked 2.04 into the call. Now behind
+`gfxversion() >= 39` (lib.version via exec/libraries; graphics is
+E-auto-opened) — 2.04 keeps the 255 masks, the plane trick stays a
+3.0+ optimization. That was the ONLY V39 call in the mandatory
+path; the real floor is V37/2.04 again (V36 pedantically excluded:
+A3000-only 2.0, broken ExAll, and every pane read is ExAll).
+Boot-gate checklist: i/T on a fat WBTOOL list (MUI app), no-change
+save byte-diffed on the Amiga side too, empty-the-list, a
+write-protected .info (fault path), a GlowIcon under 3.1 if one is
+handy (appendix must survive) — and ideally one 2.04 boot (WinUAE
+A600 config) to see the startup live.
+
+## CFile13 — a KS1.3 fork, plan SIGNED OFF + STARTED (1.8.26)
+
+**Signed off same day** ("Can you create the fork now") — created as
+`cfile13/` with its own README and PORT-STATUS.md; stage 1 (feature
+cuts) underway. One plan deviation, his call: fork NOW from main
+post-b51, not from a 0.5 release tag — b51 itself is still awaiting
+boot, so the fork inherits that risk knowingly. **Language decided
+the same hour:** he offered a C rewrite ("I think you are way more
+comfotable in C than in E"); declined with reasons — a fork's value
+IS the debugged E code (fifty builds of boot-proven lessons), a C
+rewrite re-earns every bug with boot-gates as the scarce resource.
+C is for NEW tools with no codebase to inherit (Emu68 line, cutils
+twins). The DECIDEs from the draft, resolved lean: grep CUT (may
+return capped), mods CUT (ptreplay-on-1.3 unproven), memory target
+1MB primary / 512K stretch, name CFile13.
+
+**The ask (1.8.26):** born from a Swedish forum question (larsef:
+bootable floppy, KS1.3?). His shape: "Maybe fork CFile into a 1.3
+memory lightweight version with basic functionallity ... It would
+obviously be less activly supported and developed."
+
+**The shape — a FORK, not a build option.** `cfile13/` beside
+`cfile/`, its own `cfile13.e`, README, todo. Started as a COPY of
+the 0.5 release source and cut down — the draw engine, panes,
+editor and viewer are the proven value; a rewrite would spend
+months re-earning what the copy gets free. Frozen feature set
+after its 1.0: shared-logic bugfixes cherry-picked when cheap, no
+parity promise (his words: less actively supported). Fork AFTER
+0.5 ships, from the release tag, so the base is boot-proven.
+
+**Stays (the basic-functionality core):** two panes, volume list,
+navigate, copy/move/delete/rename/new-dir, marks (all/none/invert),
+sort, `/` filter, text/hex viewer, the editor, protection bits +
+comment, bookmarks, history, F5, lha/lzx via the external binaries,
+and — pleasingly — ISO browsing: it is pure `Read()`, zero OS
+dependency, and a rescue-floppy star. Config from file only.
+
+**Cut on 1.3 (no replacement exists):** auto-refresh (no
+`StartNotify` in 1.3 filesystems), datatypes bild/ljud (3.0+), mod
+playback (keep IF ptreplay.library proves out on 1.3, else cut),
+ADF mounting (3.2), the pubscreen path (no pubscreens on 1.3 — the
+fallback is a plain window on the WB screen), pattern marking
+UNLESS a tiny own `#?`/`*`/`?` matcher earns its bytes, recursive
+grep DECIDE (portable but scanbuf-hungry; a lightweight cap could
+keep it).
+
+**The replacement table (from the V36 audit, 1.8.26):**
+`ExAll` -> `ExNext` loop (slower, correct);
+`OpenScreenTagList`/`OpenWindowTagList` -> `NewScreen`/`NewWindow`
+structs + `GetScreenData` for WB-clone sizing; `SystemTagList` ->
+`Execute()` (V33, output fh works); `AllocDosObject(DOS_FIB)` ->
+`New(260)` (E New is longword-aligned); `DateToStr` -> own
+days-since-1978 formatter (the `Div` 16-bit trap: ~17500 days fits);
+`NameFromLock` -> ParentDir walk; `SameLock` -> compare
+`fl_Task`+`fl_Key`; `LockDosList`/`NextDosEntry` -> Forbid + walk
+RootNode->DosInfo (BPTR arithmetic; amigados-handlers.md knows this
+land); `CreateMsgPort` -> hand-rolled AllocSignal port;
+`GetVar`/`SetVar` -> config file; `CreateNewProc` -> avoid needing
+it; `BitMapScale` -> gone with pictures. The E runtime itself is
+1.3-clean (auto-opens dos/intuition/graphics, version 0).
+
+**Memory ("lightweight" made concrete):** target = boots and runs
+on an A500 512K+512K; stretch = usable on 512K chip alone. Knobs:
+MAXENT 500 -> ~200/pane, CBUFSZ/EABUFSZ 16K -> 4K, viewer window
+smaller, editor stays dynamic (it already grows honestly). Numbers
+set by MEASURING on the 1.3 config, not guessed.
+
+**Gates:** compile-gate unchanged (ecompile/vamos, KS-agnostic —
+vamos CANNOT prove 1.3). The real gate is an FS-UAE A500 KS1.3
+config on the laptop for every build, his real hardware for
+releases. First milestone: panes + navigate + copy on a booted
+1.3 floppy — the screenshot for larsef.
+
+**Floppy:** 880K = cfile13 (~150K after cuts?) + lha + c/ handful +
+minimal startup-sequence. A ready-to-write ADF as a release
+artifact (CFile main can even build it: `n` makes a blank ADF).
+
 ## Disk images — plan DRAFT (30.7.26, pending Tobias's sign-off)
 
 **The ask (30.7.26):** `.iso` and `.adf` support. ISO read-only
