@@ -1,0 +1,30 @@
+# Config for clangd, the C language server (editor tooling only).
+# Lives at the repo root so it covers .c files in EVERY directory of
+# AmigaTools, present and future. Real builds use m68k-amigaos-gcc,
+# which never reads this file, and the .e files / ecompile don't know
+# it exists. Starting an Amiga C project outside this repo? Copy this
+# one file to its root and you're done.
+#
+# What the flags do:
+#   target i386      clang here has no m68k backend; 32-bit x86 has the
+#                    same 32-bit long/pointer sizes, so types come out right
+#   -nostdinc etc.   use bebbo's NDK + newlib headers, not Linux glibc
+#   -D__stdargs= ... erase bebbo-gcc keywords clang doesn't know
+#   -D_NO_INLINE     plain prototypes instead of 68k register-asm inlines
+#   /usr/lib/clang/22: bump when CachyOS ships clang 23 (symptom:
+#                    "string.h not found" squiggles)
+CompileFlags:
+  Add:
+    - --target=i386-pc-linux-gnu
+    - -nostdinc
+    - -D_NO_INLINE
+    - -D__stdargs=
+    - -D__regargs=
+    - -D__saveds=
+    - -D__chip=
+    - -D__far=
+    - -D__interrupt=
+    - -D__CLANG_MAX_ALIGN_T_DEFINED
+    - -isystem/opt/amiga/m68k-amigaos/ndk-include
+    - -isystem/opt/amiga/m68k-amigaos/sys-include
+    - -isystem/usr/lib/clang/22/include
