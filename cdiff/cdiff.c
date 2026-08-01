@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b10 (1.8.26)";
+    "$VER: cdiff 0.1b11 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -855,6 +855,10 @@ static void guimode(void)
                      * falls through as RAWKEY (plain Tab arrives
                      * as VANILLAKEY 9 and never gets here) */
                     setview((view + 2) % 3);
+                else if (code == 0x7A) /* NewMouse: wheel up */
+                    scrollto(*vtop() - (page ? crows : 3));
+                else if (code == 0x7B) /* NewMouse: wheel down */
+                    scrollto(*vtop() + (page ? crows : 3));
             }
         }
     }
