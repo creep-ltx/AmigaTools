@@ -12,6 +12,7 @@
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
+#include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
@@ -25,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b8 (1.8.26)";
+    "$VER: cdiff 0.1b9 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -573,6 +574,53 @@ static void reload(void)
     drawpage();
 }
 
+/* rediff the SAME pair, keeping view and position - the road home
+ * after an edit or an external change (F5, the CFile reflex) */
+static void refreshdiff(void)
+{
+    int v = view, gt = gtop, lt = ltop, rt = rtop, m;
+    if (gf1[0] && gf2[0]) {
+        if (loaddiff() == 0) {
+            calcgut();
+            view = v;
+            gtop = gt; ltop = lt; rtop = rt;
+            m = gnrows - crows; if (m < 0) m = 0;
+            if (gtop > m) gtop = m;
+            m = gna - crows; if (m < 0) m = 0;
+            if (ltop > m) ltop = m;
+            m = gnb - crows; if (m < 0) m = 0;
+            if (rtop > m) rtop = m;
+        }
+    }
+    settitle();
+    drawpage();
+}
+
+/* hand a side to an editor, synchronously, then rediff in place.
+ * ENV:EDITOR names it (Ed otherwise); the AUTO console only
+ * appears if the editor actually wants a shell window - GUI
+ * editors never show it. */
+static void editfile(int side)
+{
+    static char ed[80], cmd[420];
+    BPTR ch;
+    LONG res;
+    if (side == 1 ? !gf1[0] : !gf2[0]) return;
+    if (GetVar((STRPTR)"EDITOR", (STRPTR)ed, sizeof(ed), 0) <= 0)
+        strcpy(ed, "Ed");
+    sprintf(cmd, "%s \"%s\"", ed, side == 1 ? gf1 : gf2);
+    ch = Open((STRPTR)"CON:0/12/640/240/cdiff editor/AUTO/CLOSE",
+              MODE_NEWFILE);
+    res = SystemTags((STRPTR)cmd,
+                     SYS_Input, (ULONG)ch,
+                     SYS_Output, (ULONG)ch,
+                     TAG_DONE);
+    if (ch) Close(ch);
+    if (res == -1)
+        erq("could not launch the editor\n(set ENV:EDITOR to name one)");
+    refreshdiff();
+}
+
 static struct NewMenu newmenu[] = {
     { NM_TITLE, (STRPTR)"Project",       NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Open Files...", (STRPTR)"O",  0, 0, NULL },
@@ -580,6 +628,11 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Open Right...", (STRPTR)"R",  0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,             NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Quit",          (STRPTR)"Q",  0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Edit",          NULL,         0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Left File...",  (STRPTR)"E",  0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Right File...", NULL,         0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,             NULL,         0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Reload",        NULL,         0, 0, NULL },
     { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Keys...",       (STRPTR)"K",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"About...",      NULL,         0, 0, NULL },
@@ -600,12 +653,14 @@ static void aboutreq(void)
 
 static void keysreq(void)
 {
-    erq("1 / 2 / 3 or Tab - view: Both / Left / Right\n"
-        "(the tab bar is clickable too)\n"
+    erq("1 / 2 / 3 - view: Both / Left / Right\n"
+        "Tab / Shift+Tab - cycle views (bar is clickable)\n"
         "cursor up/down - scroll (shift = page)\n"
         "space / b - page down / up\n"
         "t / e - top / end\n"
         "n / p - next / previous hunk\n"
+        "F5 - reload both files, keep position\n"
+        "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
         "Esc or q - quit");
 }
 
@@ -635,6 +690,12 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                 return 1;
             }
         } else if (MENUNUM(c) == 1) {
+            switch (ITEMNUM(c)) {
+            case 0: editfile(1); break;
+            case 1: editfile(2); break;
+            case 3: refreshdiff(); break;   /* 2 is the bar */
+            }
+        } else if (MENUNUM(c) == 2) {
             switch (ITEMNUM(c)) {
             case 0: keysreq(); break;
             case 1: aboutreq(); break;
@@ -761,7 +822,12 @@ static void guimode(void)
             if (class == IDCMP_VANILLAKEY) {
                 switch (code) {
                 case 27: case 'q': case 'Q': done = 1; break;
-                case 9:  setview((view + 1) % 3); break;   /* Tab */
+                case 9:             /* Tab cycles; Shift+Tab back */
+                    if (qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT))
+                        setview((view + 2) % 3);
+                    else
+                        setview((view + 1) % 3);
+                    break;
                 case '1': setview(0); break;
                 case '2': setview(1); break;
                 case '3': setview(2); break;
@@ -782,6 +848,8 @@ static void guimode(void)
                     scrollto(*vtop() - (page ? crows : 1));
                 else if (code == 0x4D) /* cursor down */
                     scrollto(*vtop() + (page ? crows : 1));
+                else if (code == 0x54) /* F5: reload, the CFile reflex */
+                    refreshdiff();
             }
         }
     }
