@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b22 (1.8.26)";
+    "$VER: cdiff 0.1b23 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -1259,7 +1259,7 @@ static void keysreq(void)
         "F5 - reload both files, keep position\n"
         "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
         "Open Files with two DRAWERS - tree compare\n"
-        "Esc or q - quit");
+        "Esc (at the top) or Amiga+Q - quit");
 }
 
 static int domenu(UWORD code)   /* returns 1 = quit */
@@ -1473,11 +1473,14 @@ static void guimode(void)
                 switch (code) {
                 case 27:            /* Esc pops: file view -> Tree,
                                      * Tree (or plain mode) -> quit
-                                     * (his instinct, the CFile way) */
+                                     * (his instinct, the CFile way).
+                                     * Amiga+Q quits via the menu
+                                     * shortcut - no bare q (his
+                                     * call: GUI apps do not quit
+                                     * on a plain letter) */
                     if (gdirmode && view != 3) setview(3);
                     else done = 1;
                     break;
-                case 'q': case 'Q': done = 1; break;
                 case 13: opensel(); break;             /* Enter */
                 case 8:             /* Backspace: file -> Tree */
                     if (gdirmode && view != 3) setview(3);
