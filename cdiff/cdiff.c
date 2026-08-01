@@ -31,7 +31,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b41 (1.8.26)";
+    "$VER: cdiff 0.1b42 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -791,7 +791,7 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     hgad = NewObject(NULL, (STRPTR)"propgclass",
                      GA_ID, 2,
                      GA_Left, bl,
-                     GA_RelBottom, -8,     /* 3px lower (his eye) */
+                     GA_RelBottom, -9,     /* his eye: +3 then -1 */
                      GA_RelWidth, -(bl + 15 + lw + lw),
                      GA_Height, 10,
                      GA_BottomBorder, TRUE,
@@ -815,9 +815,9 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
         mkarrow(&agdn, idn, -(aw + 2), -(ah + 12),
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
-        mkarrow(&aglt, ilt, -(15 + lw + lw), 2 - lh,
+        mkarrow(&aglt, ilt, -(15 + lw + lw), 1 - lh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
-        mkarrow(&agrt, irt, -(15 + lw), 2 - lh,
+        mkarrow(&agrt, irt, -(15 + lw), 1 - lh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
         tail->NextGadget = &agup;
         agup.NextGadget = &agdn;
