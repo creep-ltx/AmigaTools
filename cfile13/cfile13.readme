@@ -1,0 +1,119 @@
+CFile13 - a two-pane file manager on a bootable Kickstart 1.3 floppy
+=====================================================================
+
+CFile13 is the Kickstart 1.3 fork of CFile, the keyboard-driven
+two-pane file manager for AmigaOS. The main line needs OS 2.04+;
+this fork was cut down and back-ported to run on a stock 68000
+with Kickstart 1.3 and 1MB of RAM - and to boot straight from
+this floppy. Press ? inside the program for the key reference.
+
+Requirements: Kickstart 1.3 (or later), 68000, 1MB RAM - or 512K.
+
+On a 512K machine CFile13 notices and adapts: a 4-colour screen
+(same colours, faster blits), smaller buffers, shorter console
+scrollback - leaving roughly 40K of working room after boot.
+Browsing, copying, viewing, editing and lha archives all work;
+LZX packing and zip need more machine (see below).
+
+
+WHAT WORKS
+----------
+- Two panes, volume list, full navigation, directory sizes
+- Copy / move / delete / rename / new directory, with the
+  byte-weighted progress bar
+- Marks (all / none / invert), sorting, the / filter
+- Text, ANSI and hex viewing; the built-in text editor
+- lha and lzx archives: browse inside, view, copy in and out
+  (the 68000 builds of both are on this disk)
+- ISO 9660 CD images browse like archives, read-only, no OS
+  support needed
+- find (substring, recursive), bookmarks, directory history
+- Protection bits and file comments from the i window
+- Icon tooltypes: view AND edit in the editor - written back by
+  file surgery, byte-identical except the tooltypes themselves
+- RAM disk shows its real free space (free memory), and copies
+  into RAM: work - on stock 1.3 it reports itself 100% full
+- Swedish keymap (setmap s in the startup; keymap-honest input
+  through console.device, so all national keys work)
+
+CFile13 creates T: and ENV: assigns itself (in RAM:) when they
+are missing, and removes at exit exactly those it created.
+Its config is saved to S:cfile13.config when you change settings.
+
+
+LIMITATIONS (vs CFile on OS 3.x)
+--------------------------------
+- No picture or sound viewing (datatypes.library is OS 3.0+),
+  no ProTracker playback (ptreplay.library needs OS 2.04+).
+  Unknown media hex-views instead.
+- No ADF mounting (needs OS 3.2 DAControl). .adf files are
+  ordinary files here.
+- No automatic pane refresh (no notification in 1.3 filesystems)
+  - press F5 to rescan.
+- No mark-by-pattern; find is substring-only (no #? wildcards).
+- No recursive text search inside files.
+- A directory pane holds at most 300 entries (main CFile: 500) -
+  more than that and CFile13 says so rather than showing a
+  silently shorter list.
+- Esc cannot interrupt a running archiver (1.3 Run hides the
+  child process) - the operation finishes on its own.
+- Zip: extraction via UnZip 5.12 should work but has seen little
+  1.3 testing; creating zips is not supported.
+- lha on this disk is LhA 1.38 (1992) - the only LhA that runs on
+  1.3 (2.x builds need OS 2.0 libraries). It packs and unpacks
+  the standard -lh5- method; archives made with the newer -lh6-
+  or -lh7- methods will not unpack here.
+- LZX CANNOT PACK on a 1MB machine: its encoder needs more free
+  memory than remains with CFile13 resident ("Fatal error
+  encoding data"), and no option shrinks it enough. Browsing and
+  extracting lzx archives is expected to work. Pack with lha -
+  which is what an A500 did in 1992 too.
+- The shell console for ':' commands opens on the Workbench
+  screen and asks for RETURN when done (no AUTO/CLOSE/WAIT in
+  the 1.3 console).
+- While booted FROM this disk, its own s/startup-sequence cannot
+  be saved from inside CFile13 - the boot shell still holds the
+  file open ("object in use"; that is AmigaDOS, not a bug).
+  Launch with "run >nil: c:cfile13" in the script to avoid it,
+  or edit a RAM: copy and copy it back.
+
+Writes to the floppy need the volume validated; if a session was
+interrupted mid-write, the next boot revalidates automatically
+(l/Disk-Validator is on the disk - do not remove it). Let the
+drive settle after a save before quitting an emulator or
+ejecting.
+
+
+THE FILES ON THIS DISK - what may not be removed
+-------------------------------------------------
+c/cfile13              the program (E, 68000, ~180K)
+c/Run, c/Execute       the 1.3 launch road: CFile13 shells
+                       through BOTH to run archivers and assigns
+c/Assign               the only way to create an assign on 1.3;
+                       CFile13 calls it (T:/ENV: self-heal)
+c/Stack, c/SetMap,     used by s/startup-sequence (16K stack is
+c/Echo                 required; setmap s = Swedish keys)
+devs/keymaps/s         the keymap setmap loads
+devs/system-configuration  1.3 preferences (pointer, key repeat)
+l/Ram-Handler          RAM: does not exist without it
+l/Disk-Validator       floppy WRITES fail without it
+l/LZX.Keyfile          unlocks the registered LZX
+libs/diskfont.library  fonts beyond the ROM Topaz (config FONT)
+libs/icon.library      the i window's icon/tooltype rows
+s/startup-sequence     echo, stack 16384, setmap s, cfile13
+
+Optional:
+c/lha, c/lzx, c/UnZip  the archivers (68000 builds - do not
+                       replace with 020+ builds on an A500!)
+
+Removed as dead weight: UNLZX (never called - lzx does it all),
+SetMap.info (an icon, and this disk never runs Workbench),
+Makedir (CFile13 creates directories through the ROM - n with a
+trailing / - and needs no external command for it).
+
+
+CFile13 is less actively developed than CFile by design: the
+feature set freezes at 1.0, fixes are cherry-picked when cheap.
+Sources and the full port ledger: the AmigaTools repository,
+cfile13/ (see PORT-STATUS.md for what was cut, what was rebuilt
+on V33 roads, and why).
