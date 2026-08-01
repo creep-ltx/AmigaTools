@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b14 (1.8.26)";
+    "$VER: cdiff 0.1b15 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -740,6 +740,106 @@ static struct NewMenu newmenu[] = {
     { NM_END,   NULL,                    NULL,         0, 0, NULL },
 };
 
+/* a centered, self-drawn requester: EasyRequest cannot be
+ * positioned (top-left always - his screenshot), so About and
+ * Keys get a bevel-framed window at the screen's true centre,
+ * whatever the resolution. OK or any key leaves. */
+static void centerreq(const char *text)
+{
+    struct Screen *scr;
+    struct Window *w;
+    struct IntuiMessage *m;
+    struct RastPort *r;
+    const char *p, *ls;
+    int nl = 1, maxc = 0, c = 0;
+    int ww, wh, okx, oky, okw, okh, y, done = 0, redraw = 1;
+
+    for (p = text; *p; p++) {
+        if (*p == '\n') { nl++; c = 0; }
+        else if (++c > maxc) maxc = c;
+    }
+    okw = 6 * fw + 8;
+    okh = fh + 6;
+    ww = maxc * fw + 32;
+    if (ww < okw + 32) ww = okw + 32;
+    wh = nl * fh + okh + 28;
+    scr = LockPubScreen(NULL);
+    if (scr == NULL) return;
+    w = OpenWindowTags(NULL,
+        WA_Left, (scr->Width - ww) / 2,
+        WA_Top, (scr->Height - wh) / 2,
+        WA_Width, ww,
+        WA_Height, wh,
+        WA_PubScreen, (ULONG)scr,
+        WA_IDCMP, IDCMP_MOUSEBUTTONS | IDCMP_VANILLAKEY |
+                  IDCMP_REFRESHWINDOW,
+        WA_Flags, WFLG_BORDERLESS | WFLG_ACTIVATE |
+                  WFLG_SIMPLE_REFRESH | WFLG_RMBTRAP,
+        TAG_DONE);
+    UnlockPubScreen(NULL, scr);
+    if (w == NULL) return;
+    r = w->RPort;
+    SetFont(r, font);
+    okx = (ww - okw) / 2;
+    oky = wh - okh - 8;
+    while (!done) {
+        if (redraw) {
+            redraw = 0;
+            SetAPen(r, pback);
+            RectFill(r, 0, 0, ww - 1, wh - 1);
+            SetAPen(r, pshine);         /* raised requester frame */
+            Move(r, 0, wh - 1); Draw(r, 0, 0); Draw(r, ww - 1, 0);
+            SetAPen(r, pshadow);
+            Move(r, ww - 1, 1); Draw(r, ww - 1, wh - 1);
+            Draw(r, 1, wh - 1);
+            SetAPen(r, ptext);
+            SetBPen(r, pback);
+            y = 12 + fbase;
+            ls = text;
+            for (p = text; ; p++) {
+                if (*p == '\n' || *p == 0) {
+                    if (p > ls) {
+                        Move(r, 16, y);
+                        Text(r, (STRPTR)ls, p - ls);
+                    }
+                    y += fh;
+                    ls = p + 1;
+                    if (*p == 0) break;
+                }
+            }
+            SetAPen(r, pshine);         /* the OK button, raised */
+            Move(r, okx, oky + okh - 1); Draw(r, okx, oky);
+            Draw(r, okx + okw - 2, oky);
+            SetAPen(r, pshadow);
+            Move(r, okx + okw - 1, oky + 1);
+            Draw(r, okx + okw - 1, oky + okh - 1);
+            Draw(r, okx + 1, oky + okh - 1);
+            SetAPen(r, ptext);
+            SetBPen(r, pback);
+            Move(r, okx + (okw - 2 * fw) / 2, oky + 3 + fbase);
+            Text(r, (STRPTR)"OK", 2);
+        }
+        WaitPort(w->UserPort);
+        while ((m = (struct IntuiMessage *)GetMsg(w->UserPort))) {
+            ULONG cls = m->Class;
+            UWORD cod = m->Code;
+            WORD mx = m->MouseX, my = m->MouseY;
+            ReplyMsg((struct Message *)m);
+            if (cls == IDCMP_VANILLAKEY) done = 1;
+            if (cls == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(w);
+                EndRefresh(w, TRUE);
+                redraw = 1;
+            }
+            if (cls == IDCMP_MOUSEBUTTONS && cod == SELECTDOWN &&
+                mx >= okx && mx < okx + okw &&
+                my >= oky && my < oky + okh)
+                done = 1;
+        }
+    }
+    CloseWindow(w);
+}
+
 static void aboutreq(void)
 {
     static char t[300];
@@ -749,12 +849,12 @@ static void aboutreq(void)
                "patience engine, side-by-side view\n\n"
                "by Tobias Karlsson & Claude, 2026",
             verstag + 6);
-    erq(t);
+    centerreq(t);
 }
 
 static void keysreq(void)
 {
-    erq("1 / 2 / 3 - view: Both / Left / Right\n"
+    centerreq("1 / 2 / 3 - view: Both / Left / Right\n"
         "Tab / Shift+Tab - cycle views (bar is clickable)\n"
         "cursor up/down - scroll (shift = page), wheel works\n"
         "cursor left/right - scroll long lines (shift = more)\n"
