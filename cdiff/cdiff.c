@@ -28,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b31 (1.8.26)";
+    "$VER: cdiff 0.1b32 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -720,13 +720,16 @@ static void mkarrow(struct Gadget *g, APTR im, int le, int te,
  * sit immediately left of the size gadget's corner. */
 static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 {
-    int brw = win->BorderRight, bbh = win->BorderBottom;
-    int bt = win->BorderTop, bl = win->BorderLeft;
+    /* The window's border metrics BEFORE it exists - because this
+     * now runs before OpenWindow (see below). These are what a
+     * plain window on this screen would get; Intuition then grows
+     * whichever borders our GACT_*BORDER gadgets need. */
+    int bt = scr->WBorTop + (scr->Font ? scr->Font->ta_YSize : 8) + 1;
+    int bl = scr->WBorLeft;
     int upw = 0, uph = 0, dnh = 0;      /* right-border arrows */
     int ltw = 0, lth = 0, rtw = 0;      /* bottom-border arrows */
-    int vx, vw, hy, hh, sysz;
+    int vw, hh, sysz;
     struct Gadget *tail;
-    int n = 2;
 
     /* medium-res arrows on a tall screen, low-res on a short one -
      * sysiclass sizes its own imagery from this */
@@ -763,31 +766,25 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
         rtw = ((struct Image *)irt)->Width;
     }
 
-    /* The track and its buttons share one column (right border) or
-     * one row (bottom border), centred in the border strip, so they
-     * line up the way MultiView's do. b30 placed the arrows at the
-     * PROP's inset but sized them from their own image - when the
-     * image is as wide as the border that pushed them past the
-     * window edge, which is the "arrows outside the borders" he
-     * photographed. Centring from each image's real size cannot do
-     * that: an arrow is never wider than the strip it is centred
-     * in, and the offset is clamped at 0 if it somehow is. */
-    vw = arrowsok ? upw : brw - 4;
-    if (vw > brw) vw = brw;
-    vx = (brw - vw) / 2;
-    if (vx < 0) vx = 0;
-    hh = arrowsok ? lth : bbh - 4;
-    if (hh > bbh) hh = bbh;
-    hy = (bbh - hh) / 2;
-    if (hy < 0) hy = 0;
+    /* The scroller column IS the right border and the scroller row
+     * IS the bottom border - their thickness comes from the arrow
+     * images, and Intuition grows the borders to fit because these
+     * gadgets carry GACT_RIGHTBORDER / GACT_BOTTOMBORDER and are
+     * attached at OpenWindow time. That is the whole trick: the
+     * system's own arrow imagery and the system's own size gadget
+     * are dimensioned to agree, so deriving everything from the
+     * arrows makes the corner line up by construction instead of
+     * by arithmetic against border widths we cannot know yet. */
+    vw = arrowsok ? upw : 16;       /* right border thickness */
+    hh = arrowsok ? lth : 10;       /* bottom border thickness */
 
     /* vertical prop: right border, from below the title down to
      * exactly where the up arrow starts */
     vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
-    vgad.LeftEdge = vx - brw;
-    vgad.TopEdge = bt + 1;
+    vgad.LeftEdge = -vw;
+    vgad.TopEdge = bt;
     vgad.Width = vw;
-    vgad.Height = -(bt + bbh + uph + dnh + 1);
+    vgad.Height = -(bt + hh + uph + dnh);
     vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
     vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
@@ -801,8 +798,8 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
      * to exactly where the left arrow starts */
     hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
     hgad.LeftEdge = bl;
-    hgad.TopEdge = hy - bbh;
-    hgad.Width = -(bl + brw + ltw + rtw + 1);
+    hgad.TopEdge = -hh;
+    hgad.Width = -(bl + vw + ltw + rtw);
     hgad.Height = hh;
     hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
     hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
@@ -819,26 +816,23 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
          * RELBOTTOM: real y = Height + TopEdge). The down arrow's
          * last row lands one pixel above the bottom border and the
          * right arrow's last column one pixel left of the right
-         * border, so the size gadget's corner stays clear without
-         * reserving anything for it by hand. */
-        mkarrow(&agup, iup, vx - brw, -(bbh + dnh + uph),
+         * border, which is precisely the corner the size gadget
+         * occupies - so it is left clear without reserving for it
+         * by hand, and both pairs butt against their own track. */
+        mkarrow(&agup, iup, -vw, -(hh + dnh + uph),
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
-        mkarrow(&agdn, idn, vx - brw, -(bbh + dnh),
+        mkarrow(&agdn, idn, -vw, -(hh + dnh),
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
-        mkarrow(&aglt, ilt, -(brw + rtw + ltw), hy - bbh,
+        mkarrow(&aglt, ilt, -(vw + rtw + ltw), -hh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
-        mkarrow(&agrt, irt, -(brw + rtw), hy - bbh,
+        mkarrow(&agrt, irt, -(vw + rtw), -hh,
                 GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
         tail->NextGadget = &agup;
         agup.NextGadget = &agdn;
         agdn.NextGadget = &aglt;
         aglt.NextGadget = &agrt;
-        n += 4;
     }
-
-    AddGList(win, &vgad, -1, n, NULL);
-    RefreshGList(&vgad, win, NULL, n);
-    gadsok = 1;
+    gadsok = 1;     /* the list is handed to OpenWindow, not added */
 }
 
 /* one row of the Tree tab: selection arrow, status marker, path.
@@ -1726,12 +1720,43 @@ static void guimode(void)
 
     scr = LockPubScreen(NULL);
     if (scr == NULL) goto out;
+    {
+        /* the screen's GUI pens for the tab bevels; fall back to
+         * the 4-colour defaults if DrawInfo is unavailable. The
+         * sysiclass arrow images need the same DrawInfo, and the
+         * whole scroller list must exist BEFORE OpenWindow - see
+         * below. */
+        struct DrawInfo *dri = GetScreenDrawInfo(scr);
+        if (dri) {
+            pshine = dri->dri_Pens[SHINEPEN];
+            pshadow = dri->dri_Pens[SHADOWPEN];
+            pfill = dri->dri_Pens[FILLPEN];
+            pfilltext = dri->dri_Pens[FILLTEXTPEN];
+            ptext = dri->dri_Pens[TEXTPEN];
+            pback = dri->dri_Pens[BACKGROUNDPEN];
+        }
+        addscrollers(dri, scr);
+        if (dri) FreeScreenDrawInfo(scr, dri);
+    }
     win = OpenWindowTags(NULL,
         WA_Left, 0, WA_Top, scr->BarHeight + 1,
         WA_Width, scr->Width,
         WA_Height, scr->Height - scr->BarHeight - 1,
         WA_Title, (ULONG)"cdiff",
         WA_PubScreen, (ULONG)scr,
+        /* THE structural fix (Intuition Gadgets, amigaos.net):
+         * "Borders are adjusted only when the window is opened."
+         * Border gadgets handed to AddGList AFTERWARDS never cause
+         * Intuition to size the borders around them - which is why
+         * every previous build's scrollers sat in a border that
+         * knew nothing about them. Passed here instead, the
+         * GACT_RIGHTBORDER / GACT_BOTTOMBORDER flags make Intuition
+         * grow each border to hold its scroller, and with a size
+         * gadget in both borders (SIZEBRIGHT|SIZEBBOTTOM) it takes
+         * exactly the corner where the two meet - which is the
+         * style guide's own rule for a window scrolling in both
+         * directions. */
+        WA_Gadgets, gadsok ? (ULONG)&vgad : (ULONG)NULL,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
@@ -1743,9 +1768,7 @@ static void guimode(void)
                    * requester covered - the app is BLOCKED inside
                    * EasyRequest and cannot repaint (his find: move
                    * the requester, holes stay). Backing store is
-                   * the price, correctness is the product.
-                   * SIZEBRIGHT widens the right border for the
-                   * vertical scroller. */
+                   * the price, correctness is the product. */
                   WFLG_CLOSEGADGET | WFLG_SMART_REFRESH |
                   WFLG_ACTIVATE | WFLG_SIZEGADGET |
                   WFLG_SIZEBBOTTOM | WFLG_SIZEBRIGHT,
@@ -1758,23 +1781,6 @@ static void guimode(void)
     if (win == NULL) {
         UnlockPubScreen(NULL, scr);
         goto out;
-    }
-    {
-        /* the screen's GUI pens for the tab bevels; fall back to
-         * the 4-colour defaults if DrawInfo is unavailable. The
-         * sysiclass arrow images need the same DrawInfo, so the
-         * scrollers are built here, while it is still held. */
-        struct DrawInfo *dri = GetScreenDrawInfo(scr);
-        if (dri) {
-            pshine = dri->dri_Pens[SHINEPEN];
-            pshadow = dri->dri_Pens[SHADOWPEN];
-            pfill = dri->dri_Pens[FILLPEN];
-            pfilltext = dri->dri_Pens[FILLTEXTPEN];
-            ptext = dri->dri_Pens[TEXTPEN];
-            pback = dri->dri_Pens[BACKGROUNDPEN];
-        }
-        addscrollers(dri, scr);
-        if (dri) FreeScreenDrawInfo(scr, dri);
     }
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
@@ -1987,14 +1993,14 @@ static void guimode(void)
         }
     }
     if (gmenu) ClearMenuStrip(win);
-    if (gadsok) RemoveGList(win, &vgad, -1);
     CloseWindow(win);
 out:
-    /* the gadgets themselves are static structs - nothing to free.
-     * Only the sysiclass images were allocated, and they outlive
-     * the window on purpose: RemoveGList detached the gadgets that
-     * referenced them first. DisposeObject is NULL-safe here by
-     * the guards. */
+    /* No RemoveGList: the gadgets went in through WA_Gadgets, so
+     * they belong to the window and CloseWindow takes them with
+     * it (RemoveGList pairs with AddGList, which is no longer
+     * used). The structs are static - nothing to free. Only the
+     * sysiclass images were allocated, and they are disposed after
+     * the close, when nothing can still reference them. */
     if (iup) DisposeObject(iup);
     if (idn) DisposeObject(idn);
     if (ilt) DisposeObject(ilt);
