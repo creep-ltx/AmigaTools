@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b11 (1.8.26)";
+    "$VER: cdiff 0.1b12 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -379,18 +379,56 @@ static void settitle(void)
     SetWindowTitles(win, (STRPTR)t, (STRPTR)~0);
 }
 
-/* scroll the ACTIVE view so `target` is on top, clamped; full
- * repaint (the ScrollRaster road is roadmap b2, deliberately) */
+/* one content row of whatever view is active */
+static void drawone(int vr)
+{
+    if (view == 0)
+        drawrow(vr);
+    else
+        drawline(vr);
+}
+
+/* content rows only - scrolling must never repaint the tab bar */
+static void drawrows(void)
+{
+    int vr;
+    for (vr = 0; vr < crows; vr++)
+        drawone(vr);
+}
+
+/* scroll the ACTIVE view so `target` is on top, clamped. The CFile
+ * R1 rule (graphics-and-performance.md): a scroll step is ONE blit
+ * of the content rectangle plus repaints of only the entering rows
+ * - not a page of Texts, and never the tab bar. Jumps of a page or
+ * more repaint the content whole (one pass beats a huge blit plus
+ * a full repaint). ScrollWindowRaster (V39) keeps the damage
+ * regions honest under overlapping windows on the pubscreen. */
 static void scrollto(int target)
 {
-    int *t = vtop();
+    int *t = vtop(), d, vr;
     int max = vcount() - crows;
     if (max < 0) max = 0;
     if (target > max) target = max;
     if (target < 0) target = 0;
-    if (target == *t) return;
+    d = target - *t;
+    if (d == 0) return;
     *t = target;
-    drawpage();
+    if ((d > -crows) && (d < crows) &&
+        (IntuitionBase->LibNode.lib_Version >= 39)) {
+        SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
+        ScrollWindowRaster(win, 0, d * fh,
+                           x0, conty,
+                           x0 + viscols * fw - 1,
+                           conty + crows * fh - 1);
+        if (d > 0) {            /* moved up: new rows at the bottom */
+            for (vr = crows - d; vr < crows; vr++)
+                drawone(vr);
+        } else {                /* moved down: new rows on top */
+            for (vr = 0; vr < -d; vr++)
+                drawone(vr);
+        }
+    } else
+        drawrows();
 }
 
 /* next/previous hunk in the active view: rows in the overview,
