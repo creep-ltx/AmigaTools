@@ -28,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b34 (1.8.26)";
+    "$VER: cdiff 0.1b35 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -787,6 +787,17 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
      * knob edge, nothing like MultiView's recessed track. Dropping
      * it lets Intuition draw the V36 framed scroller. */
     vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK;
+    /* "Initialize these variables BEFORE the gadget is added to the
+     * system" (Intuition Reference Manual, PropInfo). Since b32 the
+     * gadgets go in at OpenWindow, so whatever is here is what the
+     * knob is FIRST drawn from - and a static struct starts at zero,
+     * i.e. a zero-size knob. Full body = "nothing to scroll yet",
+     * the manual's own rule for an empty view; updscrollers replaces
+     * it the moment there is content. */
+    vpi.VertPot = 0;
+    vpi.VertBody = MAXBODY;
+    vpi.HorizPot = 0;
+    vpi.HorizBody = MAXBODY;
     vgad.LeftEdge = -vw;
     vgad.TopEdge = bt;
     vgad.Width = vw;
@@ -812,6 +823,10 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     /* horizontal prop: bottom border, from the left border across
      * to exactly where the left arrow starts */
     hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK;
+    hpi.VertPot = 0;
+    hpi.VertBody = MAXBODY;
+    hpi.HorizPot = 0;
+    hpi.HorizBody = MAXBODY;
     hgad.LeftEdge = bl;
     hgad.TopEdge = -hh;
     hgad.Width = -(bl + vw + ltw + rtw);
