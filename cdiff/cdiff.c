@@ -26,7 +26,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b9 (1.8.26)";
+    "$VER: cdiff 0.1b10 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -850,6 +850,11 @@ static void guimode(void)
                     scrollto(*vtop() + (page ? crows : 1));
                 else if (code == 0x54) /* F5: reload, the CFile reflex */
                     refreshdiff();
+                else if (code == 0x42 && page)
+                    /* Shift+Tab has NO vanilla translation - it
+                     * falls through as RAWKEY (plain Tab arrives
+                     * as VANILLAKEY 9 and never gets here) */
+                    setview((view + 2) % 3);
             }
         }
     }
