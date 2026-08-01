@@ -31,7 +31,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b39 (1.8.26)";
+    "$VER: cdiff 0.1b40 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -1748,7 +1748,12 @@ static void guimode(void)
          * exactly the corner where the two meet - which is the
          * style guide's own rule for a window scrolling in both
          * directions. */
-        WA_Gadgets, gadsok ? (ULONG)&vgad : (ULONG)NULL,
+        /* (ULONG)vgad, NOT &vgad - when the props became BOOPSI
+         * objects, vgad went from a struct to a POINTER, and this
+         * line kept taking its address. Intuition then walked a
+         * pointer-to-a-pointer as a gadget list, OpenWindow failed,
+         * and cdiff exited with no window and no error. */
+        WA_Gadgets, gadsok ? (ULONG)vgad : (ULONG)NULL,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
