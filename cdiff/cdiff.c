@@ -10,10 +10,7 @@
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
-#include <intuition/imageclass.h>   /* sysiclass: the sizing image */
-#include <intuition/gadgetclass.h>
-#include <intuition/icclass.h>
-#include <gadgets/scroller.h>
+#include <intuition/imageclass.h>   /* sysiclass: the arrow images */
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
@@ -24,7 +21,6 @@
 #include <proto/graphics.h>
 #include <proto/gadtools.h>
 #include <proto/asl.h>
-#include <proto/scroller.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b37 (1.8.26)";
+    "$VER: cdiff 0.1b38 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -45,11 +41,6 @@ struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct Library *AslBase = NULL;
-/* ScrollerBase too, and it MATTERS more than the others: without a
- * strong definition libnix auto-opens "gadgets/scroller.gadget" at
- * startup, which killed even TEXT mode - vamos cannot parse a
- * library name with a path in it. Same trap as gadtools/asl in b5. */
-struct Library *ScrollerBase = NULL;
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -459,41 +450,41 @@ static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
 
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
-/* BORDER SCROLLERS - the OS's own scroller.gadget BOOPSI class.
+/* BORDER SCROLLERS - raw Intuition prop gadgets + sysiclass arrow
+ * images. This is the MultiView anatomy and the ONLY road that
+ * works here: GadTools gadgets are client-area widgets, they are
+ * not designed to live in a window's border, which is why the
+ * b27/b28 SCROLLER_KIND rewrite rendered nothing at all on his
+ * machine (twice). Raw prop gadgets in the border DID render from
+ * b25 on - his own screenshot proves it - so this restores that
+ * proven half and fixes the one real defect the arrows had:
  *
- * Ten builds were spent hand-building these from a raw prop gadget
- * plus four sysiclass arrow buttons, and they never looked like the
- * system's. His ReBuild pointer ended it: that GUI builder does not
- * implement a scroller either, it just instantiates
- * scroller.gadget - because the OS already has one. One object per
- * bar draws the trough, the knob AND its own arrows, in exactly the
- * system style, with its own click-and-hold repeat, because it IS
- * what MultiView and every Workbench window are drawing.
+ *   GFLG_GADGIMAGE (intuition.h 0x0004) - "set if GadgetRender
+ *   and SelectRender point to an Image structure, clear if they
+ *   point to Border structures"
  *
- * It talks in real units - SCROLLER_Total/Visible/Top - which is
- * what this program already computes, so no pot/body arithmetic
- * survives either. Available from V40 (3.1); if the class will not
- * open we simply have no scrollbars and the keyboard still drives
- * everything. */
-static Object *vgad, *hgad;     /* ScrollerBase: proto/scroller.h */
-static int gadsok;
+ * b26 built the arrow gadgets with GadgetRender = a sysiclass
+ * Image but never set that flag, so Intuition walked the Image as
+ * a struct Border and drew nothing. One bit. */
+static struct Gadget vgad, hgad;
+static struct Gadget agup, agdn, aglt, agrt;
+static APTR iup, idn, ilt, irt;     /* sysiclass arrow images */
+static struct PropInfo vpi, hpi;
+static struct Image vim, him;       /* AUTOKNOB fills these in */
+static int gadsok, arrowsok;
 
-/* Set while it is NOT safe to push attributes at the scrollers.
- * Two cases, and the first one froze his machine outright:
- *
- * 1. Inside BeginRefresh/EndRefresh. Those bracket a LAYER LOCK, and
- *    the autodocs allow only plain graphics rendering between them.
- *    drawpage() ended with updscrollers(), so a refresh drove a full
- *    class render - SetGadgetAttrs -> OM_SET -> GM_RENDER - straight
- *    into the held lock. The old raw prop gadget got away with it;
- *    scroller.gadget does enough more work to deadlock, and a wedged
- *    Intuition takes the mouse and the keyboard with it.
- *
- * 2. While handling a message FROM a scroller. Writing SCROLLER_Top
- *    back to the gadget the user is currently dragging means fighting
- *    it mid-drag, and invites a set -> notify -> set feedback loop. It
- *    already knows where it is; just follow it. */
+/* Set while it is NOT safe to re-render the scrollers. BeginRefresh
+ * and EndRefresh bracket a LAYER LOCK, and the autodocs allow only
+ * plain graphics rendering between them - but drawpage() ends with
+ * updscrollers(), and the refresh handler calls drawpage(). So a
+ * window refresh drove gadget rendering straight into the held lock.
+ * This raw prop gadget has been getting away with it (NewModifyProp
+ * does little enough to slip through); the scroller.gadget attempt
+ * did enough more to deadlock outright and froze his machine, mouse
+ * and keyboard both. The latent bug is the same either way, so the
+ * guard stays regardless of which gadget is in the border. */
 static int noscrollset;
+static int arrheld;                 /* 1 up 2 down 3 left 4 right */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
@@ -643,38 +634,42 @@ static int htotal(void)
     return gmaxw > viscols ? gmaxw : viscols;
 }
 
-/* tell each scroller what there is to scroll, in real units - no
- * pot/body arithmetic at all any more, the class does that. */
+/* push view/scroll state onto both knobs. NewModifyProp wants a
+ * normalized 0..MAXPOT pot and a MAXBODY-scaled body (the visible
+ * share) - a view that fits gives body = MAXBODY, i.e. a full-length
+ * knob, the honest "nothing to scroll here" (his find: the Tree
+ * showed a part-length horizontal knob when nothing overflowed). */
+/* pot/body arithmetic that cannot overflow a 32-bit multiply:
+ * MAXPOT * 40000 lines already exceeds a signed long, so both
+ * sides shift down until the total is small enough - the same
+ * guard CFile's progadd uses for exactly this reason. */
+static ULONG propfrac(long part, long whole, long scale)
+{
+    if (whole < 1) return 0;
+    while (whole > 30000) { whole >>= 1; part >>= 1; }
+    if (part < 0) part = 0;
+    if (part > whole) part = whole;
+    return (ULONG)((scale * part) / whole);
+}
+
 static void updscrollers(void)
 {
     long total = vcount(), vis = crows, ht = htotal();
-    long hvis = viscols;
     if (!gadsok || noscrollset) return;
-    /* nothing handed to the class may be zero or inverted: a tiny
-     * window can make viscols 0, and Total/Visible of 0 is a
-     * division waiting to happen inside somebody else's code */
     if (total < 1) total = 1;
-    if (vis < 1) vis = 1;
     if (vis > total) vis = total;
-    if (ht < 1) ht = 1;
-    if (hvis < 1) hvis = 1;
-    if (hvis > ht) hvis = ht;
-    if (hoff > ht - hvis) hoff = ht - hvis;
+    if (hoff > ht - viscols) hoff = ht - viscols;
     if (hoff < 0) hoff = 0;
-    if (vgad)
-        SetGadgetAttrs((struct Gadget *)vgad, win, NULL,
-                       SCROLLER_Total, total,
-                       SCROLLER_Visible, vis,
-                       SCROLLER_Top, *vtop(), TAG_DONE);
-    if (hgad)
-        SetGadgetAttrs((struct Gadget *)hgad, win, NULL,
-                       SCROLLER_Total, ht,
-                       SCROLLER_Visible, hvis,
-                       SCROLLER_Top, hoff, TAG_DONE);
+    NewModifyProp(&vgad, win, NULL, vpi.Flags,
+                  0, propfrac(*vtop(), total - vis, MAXPOT),
+                  0, propfrac(vis, total, MAXBODY), 1);
+    NewModifyProp(&hgad, win, NULL, hpi.Flags,
+                  propfrac(hoff, ht - viscols, MAXPOT), 0,
+                  propfrac(viscols, ht, MAXBODY), 0, 1);
 }
 
-/* the one place hoff ever changes - keyboard or the scroller - so
- * the clamp and the redraw can never drift apart */
+/* the one place hoff ever changes - keyboard, arrows, the knob -
+ * so the clamp and the redraw can never drift apart */
 static void sethoff(int nh)
 {
     int ht = htotal();
@@ -689,85 +684,196 @@ static void sethoff(int nh)
 static void scrollto(int target);
 static void movesel(int target);
 
-/* Build both scrollers as scroller.gadget instances and hand them
- * to OpenWindow. The class draws trough, knob and arrows itself and
- * runs the arrows' auto-repeat internally, so none of that lives
- * here any more.
+/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. The Tree
+ * moves its selection (matching click-to-select); every other view
+ * scrolls the content or pans it. */
+static void arrowstep(int which)
+{
+    if (which == 1) {
+        if (view == 3) movesel(dsel - 1); else scrollto(*vtop() - 1);
+    } else if (which == 2) {
+        if (view == 3) movesel(dsel + 1); else scrollto(*vtop() + 1);
+    } else
+        sethoff(hoff + (which == 4 ? 8 : -8));
+}
+
+/* THE fix (his boot, twice): a plain struct Gadget renders a
+ * class-based image ONLY with GFLG_GADGIMAGE set - without it
+ * Intuition reads GadgetRender as a struct Border and draws
+ * nothing at all. b26 had everything else right and omitted this
+ * one bit, which is what sent b27/b28 chasing GadTools instead. */
+static void mkarrow(struct Gadget *g, APTR im, int le, int te,
+                    int rel, int act, int id)
+{
+    struct Image *i = (struct Image *)im;
+    g->LeftEdge = le;
+    g->TopEdge = te;
+    g->Width = i->Width;
+    g->Height = i->Height;
+    g->Flags = rel | GFLG_GADGIMAGE | GFLG_GADGHCOMP;
+    g->Activation = act | GACT_RELVERIFY | GACT_IMMEDIATE;
+    g->GadgetType = GTYP_BOOLGADGET;
+    g->GadgetRender = im;
+    g->GadgetID = id;
+    g->NextGadget = NULL;
+}
+
+/* The MultiView border anatomy, on raw Intuition prop gadgets -
+ * NOT GadTools. GadTools gadgets are client-area widgets and do
+ * not belong in a window border; putting SCROLLER_KIND there is
+ * what made b27/b28 render nothing. Raw props in the border have
+ * rendered correctly since b25 (his screenshot), so that stays;
+ * only the arrows needed fixing.
  *
- * Border thickness is measured from the system SIZING GADGET image
- * (sysiclass SIZEIMAGE) - the very image Intuition puts in the
- * corner where the two borders meet. Matching it is what makes the
- * corner line up, and it beats every guess tried before it.
- *
- * The gadgets go in via WA_Gadgets because "Borders are adjusted
- * only when the window is opened" - declared with GA_RightBorder /
- * GA_BottomBorder here, Intuition grows each border to fit. */
+ * Layout, all derived from the real border sizes: the vertical
+ * prop runs from below the title to just above its two arrows,
+ * which stack directly above the size gadget; the horizontal prop
+ * runs from the left border to just before its two arrows, which
+ * sit immediately left of the size gadget's corner. */
 static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 {
-    Class *cl;
-    APTR isz;
+    /* The window's border metrics BEFORE it exists - because this
+     * now runs before OpenWindow (see below). These are what a
+     * plain window on this screen would get; Intuition then grows
+     * whichever borders our GACT_*BORDER gadgets need. */
     int bt = scr->WBorTop + (scr->Font ? scr->Font->ta_YSize : 8) + 1;
     int bl = scr->WBorLeft;
-    int sw = 16, sh = 10;       /* border thickness, measured below */
+    int upw = 0, uph = 0, dnh = 0;      /* right-border arrows */
+    int ltw = 0, lth = 0, rtw = 0;      /* bottom-border arrows */
+    int vw, hh;
+    struct Gadget *tail;
 
-    ScrollerBase = OpenLibrary((STRPTR)"gadgets/scroller.gadget", 40);
-    if (ScrollerBase == NULL) return;      /* keyboard still works */
-    cl = SCROLLER_GetClass();
-    if (cl == NULL) return;
-
+    /* No SYSIA_Size: the previous "medium-res if the screen is
+     * over 400 tall" rule was invented here, not documented
+     * anywhere, and it is what made the arrows come out the wrong
+     * shape for the screen. Given only SYSIA_DrawInfo, sysiclass
+     * sizes each image for the screen it will be drawn on - which
+     * is the same imagery, at the same size, that Intuition uses
+     * for the window's own system gadgets. That is precisely what
+     * we want the border thickness to agree with. */
     if (dri) {
-        isz = NewObject(NULL, (STRPTR)"sysiclass",
+        iup = NewObject(NULL, (STRPTR)"sysiclass",
                         SYSIA_DrawInfo, (ULONG)dri,
-                        SYSIA_Which, SIZEIMAGE, TAG_DONE);
-        if (isz) {
-            sw = ((struct Image *)isz)->Width;
-            sh = ((struct Image *)isz)->Height;
-            DisposeObject(isz);
-        }
+                        SYSIA_Which, UPIMAGE, TAG_DONE);
+        idn = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, DOWNIMAGE, TAG_DONE);
+        ilt = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, LEFTIMAGE, TAG_DONE);
+        irt = NewObject(NULL, (STRPTR)"sysiclass",
+                        SYSIA_DrawInfo, (ULONG)dri,
+                        SYSIA_Which, RIGHTIMAGE, TAG_DONE);
+    }
+    arrowsok = iup && idn && ilt && irt;
+    if (arrowsok) {
+        /* EVERY arrow measured from ITS OWN image. b30 took all
+         * four sizes off the up-arrow, but left/right arrows are
+         * wide-and-short where up/down are narrow-and-tall, so the
+         * bottom pair was placed with the wrong width entirely. */
+        upw = ((struct Image *)iup)->Width;
+        uph = ((struct Image *)iup)->Height;
+        dnh = ((struct Image *)idn)->Height;
+        ltw = ((struct Image *)ilt)->Width;
+        lth = ((struct Image *)ilt)->Height;
+        rtw = ((struct Image *)irt)->Width;
     }
 
-    vgad = NewObject(cl, NULL,
-                     GA_ID, 1,
-                     GA_RelRight, TRUE,
-                     GA_RelHeight, TRUE,
-                     GA_Left, -sw + 1,
-                     GA_Top, bt,
-                     GA_Width, sw - 1,
-                     GA_Height, -(bt + sh + 1),
-                     GA_RightBorder, TRUE,
-                     GA_Immediate, TRUE,
-                     GA_RelVerify, TRUE,
-                     GA_FollowMouse, TRUE,
-                     SCROLLER_Orientation, SORIENT_VERT,
-                     SCROLLER_Arrows, TRUE,
-                     SCROLLER_ArrowDelta, 1,
-                     SCROLLER_Top, 0,
-                     SCROLLER_Visible, 1,
-                     SCROLLER_Total, 1,
-                     TAG_DONE);
-    if (vgad == NULL) return;
+    /* The scroller column IS the right border and the scroller row
+     * IS the bottom border - their thickness comes from the arrow
+     * images, and Intuition grows the borders to fit because these
+     * gadgets carry GACT_RIGHTBORDER / GACT_BOTTOMBORDER and are
+     * attached at OpenWindow time. That is the whole trick: the
+     * system's own arrow imagery and the system's own size gadget
+     * are dimensioned to agree, so deriving everything from the
+     * arrows makes the corner line up by construction instead of
+     * by arithmetic against border widths we cannot know yet. */
+    vw = arrowsok ? upw : 16;       /* right border thickness */
+    hh = arrowsok ? lth : 10;       /* bottom border thickness */
 
-    hgad = NewObject(cl, NULL,
-                     GA_ID, 2,
-                     GA_RelBottom, TRUE,
-                     GA_RelWidth, TRUE,
-                     GA_Left, bl,
-                     GA_Top, -sh + 1,
-                     GA_Width, -(bl + sw + 1),
-                     GA_Height, sh - 1,
-                     GA_BottomBorder, TRUE,
-                     GA_Immediate, TRUE,
-                     GA_RelVerify, TRUE,
-                     GA_FollowMouse, TRUE,
-                     SCROLLER_Orientation, SORIENT_HORIZ,
-                     SCROLLER_Arrows, TRUE,
-                     SCROLLER_ArrowDelta, 8,
-                     SCROLLER_Top, 0,
-                     SCROLLER_Visible, 1,
-                     SCROLLER_Total, 1,
-                     TAG_DONE);
-    if (hgad)
-        ((struct Gadget *)vgad)->NextGadget = (struct Gadget *)hgad;
+    /* vertical prop: right border, from below the title down to
+     * exactly where the up arrow starts */
+    /* NO PROPBORDERLESS: intuition.h says of it, plainly, "if set,
+     * no border will be rendered" - which is why both scrollers
+     * came out as flat solid bars with no channel and no visible
+     * knob edge, nothing like MultiView's recessed track. Dropping
+     * it lets Intuition draw the V36 framed scroller. */
+    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK;
+    /* "Initialize these variables BEFORE the gadget is added to the
+     * system" (Intuition Reference Manual, PropInfo). Since b32 the
+     * gadgets go in at OpenWindow, so whatever is here is what the
+     * knob is FIRST drawn from - and a static struct starts at zero,
+     * i.e. a zero-size knob. Full body = "nothing to scroll yet",
+     * the manual's own rule for an empty view; updscrollers replaces
+     * it the moment there is content. */
+    vpi.VertPot = 0;
+    vpi.VertBody = MAXBODY;
+    vpi.HorizPot = 0;
+    vpi.HorizBody = MAXBODY;
+    vgad.LeftEdge = -vw;
+    vgad.TopEdge = bt;
+    vgad.Width = vw;
+    vgad.Height = -(bt + hh + uph + dnh);
+    /* GFLG_GADGIMAGE on the PROP too - the same bug the arrows had,
+     * one level up and never spotted because its symptom is subtler.
+     * With AUTOKNOB the manual says "set GadgetRender to point to an
+     * Image ... you do not initialize the Image structure", so
+     * GadgetRender IS an Image and intuition.h's rule applies: clear
+     * the flag and Intuition reads it as a struct Border instead and
+     * draws NO KNOB. That is why every build has shown a bare blue
+     * trough where MultiView shows a light knob riding in it: we were
+     * only ever seeing the container. Present since b25. */
+    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT | GFLG_GADGIMAGE;
+    vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
+    vgad.GadgetType = GTYP_PROPGADGET;
+    vgad.GadgetRender = (APTR)&vim;
+    vgad.SpecialInfo = (APTR)&vpi;
+    vgad.GadgetID = 1;
+    vgad.NextGadget = &hgad;
+
+    /* horizontal prop: bottom border, from the left border across
+     * to exactly where the left arrow starts */
+    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK;
+    hpi.VertPot = 0;
+    hpi.VertBody = MAXBODY;
+    hpi.HorizPot = 0;
+    hpi.HorizBody = MAXBODY;
+    hgad.LeftEdge = bl;
+    hgad.TopEdge = -hh;
+    hgad.Width = -(bl + vw + ltw + rtw);
+    hgad.Height = hh;
+    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH | GFLG_GADGIMAGE;
+    hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
+    hgad.GadgetType = GTYP_PROPGADGET;
+    hgad.GadgetRender = (APTR)&him;
+    hgad.SpecialInfo = (APTR)&hpi;
+    hgad.GadgetID = 2;
+    hgad.NextGadget = NULL;
+    tail = &hgad;
+
+    if (arrowsok) {
+        /* Exact placement (RELRIGHT: real x = Width + LeftEdge;
+         * RELBOTTOM: real y = Height + TopEdge). The down arrow's
+         * last row lands one pixel above the bottom border and the
+         * right arrow's last column one pixel left of the right
+         * border, which is precisely the corner the size gadget
+         * occupies - so it is left clear without reserving for it
+         * by hand, and both pairs butt against their own track. */
+        mkarrow(&agup, iup, -vw, -(hh + dnh + uph),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
+        mkarrow(&agdn, idn, -vw, -(hh + dnh),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
+        mkarrow(&aglt, ilt, -(vw + rtw + ltw), -hh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
+        mkarrow(&agrt, irt, -(vw + rtw), -hh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
+        tail->NextGadget = &agup;
+        agup.NextGadget = &agdn;
+        agdn.NextGadget = &aglt;
+        aglt.NextGadget = &agrt;
+    }
     gadsok = 1;     /* the list is handed to OpenWindow, not added */
 }
 
@@ -1764,35 +1870,42 @@ static void guimode(void)
             ULONG csec = msg->Seconds, cmic = msg->Micros;
             ReplyMsg((struct Message *)msg);
             if (class == IDCMP_CLOSEWINDOW) done = 1;
-            /* One scroller message handler for everything the bar
-             * can do - knob drag, arrow click, arrow auto-repeat.
-             * The class has already moved itself and reports the
-             * result in real units via SCROLLER_Top, so there is
-             * nothing to convert and no repeat to run by hand. */
+            /* knob dragged: Intuition has already updated the pot,
+             * so read it back and convert to real units. Arrows are
+             * plain boolean gadgets - GADGETDOWN starts a repeat,
+             * INTUITICKS continues it, GADGETUP ends it. */
             if (class == IDCMP_GADGETDOWN ||
                 class == IDCMP_GADGETUP ||
                 class == IDCMP_MOUSEMOVE) {
-                ULONG newtop = 0;
-                if (vgad && iaddr == (APTR)vgad) {
-                    GetAttr(SCROLLER_Top, vgad, &newtop);
-                    if ((int)newtop != *vtop()) {
-                        noscrollset = 1;    /* do not fight the drag */
-                        scrollto((int)newtop);
-                        noscrollset = 0;
-                    }
-                } else if (hgad && iaddr == (APTR)hgad) {
-                    GetAttr(SCROLLER_Top, hgad, &newtop);
-                    noscrollset = 1;
-                    sethoff((int)newtop);
-                    noscrollset = 0;
-                }
+                if (iaddr == (APTR)&vgad) {
+                    long total = vcount(), vis = crows;
+                    if (total > vis)
+                        scrollto((int)(((long)vpi.VertPot *
+                                        (total - vis) + MAXPOT / 2)
+                                       / MAXPOT));
+                } else if (iaddr == (APTR)&hgad) {
+                    int ht = htotal();
+                    if (ht > viscols)
+                        sethoff((int)(((long)hpi.HorizPot *
+                                       (ht - viscols) + MAXPOT / 2)
+                                      / MAXPOT));
+                } else if (class == IDCMP_GADGETDOWN) {
+                    arrheld = iaddr == (APTR)&agup ? 1 :
+                              iaddr == (APTR)&agdn ? 2 :
+                              iaddr == (APTR)&aglt ? 3 :
+                              iaddr == (APTR)&agrt ? 4 : 0;
+                    if (arrheld) arrowstep(arrheld);
+                } else if (class == IDCMP_GADGETUP)
+                    arrheld = 0;
             }
+            if (class == IDCMP_INTUITICKS && arrheld)
+                arrowstep(arrheld);
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
             if (class == IDCMP_REFRESHWINDOW) {
-                /* graphics rendering ONLY between these two - the
-                 * scrollers are updated after the lock is released */
+                /* graphics rendering ONLY inside the lock; the
+                 * scrollers are updated after it is released */
                 noscrollset = 1;
                 BeginRefresh(win);
                 drawpage();
@@ -1805,8 +1918,8 @@ static void guimode(void)
                  * gadget's box during its own resize handling;
                  * RefreshGList makes them actually repaint there */
                 if (gadsok)
-                    RefreshGList((struct Gadget *)vgad, win, NULL,
-                                 hgad ? 2 : 1);
+                    RefreshGList(&vgad, win, NULL,
+                                 arrowsok ? 6 : 2);
                 calcgrid();
                 clamptops();
                 drawpage();
@@ -1930,14 +2043,15 @@ static void guimode(void)
     CloseWindow(win);
 out:
     /* No RemoveGList: the gadgets went in through WA_Gadgets, so
-     * they belong to the window and CloseWindow takes them with it
-     * (RemoveGList pairs with AddGList, which is no longer used).
-     * The scroller objects are disposed after the close, when
-     * nothing can still reference them, and the class library goes
-     * last of all. */
-    if (vgad) DisposeObject(vgad);
-    if (hgad) DisposeObject(hgad);
-    if (ScrollerBase) CloseLibrary(ScrollerBase);
+     * they belong to the window and CloseWindow takes them with
+     * it (RemoveGList pairs with AddGList, which is no longer
+     * used). The structs are static - nothing to free. Only the
+     * sysiclass images were allocated, and they are disposed after
+     * the close, when nothing can still reference them. */
+    if (iup) DisposeObject(iup);
+    if (idn) DisposeObject(idn);
+    if (ilt) DisposeObject(ilt);
+    if (irt) DisposeObject(irt);
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
