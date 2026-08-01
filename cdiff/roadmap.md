@@ -134,8 +134,27 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       tag first, but the FACT that decided the fix was independently
       confirmed straight from the real C NDK header the toolchain
       ships (`grep -rn PGA_Freedom /opt/amiga/.../gadtools.h`) -
-      not trusted from the Blitz source itself. Boot gate: his
-      verdict on arrows + orientation both owed.
+      not trusted from the Blitz source itself. **His boot: STILL
+      nothing** - identical symptom to b27, meaning the orientation
+      fix was real but not THE blocker; something more basic (a
+      NULL from CreateGadget, or a degenerate border-width
+      assumption never actually verified) is failing the same way
+      both times, and a third blind C-level fix would just be a
+      third guess.
+- [~] **b29: on-target telemetry instead of a third guess** -
+      vamos cannot open real Intuition windows (it emulates exec/
+      dos, explicitly not Intuition/graphics per
+      toolchain-and-testing.md), so there is no way to test this
+      GUI path from Linux at all; the only instrument left is the
+      machine itself. Following this project's own house rule
+      ("instrument until the failure has a name"): addscrollers now
+      writes real numbers into the window title, riding every
+      screenshot for free - CreateGadget's outcome (NULL or not),
+      the measured win->BorderRight/Bottom, and the computed
+      gadget geometry. Whatever the next screenshot shows in the
+      title bar decides the actual fix; this build changes no
+      scroller logic at all, only visibility into it. Strip the
+      diagnostic once the real cause has a name.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode

@@ -27,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b28 (1.8.26)";
+    "$VER: cdiff 0.1b29 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -464,6 +464,14 @@ static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 static struct Gadget *vgad, *hgad;
 static int gadsok;
 
+/* on-target telemetry (toolchain-and-testing.md's own house rule:
+ * "instrument until the failure has a name" - two blind fixes in a
+ * row produced the identical symptom, so the third move is data,
+ * not another guess). addscrollers fills this; settitle appends it
+ * to whatever's already on screen, so it rides every screenshot
+ * for free. Strip before a real release. */
+static char sbdiag[140] = "";
+
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -690,7 +698,17 @@ static void addscrollers(APTR gvi)
                         PGA_Freedom, LORIENT_VERT,
                         GTSC_Arrows, vw,
                         GTSC_Total, 1, GTSC_Visible, 1, TAG_DONE);
-    if (vgad == NULL) return;
+    if (vgad == NULL) {
+        /* two blind fixes produced the identical symptom - the
+         * third move is data, not a third guess (the house rule
+         * from toolchain-and-testing.md). This tells us CreateGadget
+         * itself is refusing, and with what geometry, rather than
+         * an orientation/imagery nuance on an otherwise-live gadget */
+        sprintf(sbdiag, "  [SB: vCreateGadget=NULL brw=%d bt=%d bbh=%d "
+                "vw=%d ng.W=%d ng.H=%d]",
+                brw, bt, bbh, vw, ng.ng_Width, ng.ng_Height);
+        return;
+    }
     vgad->LeftEdge = 3 - brw;
     vgad->Height = -(bt + bbh + 1);
     vgad->Flags |= GFLG_RELRIGHT | GFLG_RELHEIGHT;
@@ -713,6 +731,10 @@ static void addscrollers(APTR gvi)
     AddGList(win, vgad, -1, hgad ? 2 : 1, NULL);
     RefreshGList(vgad, win, NULL, hgad ? 2 : 1);
     gadsok = 1;
+    sprintf(sbdiag, "  [SB: OK brw=%d bbh=%d v(L=%d T=%d W=%d H=%d) "
+            "h=%s]",
+            brw, bbh, vgad->LeftEdge, vgad->TopEdge,
+            vgad->Width, vgad->Height, hgad ? "OK" : "NULL");
 }
 
 /* one row of the Tree tab: selection arrow, status marker, path.
@@ -904,7 +926,7 @@ static void drawpage(void)
 
 static void settitle(void)
 {
-    static char t[260];
+    static char t[400];
     if (gdirmode && view == 3)
         sprintf(t, "cdiff: %.60s | %.60s"
                 "  (%d entries: %d differ, %d left-only, %d right-only)",
@@ -917,6 +939,7 @@ static void settitle(void)
         sprintf(t, "cdiff: (now open the left file) | %.70s", gf2);
     else
         strcpy(t, "cdiff");
+    strcat(t, sbdiag);
     SetWindowTitles(win, (STRPTR)t, (STRPTR)~0);
 }
 
