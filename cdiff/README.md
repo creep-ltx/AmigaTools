@@ -16,7 +16,14 @@ on the host AND under vamos before anything boots.
     cdiff FILE1/A,FILE2/A,TEXT/S
 
 GUI (default): a window on the Workbench screen, FILE1 left, FILE2
-right, changed rows in pen 3 with a `< | >` marker column.
+right, changed rows as blue bar rows with a `< | >` marker column
+and receding line numbers in the gutter.
+
+Started from Workbench (no arguments), the window opens empty and
+the **Project** menu supplies the files: *Open Files...* asks for
+the left then the right file (ASL requester, one by one), *Open
+Left/Right...* swaps a single side later, *Quit* leaves. The same
+menu works in a CLI-started window.
 
 | key | action |
 |---|---|

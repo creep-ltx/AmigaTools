@@ -25,8 +25,20 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       screenshot): pen-3 fill + white text, the CFile selection-bar
       look; the empty-line insert reads as a solid bar. The
       screenshot-fix-screenshot loop closed in one round.
-- [~] Line numbers in the gutter (both sides), width sized to the
-      longer file, dropped whole when the window is too narrow.
+- [x] Line numbers in the gutter (both sides), width sized to the
+      longer file, dropped whole when the window is too narrow;
+      b4: gutter recedes by palette hierarchy (his ask - no dark
+      grey on a 4-colour WB): blue-on-gray plain, black-on-blue
+      under the bar.
+- [~] **b5: Workbench start + the Project menu** (his ask): argc==0
+      opens the window empty; GadTools menu (Open Files... one by
+      one / Open Left / Open Right / Quit), ASL requester that
+      remembers its drawer, errors via EasyRequest (a WB start has
+      no shell). Files swappable mid-session from a CLI start too.
+      LESSON: base pointers must be strong-initialized (= NULL) or
+      libnix auto-open drags gadtools/asl into startup and the
+      binary dies where they don't exist - vamos caught it, the
+      TEXT road is the regression gate that matters.
 - [ ] Horizontal scroll (left/right keys) for long lines.
 - [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
 - [ ] A status row: hunk i/N, +a −d, position %.
