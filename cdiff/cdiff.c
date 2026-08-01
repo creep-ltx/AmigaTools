@@ -21,7 +21,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b2 (1.8.26)";
+    "$VER: cdiff 0.1b3 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -141,6 +141,8 @@ static int halfw;                      /* columns per side */
 static const DLine *ga, *gb;
 static Row *grows;
 static int gnrows, gtop;
+static int gna, gnb;            /* line counts, for the gutter width */
+static int gutw;                /* gutter digits; 0 = no gutter */
 
 /* draw one text cell run, tab-expanded, clipped to width cells */
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -162,6 +164,33 @@ static void drawtext(int x, int y, const DLine *l, int width,
     if (o > 0) Text(rp, (STRPTR)ex, o);
 }
 
+/* right-aligned 1-based line number in the gutter cells */
+static void drawnum(int x, int y, long line, int pen, int bg)
+{
+    static char nb[16];
+    sprintf(nb, "%*ld", gutw, line + 1);
+    SetAPen(rp, pen);
+    SetBPen(rp, bg);
+    Move(rp, x, y + fbase);
+    Text(rp, (STRPTR)nb, gutw);
+}
+
+/* one side of a row: optional bar fill, gutter number, the text */
+static void drawside(int x, int y, const DLine *l, long line, int bar)
+{
+    int tx = x, tw = halfw;
+    if (bar) {
+        SetAPen(rp, 3);
+        RectFill(rp, x, y, x + halfw * fw - 1, y + fh - 1);
+    }
+    if (gutw > 0) {
+        drawnum(x, y, line, bar ? 2 : 1, bar ? 3 : 0);
+        tx += (gutw + 1) * fw;
+        tw -= gutw + 1;
+    }
+    drawtext(tx, y, l, tw, bar ? 2 : 1, bar ? 3 : 0);
+}
+
 /* changed rows are BAR rows - pen-3 fill, white text, the CFile
  * selection-bar look - because pen-3 text on WB gray barely reads
  * (first-run screenshot lesson, 1.8.26). An inserted EMPTY line
@@ -179,28 +208,16 @@ static void drawrow(int vr)
     r = &grows[idx];
     bar = r->tag != ' ';
     x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
-    if (r->al >= 0) {
-        if (bar) {
-            SetAPen(rp, 3);
-            RectFill(rp, x0, y, x0 + halfw * fw - 1, y + fh - 1);
-        }
-        drawtext(x0, y, &ga[r->al], halfw,
-                 bar ? 2 : 1, bar ? 3 : 0);
-    }
+    if (r->al >= 0)
+        drawside(x0, y, &ga[r->al], r->al, bar);
     if (bar) {
         SetAPen(rp, 3);
         SetBPen(rp, 0);
         Move(rp, x0 + (halfw + 1) * fw, y + fbase);
         Text(rp, (STRPTR)&r->tag, 1);
     }
-    if (r->bl >= 0) {
-        if (bar) {
-            SetAPen(rp, 3);
-            RectFill(rp, x1, y, x1 + halfw * fw - 1, y + fh - 1);
-        }
-        drawtext(x1, y, &gb[r->bl], halfw,
-                 bar ? 2 : 1, bar ? 3 : 0);
-    }
+    if (r->bl >= 0)
+        drawside(x1, y, &gb[r->bl], r->bl, bar);
 }
 
 static void drawpage(void)
@@ -281,6 +298,12 @@ static void guimode(const char *f1, const char *f2)
     viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
     visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
     halfw = (viscols - 3) / 2;
+    {
+        int m = gna > gnb ? gna : gnb;
+        gutw = 1;
+        while (m >= 10) { m /= 10; gutw++; }
+        if (halfw < gutw + 12) gutw = 0;    /* too narrow: no gutter */
+    }
 
     settitle(f1, f2);
     drawpage();
@@ -363,6 +386,7 @@ int main(void)
         textmode(la, lb, ops, nops);
     } else {
         ga = la; gb = lb;
+        gna = na; gnb = nb;
         grows = buildrows(ops, nops, &nrows);
         if (grows == NULL) {
             printf("cdiff: out of memory\n");

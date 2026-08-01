@@ -21,11 +21,12 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## 0.1b2 — the daily-driver polish
 
-- [x] **Changed rows as BAR rows** (built 1.8.26, deployed): pen-3
-      fill + white text, the CFile selection-bar look — the
-      screenshot showed pen-3 text on WB gray barely reads, and an
-      empty-line insert is now a visible bar, not a naked marker.
-- [ ] Line numbers in the gutter (both sides).
+- [x] **Changed rows as BAR rows** — **BOOT-GREEN 1.8.26** (second
+      screenshot): pen-3 fill + white text, the CFile selection-bar
+      look; the empty-line insert reads as a solid bar. The
+      screenshot-fix-screenshot loop closed in one round.
+- [~] Line numbers in the gutter (both sides), width sized to the
+      longer file, dropped whole when the window is too narrow.
 - [ ] Horizontal scroll (left/right keys) for long lines.
 - [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
 - [ ] A status row: hunk i/N, +a −d, position %.
