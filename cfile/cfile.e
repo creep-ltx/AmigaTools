@@ -3458,7 +3458,8 @@ ENDPROC
 -> refreshpanes: re-read and redraw both panes. If boxed=TRUE, only
 -> redraw the 3 frame rows that a progress box straddled (the box was at
 -> row nrows/2-2 to nrows/2, three cells high). For operations whose
--> screen debris is confined to the progress box — use this after progoff.
+-> screen debris is confined to the border row and the box - use it
+-> after progoff, boxed = whether the bar was actually shown.
 PROC refreshpanes(boxed)
   DEF r
   readpane(0)
@@ -5845,7 +5846,7 @@ PROC isoxfer_out(p, q, ismove, force)
   Close(fh)
   cancelok := FALSE
   progoff()
-  refreshpanes(IF total > 1 THEN TRUE ELSE FALSE)
+  refreshpanes(total > 1)
   IF abort
     StringF(mb, 'cancelled - \d of \d done', ndone,
             IF nmark > 0 THEN nmark ELSE 1)
