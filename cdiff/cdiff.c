@@ -21,7 +21,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b1 (1.8.26)";
+    "$VER: cdiff 0.1b2 (1.8.26)";
 
 unsigned long __stack = 65536;  /* libnix: engine recursion headroom */
 
@@ -143,7 +143,8 @@ static Row *grows;
 static int gnrows, gtop;
 
 /* draw one text cell run, tab-expanded, clipped to width cells */
-static void drawtext(int x, int y, const DLine *l, int width, int pen)
+static void drawtext(int x, int y, const DLine *l, int width,
+                     int pen, int bg)
 {
     static char ex[512];
     int i, o = 0;
@@ -156,31 +157,50 @@ static void drawtext(int x, int y, const DLine *l, int width, int pen)
             ex[o++] = (ch >= 32 || ch < 0) ? ch : '.';
     }
     SetAPen(rp, pen);
-    SetBPen(rp, 0);
+    SetBPen(rp, bg);
     Move(rp, x, y + fbase);
     if (o > 0) Text(rp, (STRPTR)ex, o);
 }
 
+/* changed rows are BAR rows - pen-3 fill, white text, the CFile
+ * selection-bar look - because pen-3 text on WB gray barely reads
+ * (first-run screenshot lesson, 1.8.26). An inserted EMPTY line
+ * shows as a solid bar instead of a naked marker. The untouched
+ * side of a one-sided row stays gray: nothing lives there. */
 static void drawrow(int vr)
 {
     int idx = gtop + vr;
     int y = y0 + vr * fh;
-    int pen;
+    int bar, x1;
     Row *r;
     SetAPen(rp, 0);
     RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
     if (idx >= gnrows) return;
     r = &grows[idx];
-    pen = r->tag == ' ' ? 1 : 3;
-    if (r->al >= 0)
-        drawtext(x0, y, &ga[r->al], halfw, pen);
-    if (r->tag != ' ') {
+    bar = r->tag != ' ';
+    x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
+    if (r->al >= 0) {
+        if (bar) {
+            SetAPen(rp, 3);
+            RectFill(rp, x0, y, x0 + halfw * fw - 1, y + fh - 1);
+        }
+        drawtext(x0, y, &ga[r->al], halfw,
+                 bar ? 2 : 1, bar ? 3 : 0);
+    }
+    if (bar) {
         SetAPen(rp, 3);
+        SetBPen(rp, 0);
         Move(rp, x0 + (halfw + 1) * fw, y + fbase);
         Text(rp, (STRPTR)&r->tag, 1);
     }
-    if (r->bl >= 0)
-        drawtext(x0 + (halfw + 3) * fw, y, &gb[r->bl], halfw, pen);
+    if (r->bl >= 0) {
+        if (bar) {
+            SetAPen(rp, 3);
+            RectFill(rp, x1, y, x1 + halfw * fw - 1, y + fh - 1);
+        }
+        drawtext(x1, y, &gb[r->bl], halfw,
+                 bar ? 2 : 1, bar ? 3 : 0);
+    }
 }
 
 static void drawpage(void)

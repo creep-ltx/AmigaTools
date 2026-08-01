@@ -11,14 +11,20 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 - [x] TEXT mode — unified-style stdout, doubles as the vamos road.
 - [x] GUI first cut: WB-screen window, side-by-side rows, custom
       Text/RectFill drawing, keyboard scroll, hunk jump (n/p).
-- [ ] **Boot gate:** open on the 3.2 machine against two real
-      source files; scroll the whole thing; hunk-jump both ways;
-      Esc leaves the WB screen clean. Then a KS1.3 curiosity boot —
+- [x] **Boot gate: FIRST RUN GREEN 1.8.26** (his screenshot) —
+      window up on WB, sides aligned, del/ins rows marked, the
+      trailing-empty-line insert rendered honestly (a naked `>` —
+      correct, but unreadable; fixed in b2). Full-file scroll and
+      hunk-jump eyeballing still wanted. KS1.3 curiosity boot —
       OpenWindowTags is V36+, so 1.3 needs the CFile13 treatment
       (plain OpenWindow + NewWindow) — parked, not promised.
 
 ## 0.1b2 — the daily-driver polish
 
+- [x] **Changed rows as BAR rows** (built 1.8.26, deployed): pen-3
+      fill + white text, the CFile selection-bar look — the
+      screenshot showed pen-3 text on WB gray barely reads, and an
+      empty-line insert is now a visible bar, not a naked marker.
 - [ ] Line numbers in the gutter (both sides).
 - [ ] Horizontal scroll (left/right keys) for long lines.
 - [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
