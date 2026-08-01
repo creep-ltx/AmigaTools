@@ -14,7 +14,7 @@ shipping artifact: write it to a floppy (or mount it in an
 emulator) and a stock A500 with Kickstart 1.3 boots straight into
 CFile13. On 512K it adapts itself — a 4-colour screen in the same
 palette, smaller buffers — and leaves ~40K of working room; on 1MB
-it runs full-dress with ~460K free.
+it runs full-dress with ~520K free.
 
 ## What it is
 

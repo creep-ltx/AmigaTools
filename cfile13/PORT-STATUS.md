@@ -185,6 +185,8 @@ vbwinsz (256K/64K).
    section - binary 180K → 176K) and the 512K copybuf rung retuned
    16K → 8K. Expected 512K headroom: ~19K → ~31K. The bigger
    knobs (WB-screen reclaim +40K, MAXENT +24K) stay on the shelf.
+   b17 on 1MB, his measurement: 523K free (was 462K at b6 — the
+   diet paid both machines).
    **b17 (his compromise):** MAXENT 500→300 (compile-time, both
    configs; the seven entry arrays 22K→13K, readme documents the
    300 cap) and the 512K scrollback rung 200→100 lines (8K model).
