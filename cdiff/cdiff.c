@@ -28,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b33 (1.8.26)";
+    "$VER: cdiff 0.1b34 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -791,7 +791,16 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     vgad.TopEdge = bt;
     vgad.Width = vw;
     vgad.Height = -(bt + hh + uph + dnh);
-    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
+    /* GFLG_GADGIMAGE on the PROP too - the same bug the arrows had,
+     * one level up and never spotted because its symptom is subtler.
+     * With AUTOKNOB the manual says "set GadgetRender to point to an
+     * Image ... you do not initialize the Image structure", so
+     * GadgetRender IS an Image and intuition.h's rule applies: clear
+     * the flag and Intuition reads it as a struct Border instead and
+     * draws NO KNOB. That is why every build has shown a bare blue
+     * trough where MultiView shows a light knob riding in it: we were
+     * only ever seeing the container. Present since b25. */
+    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT | GFLG_GADGIMAGE;
     vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
     vgad.GadgetType = GTYP_PROPGADGET;
@@ -807,7 +816,7 @@ static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
     hgad.TopEdge = -hh;
     hgad.Width = -(bl + vw + ltw + rtw);
     hgad.Height = hh;
-    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
+    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH | GFLG_GADGIMAGE;
     hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
     hgad.GadgetType = GTYP_PROPGADGET;
