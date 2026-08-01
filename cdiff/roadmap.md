@@ -63,11 +63,36 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       content only. **BOOT-GREEN 1.8.26: "Amazing, what a
       difference."** The campaign lesson holds: blit count is the
       metric, and it transfers to a new codebase in one build.
-- [ ] Horizontal scroll (left/right keys) for long lines.
-- [ ] Window resize (WFLG_SIZEGADGET + IDCMP_NEWSIZE re-grid).
+- [x] **b13: horizontal scroll + window resize** — left/right pans
+      the text (gutter pinned, tab stops absolute); size gadget +
+      IDCMP_NEWSIZE re-grids and re-clamps every view's top.
+- [x] **b14: two resize finds** (his screenshots) — the no-files
+      hint and tab labels now clip to window width instead of
+      overpainting the border; drawpage clears the sub-cell slack
+      margins so a resize can't leave stale pixels beside them.
+- [x] **b17-b19: the Unpacked/ guru, three ways** (his find: a
+      guru closing cdiff after opening two big real drawers) —
+      walkdir's path buffer moved off the stack onto the heap;
+      the fraudulent `__stack` (nothing in this libnix reads it,
+      proven by nm) removed; main became a StackSwap trampoline
+      onto a 64K heap stack whenever the task's own stack measures
+      small. b19 fixed the trampoline's OWN exit crash: gcc merges
+      SP cleanup across calls, so the swapped work must be an
+      argument-less noinline function - verified by re-reading the
+      disassembly tail. **BOOT-GREEN on real 3.2, stack 4096, no
+      Stack/STACK tooltype needed.**
+- [x] **b25/b26: mouse citizenship** (his verdict: "a CLI program
+      in a GUI, no scrollbar, can't click anything") — proportional
+      border prop-gadgets (vertical right, horizontal bottom,
+      AUTOKNOB/NEWLOOK, border-relative so resize repositions them
+      free) synced to every scroll source (keys, wheel, hunk jump,
+      tab switch); Tree click selects, double-click opens
+      (DoubleClick() timing). b26: the MultiView border anatomy
+      (his reference screenshot) - sysiclass UP/DOWN/LEFT/RIGHT
+      arrow gadgets at the scroller ends, sized from the real
+      image dimensions so the props stop short exactly at the
+      arrows; IDCMP_INTUITICKS drives press-and-hold repeat.
 - [ ] A status row: hunk i/N, +a −d, position %.
-- [ ] ScrollRaster for ±1 row scroll + the R1 two-row rule —
-      the CFile campaign lesson, applied from birth this time.
 
 ## 0.1b3 — directory mode
 

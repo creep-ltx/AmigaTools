@@ -10,6 +10,7 @@
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
+#include <intuition/imageclass.h>
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
@@ -27,7 +28,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b25 (1.8.26)";
+    "$VER: cdiff 0.1b26 (1.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -439,11 +440,16 @@ static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
 /* border scrollers (his verdict: "a CLI program in a GUI") - raw
- * prop gadgets, border-relative so resize repositions them free */
+ * prop gadgets, border-relative so resize repositions them free,
+ * plus sysiclass arrow gadgets at their ends - the MultiView
+ * border anatomy (his reference screenshot) */
 static struct Gadget vgad, hgad;
+static struct Gadget agup, agdn, aglt, agrt;
+static APTR iup, idn, ilt, irt;     /* sysiclass arrow images */
 static struct PropInfo vpi, hpi;
 static struct Image vim, him;
 static int gadsok;
+static int arrheld;                 /* 1 up 2 down 3 left 4 right */
 #define HTOT 512                /* drawtext's pan range */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
@@ -542,6 +548,32 @@ static int vcount(void)
            view == 2 ? gnb : ndents;
 }
 
+static void scrollto(int target);
+static void movesel(int target);
+static void drawrows(void);
+static void updscrollers(void);
+
+/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. Tree view
+ * moves the selection (his click-to-select rule extends here too);
+ * every other view scrolls the content or pans horizontally. */
+static void arrowstep(int which)
+{
+    if (which == 1) {
+        if (view == 3) movesel(dsel - 1); else scrollto(*vtop() - 1);
+    } else if (which == 2) {
+        if (view == 3) movesel(dsel + 1); else scrollto(*vtop() + 1);
+    } else if (which == 3 || which == 4) {
+        int nh = hoff + (which == 4 ? 8 : -8);
+        if (nh < 0) nh = 0;
+        if (nh > 440) nh = 440;
+        if (nh != hoff) {
+            hoff = nh;
+            drawrows();
+            updscrollers();
+        }
+    }
+}
+
 /* keep both knobs honest: body = visible share, pot = position */
 static void updscrollers(void)
 {
@@ -558,16 +590,57 @@ static void updscrollers(void)
     NewModifyProp(&hgad, win, NULL, hpi.Flags, hpot, 0, hbody, 0, 1);
 }
 
-/* the border scrollers: vertical right, horizontal bottom (beside
- * the size gadget), AUTOKNOB props in the new look */
-static void addscrollers(void)
+static void mkarrow(struct Gadget *g, APTR im, int le, int te,
+                    int rel, int act, int id)
+{
+    struct Image *i = (struct Image *)im;
+    g->LeftEdge = le;
+    g->TopEdge = te;
+    g->Width = i->Width;
+    g->Height = i->Height;
+    g->Flags = rel;
+    g->Activation = act | GACT_RELVERIFY | GACT_IMMEDIATE;
+    g->GadgetType = GTYP_BOOLGADGET;
+    g->GadgetRender = im;
+    g->GadgetID = id;
+}
+
+/* the border anatomy per MultiView (his reference): vertical
+ * scroller down the right border ending in up/down sysiclass
+ * arrows above the size gadget; horizontal scroller along the
+ * bottom ending in left/right arrows before the size corner */
+static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 {
     int brw = win->BorderRight, bbh = win->BorderBottom;
+    int bl = win->BorderLeft, bt = win->BorderTop;
+    int uph = 0, dnh = 0, ltw = 0, rtw = 0, n = 2, sysz;
+    struct Gadget *tail;
+    sysz = scr->Height >= 400 ? SYSISIZE_MEDRES : SYSISIZE_LOWRES;
+    iup = NewObject(NULL, (STRPTR)"sysiclass", SYSIA_DrawInfo,
+                    (ULONG)dri, SYSIA_Which, UPIMAGE,
+                    SYSIA_Size, sysz, TAG_DONE);
+    idn = NewObject(NULL, (STRPTR)"sysiclass", SYSIA_DrawInfo,
+                    (ULONG)dri, SYSIA_Which, DOWNIMAGE,
+                    SYSIA_Size, sysz, TAG_DONE);
+    ilt = NewObject(NULL, (STRPTR)"sysiclass", SYSIA_DrawInfo,
+                    (ULONG)dri, SYSIA_Which, LEFTIMAGE,
+                    SYSIA_Size, sysz, TAG_DONE);
+    irt = NewObject(NULL, (STRPTR)"sysiclass", SYSIA_DrawInfo,
+                    (ULONG)dri, SYSIA_Which, RIGHTIMAGE,
+                    SYSIA_Size, sysz, TAG_DONE);
+    if (iup && idn) {
+        uph = ((struct Image *)iup)->Height;
+        dnh = ((struct Image *)idn)->Height;
+    }
+    if (ilt && irt) {
+        ltw = ((struct Image *)ilt)->Width;
+        rtw = ((struct Image *)irt)->Width;
+    }
     vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
-    vgad.LeftEdge = -(brw - 4);
-    vgad.TopEdge = win->BorderTop + 1;
-    vgad.Width = brw - 6;
-    vgad.Height = -(win->BorderTop + bbh + 3);
+    vgad.LeftEdge = 3 - brw;
+    vgad.TopEdge = bt + 1;
+    vgad.Width = brw - 4;
+    vgad.Height = -(bt + bbh + uph + dnh + 2);
     vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
     vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
@@ -576,10 +649,10 @@ static void addscrollers(void)
     vgad.SpecialInfo = (APTR)&vpi;
     vgad.GadgetID = 1;
     hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
-    hgad.LeftEdge = win->BorderLeft;
-    hgad.TopEdge = -(bbh - 3);
-    hgad.Width = -(win->BorderLeft + brw + 20);
-    hgad.Height = bbh - 5;
+    hgad.LeftEdge = bl;
+    hgad.TopEdge = 3 - bbh;
+    hgad.Width = -(bl + brw + ltw + rtw + 1);
+    hgad.Height = bbh - 4;
     hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
     hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
@@ -588,8 +661,32 @@ static void addscrollers(void)
     hgad.SpecialInfo = (APTR)&hpi;
     hgad.GadgetID = 2;
     vgad.NextGadget = &hgad;
-    AddGList(win, &vgad, -1, 2, NULL);
-    RefreshGList(&vgad, win, NULL, 2);
+    hgad.NextGadget = NULL;
+    tail = &hgad;
+    if (iup && idn) {
+        int w = ((struct Image *)iup)->Width;
+        mkarrow(&agup, iup, 1 - w, -(bbh + dnh + uph - 1),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
+        mkarrow(&agdn, idn, 1 - w, -(bbh + dnh - 1),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
+        tail->NextGadget = &agup;
+        agup.NextGadget = &agdn;
+        agdn.NextGadget = NULL;
+        tail = &agdn;
+        n += 2;
+    }
+    if (ilt && irt) {
+        mkarrow(&aglt, ilt, 1 - brw - rtw - ltw, 1 - bbh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
+        mkarrow(&agrt, irt, 1 - brw - rtw, 1 - bbh,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
+        tail->NextGadget = &aglt;
+        aglt.NextGadget = &agrt;
+        agrt.NextGadget = NULL;
+        n += 2;
+    }
+    AddGList(win, &vgad, -1, n, NULL);
+    RefreshGList(&vgad, win, NULL, n);
     gadsok = 1;
 }
 
@@ -1478,7 +1575,8 @@ static void guimode(void)
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
                   IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
-                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE,
+                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
+                  IDCMP_INTUITICKS,
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   /* SMART: Intuition itself restores regions a
                    * requester covered - the app is BLOCKED inside
@@ -1502,7 +1600,9 @@ static void guimode(void)
     }
     {
         /* the screen's GUI pens for the tab bevels; fall back to
-         * the 4-colour defaults if DrawInfo is unavailable */
+         * the 4-colour defaults if DrawInfo is unavailable. The
+         * scroller arrows (sysiclass) need the DrawInfo too, so
+         * the gadgets are born here, before it goes back. */
         struct DrawInfo *dri = GetScreenDrawInfo(scr);
         if (dri) {
             pshine = dri->dri_Pens[SHINEPEN];
@@ -1511,8 +1611,9 @@ static void guimode(void)
             pfilltext = dri->dri_Pens[FILLTEXTPEN];
             ptext = dri->dri_Pens[TEXTPEN];
             pback = dri->dri_Pens[BACKGROUNDPEN];
-            FreeScreenDrawInfo(scr, dri);
         }
+        addscrollers(dri, scr);
+        if (dri) FreeScreenDrawInfo(scr, dri);
     }
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
@@ -1537,7 +1638,6 @@ static void guimode(void)
     fw = font->tf_XSize;
     fh = font->tf_YSize;
     fbase = font->tf_Baseline;
-    addscrollers();
     calcgrid();
 
     if (gdirmode) {                 /* CLI gave two directories */
@@ -1578,8 +1678,18 @@ static void guimode(void)
                             updscrollers();
                         }
                     }
-                }
+                } else if (class == IDCMP_GADGETDOWN &&
+                          (iaddr == (APTR)&agup || iaddr == (APTR)&agdn ||
+                           iaddr == (APTR)&aglt || iaddr == (APTR)&agrt)) {
+                    arrheld = iaddr == (APTR)&agup ? 1 :
+                             iaddr == (APTR)&agdn ? 2 :
+                             iaddr == (APTR)&aglt ? 3 : 4;
+                    arrowstep(arrheld);
+                } else if (class == IDCMP_GADGETUP)
+                    arrheld = 0;
             }
+            if (class == IDCMP_INTUITICKS && arrheld)
+                arrowstep(arrheld);
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
@@ -1714,8 +1824,16 @@ static void guimode(void)
         }
     }
     if (gmenu) ClearMenuStrip(win);
+    if (gadsok) RemoveGList(win, &vgad, -1);
     CloseWindow(win);
 out:
+    /* sysiclass objects outlive the window on purpose (RemoveGList
+     * detached the gadgets first) - DisposeObject after the close,
+     * NULL-safe */
+    if (iup) DisposeObject(iup);
+    if (idn) DisposeObject(idn);
+    if (ilt) DisposeObject(ilt);
+    if (irt) DisposeObject(irt);
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
