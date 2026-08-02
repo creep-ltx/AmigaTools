@@ -326,32 +326,143 @@ void ltx_calcgrid(void)
 /* ---- the tab bar ------------------------------------------------ */
 
 int ltx_tabx[LTX_MAXTABS], ltx_tabe[LTX_MAXTABS];
+int ltx_tabcx[LTX_MAXTABS];
 int ltx_ntabs;
+int ltx_tabfirst;
 
-void ltx_drawtabs(const char *const *labels, int n, int active)
+/* the two scroll arrows' hit ranges; empty when they are not drawn */
+static int arrlx, arrle, arrrx, arrre;
+static int lastclosable;
+static int lastactive = -1;     /* to tell a SWITCH from a redraw */
+
+static int closew(int closable)
 {
+    return closable ? fw + 4 : 0;   /* the glyph, plus a little air */
+}
+
+static int arroww(void)
+{
+    return fw + 8;
+}
+
+static int tabw(const char *label, int closable)
+{
+    return (int)strlen(label) * fw + 12 + closew(closable);
+}
+
+/* the last tab that fits completely when drawing starts at `first`.
+ * Returns first-1 when not even one does, which only happens in a
+ * window too narrow for a single label - there the clip below takes
+ * over and draws what it can. */
+static int fitlast(const char *const *labels, int n, int first,
+                   int left, int right, int closable)
+{
+    int i, x = left;
+    for (i = first; i < n; i++) {
+        int w = tabw(labels[i], closable);
+        if (x + w > right) break;
+        x += w + 3;
+    }
+    return i - 1;
+}
+
+/* a small bevelled box with a glyph in it - the arrows, in the same
+ * language as the tabs themselves so they follow the WB palette */
+static void arrowbox(int x, int yr, int w, char glyph, int on)
+{
+    SetAPen(rp, pback);
+    RectFill(rp, x + 1, gy0 + 1, x + w - 2, yr - 1);
+    SetAPen(rp, on ? pshine : pback);
+    Move(rp, x, yr - 1);
+    Draw(rp, x, gy0);
+    Draw(rp, x + w - 2, gy0);
+    SetAPen(rp, on ? pshadow : pback);
+    Move(rp, x + w - 1, gy0 + 1);
+    Draw(rp, x + w - 1, yr - 1);
+    if (!on) return;            /* the slot stays, the arrow does not */
+    SetAPen(rp, ptext);
+    SetBPen(rp, pback);
+    Move(rp, x + 4, gy0 + 2 + fbase);
+    Text(rp, (STRPTR)&glyph, 1);
+}
+
+void ltx_drawtabs(const char *const *labels, int n, int active,
+                  int closable)
+{
+    /* His find, and the whole diagnosis of three symptoms at once:
+     * everything here drew to `xend`, and a pixel at xend lands on
+     * the window border - the grey fill invaded it, and so did the
+     * white base rule. It shows in the tab bar and not in cdiff's
+     * content area only because THERE the offending pixel is
+     * background grey against a grey border, and invisible.
+     *
+     * So the bar has one right limit, one pixel inside xend, and
+     * the fill, the arrows and the rule all respect it. b86's rule
+     * for the content area is untouched. */
+    /* ONE limit again, and it is b86's: xend is the real pixel edge
+     * of the client area, and the bar meets it. The two-limit split
+     * I tried before was chasing a gap that was never drawn here at
+     * all - the page's slack strip was painting over the bar's right
+     * end afterwards. */
     int i, x, w, yr = gy0 + tabh, winr = xend;
+    int left = gx0 + 2, right = winr;
+    int total = 0, scrolling, last;
+
     if (rp == NULL || !ltx_tabbar) return;
     SetAPen(rp, pback);
     RectFill(rp, gx0, gy0, winr, yr + 1);
     if (n > LTX_MAXTABS) n = LTX_MAXTABS;
     ltx_ntabs = n;
-    if (n < 1) return;
+    lastclosable = closable;
+    arrlx = arrle = arrrx = arrre = 0;
+    for (i = 0; i < LTX_MAXTABS; i++) {
+        ltx_tabx[i] = ltx_tabe[i] = winr;   /* zero width = off screen */
+        ltx_tabcx[i] = 0;
+    }
+    if (n < 1) { ltx_tabfirst = 0; return; }
     if (active < 0 || active >= n) active = 0;
-    x = gx0 + 2;
-    for (i = 0; i < n; i++) {
-        int lw = strlen(labels[i]);
-        w = lw * fw + 12;               /* label + side padding */
-        /* clip into the window - narrow windows must not get
-         * their border overpainted (his find, the hint lesson) */
-        if (x + w > winr) {
-            w = winr - x;
-            lw = (w - 12) / fw;
-            if (lw < 1) {               /* no room left at all */
-                ltx_tabx[i] = winr;
-                ltx_tabe[i] = winr;
-                continue;
-            }
+
+    for (i = 0; i < n; i++) total += tabw(labels[i], closable) + 3;
+    scrolling = (total - 3) > (right - left);
+    if (!scrolling)
+        ltx_tabfirst = 0;
+    else {
+        /* both slots reserved for as long as scrolling is in force,
+         * so the tabs keep still while you page through them */
+        left  += arroww() + 2;
+        /* +5, not +2: the right arrow moved 3px left (below), so the
+         * tabs give up the same 3 or the last one runs into it */
+        right -= arroww() + 5;
+        if (ltx_tabfirst > n - 1) ltx_tabfirst = n - 1;
+        if (ltx_tabfirst < 0) ltx_tabfirst = 0;
+        /* Bring the active tab into view when the ACTIVE TAB CHANGED
+         * - the menu can switch to a document that is off the end of
+         * the bar, and it has to become visible. But NOT on an
+         * ordinary redraw: the user scrolling the bar with the
+         * arrows to look at something else would otherwise be undone
+         * the instant it was drawn. Switching follows the document;
+         * scrolling stays where it is put. */
+        if (active != lastactive) {
+            if (active < ltx_tabfirst) ltx_tabfirst = active;
+            while (ltx_tabfirst < n - 1 &&
+                   fitlast(labels, n, ltx_tabfirst, left, right,
+                           closable) < active)
+                ltx_tabfirst++;
+        }
+    }
+    last = fitlast(labels, n, ltx_tabfirst, left, right, closable);
+
+    x = left;
+    for (i = ltx_tabfirst; i < n; i++) {
+        int lw = (int)strlen(labels[i]);
+        w = tabw(labels[i], closable);
+        if (x + w > right) {
+            /* only reachable when a single tab is wider than the bar
+             * - clip it rather than draw nothing at all */
+            if (i != ltx_tabfirst) break;
+            w = right - x;
+            lw = (w - 12 - closew(closable)) / fw;
+            if (lw < 1) break;
         }
         ltx_tabx[i] = x;
         ltx_tabe[i] = x + w;
@@ -374,26 +485,104 @@ void ltx_drawtabs(const char *const *labels, int n, int active)
         SetBPen(rp, pback);
         Move(rp, x + 6, gy0 + 2 + fbase);
         Text(rp, (STRPTR)labels[i], lw);
+        if (closable) {
+            /* the close box sits at the tab's right end. Tested
+             * BEFORE the tab body by ltx_tabclick, so a click on it
+             * cannot be read as "switch to this tab". */
+            /* an 'x' glyph, and deliberately not sysiclass
+             * CLOSEIMAGE: the border's close gadget is sized for a
+             * TITLE BAR, so fitting one would mean growing the tab
+             * bar to suit it. Not worth a row of text (his call). */
+            static const char xg = 'x';
+            ltx_tabcx[i] = x + w - closew(1) - 2;
+            SetAPen(rp, pshadow);
+            SetBPen(rp, pback);
+            Move(rp, ltx_tabcx[i] + 2, gy0 + 2 + fbase);
+            Text(rp, (STRPTR)&xg, 1);
+        }
         x += w + 3;
+        if (i == last) break;
     }
+
+    if (scrolling) {
+        /* each arrow only when that direction is really available -
+         * his rule. The slot stays either way. */
+        arrlx = gx0 + 2;
+        arrle = arrlx + arroww();
+        arrowbox(arrlx, yr, arroww(), '<', ltx_tabfirst > 0);
+        /* 3px left of the edge (his eye): sat flush against xend it
+         * read as reaching into the window border. The base rule
+         * still runs the full width underneath it. */
+        arrrx = winr - arroww() - 2;
+        arrre = arrrx + arroww();
+        arrowbox(arrrx, yr, arroww(), '>', last < n - 1);
+    }
+
+    lastactive = active;
+
     /* base rule in shine, broken open under the active tab - the
-     * classic "this tab is the page you are on" statement */
-    SetAPen(rp, pshine);
-    if (ltx_tabx[active] > gx0) {
-        Move(rp, gx0, yr);
-        Draw(rp, ltx_tabx[active], yr);
+     * classic "this tab is the page you are on" statement.
+     *
+     * ONLY when that tab is actually on screen, and this is the bug
+     * his screenshot caught. A tab scrolled out of view carries a
+     * ZERO-WIDTH hit range parked at winr, so the "erase under the
+     * active tab" span became [tabe-2 .. tabx+1] = [619..622] and
+     * Draw ran it BACKWARDS - straight over the last client column
+     * and one pixel into Intuition's own border bevel at 622. That
+     * is the grey pixel that survived until a resize: the border is
+     * Intuition's to repaint, and only RefreshWindowFrame does it.
+     * It also ate the last three pixels of the rule, which is why
+     * the divider looked short no matter what limit I gave it.
+     *
+     * With no visible active tab the rule is simply unbroken. */
+    {
+        int tx = ltx_tabx[active], te = ltx_tabe[active];
+        int visible = (te - 2) >= (tx + 1);     /* room to break it */
+        SetAPen(rp, pshine);
+        if (!visible) {
+            Move(rp, gx0, yr);
+            Draw(rp, winr, yr);
+        } else {
+            if (tx > gx0) {
+                Move(rp, gx0, yr);
+                Draw(rp, tx, yr);
+            }
+            Move(rp, te - 1, yr);
+            Draw(rp, winr, yr);
+            /* b59: the active tab's floor is the page background, so
+             * the rule span under it is erased to pback - tab and
+             * page read as one continuous surface and the separator
+             * does not cut across it (his ask). */
+            SetAPen(rp, pback);
+            Move(rp, tx + 1, yr);
+            Draw(rp, te - 2, yr);
+        }
     }
-    Move(rp, ltx_tabe[active] - 1, yr);
-    Draw(rp, winr, yr);
-    /* b59: the active tab's floor is the page background, so the
-     * rule span under it is erased to pback - tab and page read as
-     * one continuous surface and the separator does not cut across
-     * it (his ask). This is the ONLY thing distinguishing the
-     * active tab now, so the span must stay exactly as wide as the
-     * tab's own body. */
-    SetAPen(rp, pback);
-    Move(rp, ltx_tabx[active] + 1, yr);
-    Draw(rp, ltx_tabe[active] - 2, yr);
+}
+
+int ltx_tabclick(int mx, int my, int *idx)
+{
+    int i;
+    if (!ltx_tabbar || my < gy0 || my > gy0 + tabh) return LTXTAB_NONE;
+    if (arrle > arrlx && mx >= arrlx && mx < arrle) {
+        if (ltx_tabfirst <= 0) return LTXTAB_NONE;
+        ltx_tabfirst--;
+        return LTXTAB_SCROLL;
+    }
+    if (arrre > arrrx && mx >= arrrx && mx < arrre) {
+        if (ltx_tabfirst >= ltx_ntabs - 1) return LTXTAB_NONE;
+        ltx_tabfirst++;
+        return LTXTAB_SCROLL;
+    }
+    for (i = 0; i < ltx_ntabs; i++) {
+        if (ltx_tabe[i] <= ltx_tabx[i]) continue;   /* off screen */
+        if (mx < ltx_tabx[i] || mx >= ltx_tabe[i]) continue;
+        *idx = i;
+        if (lastclosable && ltx_tabcx[i] && mx >= ltx_tabcx[i])
+            return LTXTAB_CLOSE;
+        return LTXTAB_PICK;
+    }
+    return LTXTAB_NONE;
 }
 
 /* ---- the status row --------------------------------------------- */

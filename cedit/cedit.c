@@ -340,7 +340,8 @@ static void drawtabbar(void)
     if (!ltx_tabbar) return;
     for (i = 0; i < ndocs; i++)
         labs[i] = docs[i].name[0] ? docs[i].name : "untitled";
-    ltx_drawtabs(labs, ndocs, curdoc);
+    /* closable: a document tab carries its own close box */
+    ltx_drawtabs(labs, ndocs, curdoc, 1);
 }
 
 static void epage(void)
@@ -352,12 +353,20 @@ static void epage(void)
     erows();
     /* the slack margins: the window size is rarely an exact multiple
      * of the cell, and the sub-cell strips below the last row and
-     * right of the last column keep STALE pixels across a resize */
+     * right of the last column keep STALE pixels across a resize.
+     *
+     * From CONTY, not gy0 - his find, and the answer to why every
+     * attempt to move the tab divider's right end changed nothing at
+     * all. This strip is the sub-cell remainder, 0 to fw-1 pixels
+     * wide, and starting it at the top of the window painted it
+     * straight over the right end of the tab bar - drawn moments
+     * earlier - in background grey. The bar paints its own full
+     * width; this only ever needed to cover the content. */
     SetAPen(rp, 0);
     s = gx0 + viscols * fw;
     e = win->Width - win->BorderRight - 1;
     if (s <= e)
-        RectFill(rp, s, gy0, e, win->Height - win->BorderBottom - 1);
+        RectFill(rp, s, conty, e, win->Height - win->BorderBottom - 1);
     s = conty + crows * fh;
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
@@ -1163,14 +1172,18 @@ static void guimode(void)
              * from the chassis, which filled them when it drew the
              * bar - so the boxes on screen and the boxes we test are
              * the same numbers by construction. */
-            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN &&
-                ltx_tabbar && my >= gy0 && my <= gy0 + tabh) {
-                int t;
-                for (t = 0; t < ltx_ntabs && t < ndocs; t++)
-                    if (mx >= ltx_tabx[t] && mx < ltx_tabe[t]) {
-                        if (t != curdoc) setdoc(t);
-                        break;
-                    }
+            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
+                int t, what = ltx_tabclick(mx, my, &t);
+                if (what == LTXTAB_PICK) {
+                    if (t != curdoc) setdoc(t);
+                } else if (what == LTXTAB_CLOSE) {
+                    /* close the tab that was clicked, not the active
+                     * one - so switch first, then use the one road
+                     * to closing (which is where the prompt lives) */
+                    if (t != curdoc) setdoc(t);
+                    doclose();
+                } else if (what == LTXTAB_SCROLL)
+                    drawtabbar();
             }
             if (class == IDCMP_VANILLAKEY) {
                 if (code == 13)                         /* Return */

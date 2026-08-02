@@ -51,7 +51,9 @@ Project menu:
 | `Save As...` (A) | the requester |
 | `Quit` (Q) | |
 
-Up to 16 documents at once. Click a tab to switch to it. Anything
+Up to 16 documents at once. Click a tab to switch to it, or its `x` to close it. When there are more tabs than fit, `<` and `>` appear at
+the ends of the bar — each only when there is somewhere to go that
+way. Anything
 that would throw away unsaved changes asks first, with Cancel as the
 default — and Close All and Quit ask **once** for the whole set
 rather than once per document.

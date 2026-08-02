@@ -1120,7 +1120,7 @@ static void drawtabs(void)
     tabsok = (ga != NULL) || gdirmode;
     if (!tabsok) {
         gntabs = 0;
-        ltx_drawtabs(NULL, 0, 0);       /* clears the bar */
+        ltx_drawtabs(NULL, 0, 0, 0);    /* clears the bar */
         return;
     }
     if (gdirmode) {
@@ -1140,7 +1140,8 @@ static void drawtabs(void)
         labs[i] = lab[i];
         if (gtabvid[i] == view) act = i;
     }
-    ltx_drawtabs(labs, nt, act);
+    /* cdiff's tabs are views, not documents - nothing to close */
+    ltx_drawtabs(labs, nt, act, 0);
 }
 
 static void calcgrid(void);     /* b68: the grid follows find state */
@@ -1172,7 +1173,14 @@ static void drawpage(void)
     s = gx0 + viscols * fw;
     e = win->Width - win->BorderRight - 1;
     if (s <= e)
-        RectFill(rp, s, gy0, e, win->Height - win->BorderBottom - 1);
+        /* from CONTY, not gy0 (cedit b2, his find): this strip is
+         * the sub-cell remainder, 0 to fw-1 pixels wide, and
+         * starting it at the top of the window painted it over the
+         * right end of the tab bar - drawn moments earlier - in
+         * background grey, cutting the base rule short. The bar
+         * paints its own full width; this only ever needed to cover
+         * the content. */
+        RectFill(rp, s, conty, e, win->Height - win->BorderBottom - 1);
     s = conty + crows * fh;
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
@@ -2741,10 +2749,12 @@ static void guimode(void)
             }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
                 if (tabsok && my >= gy0 && my <= gy0 + tabh) {
-                    int i;
-                    for (i = 0; i < gntabs; i++)
-                        if (mx >= ltx_tabx[i] && mx < ltx_tabe[i])
-                            setview(gtabvid[i]);
+                    int ti;
+                    int what = ltx_tabclick(mx, my, &ti);
+                    if (what == LTXTAB_PICK && ti < gntabs)
+                        setview(gtabvid[ti]);
+                    else if (what == LTXTAB_SCROLL)
+                        drawtabs();
                 } else if (view == 3 && my >= conty &&
                            my < conty + crows * fh) {
                     /* Tree rows: click selects, double-click

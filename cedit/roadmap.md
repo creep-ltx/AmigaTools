@@ -294,13 +294,67 @@ lets cedit hand the same engine a Buffer.
       versions rather than keeping its own copies.
 - [ ] Not yet: undo — which is b3, and the reason to be careful with
       this build until it exists.
-- [ ] Still open from b4's list: a close BOX on each tab (the menu's
-      Close covers the function, the gadget does not exist yet), and
-      tab-bar overflow — with enough documents open the chassis
-      still clips the last tabs to a zero-width hit range, so they
-      cannot be reached by mouse. A document that cannot be reached
-      is the b4 problem written down at b0, and it is now reachable
-      in practice: 16 documents do not fit on PAL Hires.
+- [x] **b4's two remaining tab items, both done, both in the
+      chassis** (his design):
+      1. **A close box on every tab** — a small `x` at the tab's
+         right end, tested BEFORE the tab body so a click on it can
+         never read as "switch to this tab". `sysiclass CLOSEIMAGE`
+         (the window border's own close gadget) was tried and
+         **removed on his call**: it is sized for a TITLE BAR, so at
+         topaz 8 nothing the class offers fits a tab, and using it
+         would have meant growing the tab bar to suit — a row of
+         text spent on a prettier gadget. The attempt is gone rather
+         than left dormant, because a latent branch would have
+         switched the tabs to an image by itself the day someone
+         picked a larger font. Clicking one switches
+         to that tab and then goes through the same `doclose()` the
+         menu uses, so the unsaved-changes prompt lives in exactly
+         one place. `ltx_drawtabs` takes a `closable` flag; cdiff
+         passes 0, because its tabs are views and there is nothing
+         to close.
+      2. **Scroll arrows when the tabs do not fit** — `<` at the
+         left end and `>` at the right, each drawn only when that
+         direction is actually available, with both slots reserved
+         while scrolling is in force so the tabs do not shuffle
+         sideways as you page through them. Off-screen tabs get a
+         zero-width hit range, so a hit test can never land on
+         something that is not drawn.
+      The conflict that took a second pass: the bar also has to keep
+      the ACTIVE tab visible, since the menu can switch to a
+      document off the end of it — but doing that on every redraw
+      would undo the user's own scrolling the instant it was drawn.
+      So it only recentres when the active tab actually CHANGED.
+      Switching follows the document; scrolling stays where it is
+      put.
+      **The right-hand edge took five rounds and a screenshot**, and
+      the lesson is b29's: three of those rounds were guesses at
+      where the client area ends, and all three were wrong. What
+      finally settled it was on-target telemetry (the window's own
+      W/BorderRight/xend printed into its title) plus a 4-colour
+      screen grab measured pixel by pixel. Two real defects came
+      out of it, neither where I kept looking:
+      1. The page's slack strip started at `gy0` instead of `conty`,
+         so it repainted the sub-cell remainder — 0 to fw-1 pixels
+         wide, in background grey — straight over the right end of
+         the tab bar, *after* the bar had drawn. Every adjustment
+         inside `ltx_drawtabs` was being painted over, which is
+         exactly why one build "looked exactly the same". Same bug
+         in cdiff's `drawpage`, fixed there too.
+      2. The rule's break-open-under-the-active-tab step drew
+         BACKWARDS when that tab was scrolled out of view: an
+         off-screen tab carries a zero-width hit range parked at
+         `winr`, so the span became `[tabe-2 .. tabx+1]` and ran
+         across the last client column into Intuition's own border
+         bevel. That is the grey pixel that survived until a resize
+         — the border is Intuition's to repaint, and only
+         `RefreshWindowFrame` does it. With no visible active tab
+         the rule is simply unbroken now.
+      Also his eye: the right arrow sat flush against the client
+      edge and read as reaching into the border, so it moved 3px
+      left and the tabs gave up the same 3.
+      Hit testing moved into the chassis too (`ltx_tabclick`), so
+      the boxes on screen and the boxes being tested are the same
+      numbers by construction — cdiff uses it as well now.
 
 ## 0.1b3 — undo
 

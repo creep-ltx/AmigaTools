@@ -166,18 +166,36 @@ void ltx_calcgrid(void);
  * answer for what happens past the last one that fits. */
 #define LTX_MAXTABS 32
 
-/* pixel hit ranges, filled by ltx_drawtabs. A tab with no room left
- * gets a ZERO-WIDTH range at the right edge - correct for a fixed
- * few, and the thing cedit's dynamic tabs must replace, because a
- * tab you cannot reach is a file you cannot reach. */
+/* pixel hit ranges, filled by ltx_drawtabs, indexed by the app's OWN
+ * tab number - a tab scrolled out of view gets a zero-width range,
+ * so a hit test can never land on something that is not on screen. */
 extern int ltx_tabx[LTX_MAXTABS], ltx_tabe[LTX_MAXTABS];
+extern int ltx_tabcx[LTX_MAXTABS];  /* close box left edge, or 0 */
 extern int ltx_ntabs;
+extern int ltx_tabfirst;            /* leftmost tab drawn */
 
 /* the tab bar: real GUI tabs (his ask) - beveled boxes in the
  * screen's own pen set, so they follow the user's WB palette rather
  * than inventing colours. `active` is an INDEX into labels[], not
- * whatever the app calls that view. n == 0 clears the bar. */
-void ltx_drawtabs(const char *const *labels, int n, int active);
+ * whatever the app calls that view. n == 0 clears the bar.
+ *
+ * `closable` puts a small close box on every tab. When the tabs do
+ * not all fit, a left arrow appears at the left end and a right one
+ * at the right, each drawn only when that direction is actually
+ * available - and the bar scrolls itself so the ACTIVE tab is always
+ * on screen, because a tab you cannot reach is a document you cannot
+ * reach. Both arrow slots stay reserved while scrolling is in force,
+ * so the tabs do not shuffle sideways as you page through them. */
+void ltx_drawtabs(const char *const *labels, int n, int active,
+                  int closable);
+
+/* what a click in the bar means. LTXTAB_SCROLL means the chassis has
+ * already moved the bar and the app need only redraw it. */
+#define LTXTAB_NONE   0
+#define LTXTAB_PICK   1         /* *idx = the tab clicked */
+#define LTXTAB_CLOSE  2         /* *idx = that tab's close box */
+#define LTXTAB_SCROLL 3
+int ltx_tabclick(int mx, int my, int *idx);
 
 /* ---- what the chassis asks the app ------------------------------ */
 
@@ -229,6 +247,7 @@ void ltx_trackvert(void);
 void ltx_trackhoriz(void);
 void addscrollers(struct DrawInfo *dri, struct Screen *scr);
 void freearrows(void);          /* the four sysiclass images */
+
 
 extern struct Gadget vgad, hgad, agup, agdn, aglt, agrt;
 extern int gadsok, arrowsok, arrheld;
