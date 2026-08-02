@@ -5,6 +5,8 @@ window, with a real diff algorithm underneath. Born 1.8.26 from the
 observation that maintaining a fork (cfile vs cfile13) means living
 inside a 12,000-line diff with no way to *see* it on the machine.
 
+![cdiff comparing cfile.e with its Kickstart 1.3 fork on AmigaOS 3.2 — changed rows as selection bars with the changed part of each line darkened, one-sided rows marked < and >, and the status row counting hunks and lines](screenshot.png)
+
 The first C-language member of the C* family — built with Bebbo's
 m68k-amigaos-gcc instead of Amiga E, chosen for the RKM-verbatim API
 documentation and the newer optimizer. The testing discipline is
