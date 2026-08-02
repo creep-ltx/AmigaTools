@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b96 (2.8.26)";
+    "$VER: cdiff 0.1b100 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -603,8 +603,65 @@ static int selold, seloldset;           /* Tree cursor's painted row */
  * The buffer now holds only the VISIBLE window rather than the
  * line from column 0, so a large hoff can never run past it - the
  * old ex[512] silently stopped padding once hoff+width passed 512. */
+/* b97: expand a line into columns exactly as drawtext renders it -
+ * same tab rule, same control-char substitution - so an intra-line
+ * comparison can never disagree with what is on screen */
+static int expandcols(const DLine *l, char *out, int max)
+{
+    int i, o = 0;
+    for (i = 0; i < l->len && o < max; i++) {
+        char ch = l->ptr[i];
+        if (ch == '\t') {
+            do {
+                out[o++] = ' ';
+            } while ((ttmask ? (o & ttmask) : (o % tttab)) && o < max);
+        } else
+            out[o++] = (ch >= 32 || ch < 0) ? ch : '.';
+    }
+    return o;
+}
+
+/* b97, the intra-line span: trim the longest common PREFIX and the
+ * longest common SUFFIX, and whatever is left in the middle is what
+ * actually changed. Two cheap scans instead of a character-level
+ * LCS, and it catches what real edits look like - an identifier
+ * renamed, a number changed, a word inserted. When a line was
+ * rewritten wholesale the span is the whole line, which is the
+ * truth. Columns, not bytes, so tabs cannot shift it. */
+static void intraspan(const DLine *a, const DLine *b,
+                      int *pre, int *enda, int *endb)
+{
+    static char ca[512], cb[512];
+    int la = expandcols(a, ca, sizeof(ca));
+    int lb = expandcols(b, cb, sizeof(cb));
+    int p = 0, sfx = 0, maxs;
+    /* b100, and this cost a screenshot's worth of pixel forensics:
+     * written as a THREE-term condition
+     *
+     *     while (p < la && p < lb && ca[p] == cb[p]) p++;
+     *
+     * bebbo's gcc MISCOMPILES this at -O2 on m68k. It stopped at
+     * p=1 where the answer is 11, so the marked span started at the
+     * second character of every changed line. -O1 and -O0 are
+     * correct, and so is the two-term suffix loop below - the bound
+     * has to come out of the condition. Verified on target under
+     * vamos, not guessed: -O2 gave 1, -O1 and -O0 gave 11, and
+     * hoisting the min fixed it at -O2.
+     * Hoisting is better code regardless: one compare per iteration
+     * instead of two. */
+    {
+        int lim = la < lb ? la : lb;
+        while (p < lim && ca[p] == cb[p]) p++;
+    }
+    maxs = (la < lb ? la : lb) - p;     /* never overlap the prefix */
+    while (sfx < maxs && ca[la - 1 - sfx] == cb[lb - 1 - sfx]) sfx++;
+    *pre = p;
+    *enda = la - sfx;
+    *endb = lb - sfx;
+}
+
 static void drawtext(int x, int y, const DLine *l, int width,
-                     int pen, int bg)
+                     int pen, int bg, int hs, int he, int hpen, int hbg)
 {
     static char vis[256];
     int i, o = 0, n, end;
@@ -626,10 +683,35 @@ static void drawtext(int x, int y, const DLine *l, int width,
     n = o - hoff;
     if (n < 0) n = 0;
     while (n < width) vis[n++] = ' ';
-    SetAPen(rp, pen);
-    SetBPen(rp, bg);
-    Move(rp, x, y + fbase);
-    Text(rp, (STRPTR)vis, width);
+    /* b97: up to three runs - before, the changed span, after. Each
+     * pixel is still written exactly once (the b66 rule); the spans
+     * are adjacent, never overlapping. */
+    hs -= hoff; he -= hoff;             /* into visible columns */
+    if (hs < 0) hs = 0;
+    if (he > width) he = width;
+    if (hs >= he) {                     /* nothing to mark */
+        SetAPen(rp, pen);
+        SetBPen(rp, bg);
+        Move(rp, x, y + fbase);
+        Text(rp, (STRPTR)vis, width);
+        return;
+    }
+    if (hs > 0) {
+        SetAPen(rp, pen);
+        SetBPen(rp, bg);
+        Move(rp, x, y + fbase);
+        Text(rp, (STRPTR)vis, hs);
+    }
+    SetAPen(rp, hpen);
+    SetBPen(rp, hbg);
+    Move(rp, x + hs * fw, y + fbase);
+    Text(rp, (STRPTR)vis + hs, he - hs);
+    if (he < width) {
+        SetAPen(rp, pen);
+        SetBPen(rp, bg);
+        Move(rp, x + he * fw, y + fbase);
+        Text(rp, (STRPTR)vis + he, width - he);
+    }
 }
 
 /* right-aligned 1-based line number in the gutter cells */
@@ -665,7 +747,7 @@ static void drawmark(int y, int hit)
 }
 
 static void drawside(int x, int y, const DLine *l, long line,
-                     int bar, int w)
+                     int bar, int w, int hs, int he)
 {
     int tx = x, tw = w;
     /* b65: no fill here any more. The caller lays the row down ONCE
@@ -676,7 +758,10 @@ static void drawside(int x, int y, const DLine *l, long line,
         tx += (gutw + 1) * fw;
         tw -= gutw + 1;
     }
-    drawtext(tx, y, l, tw, bar ? 2 : 1, bar ? 3 : 0);
+    /* b98 (his call): the changed span goes BLACK on the bar's own
+     * blue, rather than b97's inversion to blue-on-white. Keeps the
+     * row reading as one surface - only the text darkens. */
+    drawtext(tx, y, l, tw, bar ? 2 : 1, bar ? 3 : 0, hs, he, 1, 3);
 }
 
 /* changed rows are BAR rows - pen-3 fill, white text, the CFile
@@ -690,6 +775,7 @@ static void drawrow(int vr)
     int y = conty + vr * fh, ye = y + fh - 1;
     int rend = x0 + viscols * fw - 1;
     int bar, x1, se;
+    int hpre = 0, hea = 0, heb = 0;     /* b97: intra-line span */
     Row *r;
     if (idx >= gnrows) {                /* past the end: blank */
         SetAPen(rp, 0);
@@ -722,8 +808,13 @@ static void drawrow(int vr)
         RectFill(rp, x1, y, x1 + halfw * fw - 1, ye);
     se = x1 + halfw * fw;               /* sub-cell slack on the right */
     if (se <= rend) RectFill(rp, se, y, rend, ye);
+    /* b97: only a '|' row has two lines to compare. A '<' or '>'
+     * row has nothing on the other side, and an equal row nothing
+     * to mark. */
+    if (r->tag == '|' && r->al >= 0 && r->bl >= 0)
+        intraspan(&ga[r->al], &gb[r->bl], &hpre, &hea, &heb);
     if (r->al >= 0)
-        drawside(cx0, y, &ga[r->al], r->al, bar, halfw);
+        drawside(cx0, y, &ga[r->al], r->al, bar, halfw, hpre, hea);
     if (bar) {
         SetAPen(rp, 3);
         SetBPen(rp, 0);
@@ -731,7 +822,7 @@ static void drawrow(int vr)
         Text(rp, (STRPTR)&r->tag, 1);
     }
     if (r->bl >= 0)
-        drawside(x1, y, &gb[r->bl], r->bl, bar, halfw);
+        drawside(x1, y, &gb[r->bl], r->bl, bar, halfw, hpre, heb);
 }
 
 /* the active view's scroll top and extent (3 = the Tree tab) */
@@ -1217,7 +1308,7 @@ static void drawdirrow(int vr)
     tl.len = strlen(pbuf);
     tl.hash = 0;
     drawtext(x0 + 4 * fw, y, &tl, viscols - 4,
-             bar ? 2 : 1, bar ? 3 : 0);
+             bar ? 2 : 1, bar ? 3 : 0, 0, 0, 0, 0);
 }
 
 /* one full-width line of a single-file tab */
@@ -1240,7 +1331,10 @@ static void drawline(int vr)
     /* b66: drawside covers the full width via drawnum+drawtext,
      * each painting its own background - no fill at all here */
     drawmark(y, findrow >= 0 && line == findrow);
-    drawside(cx0, y, l, line, tag != ' ', cvis);
+    /* b97: no intra-line marking here - the paired line is not in
+     * this view, and finding it would need a reverse line->row map.
+     * The Both tab is where you compare. */
+    drawside(cx0, y, l, line, tag != ' ', cvis, 0, 0);
     return;
 blank:
     SetAPen(rp, 0);

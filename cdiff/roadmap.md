@@ -523,9 +523,61 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## 0.1b4 — engine deepening
 
-- [ ] Myers middle-snake inside replace blocks (the non-unique
-      fallback today) — bounded memory, better alignment in
-      repetitive code.
+- [x] **b99: Myers middle-snake inside replace blocks** — patience
+      anchors on lines unique in BOTH files, so a block with no
+      unique lines had nothing to anchor on and degraded to "delete
+      all n, insert all m". Myers finds the genuinely shortest edit
+      script; the middle snake makes it affordable (search forward
+      from the start and backward from the end until they meet, then
+      recurse on the halves — linear memory, not quadratic). Applied
+      ONLY at middle()'s replace label, so patience keeps its good
+      anchoring everywhere else. Capped at n+m <= 1024 lines with
+      one pair of work vectors allocated per run, never inside the
+      recursion; past the cap, or if the allocation fails, the plain
+      replace is emitted exactly as before.
+      Three harness cases added, and PROVEN to have teeth: with
+      MYERSMAX forced to 0 they fail with exactly 0 equal lines,
+      which is the degeneration itself.
+      **MEASURED, and weaker than this entry assumed.** On the real
+      cfile/cfile13 pair: 489 -> 560 hunks, +1083/-2145 -> +1081/
+      -2143, 1869 -> 2035 ms under vamos. That is +9% time for TWO
+      extra matched lines and 71 more hunks, most of the output
+      difference being hunk boundaries shifting rather than new
+      alignments. The reason: rec() trims the common prefix and
+      suffix BEFORE middle() is reached, so genuinely anchorless
+      blocks are rare in a fork-style diff. Kept pending his verdict
+      on whether the WA_-tag blocks read better by eye; if not, this
+      is a roadmap item that measured worse than it sounded.
+- [x] **b97-b98, b100: INTRA-LINE CHANGE HIGHLIGHT** (his pick, and
+      the one that changes daily use most). On a '|' row, trim the
+      longest common prefix and suffix and mark what is left — two
+      cheap scans instead of a character-level LCS, which is what
+      real edits look like: an identifier renamed, a number changed.
+      Compared in EXPANDED column space, using the same tab rule and
+      control-char substitution drawtext renders with, so the span
+      can never disagree with what is on screen. Up to three Text
+      runs per side (before / changed / after), each pixel still
+      written exactly once. b98: BLACK on the bar's own blue (his
+      call) rather than b97's inversion to blue-on-white, so the row
+      still reads as one surface. Only '|' rows, and only the Both
+      tab — the single-file tabs would need a reverse line->row map.
+      **b100: a COMPILER BUG, found from his screenshot.** He asked
+      why the D in DEF was a different colour. The span was starting
+      one character in on every changed line. The prefix scan was
+      a THREE-term condition:
+          while (p < la && p < lb && ca[p] == cb[p]) p++;
+      and bebbo's gcc MISCOMPILES that at -O2 on m68k: it returned
+      p=1 where the answer is 11. -O1 and -O0 are correct, and so is
+      the two-term suffix loop beside it. Adding a printf inside the
+      function also "fixed" it — the giveaway. Hoisting the bound
+      out of the condition fixes it at -O2 (and is better code: one
+      compare per iteration instead of two).
+      LESSON: the engine has a host-AND-target harness precisely so
+      the two can be compared, and I spent a long time on pixel
+      forensics of a screenshot before running the target build under
+      vamos. One command would have shown the divergence
+      immediately. When behaviour differs from what the source says,
+      run it on the target BEFORE analysing the display.
 - [ ] Intra-line change highlight on `|` rows (char-level diff of
       the paired lines).
 

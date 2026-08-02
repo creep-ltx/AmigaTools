@@ -11,11 +11,20 @@
 
 #define MAXDEPTH 64
 
+/* b99: the most work Myers is allowed to attempt on one replace
+ * block, counted as n+m lines. Myers is O(ND) in time and needs two
+ * vectors of 2(n+m)+3 ints; both have to stay affordable on a small
+ * Amiga, and a block bigger than this is not a block anyone reads
+ * line by line anyway. Past the cap we emit the plain replace that
+ * was there before - degrade, never die. */
+#define MYERSMAX 1024
+
 typedef struct {
     const DLine *a, *b;
     DOp *ops;
     int nops, cap;
     int oom;
+    int *mv1, *mv2, mvoff;      /* b99: Myers work vectors, or NULL */
 } Ctx;
 
 static unsigned long hashline(const char *p, int len)
@@ -131,6 +140,115 @@ static int findkey(const HKey *k, int n, unsigned long hash)
 
 static void rec(Ctx *c, int alo, int ahi, int blo, int bhi, int depth);
 
+/* ---- b99: Myers inside the replace blocks ----------------------
+ * Patience anchors on lines unique in BOTH files. When a block has
+ * no unique lines there is nothing to anchor on, and the whole thing
+ * degraded to "delete all n, insert all m" - which is exactly what a
+ * run of `WA_TOP,`/`WA_WIDTH,`/`WA_HEIGHT,` looks like, where most
+ * of the lines actually match.
+ *
+ * Myers finds the genuinely shortest edit script. The MIDDLE SNAKE
+ * is what makes it affordable: instead of building the whole edit
+ * graph, find the midpoint of an optimal path by running the search
+ * forward from the start and backward from the end until they meet,
+ * then recurse on the two halves. Linear memory instead of
+ * quadratic. Applied ONLY here, so patience keeps its good
+ * anchoring everywhere else. */
+
+/* the middle snake of a[alo..alo+n) vs b[blo..blo+m). Returns the
+ * edit distance and, in forward-local coordinates, the snake start
+ * (*px,*py) and end (*pu,*pv). -1 if the cap was hit. */
+static int midsnake(Ctx *c, int alo, int n, int blo, int m,
+                    int *v1, int *v2, int off,
+                    int *px, int *py, int *pu, int *pv)
+{
+    int delta = n - m;
+    int odd = (delta & 1) != 0;
+    int dmax = (n + m + 1) / 2;
+    int d, k;
+
+    v1[off + 1] = 0;
+    v2[off + 1] = 0;
+    for (d = 0; d <= dmax; d++) {
+        for (k = -d; k <= d; k += 2) {          /* forward */
+            int x, y, x0;
+            if (k == -d || (k != d && v1[off + k - 1] < v1[off + k + 1]))
+                x = v1[off + k + 1];
+            else
+                x = v1[off + k - 1] + 1;
+            y = x - k;
+            x0 = x;
+            while (x < n && y < m &&
+                   lineeq(&c->a[alo + x], &c->b[blo + y])) { x++; y++; }
+            v1[off + k] = x;
+            if (odd) {
+                int kk = delta - k;
+                if (kk >= -(d - 1) && kk <= (d - 1) &&
+                    v1[off + k] + v2[off + kk] >= n) {
+                    *px = x0; *py = x0 - k;
+                    *pu = x;  *pv = y;
+                    return 2 * d - 1;
+                }
+            }
+        }
+        for (k = -d; k <= d; k += 2) {          /* backward */
+            int x, y, x0;
+            if (k == -d || (k != d && v2[off + k - 1] < v2[off + k + 1]))
+                x = v2[off + k + 1];
+            else
+                x = v2[off + k - 1] + 1;
+            y = x - k;
+            x0 = x;
+            while (x < n && y < m &&
+                   lineeq(&c->a[alo + n - 1 - x],
+                          &c->b[blo + m - 1 - y])) { x++; y++; }
+            v2[off + k] = x;
+            if (!odd) {
+                int kk = delta - k;
+                if (kk >= -d && kk <= d &&
+                    v2[off + k] + v1[off + kk] >= n) {
+                    /* backward coordinates count from the end */
+                    *px = n - x;  *py = m - y;
+                    *pu = n - x0; *pv = m - (x0 - k);
+                    return 2 * d;
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+static void myers(Ctx *c, int alo, int ahi, int blo, int bhi, int depth)
+{
+    int n = ahi - alo, m = bhi - blo;
+    int x, y, u, v;
+
+    if (c->oom) return;
+    if (n <= 0 && m <= 0) return;
+    if (n <= 0) { emit(c, DOP_INS, m); return; }
+    if (m <= 0) { emit(c, DOP_DEL, n); return; }
+    /* the depth cap is the backstop for any pathological split: we
+     * fall back to the honest replace rather than recurse forever */
+    if (depth >= MAXDEPTH ||
+        midsnake(c, alo, n, blo, m, c->mv1, c->mv2, c->mvoff,
+                 &x, &y, &u, &v) < 0) {
+        emit(c, DOP_DEL, n);
+        emit(c, DOP_INS, m);
+        return;
+    }
+    /* no split possible - same guard, reached when the snake spans
+     * the whole range in one direction */
+    if ((x == 0 && y == 0 && u == 0 && v == 0) ||
+        (x == n && y == m && u == n && v == m)) {
+        emit(c, DOP_DEL, n);
+        emit(c, DOP_INS, m);
+        return;
+    }
+    myers(c, alo, alo + x, blo, blo + y, depth + 1);
+    if (u > x) emit(c, DOP_EQ, u - x);
+    myers(c, alo + u, ahi, blo + v, bhi, depth + 1);
+}
+
 /* the middle of a trimmed range: anchor on unique pairs, LIS-chain
  * them, recurse the gaps. Falls back to a replace block when there
  * are no anchors (or on OOM of the work arrays - degrade, not die). */
@@ -202,6 +320,13 @@ static void middle(Ctx *c, int alo, int ahi, int blo, int bhi, int depth)
 
 replace:
     free(ka); free(kb); free(ca); free(cb); free(tails); free(prev);
+    /* b99: no anchors here - this is where the block used to become
+     * a wholesale replace. Myers aligns it properly, within the cap
+     * and only if the work vectors exist. */
+    if (c->mv1 && c->mv2 && na + nb <= MYERSMAX) {
+        myers(c, alo, ahi, blo, bhi, depth);
+        return;
+    }
     emit(c, DOP_DEL, na);
     emit(c, DOP_INS, nb);
 }
@@ -236,9 +361,21 @@ int diff_run(const DLine *a, int na, const DLine *b, int nb,
              DOp **ops, int *nops)
 {
     Ctx c;
+    int vn = 2 * MYERSMAX + 3;
     c.a = a; c.b = b;
     c.ops = NULL; c.nops = 0; c.cap = 0; c.oom = 0;
+    /* b99: one allocation for the whole run, reused by every replace
+     * block - Myers is called from deep inside the recursion and must
+     * not malloc there. If either fails we simply never use Myers and
+     * the blocks stay as plain replaces: a missing optimisation, not
+     * a failure. */
+    c.mv1 = malloc(vn * sizeof(int));
+    c.mv2 = c.mv1 ? malloc(vn * sizeof(int)) : NULL;
+    c.mvoff = MYERSMAX + 1;
+    if (c.mv2 == NULL) { free(c.mv1); c.mv1 = NULL; }
     rec(&c, 0, na, 0, nb, 0);
+    free(c.mv1);
+    free(c.mv2);
     if (c.oom) { free(c.ops); *ops = NULL; *nops = 0; return -1; }
     *ops = c.ops;
     *nops = c.nops;
