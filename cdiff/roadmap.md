@@ -557,6 +557,46 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       STATUSBAR. Differences only is deliberately NOT persisted - it
       is a mode you flip while reading, not a preference.
 
+- [x] **b106: the shell start, and a leaked library** (his question:
+      "what happens if it's started without an icon?"). Workbench
+      cannot launch it without one, so the real case is a SHELL
+      start: readtooltypes never runs, every default applies, the
+      AppIcon uses the generic tool image, and the Settings toggles
+      apply for the session with nothing to write them back to.
+      Two things that question exposed. icon.library was opened
+      TWICE on a Workbench start - once in smain for the tooltypes,
+      again in guimode - and closed once, leaking a reference every
+      run. And bare `cdiff` from a shell FAILED with "required
+      argument missing": FILE1/A,FILE2/A meant the one road that can
+      show the window without knowing both names was the one road you
+      could not take from a shell. Both files are optional now (`cdiff`
+      opens empty, `cdiff onefile` fills that side and asks for the
+      other, exactly like a single dropped icon); TEXT still requires
+      both, because a listing of nothing is not a listing.
+- [x] **b107-b109: FONT=Topaz/8** (his find, and three of his
+      observations solved it). It rendered in a thin ~6px face
+      instead of topaz 8. **The mechanism: FONTS:topaz.font on disk
+      offers only size 11, so diskfont SCALED it down to 8** - and a
+      squeezed topaz still lays out correctly on a character grid,
+      which is why nothing looked broken, only wrong. The real topaz
+      8 and 9 live in ROM, and were never consulted because
+      OpenFont's list is case-sensitive: "Topaz.font" misses
+      "topaz.font", so the search fell through to disk.
+      Fixed three ways: try the ROM/memory list FIRST via OpenFont
+      and only then OpenDiskFont; validate on BOTH roads (refuse
+      proportional, refuse anything not FPF_DESIGNED, refuse a
+      different height); and retry the whole search lowercased, since
+      the font list is case-sensitive while the filesystem is not.
+      b108's retry was gated on a NULL return, which never happens
+      when diskfont hands back something scaled - a rejected font now
+      falls through to the next road instead of ending the search.
+      His three data points did the work: only Topaz broke,
+      MicroKnight/8 was fine EVEN as the Workbench font, and
+      FONTS:topaz has 11 only. I was wrong twice before that: I
+      abandoned the correct scaled-font theory when the WB font came
+      up, then predicted the fallback would give him topaz when his
+      system font is MicroKnight7/7.
+
 ## 0.1b3 — directory mode
 
 - [x] **DIRECTORY MODE (build b16, 1.8.26)** — `cdiff DIR1 DIR2`

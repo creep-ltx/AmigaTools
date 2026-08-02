@@ -42,11 +42,16 @@ menu works in a CLI-started window.
 ## Tooltypes
 
 Set these on cdiff's Workbench icon (no config file — the icon carries
-the settings). All optional; a shell launch ignores them.
+the settings). All optional.
+
+**A shell launch ignores them entirely** — there is no icon to read,
+so every default applies, the iconify AppIcon uses the generic tool
+image, and the Settings toggles apply for that session only, with
+nothing to write them back to.
 
 | tooltype | effect |
 |---|---|
-| `FONT=topaz/8` | text font, family name and size (`.font` is appended for you; `topaz.font/8` also works). **Fixed-width only** — a proportional font is refused and the system font used instead, because every measurement here is columns × character width |
+| `FONT=topaz/8` | text font, family name and size (`.font` is appended for you; `topaz.font/8` also works). **Fixed-width, and a designed size** — a proportional face, an algorithmically scaled one, or a different height is refused and the system font used instead — a proportional font is refused and the system font used instead, because every measurement here is columns × character width |
 | `EDITOR=C:Ed` | beats `ENV:EDITOR` for the Edit menu |
 | `DRAWER=Work:Code` | where the file requester first opens |
 | `OPENSCREEN=cdiff` | **opens cdiff's own public screen** under that name, cloned from Workbench. Absent = the window opens on Workbench as usual. The screen closes when cdiff quits or iconifies, so it never leaves an empty screen behind |
@@ -81,6 +86,11 @@ are flagged as changed while looking identical on screen — the tool
 saying "these differ" and then showing nothing. Detection is a NUL
 byte in the first 8K, which is reliable for Amiga text. `TEXT` mode
 prints the same verdict and exits `5` (WARN).
+
+From a shell, both filenames are optional: `cdiff` alone opens the
+empty window, `cdiff onefile` opens with that side filled and the
+title asking for the other, and two arguments load the pair (or two
+drawers, for a tree compare). `TEXT` needs both.
 
 `TEXT`: unified-style listing to stdout — and the on-target test
 road under vamos, where the GUI cannot run.

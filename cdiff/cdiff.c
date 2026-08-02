@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b105 (2.8.26)";
+    "$VER: cdiff 0.1b109 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -523,6 +523,46 @@ static struct Window *win;
 /* b102: WA_PointerDelay means the busy pointer only appears if the
  * job actually takes a moment - a fast load never flashes it. V39+;
  * older Kickstarts keep the normal pointer, as they always did. */
+/* b109: is this the font we actually asked for? Every measurement
+ * in cdiff is columns x fw, so a proportional face would render
+ * nonsense; an algorithmically SCALED one is not what he named; and
+ * a different height means diskfont substituted something. */
+static int goodfont(struct TextFont *tf, int size)
+{
+    return !(tf->tf_Flags & FPF_PROPORTIONAL) &&
+            (tf->tf_Flags & FPF_DESIGNED) &&
+            tf->tf_YSize == size;
+}
+
+/* b109, and his findings are the whole design of this:
+ *
+ *   FONTS:topaz.font on disk offers only size 11. Ask diskfont for
+ *   topaz 8 and it SCALES 11 down - a thin ~6px face that still
+ *   lays out correctly on a character grid, so nothing looks broken,
+ *   only wrong. The real topaz 8 and 9 live in ROM.
+ *
+ * So try the ROM/memory list FIRST via OpenFont, and only then go to
+ * disk. Validation happens on BOTH roads, and a rejected font falls
+ * through to the next one rather than ending the search - b108 gated
+ * its retry on a NULL return, which never happens when diskfont
+ * hands back something scaled. */
+static struct TextFont *tryfont(const char *name, int size)
+{
+    struct TextAttr ta;
+    struct TextFont *tf;
+    ta.ta_Name  = (STRPTR)name;
+    ta.ta_YSize = size;
+    ta.ta_Style = FS_NORMAL;
+    ta.ta_Flags = 0;            /* ask permissively, verify strictly */
+    tf = OpenFont(&ta);
+    if (tf && !goodfont(tf, size)) { CloseFont(tf); tf = NULL; }
+    if (tf == NULL && DiskfontBase) {
+        tf = OpenDiskFont(&ta);
+        if (tf && !goodfont(tf, size)) { CloseFont(tf); tf = NULL; }
+    }
+    return tf;
+}
+
 static void busy(int on)
 {
     if (win == NULL) return;
@@ -3231,22 +3271,23 @@ static int openmain(void)
      * this program is columns x fw, so a variable-width face would
      * not render badly, it would render nonsense. Falling back to
      * the system font is the honest answer. */
-    if (font == NULL && ttfont[0] && DiskfontBase) {
-        struct TextAttr ta;
-        struct TextFont *tf;
-        ta.ta_Name  = (STRPTR)ttfont;
-        ta.ta_YSize = ttfsize;
-        ta.ta_Style = FS_NORMAL;
-        ta.ta_Flags = 0;
-        tf = OpenDiskFont(&ta);
-        if (tf) {
-            if (tf->tf_Flags & FPF_PROPORTIONAL) {
-                CloseFont(tf);
-                ttfont[0] = 0;      /* do not retry on every reopen */
-            } else
-                font = ttfont2 = tf;
-        } else
-            ttfont[0] = 0;
+    if (font == NULL && ttfont[0]) {
+        struct TextFont *tf = tryfont(ttfont, ttfsize);
+        if (tf == NULL) {
+            /* b109: retry lowercased. OpenFont's list is
+             * case-sensitive but the filesystem is not, so "Topaz"
+             * misses the ROM topaz while "microknight" still finds
+             * MicroKnight.font on disk. */
+            char lc[64];
+            int i2;
+            for (i2 = 0; ttfont[i2] && i2 < (int)sizeof(lc) - 1; i2++)
+                lc[i2] = (ttfont[i2] >= 'A' && ttfont[i2] <= 'Z')
+                             ? ttfont[i2] + 32 : ttfont[i2];
+            lc[i2] = 0;
+            if (strcmp(lc, ttfont)) tf = tryfont(lc, ttfsize);
+        }
+        if (tf) font = ttfont2 = tf;
+        else    ttfont[0] = 0;      /* do not retry on every reopen */
     }
     if (font == NULL) font = GfxBase->DefaultFont;  /* system monospace */
     SetFont(rp, font);
@@ -3349,7 +3390,11 @@ static void guimode(void)
     WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
     if (ttfont[0]) DiskfontBase = OpenLibrary((STRPTR)"diskfont.library", 37);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
-    IconBase = OpenLibrary((STRPTR)"icon.library", 37);
+    /* b106: only if smain has not already opened it for the
+      * tooltypes - a Workbench start came through there first, and
+      * opening twice while closing once leaks a reference every run */
+    if (IconBase == NULL)
+        IconBase = OpenLibrary((STRPTR)"icon.library", 37);
     /* b72: one port for the lifetime of the program - the AppWindow
      * comes and goes with the window, the AppIcon exists only while
      * iconified, and both report here. */
@@ -4002,7 +4047,14 @@ static void readtooltypes(struct WBStartup *wbs)
 
 static int smain(int argc, char **argv)
 {
-    static const char tmpl[] = "FILE1/A,FILE2/A,TEXT/S";
+    /* b106: FILE1/FILE2 are NOT /A any more. A Workbench start has
+     * always opened the empty window and let the Project menu supply
+     * the files; from a shell, bare `cdiff` used to fail with
+     * "required argument missing" instead - so the one road that
+     * could show the window without knowing both names was the one
+     * you could not take from a shell. TEXT still requires both,
+     * because a listing of nothing is not a listing. */
+    static const char tmpl[] = "FILE1,FILE2,TEXT/S";
     LONG argarr[3] = { 0, 0, 0 };
     struct RDArgs *rda;
 
@@ -4021,6 +4073,11 @@ static int smain(int argc, char **argv)
     rda = ReadArgs((STRPTR)tmpl, argarr, NULL);
     if (rda == NULL) {
         PrintFault(IoErr(), (STRPTR)"cdiff");
+        return 20;
+    }
+    if (argarr[2] && (argarr[0] == 0 || argarr[1] == 0)) {
+        printf("cdiff: TEXT needs both files\n");
+        FreeArgs(rda);
         return 20;
     }
     if (argarr[2]) {
@@ -4099,7 +4156,7 @@ static int smain(int argc, char **argv)
         free(lb);
         free(buf1);
         free(buf2);
-    } else {
+    } else if (argarr[0] && argarr[1]) {
         int d1 = ispathdir((char *)argarr[0]);
         int d2 = ispathdir((char *)argarr[1]);
         if (d1 && d2) {         /* two directories: tree compare */
@@ -4114,6 +4171,20 @@ static int smain(int argc, char **argv)
         } else {
             strncpy(gf1, (char *)argarr[0], sizeof(gf1) - 1);
             strncpy(gf2, (char *)argarr[1], sizeof(gf2) - 1);
+        }
+        guimode();
+        freediff();
+        freedirs();
+    } else {
+        /* b106: none or one. The window opens either empty or with
+         * that side filled and the title asking for the other -
+         * exactly what a single dropped icon does, and what a
+         * Workbench start has always done. */
+        if (argarr[0]) {
+            if (ispathdir((char *)argarr[0]))
+                strncpy(gdir1, (char *)argarr[0], sizeof(gdir1) - 1);
+            else
+                strncpy(gf1, (char *)argarr[0], sizeof(gf1) - 1);
         }
         guimode();
         freediff();
