@@ -194,8 +194,77 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       builds then argued with the breakage instead of dropping the
       cosmetic. When an addition breaks something that rendered,
       the first move is to remove the addition, not to debug it.
-- [ ] Arrows on the scrollers - reopen ONLY from the b25 base, one
-      build, and abandon again if it does not render first try.
+- [x] **b46-b57: the scrollers and the arrows, by his eye** — the
+      arrow road reopened from the b25 base exactly as the rule
+      above required, and it rendered FIRST TRY, because b30's
+      post-mortem was taken as given instead of re-derived:
+      `mkarrow` sets **GFLG_GADGIMAGE** (verified in the shipped NDK
+      header, `intuition.h:296`, not from memory). Everything after
+      that was his eye, one pixel at a time: track insets (b46/b47),
+      arrows down 1px (b53), track grown 1px down and 17px right
+      (b54-b57). Arrow sizes are MEASURED back from each image and
+      each pair measured separately - b48 sized both pairs off the
+      up arrow, correct only while they happened to match.
+      **THE FINDING, worth more than the pixels:** this sysiclass
+      IGNORES `IA_Width`/`IA_Height`. b49 asked +2 and b51 asked +4;
+      both were silently discarded and the arrows stayed natural
+      size through two builds that did nothing. Proven by b51's
+      window-title telemetry reading `nat 13 req 17 got 13` - the
+      b29 pattern paying for itself a second time. `SYSIA_Size` is
+      the only lever that works, so b52 measures all three sizes at
+      startup and picks the smallest that reaches the target
+      (LOWRES 13 / MEDRES 18 / HIRES 18 on his 256-line PAL WB).
+- [x] **b50: RefreshWindowFrame, not RefreshGList** (his find, and
+      the diagnosis was entirely his: "they look bad on open and
+      resize, but click outside the window and back and they come
+      good"). Deactivating makes Intuition redraw the window FRAME -
+      border background first, THEN the border gadgets. RefreshGList
+      only paints gadget imagery, so every refresh of ours stamped
+      the arrows onto stale border pixels. Every gadget in this
+      window is a border gadget; RefreshGList has no business here.
+- [x] **b58: the horizontal knob tells the truth** (his find: a
+      shrunken, draggable knob over an EMPTY window). The pan range
+      was `#define HTOT 512`, a guess. Replaced by b27's one keeper,
+      the cached per-view widest-EXPANDED-line scan. Empty content
+      needs no special case: gmaxw 0 -> htotal == viscols -> body
+      full, pot 0, and a knob filling its track is one Intuition
+      will not let the mouse drag. The flat 440 clamp in two places
+      went with it; keys, arrows and knob now share `sethoff`.
+- [x] **b59-b61: tabs and keys, his calls** — active tab takes the
+      page background instead of FILLPEN blue, marked only by the
+      base rule breaking open under it; tab bar 2px shorter, off the
+      bottom; **Esc POPS ONLY and never quits** - quitting is
+      Amiga+Q or the close gadget. Three stale "Esc quits" claims
+      corrected in the Keys window, the file header and README.
+- [x] **b62-b66: the scroll stutter** (his find, and his bisection
+      solved it: "up/down clean, Shift+up/down and left/right
+      glitchy" - which is precisely the split between the blit path
+      and `drawrows()`). Two mistakes of mine on the way, both worth
+      keeping written down. b62 deferred painting to the end of an
+      input burst but always paid the debt with a full `drawpage`,
+      making a SINGLE keypress dearer than the incremental scroll it
+      replaced; and it flushed only after the message loop exited,
+      which during a knob drag never happens, so the content froze
+      until the button came up. b63/b64 typed the debt (page / rows
+      / scroll-from / cursor / knob), flush the moment the port is
+      empty AND at least every 4 messages, and drive a knob drag
+      from INTUITICKS as well as MOUSEMOVE so it cannot depend on
+      one delivery path. b64 also fixed a bug b62 introduced: with
+      the paint deferred, `drawpage()` inside BeginRefresh drew
+      NOTHING while EndRefresh still cleared the damage.
+      **The real defect was underneath all of that, and predates the
+      revert:** every row was filled grey, filled again in FILLPEN,
+      then written into - two full-width fills per changed row. One
+      or two entering rows hid it; forty rows repainted in place did
+      not. b65 fills once in the final colour; b66 removes the fills
+      entirely - `Text()` paints its own background, so a padded
+      span puts glyphs and surface down in ONE blit and no row can
+      be caught half-painted. b66 also fixed a latent clip: the old
+      `ex[512]` held the line from column 0 and stopped padding once
+      hoff+width passed 512.
+      LESSON: scheduling was not the bug, it only exposed one. Three
+      builds went into WHEN to paint before the cost of HOW each row
+      painted got looked at.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode

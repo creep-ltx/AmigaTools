@@ -4,12 +4,14 @@
  * Usage: cdiff FILE1/A,FILE2/A,TEXT/S
  *   GUI (default): window on the Workbench screen.
  *     cursor up/down scroll, shift = page, space/b page, t/e top/end,
- *     n/p next/previous hunk, Esc or q quits.
+ *     n/p next/previous hunk, Esc backs out to the Tree,
+ *     Amiga+Q quits.
  *   TEXT: unified-style listing to stdout (and the vamos test road).
  */
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
+#include <intuition/imageclass.h>   /* sysiclass: the arrow images */
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
@@ -27,7 +29,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b45 (2.8.26)";
+    "$VER: cdiff 0.1b66 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -157,6 +159,17 @@ static int gdirmode;
 static char gdir1[310], gdir2[310];
 static DEnt *dents;
 static int ndents, dtop, dsel;
+
+/* b58, his find: the horizontal knob sat shrunken and draggable
+ * even with NOTHING loaded, because the pan range was the fixed
+ * HTOT=512 guess rather than anything the content had to say. This
+ * is the widest EXPANDED (tab stops honoured) line in the ACTIVE
+ * view, in columns - recomputed lazily via maxwdirty so a scroll
+ * step never rescans a 12000-line file. Declared up here, not with
+ * the rest of the view state, so freedirs/scandirs can mark it
+ * dirty too. (The scan is b27's one keeper, which b30 also kept
+ * when it threw the rest of that detour away.) */
+static int gmaxw, maxwdirty = 1;
 static int gndiff, gnleft, gnright;
 
 typedef struct {
@@ -266,6 +279,7 @@ static void freedirs(void)
     free(dents);
     dents = NULL;
     ndents = 0; dtop = 0; dsel = 0;
+    maxwdirty = 1;          /* b58: the Tree's widest path is gone */
     gndiff = gnleft = gnright = 0;
     gdirmode = 0;
 }
@@ -345,6 +359,7 @@ static void scandirs(void)
     }
     slfree(&la);
     slfree(&lb);
+    maxwdirty = 1;              /* b58: the Tree just gained rows */
 }
 
 /* same-size pair: do the BYTES differ? Chunked compare with an
@@ -444,38 +459,99 @@ static struct Gadget vgad, hgad;
 static struct PropInfo vpi, hpi;
 static struct Image vim, him;
 static int gadsok;
-#define HTOT 512                /* drawtext's pan range */
+
+/* b48: the arrows, from b30's post-mortem rather than a new guess.
+ * Boolean gadgets rendering sysiclass images, held in the same two
+ * borders as the props. arrheld is the button under the mouse for
+ * the INTUITICKS repeat; 0 when none. */
+static struct Gadget agup, agdn, aglt, agrt;
+static APTR iup, idn, ilt, irt;
+static int arrowsok, arrheld;
+
+/* b62, his find (stutter and torn rows on held up/down, Shift+
+ * up/down and Tab, while the wheel stayed clean): the event loop
+ * drains the whole port and PAINTS on every message. A held key
+ * repeats faster than a scroll can be blitted, so one burst of N
+ * repeats did N scroll blits and N knob refreshes to reach a state
+ * that one paint could have drawn - and the intermediate frames
+ * are what the eye catches as stutter. The wheel escaped it only
+ * because a notch is one message, not a repeat stream.
+ *
+ * So: while `defer` is set the state still updates exactly as
+ * before - every clamp, anchor mapping and view switch runs
+ * untouched - but the painting is skipped and merely OWED, and
+ * flushpaint() settles it once the port is empty. Same rule as
+ * b12, moved up a level: the metric is blits per burst, not blits
+ * per step.
+ *
+ * b63 fixed two things b62 got wrong. The debt is TYPED, so paying
+ * it picks the cheapest sufficient repaint - b62 always ran a full
+ * drawpage, which made a single keypress dearer than the
+ * incremental scroll it replaced and stuttered worse than before.
+ * And the flush runs inside the drain loop the moment the port is
+ * empty, not after the loop exits - during a knob drag the stream
+ * of MOUSEMOVE kept that loop alive, so b62 painted nothing at all
+ * until the button came up. */
+static int propheld;            /* 1 = vgad knob held, 2 = hgad */
+static int defer;               /* inside message handling */
+static int dirtyall;            /* a whole drawpage is owed */
+static int dirtyrows;           /* every content row is owed */
+static int dirtyknob;           /* the props need re-syncing */
+static int scrollfrom, scrollfromset;   /* top the SCREEN still shows */
+static int selold, seloldset;           /* Tree cursor's painted row */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
+/* b66: render exactly `width` columns, padded with blanks, and let
+ * Text() lay down its own background through BPen. One blit puts
+ * both the glyphs and the surface under them on screen, so the
+ * caller needs no RectFill here at all - and a row can no longer
+ * be caught half-painted, which is what a full-screen repaint
+ * (Shift+scroll, Tab) was showing.
+ *
+ * The buffer now holds only the VISIBLE window rather than the
+ * line from column 0, so a large hoff can never run past it - the
+ * old ex[512] silently stopped padding once hoff+width passed 512. */
 static void drawtext(int x, int y, const DLine *l, int width,
                      int pen, int bg)
 {
-    static char ex[512];
-    int i, o = 0, end = hoff + width;
-    if (end > 512) end = 512;
+    static char vis[256];
+    int i, o = 0, n, end;
+    if (width <= 0) return;
+    if (width > (int)sizeof(vis)) width = sizeof(vis);
+    end = hoff + width;
     for (i = 0; i < l->len && o < end; i++) {
         char ch = l->ptr[i];
         if (ch == '\t') {
-            do { ex[o++] = ' '; } while ((o & 7) && o < end);
-        } else
-            ex[o++] = (ch >= 32 || ch < 0) ? ch : '.';
+            do {
+                if (o >= hoff) vis[o - hoff] = ' ';
+                o++;
+            } while ((o & 7) && o < end);
+        } else {
+            if (o >= hoff) vis[o - hoff] = (ch >= 32 || ch < 0) ? ch : '.';
+            o++;
+        }
     }
+    n = o - hoff;
+    if (n < 0) n = 0;
+    while (n < width) vis[n++] = ' ';
     SetAPen(rp, pen);
     SetBPen(rp, bg);
     Move(rp, x, y + fbase);
-    if (o > hoff) Text(rp, (STRPTR)ex + hoff, o - hoff);
+    Text(rp, (STRPTR)vis, width);
 }
 
 /* right-aligned 1-based line number in the gutter cells */
+/* b66: gutw digits PLUS the separator column, so this Text covers
+ * the whole gutw+1 span drawside skips over - no fill needed */
 static void drawnum(int x, int y, long line, int pen, int bg)
 {
-    static char nb[16];
-    sprintf(nb, "%*ld", gutw, line + 1);
+    static char nb[24];
+    sprintf(nb, "%*ld ", gutw, line + 1);
     SetAPen(rp, pen);
     SetBPen(rp, bg);
     Move(rp, x, y + fbase);
-    Text(rp, (STRPTR)nb, gutw);
+    Text(rp, (STRPTR)nb, gutw + 1);
 }
 
 /* one side of a row: optional bar fill, gutter number, the text,
@@ -488,10 +564,9 @@ static void drawside(int x, int y, const DLine *l, long line,
                      int bar, int w)
 {
     int tx = x, tw = w;
-    if (bar) {
-        SetAPen(rp, 3);
-        RectFill(rp, x, y, x + w * fw - 1, y + fh - 1);
-    }
+    /* b65: no fill here any more. The caller lays the row down ONCE
+     * in its final colour, so this pane is already the right shade
+     * and painting it again is pure flicker. */
     if (gutw > 0) {
         drawnum(x, y, line, bar ? 1 : 3, bar ? 3 : 0);
         tx += (gutw + 1) * fw;
@@ -508,15 +583,40 @@ static void drawside(int x, int y, const DLine *l, long line,
 static void drawrow(int vr)
 {
     int idx = gtop + vr;
-    int y = conty + vr * fh;
-    int bar, x1;
+    int y = conty + vr * fh, ye = y + fh - 1;
+    int rend = x0 + viscols * fw - 1;
+    int bar, x1, se;
     Row *r;
-    SetAPen(rp, 0);
-    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
-    if (idx >= gnrows) return;
+    if (idx >= gnrows) {                /* past the end: blank */
+        SetAPen(rp, 0);
+        RectFill(rp, x0, y, rend, ye);
+        return;
+    }
     r = &grows[idx];
     bar = r->tag != ' ';
     x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
+    /* b65, his find (up/down clean, Shift+up/down and left/right
+     * glitchy): those two land in drawrows(), which repaints every
+     * row IN PLACE - and each row was being filled grey, then
+     * filled blue over the top, then written into. Two full-width
+     * fills per changed row, forty rows at key-repeat speed, is the
+     * flicker. The blit path escaped it by only ever redrawing the
+     * one or two entering rows.
+     * ONE fill now, in the colour the row actually ends up, then
+     * only the narrow strips that differ from it. */
+    /* b66: each pane is painted end to end by drawnum + drawtext,
+     * both of which carry their own background now. So fill ONLY
+     * what no Text will cover: the marker gap, a missing pane on a
+     * one-sided row, and the sub-cell slack at the right edge. No
+     * pixel is written twice, and no row is ever briefly blank. */
+    SetAPen(rp, 0);
+    RectFill(rp, x0 + halfw * fw, y, x1 - 1, ye);       /* marker gap */
+    if (r->al < 0)                      /* one-sided: no left pane */
+        RectFill(rp, x0, y, x0 + halfw * fw - 1, ye);
+    if (r->bl < 0)
+        RectFill(rp, x1, y, x1 + halfw * fw - 1, ye);
+    se = x1 + halfw * fw;               /* sub-cell slack on the right */
+    if (se <= rend) RectFill(rp, se, y, rend, ye);
     if (r->al >= 0)
         drawside(x0, y, &ga[r->al], r->al, bar, halfw);
     if (bar) {
@@ -542,32 +642,238 @@ static int vcount(void)
            view == 2 ? gnb : ndents;
 }
 
+/* length of a line once tab stops are expanded, in columns - the
+ * same 8-column rule drawtext renders with, so the measurement and
+ * the rendering can never disagree */
+static int explen(const char *p, int n)
+{
+    int i, o = 0;
+    for (i = 0; i < n; i++) {
+        if (p[i] == '\t') { do { o++; } while (o & 7); }
+        else o++;
+    }
+    return o;
+}
+
+/* recompute gmaxw for the ACTIVE view: Both/Left take ga, Both/
+ * Right take gb (Both scrolls them together, so it needs whichever
+ * side is wider), Tree takes the rel-path length. Called lazily -
+ * never on a hot scroll step, so a big file costs nothing per
+ * keystroke. With nothing loaded every loop is skipped and gmaxw
+ * lands on 0, which is exactly the "nothing to scroll" answer. */
+static void calcmaxw(void)
+{
+    int i, m = 0, w;
+    if (view == 3) {
+        for (i = 0; i < ndents; i++) {
+            w = strlen(dents[i].rel) + (dents[i].isdir ? 1 : 0);
+            if (w > m) m = w;
+        }
+    } else {
+        if (view != 2 && ga)
+            for (i = 0; i < gna; i++) {
+                w = explen(ga[i].ptr, ga[i].len);
+                if (w > m) m = w;
+            }
+        if (view != 1 && gb)
+            for (i = 0; i < gnb; i++) {
+                w = explen(gb[i].ptr, gb[i].len);
+                if (w > m) m = w;
+            }
+    }
+    gmaxw = m;
+    maxwdirty = 0;
+}
+
+/* the horizontal scroll range in columns: the widest line there is,
+ * or the window width when everything already fits. Equal to
+ * viscols means body == full and pot == 0 - a knob that fills its
+ * track, which Intuition will not let the mouse drag. That is the
+ * "expanded and not movable" state he asked for, and it falls out
+ * of telling the truth about the content rather than from a special
+ * case for empty. */
+static int htotal(void)
+{
+    if (maxwdirty) calcmaxw();
+    return gmaxw > viscols ? gmaxw : viscols;
+}
+
 /* keep both knobs honest: body = visible share, pot = position */
 static void updscrollers(void)
 {
     ULONG vbody, vpot, hbody, hpot;
     long total = vcount(), vis = crows, top = *vtop();
+    int ht;
     if (!gadsok) return;
+    if (defer) { dirtyknob = 1; return; }
+    /* after the guard, and floored at 1: htotal() is max(gmaxw,
+     * viscols) and both are 0 before the first calcgrid, which
+     * would divide by zero below */
+    ht = htotal();
+    if (ht < 1) ht = 1;
     if (total < 1) total = 1;
     if (vis > total) vis = total;
     vbody = (0xFFFFUL * vis) / total;
     vpot = total > vis ? (0xFFFFUL * top) / (total - vis) : 0;
-    hbody = (0xFFFFUL * (viscols < HTOT ? viscols : HTOT)) / HTOT;
-    hpot = HTOT > viscols ? (0xFFFFUL * hoff) / (HTOT - viscols) : 0;
+    hbody = (0xFFFFUL * (viscols < ht ? viscols : ht)) / ht;
+    hpot = ht > viscols ? (0xFFFFUL * hoff) / (ht - viscols) : 0;
     NewModifyProp(&vgad, win, NULL, vpi.Flags, 0, vpot, 0, vbody, 1);
     NewModifyProp(&hgad, win, NULL, hpi.Flags, hpot, 0, hbody, 0, 1);
 }
 
+/* one sysiclass arrow image. w > 0 asks the class for an explicit
+ * size; w == 0 takes whatever it considers natural for SYSIA_Size.
+ * The caller ALWAYS re-reads Width/Height from the object it gets
+ * back rather than assuming the request was honoured - if this
+ * Intuition ignores IA_Width/IA_Height the geometry simply falls
+ * back to the natural size instead of drifting out of the border. */
+static APTR mksysi(struct DrawInfo *dri, ULONG which, int sysz,
+                   int w, int h)
+{
+    if (w > 0)
+        return NewObject(NULL, (STRPTR)"sysiclass",
+                         SYSIA_DrawInfo, (ULONG)dri,
+                         SYSIA_Which, which,
+                         SYSIA_Size, sysz,
+                         IA_Width, w, IA_Height, h, TAG_DONE);
+    return NewObject(NULL, (STRPTR)"sysiclass",
+                     SYSIA_DrawInfo, (ULONG)dri,
+                     SYSIA_Which, which,
+                     SYSIA_Size, sysz, TAG_DONE);
+}
+
+/* THE arrow fix, and the only reason b26-b28 failed: a plain struct
+ * Gadget renders a class-based image ONLY with GFLG_GADGIMAGE set
+ * (intuition.h 0x0004 - "set if GadgetRender and SelectRender point
+ * to an Image structure, clear if they point to Border structures").
+ * Without it Intuition walks the sysiclass Image as a struct Border
+ * and draws nothing at all. b26 had every other detail right and
+ * omitted this one bit, which is what sent b27/b28 chasing GadTools
+ * SCROLLER_KIND - a client-area widget kind that cannot live in a
+ * window border, hence "nothing rendered" twice over. */
+static void mkarrow(struct Gadget *g, APTR im, int le, int te,
+                    int rel, int act, int id)
+{
+    struct Image *i = (struct Image *)im;
+    g->LeftEdge = le;
+    g->TopEdge = te;
+    g->Width = i->Width;
+    g->Height = i->Height;
+    g->Flags = rel | GFLG_GADGIMAGE | GFLG_GADGHCOMP;
+    g->Activation = act | GACT_RELVERIFY | GACT_IMMEDIATE;
+    g->GadgetType = GTYP_BOOLGADGET;
+    g->GadgetRender = im;
+    g->GadgetID = id;
+    g->NextGadget = NULL;
+}
+
 /* the border scrollers: vertical right, horizontal bottom (beside
- * the size gadget), AUTOKNOB props in the new look */
-static void addscrollers(void)
+ * the size gadget), AUTOKNOB props in the new look.
+ *
+ * b48 adds the arrows WITHOUT disturbing the track geometry he
+ * signed off at b47: every b47 constant below is untouched except
+ * the two extents, which give up exactly the room the arrows need
+ * (2*ah off the vertical's height, 2*aw off the horizontal's
+ * width). The arrows are centred on the track they drive rather
+ * than in the raw border, so they stay aligned with the insets he
+ * tuned by eye whatever size sysiclass hands back. */
+static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
 {
     int brw = win->BorderRight, bbh = win->BorderBottom;
+    int vaw = 0, vah = 0, haw = 0, hah = 0, hahnat = 0, sysz;
+    int vawnat = 0;                 /* natural width at sysz */
+    struct Gadget *tail;
+    int n = 2;
+
+    /* medium-res arrows on a tall screen, low-res on a short one -
+     * sysiclass sizes its own imagery from this.
+     *
+     * b49, his eye on b48: the up/down pair wants a pixel on EACH
+     * side, the left/right pair wants a pixel off the BOTTOM with
+     * its top staying put. Neither is a placement constant - the
+     * drawn size comes from the image, so the size has to be asked
+     * of the class. Two passes: build one of each pair at its
+     * natural size to measure it, then rebuild all four at the
+     * measured size plus his deltas. b48 measured BOTH pairs off
+     * the up arrow, which was only correct while the two pairs
+     * happened to share dimensions - each pair is measured on its
+     * own here. */
+    sysz = scr->Height >= 400 ? SYSISIZE_MEDRES : SYSISIZE_LOWRES;
+    if (dri) {
+        static const int cand[3] = { SYSISIZE_LOWRES, SYSISIZE_MEDRES,
+                                     SYSISIZE_HIRES };
+        int cw[3], ch[3], i, pick = -1, want;
+        APTR ph = mksysi(dri, LEFTIMAGE, sysz, 0, 0);
+
+        /* b52, settled by b51's telemetry ("nat 13 req 17 got 13"):
+         * this sysiclass IGNORES IA_Width/IA_Height. b49's +2 and
+         * b51's +4 were both silently discarded - the arrows have
+         * been at natural size since b48, and no further nudging of
+         * that number can ever do anything. SYSIA_Size is the only
+         * real lever, so measure every size the class offers and
+         * choose, instead of guessing which one to hardcode. */
+        for (i = 0; i < 3; i++) {
+            APTR p = mksysi(dri, UPIMAGE, cand[i], 0, 0);
+            cw[i] = ch[i] = 0;
+            if (p) {
+                cw[i] = ((struct Image *)p)->Width;
+                ch[i] = ((struct Image *)p)->Height;
+                DisposeObject(p);
+            }
+            if (cand[i] == sysz) vawnat = cw[i];
+        }
+        /* his ask, in his units: the width he saw, plus a pixel per
+         * side. Take the SMALLEST size that reaches it - overshoot
+         * is as wrong as undershoot - and the widest available if
+         * nothing does. */
+        want = vawnat > 0 ? vawnat + 2 : 0;
+        for (i = 0; i < 3; i++)
+            if (cw[i] >= want && cw[i] > 0 &&
+                (pick < 0 || cw[i] < cw[pick])) pick = i;
+        if (pick < 0)
+            for (i = 0; i < 3; i++)
+                if (cw[i] > 0 && (pick < 0 || cw[i] > cw[pick])) pick = i;
+
+        if (ph) {
+            haw = ((struct Image *)ph)->Width;
+            hah = ((struct Image *)ph)->Height;
+            DisposeObject(ph);
+        }
+        if (pick >= 0 && haw > 0) {
+            vaw = cw[pick];
+            vah = ch[pick];
+            hahnat = hah;       /* the top is pinned to THIS */
+            /* the vertical pair takes the chosen SIZE; the
+             * horizontal pair is left exactly as b50 built it -
+             * his eye signed that pair off and nothing here
+             * touches it */
+            iup = mksysi(dri, UPIMAGE, cand[pick], 0, 0);
+            idn = mksysi(dri, DOWNIMAGE, cand[pick], 0, 0);
+            ilt = mksysi(dri, LEFTIMAGE, sysz, haw, hah - 1);
+            irt = mksysi(dri, RIGHTIMAGE, sysz, haw, hah - 1);
+        }
+    }
+    arrowsok = iup && idn && ilt && irt;
+    if (arrowsok) {
+        /* what the class actually built, not what was asked for */
+        vaw = ((struct Image *)iup)->Width;
+        vah = ((struct Image *)iup)->Height;
+        haw = ((struct Image *)ilt)->Width;
+        hah = ((struct Image *)ilt)->Height;
+    } else
+        vaw = vah = haw = hah = 0;
+
     vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
-    vgad.LeftEdge = -(brw - 4);
+    /* b47: left edge in 1px, right edge pinned (his eye: "perfectly
+     * positioned to the right, 1 pixel too wide to the left"). Both
+     * constants move together - LeftEdge is RELRIGHT-anchored, so
+     * +1 on it and -1 on Width shifts the left side alone */
+    vgad.LeftEdge = -(brw - 5);
     vgad.TopEdge = win->BorderTop + 1;
-    vgad.Width = brw - 6;
-    vgad.Height = -(win->BorderTop + bbh + 3);
+    vgad.Width = brw - 8;
+    /* b54: 1px taller at the BOTTOM (his eye) - TopEdge is absolute
+     * and untouched, so the whole pixel goes to the bottom end */
+    vgad.Height = -(win->BorderTop + bbh + 2 + 2 * vah);
     vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
     vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
@@ -577,9 +883,20 @@ static void addscrollers(void)
     vgad.GadgetID = 1;
     hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
     hgad.LeftEdge = win->BorderLeft;
+    /* b47: grow 1px upward, bottom edge pinned (his eye: "perfectly
+     * positioned to the bottom but 1 pixel too thin"). TopEdge back
+     * to b45's value while Height gains the pixel, so the bar gets
+     * taller instead of moving - the b46 bottom he approved holds */
     hgad.TopEdge = -(bbh - 3);
-    hgad.Width = -(win->BorderLeft + brw + 20);
-    hgad.Height = bbh - 5;
+    /* b57: another 2px to the RIGHT (his eye), 17 in total since
+     * b54. LeftEdge is absolute and untouched, so every pixel goes
+     * to the right end. The trailing constant IS the gap in pixels
+     * before the left/right arrows: 20 originally, 3 now. The
+     * arrows are anchored to the right border and do not move, so
+     * that 3 is all the room left - past it the track and the left
+     * arrow overlap, and the arrows have to move instead. */
+    hgad.Width = -(win->BorderLeft + brw + 3 + 2 * haw);
+    hgad.Height = bbh - 4;
     hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
     hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
                       GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
@@ -588,8 +905,59 @@ static void addscrollers(void)
     hgad.SpecialInfo = (APTR)&hpi;
     hgad.GadgetID = 2;
     vgad.NextGadget = &hgad;
-    AddGList(win, &vgad, -1, 2, NULL);
-    RefreshGList(&vgad, win, NULL, 2);
+    hgad.NextGadget = NULL;
+    tail = &hgad;
+
+    if (arrowsok) {
+        /* Up/down stack in the right border directly above the size
+         * gadget; left/right sit in the bottom border directly left
+         * of it. The offsets are exact: with RELRIGHT the real x is
+         * win->Width + LeftEdge, with RELBOTTOM the real y is
+         * win->Height + TopEdge - so -(bbh + vah) puts a button's
+         * last row exactly one pixel above the bottom border, and
+         * -(brw + haw) its last column one pixel left of the right
+         * border. The cross-axis inset centres each arrow on its
+         * own track, so a sysiclass image wider or narrower than
+         * the track still lines up with it.
+         *
+         * b49: the vertical pair re-centres on its NEW width, so
+         * the two extra pixels land one per side exactly as he
+         * asked. The horizontal pair does NOT re-centre - hy is
+         * computed from the natural height it had at b48, which he
+         * called correct, so losing a pixel takes it off the
+         * bottom and leaves the top where it is. */
+        int vx = vgad.LeftEdge + (vgad.Width - vaw) / 2;
+        int hy = hgad.TopEdge + (hgad.Height - hahnat) / 2;
+        /* b53: both down 1px (his eye) - the pair moves together,
+         * the track above them is left where he tuned it */
+        mkarrow(&agup, iup, vx, -(bbh + 2 * vah - 1),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
+        mkarrow(&agdn, idn, vx, -(bbh + vah - 1),
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
+        mkarrow(&aglt, ilt, -(brw + 2 * haw), hy,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
+        mkarrow(&agrt, irt, -(brw + haw), hy,
+                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
+        tail->NextGadget = &agup;
+        agup.NextGadget = &agdn;
+        agdn.NextGadget = &aglt;
+        aglt.NextGadget = &agrt;
+        n += 4;
+    }
+
+    AddGList(win, &vgad, -1, n, NULL);
+    /* b50, his find: the arrows drew wrong on open and on every
+     * resize, then corrected themselves the moment the window was
+     * deactivated and reactivated - and stayed correct until the
+     * next resize. That is the whole diagnosis. Deactivating makes
+     * Intuition redraw the window FRAME: border background first,
+     * then the border gadgets on top of it. RefreshGList only ever
+     * paints the gadget imagery - it does not repaint the border
+     * underneath - so every one of our own refreshes stamped the
+     * arrows onto stale border pixels. Every gadget here lives in
+     * a border, so the frame refresh is the correct call for all
+     * six and RefreshGList has no business in this window. */
+    RefreshWindowFrame(win);
     gadsok = 1;
 }
 
@@ -604,56 +972,65 @@ static void drawdirrow(int vr)
     static char pbuf[440];
     DLine tl;
     DEnt *d;
-    SetAPen(rp, 0);
-    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
-    if (idx >= ndents) return;
+    if (idx >= ndents) {
+        SetAPen(rp, 0);
+        RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+        return;
+    }
     d = &dents[idx];
     bar = d->st != 'S';
     st = d->st == 'S' ? ' ' : d->st == 'D' ? '|' :
          d->st == 'L' ? '<' : '>';
-    if (bar) {
-        SetAPen(rp, 3);
-        RectFill(rp, x0 + 2 * fw, y,
-                 x0 + viscols * fw - 1, y + fh - 1);
+    /* b66: no fill. Columns 0-1 carry the cursor on grey, columns
+     * 2-3 the status mark on the row's own colour, and the path
+     * takes the rest - three Texts, each painting its background,
+     * covering the row end to end in one pass. */
+    {
+        char pre[2];
+        pre[0] = idx == dsel ? (char)0xBB : ' ';   /* Latin-1 >> */
+        pre[1] = ' ';
+        SetAPen(rp, 1);
+        SetBPen(rp, 0);
+        Move(rp, x0, y + fbase);
+        Text(rp, (STRPTR)pre, 2);
+        pre[0] = st;
+        SetAPen(rp, bar ? 2 : 1);
+        SetBPen(rp, bar ? 3 : 0);
+        Move(rp, x0 + 2 * fw, y + fbase);
+        Text(rp, (STRPTR)pre, 2);
     }
-    SetAPen(rp, bar ? 2 : 1);
-    SetBPen(rp, bar ? 3 : 0);
-    Move(rp, x0 + 2 * fw, y + fbase);
-    Text(rp, (STRPTR)&st, 1);
     sprintf(pbuf, "%.400s%s", d->rel, d->isdir ? "/" : "");
     tl.ptr = pbuf;
     tl.len = strlen(pbuf);
     tl.hash = 0;
     drawtext(x0 + 4 * fw, y, &tl, viscols - 4,
              bar ? 2 : 1, bar ? 3 : 0);
-    if (idx == dsel) {          /* the cursor, always on the gray */
-        static const char arrow = 0xBB;    /* Latin-1 >> */
-        SetAPen(rp, 1);
-        SetBPen(rp, 0);
-        Move(rp, x0, y + fbase);
-        Text(rp, (STRPTR)&arrow, 1);
-    }
 }
 
 /* one full-width line of a single-file tab */
 static void drawline(int vr)
 {
     int line = *vtop() + vr;
-    int y = conty + vr * fh;
+    int y = conty + vr * fh, ye = y + fh - 1;
+    int rend = x0 + viscols * fw - 1;
     const DLine *l;
     char tag;
-    SetAPen(rp, 0);
-    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
     if (view == 1) {
-        if (line >= gna) return;
+        if (line >= gna) goto blank;
         l = &ga[line];
         tag = gatag[line];
     } else {
-        if (line >= gnb) return;
+        if (line >= gnb) goto blank;
         l = &gb[line];
         tag = gbtag[line];
     }
+    /* b66: drawside covers the full width via drawnum+drawtext,
+     * each painting its own background - no fill at all here */
     drawside(x0, y, l, line, tag != ' ', viscols);
+    return;
+blank:
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, rend, ye);
 }
 
 /* the tab bar: real GUI tabs (his ask) - beveled boxes in the
@@ -700,8 +1077,10 @@ static void drawtabs(void)
         tabx[i] = x;
         tabe[i] = x + w;
         if (gtabvid[i] == view) act = i;
-        /* body */
-        SetAPen(rp, gtabvid[i] == view ? pfill : pback);
+        /* body - b59: every tab takes the page background, active
+         * included (his ask: no blue). What marks the active one is
+         * the base rule breaking open under it, not a fill. */
+        SetAPen(rp, pback);
         RectFill(rp, x + 1, y0 + 1, x + w - 2, yr - 1);
         /* bevel: shine top+left, shadow right */
         SetAPen(rp, pshine);
@@ -711,9 +1090,10 @@ static void drawtabs(void)
         SetAPen(rp, pshadow);
         Move(rp, x + w - 1, y0 + 1);
         Draw(rp, x + w - 1, yr - 1);
-        /* label, centred in the tab */
-        SetAPen(rp, gtabvid[i] == view ? pfilltext : ptext);
-        SetBPen(rp, gtabvid[i] == view ? pfill : pback);
+        /* label, centred in the tab - b59: one pen pair now that
+         * the active tab is no longer filled */
+        SetAPen(rp, ptext);
+        SetBPen(rp, pback);
         Move(rp, x + 6, y0 + 2 + fbase);
         Text(rp, (STRPTR)lab[i], lw);
         x += w + 3;
@@ -727,9 +1107,13 @@ static void drawtabs(void)
     }
     Move(rp, tabe[act] - 1, yr);
     Draw(rp, winr, yr);
-    /* the active tab's floor is its fill colour: erase the rule
-     * span so page and tab read as one surface */
-    SetAPen(rp, pfill);
+    /* b59: the active tab's floor is the page background, so the
+     * rule span under it is erased to pback - tab and page read as
+     * one continuous surface and the separator does not cut across
+     * it (his ask). This is the ONLY thing distinguishing the
+     * active tab now, so the span must stay exactly as wide as the
+     * tab's own body. */
+    SetAPen(rp, pback);
     Move(rp, tabx[act] + 1, yr);
     Draw(rp, tabe[act] - 2, yr);
 }
@@ -737,6 +1121,7 @@ static void drawtabs(void)
 static void drawpage(void)
 {
     int vr, s, e;
+    if (defer) { dirtyall = 1; return; }
     drawtabs();
     for (vr = 0; vr < crows; vr++) {
         if (view == 3)
@@ -801,6 +1186,7 @@ static void settitle(void)
 /* one content row of whatever view is active */
 static void drawone(int vr)
 {
+    if (defer) { dirtyrows = 1; return; }
     if (view == 3)
         drawdirrow(vr);
     else if (view == 0)
@@ -813,6 +1199,7 @@ static void drawone(int vr)
 static void drawrows(void)
 {
     int vr;
+    if (defer) { dirtyrows = 1; return; }
     for (vr = 0; vr < crows; vr++)
         drawone(vr);
 }
@@ -824,16 +1211,16 @@ static void drawrows(void)
  * more repaint the content whole (one pass beats a huge blit plus
  * a full repaint). ScrollWindowRaster (V39) keeps the damage
  * regions honest under overlapping windows on the pubscreen. */
-static void scrollto(int target)
+/* b63: the scroll PAINT, from wherever the screen currently is to
+ * wherever the state now says it should be. Split out of scrollto
+ * so a deferred burst can replay it ONCE over the whole distance
+ * instead of the caller having to paint every step. Still b12's
+ * rule: one ScrollWindowRaster plus only the entering rows, the
+ * tab bar never touched. */
+static void paintscroll(int from, int to)
 {
-    int *t = vtop(), d, vr;
-    int max = vcount() - crows;
-    if (max < 0) max = 0;
-    if (target > max) target = max;
-    if (target < 0) target = 0;
-    d = target - *t;
+    int d = to - from, vr;
     if (d == 0) return;
-    *t = target;
     if ((d > -crows) && (d < crows) &&
         (IntuitionBase->LibNode.lib_Version >= 39)) {
         SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
@@ -848,12 +1235,29 @@ static void scrollto(int target)
             for (vr = 0; vr < -d; vr++)
                 drawone(vr);
         }
-        updscrollers();
     } else
-        drawrows();             /* full path: no tabs, but the
-                                 * knob still needs the new top */
-    if (d <= -crows || d >= crows)
-        updscrollers();
+        drawrows();             /* too far to blit: full rows */
+}
+
+static void scrollto(int target)
+{
+    int *t = vtop(), from;
+    int max = vcount() - crows;
+    if (max < 0) max = 0;
+    if (target > max) target = max;
+    if (target < 0) target = 0;
+    from = *t;
+    if (target == from) return;
+    *t = target;
+    if (defer) {
+        /* Only the FIRST deferred step of a burst knows what is
+         * actually on screen - every later one would report a top
+         * that was never painted. Hence "if not already set". */
+        if (!scrollfromset) { scrollfrom = from; scrollfromset = 1; }
+        return;
+    }
+    paintscroll(from, target);
+    updscrollers();
 }
 
 /* next/previous hunk in the active view: rows in the overview,
@@ -891,14 +1295,121 @@ static void movesel(int target)
     if (target >= ndents) target = ndents - 1;
     if (target == dsel) return;
     dsel = target;
+    /* the scroll goes first even when deferring, so scrollto can
+     * record where the screen is before we return */
     if (dsel < dtop)
         scrollto(dsel);
     else if (dsel >= dtop + crows)
         scrollto(dsel - crows + 1);
+    if (defer) {
+        if (!seloldset) { selold = old; seloldset = 1; }
+        return;
+    }
     if (old >= dtop && old < dtop + crows)
         drawone(old - dtop);
     if (dsel >= dtop && dsel < dtop + crows)
         drawone(dsel - dtop);
+}
+
+/* pan to column `nh`, clamped to the real content width - the one
+ * path to hoff for arrows and keys alike, so a held-down arrow can
+ * never walk it past what drawtext will show. b58: the clamp was a
+ * flat 440, which is why panning worked over an empty window; with
+ * nothing loaded htotal() == viscols and the ceiling is 0. */
+static void sethoff(int nh)
+{
+    int ht = htotal();
+    if (nh > ht - viscols) nh = ht - viscols;
+    if (nh < 0) nh = 0;
+    if (nh == hoff) return;
+    hoff = nh;
+    if (defer) { dirtyrows = 1; return; }
+    drawrows();
+    updscrollers();
+}
+
+/* b64: follow a knob that Intuition is dragging. The PropInfo pot
+ * is the truth - Intuition updates it in place as the mouse moves,
+ * so converting it to a row/column here tracks the drag no matter
+ * which IDCMP class happened to wake us. Cheap and idempotent: if
+ * the pot still agrees with where we are, both calls return
+ * immediately having done nothing. */
+static void proptrack(void)
+{
+    if (propheld == 1) {
+        long total = vcount(), vis = crows;
+        if (total > vis)
+            scrollto((int)(((ULONG)vpi.VertPot * (total - vis)
+                            + 0x7FFF) / 0xFFFF));
+    } else if (propheld == 2) {
+        int ht = htotal();
+        if (ht > viscols)
+            sethoff((int)(((ULONG)hpi.HorizPot * (ht - viscols)
+                           + 0x7FFF) / 0xFFFF));
+    }
+}
+
+/* b63: is another message ALREADY queued? A held key or a dragged
+ * knob arrives as a stream, and painting every message of it is
+ * what stutters. This answers "is more coming right now", so the
+ * paint can be skipped for every message but the last of a burst.
+ * Forbid/Permit because Intuition appends to this list from input
+ * server context. */
+static int inputwaiting(void)
+{
+    int more;
+    Forbid();
+    more = win->UserPort->mp_MsgList.lh_Head->ln_Succ != NULL;
+    Permit();
+    return more;
+}
+
+/* b63: settle whatever painting the burst ran up, ONCE, on the
+ * final state. b62 got this wrong twice: it always paid the debt
+ * with a full drawpage (making a SINGLE keypress more expensive
+ * than the incremental scroll it replaced), and it only ran after
+ * the message loop exited - which during a knob drag never
+ * happened, so nothing moved until the button came up. Now the
+ * debt is typed, the cheapest sufficient repaint is chosen, and
+ * the caller runs this the moment the port is empty. */
+static void flushpaint(void)
+{
+    int owed = dirtyall || dirtyrows || scrollfromset || seloldset;
+    if (!owed && !dirtyknob) return;
+    defer = 0;
+    if (dirtyall)
+        drawpage();                     /* tabs and every row */
+    else if (dirtyrows)
+        drawrows();                     /* every row's text moved */
+    else {
+        if (scrollfromset)
+            paintscroll(scrollfrom, *vtop());
+        if (seloldset) {                /* Tree cursor: two rows */
+            if (selold >= dtop && selold < dtop + crows)
+                drawone(selold - dtop);
+            if (dsel >= dtop && dsel < dtop + crows)
+                drawone(dsel - dtop);
+        }
+    }
+    dirtyall = dirtyrows = dirtyknob = 0;
+    scrollfromset = seloldset = 0;
+    /* b64: NOT while a knob is held - Intuition is rendering that
+     * knob as it tracks the mouse, and NewModifyProp would stamp
+     * our own idea of the position back over the drag. */
+    if (!propheld) updscrollers();
+}
+
+/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. The Tree
+ * moves its selection (matching click-to-select); every other view
+ * scrolls the content or pans it. */
+static void arrowstep(int which)
+{
+    if (which == 1) {
+        if (view == 3) movesel(dsel - 1); else scrollto(*vtop() - 1);
+    } else if (which == 2) {
+        if (view == 3) movesel(dsel + 1); else scrollto(*vtop() + 1);
+    } else
+        sethoff(hoff + (which == 4 ? 8 : -8));
 }
 
 /* switch tabs, keeping the position: the top row/line carries over
@@ -908,6 +1419,9 @@ static void setview(int v)
 {
     int i, row = 0;
     if (v == view) return;
+    /* b58: gmaxw is per-view (Both needs the wider of the two
+     * sides, Tree measures paths), so a view change invalidates it */
+    maxwdirty = 1;
     if (v == 3) {
         if (!gdirmode) return;
         view = 3;
@@ -994,6 +1508,7 @@ static void freediff(void)
     gtop = 0; ltop = 0; rtop = 0;
     hoff = 0;
     view = 0;
+    maxwdirty = 1;          /* b58: both sides freed */
 }
 
 static void calcgut(void)
@@ -1013,7 +1528,11 @@ static void calcgrid(void)
     viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
     visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
     halfw = (viscols - 3) / 2;
-    tabh = fh + 4;
+    /* b60: 2px shorter (his eye). The label baseline is fixed at
+     * y0 + 2 + fbase, so the text does not move and the whole
+     * saving comes off the bottom - which also lifts conty and
+     * gains the content a couple of pixels. */
+    tabh = fh + 2;
     conty = y0 + tabh + 2;
     crows = (win->Height - win->BorderBottom - conty) / fh;
     if (crows < 1) crows = 1;
@@ -1076,6 +1595,7 @@ static int loaddiff(void)
     }
     ga = gla; gb = glb;
     gna = na; gnb = nb;
+    maxwdirty = 1;          /* b58: new content, new widest line */
     gnrows = nrows;
     gtop = 0;
     return 0;
@@ -1359,13 +1879,13 @@ static void keysreq(void)
         "t / e - top / end\n"
         "n / p - next / previous hunk (or tree entry)\n"
         "Enter - diff the selected tree entry\n"
-        "Esc or Backspace - back to the Tree (Esc in the Tree quits)\n"
+        "Esc or Backspace - back to the Tree\n"
         "F5 - reload both files, keep position\n"
         "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
         "Open Files with two DRAWERS - tree compare\n"
         "mouse: scrollbars; in the Tree click selects,\n"
         "double-click opens\n"
-        "Esc (at the top) or Amiga+Q - quit");
+        "Amiga+Q or the close gadget - quit");
 }
 
 static int domenu(UWORD code)   /* returns 1 = quit */
@@ -1455,8 +1975,9 @@ static int domenu(UWORD code)   /* returns 1 = quit */
 static void guimode(void)
 {
     struct Screen *scr;
+    struct DrawInfo *dri = NULL;
     struct IntuiMessage *msg;
-    int done = 0;
+    int done = 0, burst = 0;
 
     IntuitionBase = (struct IntuitionBase *)
         OpenLibrary((STRPTR)"intuition.library", 37);
@@ -1478,7 +1999,8 @@ static void guimode(void)
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
                   IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
-                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE,
+                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
+                  IDCMP_INTUITICKS,   /* b48: arrow auto-repeat */
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   /* SMART: Intuition itself restores regions a
                    * requester covered - the app is BLOCKED inside
@@ -1500,19 +2022,19 @@ static void guimode(void)
         UnlockPubScreen(NULL, scr);
         goto out;
     }
-    {
-        /* the screen's GUI pens for the tab bevels; fall back to
-         * the 4-colour defaults if DrawInfo is unavailable */
-        struct DrawInfo *dri = GetScreenDrawInfo(scr);
-        if (dri) {
-            pshine = dri->dri_Pens[SHINEPEN];
-            pshadow = dri->dri_Pens[SHADOWPEN];
-            pfill = dri->dri_Pens[FILLPEN];
-            pfilltext = dri->dri_Pens[FILLTEXTPEN];
-            ptext = dri->dri_Pens[TEXTPEN];
-            pback = dri->dri_Pens[BACKGROUNDPEN];
-            FreeScreenDrawInfo(scr, dri);
-        }
+    /* the screen's GUI pens for the tab bevels; fall back to the
+     * 4-colour defaults if DrawInfo is unavailable. b48: the pens
+     * are read here but the DrawInfo is NOT freed yet - sysiclass
+     * needs it to build the arrow images, so it stays alive (and
+     * the pubscreen stays locked) until addscrollers has run */
+    dri = GetScreenDrawInfo(scr);
+    if (dri) {
+        pshine = dri->dri_Pens[SHINEPEN];
+        pshadow = dri->dri_Pens[SHADOWPEN];
+        pfill = dri->dri_Pens[FILLPEN];
+        pfilltext = dri->dri_Pens[FILLTEXTPEN];
+        ptext = dri->dri_Pens[TEXTPEN];
+        pback = dri->dri_Pens[BACKGROUNDPEN];
     }
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
@@ -1529,15 +2051,18 @@ static void guimode(void)
             }
         }
     }
-    UnlockPubScreen(NULL, scr);
-
     rp = win->RPort;
     font = GfxBase->DefaultFont;    /* system monospace */
     SetFont(rp, font);
     fw = font->tf_XSize;
     fh = font->tf_YSize;
     fbase = font->tf_Baseline;
-    addscrollers();
+    /* b48: both the DrawInfo and the pubscreen lock are still held
+     * here on purpose - sysiclass reads them while it builds the
+     * arrow images. Released the moment the gadgets exist. */
+    addscrollers(dri, scr);
+    if (dri) FreeScreenDrawInfo(scr, dri);
+    UnlockPubScreen(NULL, scr);
     calcgrid();
 
     if (gdirmode) {                 /* CLI gave two directories */
@@ -1557,38 +2082,89 @@ static void guimode(void)
             UWORD qual = msg->Qualifier;
             WORD mx = msg->MouseX, my = msg->MouseY;
             APTR iaddr = msg->IAddress;
+            /* b63: every message defers its paint; flushpaint
+             * below settles it as soon as the port is empty. A lone
+             * message therefore still paints in its own iteration -
+             * nothing waits on a later event. */
+            defer = 1;
             ULONG csec = msg->Seconds, cmic = msg->Micros;
             ReplyMsg((struct Message *)msg);
             if (class == IDCMP_CLOSEWINDOW) done = 1;
             if (class == IDCMP_GADGETDOWN ||
                 class == IDCMP_GADGETUP ||
                 class == IDCMP_MOUSEMOVE) {
+                /* b64: remember that a KNOB is being dragged. The
+                 * content was not following the drag at all, only
+                 * jumping on release, which means the MOUSEMOVE
+                 * path alone is not reliably driving it. Rather
+                 * than keep theorising about who delivers what,
+                 * the drag is also pumped from INTUITICKS below -
+                 * two independent paths, and the pot is the single
+                 * source of truth for both. */
+                if (class == IDCMP_GADGETDOWN)
+                    propheld = iaddr == (APTR)&vgad ? 1 :
+                               iaddr == (APTR)&hgad ? 2 : 0;
+                else if (class == IDCMP_GADGETUP)
+                    propheld = 0;
                 if (iaddr == (APTR)&vgad) {
                     long total = vcount(), vis = crows;
                     if (total > vis)
                         scrollto(((ULONG)vpi.VertPot *
                                   (total - vis) + 0x7FFF) / 0xFFFF);
                 } else if (iaddr == (APTR)&hgad) {
-                    if (HTOT > viscols) {
-                        int nh = ((ULONG)hpi.HorizPot *
-                                  (HTOT - viscols) + 0x7FFF) / 0xFFFF;
-                        if (nh != hoff) {
-                            hoff = nh;
-                            drawrows();
-                            updscrollers();
-                        }
-                    }
-                }
+                    int ht = htotal();
+                    if (ht > viscols)
+                        sethoff(((ULONG)hpi.HorizPot *
+                                 (ht - viscols) + 0x7FFF) / 0xFFFF);
+                } else if (class == IDCMP_GADGETDOWN) {
+                    /* b48: the arrows are plain boolean gadgets -
+                     * GADGETDOWN starts the repeat and takes the
+                     * first step, INTUITICKS continues it while the
+                     * button is held, GADGETUP ends it */
+                    arrheld = iaddr == (APTR)&agup ? 1 :
+                              iaddr == (APTR)&agdn ? 2 :
+                              iaddr == (APTR)&aglt ? 3 :
+                              iaddr == (APTR)&agrt ? 4 : 0;
+                    if (arrheld) arrowstep(arrheld);
+                } else if (class == IDCMP_GADGETUP)
+                    arrheld = 0;
             }
+            if (class == IDCMP_INTUITICKS && arrheld)
+                arrowstep(arrheld);
+            if (class == IDCMP_INTUITICKS && propheld)
+                proptrack();
             if (class == IDCMP_MENUPICK) {
                 if (gmenu && domenu(code)) done = 1;
             }
             if (class == IDCMP_REFRESHWINDOW) {
+                /* b64, a bug b62/b63 introduced: with the paint
+                 * deferred, drawpage() drew NOTHING here while
+                 * EndRefresh still cleared the damage - so the
+                 * damaged region was left holding whatever was
+                 * under it until some later flush, and during a
+                 * held key that flush is skipped while input is
+                 * queued. A refresh is not a repeat stream: it
+                 * must paint inside Begin/EndRefresh, now. */
+                int od = defer;
+                defer = 0;
                 BeginRefresh(win);
                 drawpage();
                 EndRefresh(win, TRUE);
+                defer = od;
+                /* the whole page was just painted - drop the debt
+                 * so the flush does not redraw it a second time */
+                dirtyall = dirtyrows = 0;
+                scrollfromset = seloldset = 0;
             }
             if (class == IDCMP_NEWSIZE) {
+                /* the RELxxx flags let Intuition reposition each
+                 * gadget's box during its own resize handling; the
+                 * frame refresh then repaints border background and
+                 * border gadgets together at the new corner. b50:
+                 * this was RefreshGList, which skipped the
+                 * background and left the arrows sitting on stale
+                 * border pixels after every resize (his find) */
+                if (gadsok) RefreshWindowFrame(win);
                 calcgrid();
                 clamptops();
                 drawpage();
@@ -1623,15 +2199,15 @@ static void guimode(void)
             if (class == IDCMP_VANILLAKEY) {
                 int tree = view == 3;
                 switch (code) {
-                case 27:            /* Esc pops: file view -> Tree,
-                                     * Tree (or plain mode) -> quit
-                                     * (his instinct, the CFile way).
-                                     * Amiga+Q quits via the menu
-                                     * shortcut - no bare q (his
-                                     * call: GUI apps do not quit
-                                     * on a plain letter) */
+                case 27:            /* Esc POPS ONLY, it never quits
+                                     * (b61, his call): file view ->
+                                     * Tree, and nothing at all from
+                                     * the Tree or from plain mode.
+                                     * Quitting is Amiga+Q via the
+                                     * menu shortcut, or the window's
+                                     * close gadget - not Esc, not a
+                                     * bare letter. */
                     if (gdirmode && view != 3) setview(3);
-                    else done = 1;
                     break;
                 case 13: opensel(); break;             /* Enter */
                 case 8:             /* Backspace: file -> Tree */
@@ -1701,20 +2277,35 @@ static void guimode(void)
                      * stays a content repaint (the CFile editor's
                      * edxoff precedent) - the gutter is pinned */
                     int step = page ? 40 : 8;
-                    int nh = hoff + (code == 0x4E ? step : -step);
-                    if (nh < 0) nh = 0;
-                    if (nh > 440) nh = 440;
-                    if (nh != hoff) {
-                        hoff = nh;
-                        drawrows();
-                        updscrollers();
-                    }
+                    sethoff(hoff + (code == 0x4E ? step : -step));
                 }
             }
+            /* b63: pay the debt as soon as nothing else is queued.
+             * This sits INSIDE the drain loop on purpose - a knob
+             * drag streams MOUSEMOVE hard enough that the loop can
+             * keep finding messages and never exit, which is why
+             * b62's after-the-loop flush left the content frozen
+             * until the button came up.
+             * b64: and pay it at least every 4 messages regardless,
+             * so a stream that never leaves a gap still animates
+             * instead of going dark until the user lets go. */
+            if (!inputwaiting() || ++burst >= 4) {
+                flushpaint();
+                burst = 0;
+            }
         }
+        flushpaint();           /* burst ended by the port emptying */
     }
     if (gmenu) ClearMenuStrip(win);
+    if (gadsok) RemoveGList(win, &vgad, -1);
     CloseWindow(win);
+    /* b48: dispose the images only AFTER the gadgets that pointed
+     * at them are gone - RemoveGList detached them above, so this
+     * order can never leave Intuition holding a freed Image */
+    if (iup) DisposeObject(iup);
+    if (idn) DisposeObject(idn);
+    if (ilt) DisposeObject(ilt);
+    if (irt) DisposeObject(irt);
 out:
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);

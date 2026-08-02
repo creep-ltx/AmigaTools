@@ -31,7 +31,8 @@ menu works in a CLI-started window.
 | space / b | page down / up |
 | t / e | top / end |
 | n / p | next / previous hunk |
-| Esc, q | quit |
+| Esc / Backspace | back to the Tree (never quits) |
+| Amiga+Q | quit |
 
 `TEXT`: unified-style listing to stdout — and the on-target test
 road under vamos, where the GUI cannot run.
