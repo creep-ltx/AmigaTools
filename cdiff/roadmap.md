@@ -170,6 +170,32 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       (CFile's own progadd pattern). Event loop back to plain
       GetMsg/ReplyMsg - GT_GetIMsg is only required for GadTools
       *gadgets*, never for its menus.
+- [x] **b45: REVERT TO b25 - the arrow road is abandoned** (his
+      call: "the latest build was a complete rebuild and it looks
+      terrible... revert to an earlier build before we tried to
+      add scrollbars and arrows"). `cdiff.c` restored verbatim
+      from b25, the last state whose scrollers he SAW render (his
+      screenshot #14, both tracks). Everything from b26 on was one
+      chase after arrow images that never appeared: b26 sysiclass
+      without GFLG_GADGIMAGE, b27 the GadTools SCROLLER_KIND
+      detour, b28 PGA_Freedom, b30 the flag restored, b31-b38 the
+      geometry grind, b39/b40 propgclass, b41-b44 pixel nudges -
+      and then 0.2b1 threw the whole custom renderer away for a
+      ReAction listbrowser that looked worse than any of it.
+      Discarded here in one step. The ENGINE was never implicated:
+      `diff.c`/`diff.h` are byte-identical at b25 and 0.2b1, and
+      the harness is ALL GREEN on host and vamos after the revert.
+      **What b25 has: border prop scrollers that render, Tree
+      click-to-select and double-click-to-open. What it has not:
+      arrows.** That is the accepted trade - the arrows cost a
+      whole night and never arrived.
+      LESSON, the expensive one: b26 was a cosmetic addition on
+      top of a WORKING widget, and it broke the widget. Nine
+      builds then argued with the breakage instead of dropping the
+      cosmetic. When an addition breaks something that rendered,
+      the first move is to remove the addition, not to debug it.
+- [ ] Arrows on the scrollers - reopen ONLY from the b25 base, one
+      build, and abandon again if it does not render first try.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode

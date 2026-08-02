@@ -10,30 +10,16 @@
 #include <exec/types.h>
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
-#include <intuition/imageclass.h>
-#include <intuition/gadgetclass.h>
-#include <intuition/icclass.h>
-#include <classes/window.h>
-#include <gadgets/layout.h>
-#include <gadgets/listbrowser.h>
-#include <gadgets/clicktab.h>
-#include <reaction/reaction_macros.h>
-#include <proto/utility.h>   /* sysiclass: the arrow images */
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
 #include <dos/dostags.h>
 #include <proto/exec.h>
-#include <clib/alib_protos.h>
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
 #include <proto/gadtools.h>
 #include <proto/asl.h>
-#include <proto/window.h>
-#include <proto/layout.h>
-#include <proto/listbrowser.h>
-#include <proto/clicktab.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -41,7 +27,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.2b1 (2.8.26)";
+    "$VER: cdiff 0.1b45 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -54,12 +40,6 @@ struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct Library *AslBase = NULL;
-/* the ReAction classes - V40 (3.1) onwards */
-struct Library *WindowBase = NULL;
-struct Library *LayoutBase = NULL;
-struct Library *ListBrowserBase = NULL;
-struct Library *ClickTabBase = NULL;
-#define REACTVER 40
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -179,15 +159,6 @@ static DEnt *dents;
 static int ndents, dtop, dsel;
 static int gndiff, gnleft, gnright;
 
-/* widest EXPANDED (tab-stops honoured) line in the active view, in
- * columns - the honest replacement for a fixed pan-range guess
- * (his find: a constant showed a partly-empty knob even when
- * nothing on screen overflowed the window). Recomputed lazily
- * (maxwdirty) so a scroll step never rescans a 12000-line file.
- * Declared here (not with the rest of the view state further
- * down) so freedirs/scandirs can mark it dirty too. */
-static int gmaxw, maxwdirty = 1;
-
 typedef struct {
     char *rel;
     long sz;
@@ -297,7 +268,6 @@ static void freedirs(void)
     ndents = 0; dtop = 0; dsel = 0;
     gndiff = gnleft = gnright = 0;
     gdirmode = 0;
-    maxwdirty = 1;
 }
 
 /* takes ownership of rel */
@@ -375,7 +345,6 @@ static void scandirs(void)
     }
     slfree(&la);
     slfree(&lb);
-    maxwdirty = 1;
 }
 
 /* same-size pair: do the BYTES differ? Chunked compare with an
@@ -427,25 +396,20 @@ static int ispathdir(const char *p)
     return r;
 }
 
-/* ---- the ReAction GUI ------------------------------------------- */
-/* His instruction from the start, finally followed: build this out
- * of the OS's own GUI classes instead of hand-drawing it. The window
- * is window.class, the view switcher is clicktab.gadget, and the
- * content is listbrowser.gadget - which is a COMPLETE scrolling list
- * widget: it draws the rows, both scrollbars and their arrows, in
- * the system style, because it is the same class Workbench-era apps
- * like DiskMaster2 use for exactly this. Per-column LBNCA_FGPen /
- * LBNCA_BGPen carry the diff colouring, so nothing is lost by not
- * rendering the rows myself. */
+/* ---- the window ------------------------------------------------- */
+
 static struct Window *win;
-static Object *winobj, *tabobj, *listobj, *layoutobj;
-static struct List rowlist, tablist;
-static struct MsgPort *appport;
+static struct RastPort *rp;
+static struct TextFont *font;
+static int fw, fh, fbase;              /* cell metrics */
+static int x0, y0, viscols, visrows;   /* drawable grid */
+static int halfw;                      /* columns per side */
 
 static const DLine *ga, *gb;
 static Row *grows;
-static int gnrows;
-static int gna, gnb;
+static int gnrows, gtop;
+static int gna, gnb;            /* line counts, for the gutter width */
+static int gutw;                /* gutter digits; 0 = no gutter */
 
 /* the loaded pair, owned here so the menu can swap files in place */
 static char gf1[310], gf2[310];
@@ -453,21 +417,368 @@ static char *gbuf1, *gbuf2;
 static DLine *gla, *glb;
 static DOp *gops;
 
-/* 0 = Both side-by-side, 1 = Left, 2 = Right, 3 = Tree */
+/* tabs (his ask): 0 = Both side-by-side, 1 = Left full-width,
+ * 2 = Right full-width. Per-line change tags let the single views
+ * bar their changed lines without walking the row list. */
 static int view;
+static int ltop, rtop;          /* single-view scroll tops (lines) */
+static int hoff;                /* horizontal column offset - text
+                                 * only, the gutter stays pinned */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
+static int conty, crows;        /* content grid below the tab bar */
+static int tabx[4], tabe[4];    /* tab bar hit ranges (pixels) */
+static int tabsok;              /* tab bar live (files loaded) */
+static int tabh;                /* tab bar height in pixels */
 
-/* one arena holding every NUL-terminated string the listbrowser
- * nodes point at - DLine is pointer+length with no terminator, and
- * the class needs real C strings that outlive the call */
-static char *arena;
-static long arenasz, arenaused;
-
-/* the screen's own GUI pens (DrawInfo), 4-colour fallbacks */
+/* the screen's own GUI pens (DrawInfo), with 4-colour WB fallbacks -
+ * the tabs are drawn in Intuition's bevel language (his ask: GUI
+ * tabs, not text cells), so they follow the user's WB palette */
 static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
            ptext = 1, pback = 0;
 
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
+
+/* border scrollers (his verdict: "a CLI program in a GUI") - raw
+ * prop gadgets, border-relative so resize repositions them free */
+static struct Gadget vgad, hgad;
+static struct PropInfo vpi, hpi;
+static struct Image vim, him;
+static int gadsok;
+#define HTOT 512                /* drawtext's pan range */
+
+/* draw one text cell run, tab-expanded, clipped to width cells,
+ * starting hoff source columns in (tab stops stay absolute) */
+static void drawtext(int x, int y, const DLine *l, int width,
+                     int pen, int bg)
+{
+    static char ex[512];
+    int i, o = 0, end = hoff + width;
+    if (end > 512) end = 512;
+    for (i = 0; i < l->len && o < end; i++) {
+        char ch = l->ptr[i];
+        if (ch == '\t') {
+            do { ex[o++] = ' '; } while ((o & 7) && o < end);
+        } else
+            ex[o++] = (ch >= 32 || ch < 0) ? ch : '.';
+    }
+    SetAPen(rp, pen);
+    SetBPen(rp, bg);
+    Move(rp, x, y + fbase);
+    if (o > hoff) Text(rp, (STRPTR)ex + hoff, o - hoff);
+}
+
+/* right-aligned 1-based line number in the gutter cells */
+static void drawnum(int x, int y, long line, int pen, int bg)
+{
+    static char nb[16];
+    sprintf(nb, "%*ld", gutw, line + 1);
+    SetAPen(rp, pen);
+    SetBPen(rp, bg);
+    Move(rp, x, y + fbase);
+    Text(rp, (STRPTR)nb, gutw);
+}
+
+/* one side of a row: optional bar fill, gutter number, the text,
+ * within a `w`-column budget (halfw in the overview, viscols in a
+ * single-file tab). The gutter recedes by palette hierarchy (his
+ * ask - there is no dark grey on a 4-colour WB): blue-on-gray for
+ * plain rows, black-on-blue under the bar - always a step quieter
+ * than the content beside it. */
+static void drawside(int x, int y, const DLine *l, long line,
+                     int bar, int w)
+{
+    int tx = x, tw = w;
+    if (bar) {
+        SetAPen(rp, 3);
+        RectFill(rp, x, y, x + w * fw - 1, y + fh - 1);
+    }
+    if (gutw > 0) {
+        drawnum(x, y, line, bar ? 1 : 3, bar ? 3 : 0);
+        tx += (gutw + 1) * fw;
+        tw -= gutw + 1;
+    }
+    drawtext(tx, y, l, tw, bar ? 2 : 1, bar ? 3 : 0);
+}
+
+/* changed rows are BAR rows - pen-3 fill, white text, the CFile
+ * selection-bar look - because pen-3 text on WB gray barely reads
+ * (first-run screenshot lesson, 1.8.26). An inserted EMPTY line
+ * shows as a solid bar instead of a naked marker. The untouched
+ * side of a one-sided row stays gray: nothing lives there. */
+static void drawrow(int vr)
+{
+    int idx = gtop + vr;
+    int y = conty + vr * fh;
+    int bar, x1;
+    Row *r;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+    if (idx >= gnrows) return;
+    r = &grows[idx];
+    bar = r->tag != ' ';
+    x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
+    if (r->al >= 0)
+        drawside(x0, y, &ga[r->al], r->al, bar, halfw);
+    if (bar) {
+        SetAPen(rp, 3);
+        SetBPen(rp, 0);
+        Move(rp, x0 + (halfw + 1) * fw, y + fbase);
+        Text(rp, (STRPTR)&r->tag, 1);
+    }
+    if (r->bl >= 0)
+        drawside(x1, y, &gb[r->bl], r->bl, bar, halfw);
+}
+
+/* the active view's scroll top and extent (3 = the Tree tab) */
+static int *vtop(void)
+{
+    return view == 0 ? &gtop : view == 1 ? &ltop :
+           view == 2 ? &rtop : &dtop;
+}
+
+static int vcount(void)
+{
+    return view == 0 ? gnrows : view == 1 ? gna :
+           view == 2 ? gnb : ndents;
+}
+
+/* keep both knobs honest: body = visible share, pot = position */
+static void updscrollers(void)
+{
+    ULONG vbody, vpot, hbody, hpot;
+    long total = vcount(), vis = crows, top = *vtop();
+    if (!gadsok) return;
+    if (total < 1) total = 1;
+    if (vis > total) vis = total;
+    vbody = (0xFFFFUL * vis) / total;
+    vpot = total > vis ? (0xFFFFUL * top) / (total - vis) : 0;
+    hbody = (0xFFFFUL * (viscols < HTOT ? viscols : HTOT)) / HTOT;
+    hpot = HTOT > viscols ? (0xFFFFUL * hoff) / (HTOT - viscols) : 0;
+    NewModifyProp(&vgad, win, NULL, vpi.Flags, 0, vpot, 0, vbody, 1);
+    NewModifyProp(&hgad, win, NULL, hpi.Flags, hpot, 0, hbody, 0, 1);
+}
+
+/* the border scrollers: vertical right, horizontal bottom (beside
+ * the size gadget), AUTOKNOB props in the new look */
+static void addscrollers(void)
+{
+    int brw = win->BorderRight, bbh = win->BorderBottom;
+    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
+    vgad.LeftEdge = -(brw - 4);
+    vgad.TopEdge = win->BorderTop + 1;
+    vgad.Width = brw - 6;
+    vgad.Height = -(win->BorderTop + bbh + 3);
+    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
+    vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
+    vgad.GadgetType = GTYP_PROPGADGET;
+    vgad.GadgetRender = (APTR)&vim;
+    vgad.SpecialInfo = (APTR)&vpi;
+    vgad.GadgetID = 1;
+    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
+    hgad.LeftEdge = win->BorderLeft;
+    hgad.TopEdge = -(bbh - 3);
+    hgad.Width = -(win->BorderLeft + brw + 20);
+    hgad.Height = bbh - 5;
+    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
+    hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
+                      GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
+    hgad.GadgetType = GTYP_PROPGADGET;
+    hgad.GadgetRender = (APTR)&him;
+    hgad.SpecialInfo = (APTR)&hpi;
+    hgad.GadgetID = 2;
+    vgad.NextGadget = &hgad;
+    AddGList(win, &vgad, -1, 2, NULL);
+    RefreshGList(&vgad, win, NULL, 2);
+    gadsok = 1;
+}
+
+/* one row of the Tree tab: selection arrow, status marker, path.
+ * One-sided and differing rows bar like changed lines do. */
+static void drawdirrow(int vr)
+{
+    int idx = dtop + vr;
+    int y = conty + vr * fh;
+    int bar;
+    char st;
+    static char pbuf[440];
+    DLine tl;
+    DEnt *d;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+    if (idx >= ndents) return;
+    d = &dents[idx];
+    bar = d->st != 'S';
+    st = d->st == 'S' ? ' ' : d->st == 'D' ? '|' :
+         d->st == 'L' ? '<' : '>';
+    if (bar) {
+        SetAPen(rp, 3);
+        RectFill(rp, x0 + 2 * fw, y,
+                 x0 + viscols * fw - 1, y + fh - 1);
+    }
+    SetAPen(rp, bar ? 2 : 1);
+    SetBPen(rp, bar ? 3 : 0);
+    Move(rp, x0 + 2 * fw, y + fbase);
+    Text(rp, (STRPTR)&st, 1);
+    sprintf(pbuf, "%.400s%s", d->rel, d->isdir ? "/" : "");
+    tl.ptr = pbuf;
+    tl.len = strlen(pbuf);
+    tl.hash = 0;
+    drawtext(x0 + 4 * fw, y, &tl, viscols - 4,
+             bar ? 2 : 1, bar ? 3 : 0);
+    if (idx == dsel) {          /* the cursor, always on the gray */
+        static const char arrow = 0xBB;    /* Latin-1 >> */
+        SetAPen(rp, 1);
+        SetBPen(rp, 0);
+        Move(rp, x0, y + fbase);
+        Text(rp, (STRPTR)&arrow, 1);
+    }
+}
+
+/* one full-width line of a single-file tab */
+static void drawline(int vr)
+{
+    int line = *vtop() + vr;
+    int y = conty + vr * fh;
+    const DLine *l;
+    char tag;
+    SetAPen(rp, 0);
+    RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+    if (view == 1) {
+        if (line >= gna) return;
+        l = &ga[line];
+        tag = gatag[line];
+    } else {
+        if (line >= gnb) return;
+        l = &gb[line];
+        tag = gbtag[line];
+    }
+    drawside(x0, y, l, line, tag != ' ', viscols);
+}
+
+/* the tab bar: real GUI tabs (his ask) - beveled boxes in the
+ * screen's DrawInfo pens, the active one filled and opening into
+ * the content through a gap in the base rule. Directory mode adds
+ * a Tree tab ahead of the file three. */
+static void drawtabs(void)
+{
+    static char lab[4][40];
+    int i, x, w, yr = y0 + tabh, winr = x0 + viscols * fw - 1;
+    int nt = 0, act = 0;
+    SetAPen(rp, pback);
+    RectFill(rp, x0, y0, winr, yr + 1);
+    tabsok = (ga != NULL) || gdirmode;
+    if (!tabsok) { gntabs = 0; return; }
+    if (gdirmode) {
+        strcpy(lab[nt], "Tree");
+        gtabvid[nt++] = 3;
+    }
+    if (ga) {
+        strcpy(lab[nt], "Both");
+        gtabvid[nt++] = 0;
+        sprintf(lab[nt], "%.30s", (char *)FilePart((STRPTR)gf1));
+        gtabvid[nt++] = 1;
+        sprintf(lab[nt], "%.30s", (char *)FilePart((STRPTR)gf2));
+        gtabvid[nt++] = 2;
+    }
+    gntabs = nt;
+    x = x0 + 2;
+    for (i = 0; i < nt; i++) {
+        int lw = strlen(lab[i]);
+        w = lw * fw + 12;               /* label + side padding */
+        /* clip into the window - narrow windows must not get
+         * their border overpainted (his find, the hint lesson) */
+        if (x + w > winr) {
+            w = winr - x;
+            lw = (w - 12) / fw;
+            if (lw < 1) {               /* no room left at all */
+                tabx[i] = winr;
+                tabe[i] = winr;
+                continue;
+            }
+        }
+        tabx[i] = x;
+        tabe[i] = x + w;
+        if (gtabvid[i] == view) act = i;
+        /* body */
+        SetAPen(rp, gtabvid[i] == view ? pfill : pback);
+        RectFill(rp, x + 1, y0 + 1, x + w - 2, yr - 1);
+        /* bevel: shine top+left, shadow right */
+        SetAPen(rp, pshine);
+        Move(rp, x, yr - 1);
+        Draw(rp, x, y0);
+        Draw(rp, x + w - 2, y0);
+        SetAPen(rp, pshadow);
+        Move(rp, x + w - 1, y0 + 1);
+        Draw(rp, x + w - 1, yr - 1);
+        /* label, centred in the tab */
+        SetAPen(rp, gtabvid[i] == view ? pfilltext : ptext);
+        SetBPen(rp, gtabvid[i] == view ? pfill : pback);
+        Move(rp, x + 6, y0 + 2 + fbase);
+        Text(rp, (STRPTR)lab[i], lw);
+        x += w + 3;
+    }
+    /* base rule in shine, broken open under the active tab - the
+     * classic "this tab is the page you are on" statement */
+    SetAPen(rp, pshine);
+    if (tabx[act] > x0) {
+        Move(rp, x0, yr);
+        Draw(rp, tabx[act], yr);
+    }
+    Move(rp, tabe[act] - 1, yr);
+    Draw(rp, winr, yr);
+    /* the active tab's floor is its fill colour: erase the rule
+     * span so page and tab read as one surface */
+    SetAPen(rp, pfill);
+    Move(rp, tabx[act] + 1, yr);
+    Draw(rp, tabe[act] - 2, yr);
+}
+
+static void drawpage(void)
+{
+    int vr, s, e;
+    drawtabs();
+    for (vr = 0; vr < crows; vr++) {
+        if (view == 3)
+            drawdirrow(vr);
+        else if (view == 0)
+            drawrow(vr);
+        else
+            drawline(vr);
+    }
+    /* the slack margins: window size is rarely an exact multiple
+     * of the cell, and the sub-cell strips below the last row and
+     * right of the last column keep STALE pixels across a resize
+     * (his find - "the blue": old bar rows surviving there) */
+    SetAPen(rp, 0);
+    s = x0 + viscols * fw;
+    e = win->Width - win->BorderRight - 1;
+    if (s <= e)
+        RectFill(rp, s, y0, e, win->Height - win->BorderBottom - 1);
+    s = conty + crows * fh;
+    e = win->Height - win->BorderBottom - 1;
+    if (s <= e)
+        RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
+    updscrollers();
+    if (ga == NULL && !gdirmode) {  /* WB start, nothing loaded -
+                                     * in dirmode the Tree IS the
+                                     * content (his find: the hint
+                                     * stamped over the rows) */
+        static const char hint[] =
+            "no files loaded - Project / Open Files... "
+            "(right mouse button)";
+        int hl = sizeof(hint) - 1;
+        /* a window RastPort includes the borders - clip by hand or
+         * a narrow window gets its border overpainted (his find) */
+        if (hl > viscols - 4) hl = viscols - 4;
+        if (hl > 0) {
+            SetAPen(rp, 1);
+            SetBPen(rp, 0);
+            Move(rp, x0 + 2 * fw, conty + fh + fbase);
+            Text(rp, (STRPTR)hint, hl);
+        }
+    }
+}
 
 static void settitle(void)
 {
@@ -488,319 +799,163 @@ static void settitle(void)
 }
 
 /* one content row of whatever view is active */
-/* ---- the listbrowser model -------------------------------------- */
-
-/* column layouts, one per view. CIF_WEIGHTED shares the width out
- * proportionally, so the two text columns of the side-by-side view
- * get the space and the number/marker columns stay narrow. */
-static struct ColumnInfo ci_both[] = {
-    {  6, NULL, CIF_WEIGHTED }, { 44, NULL, CIF_WEIGHTED },
-    {  4, NULL, CIF_WEIGHTED },
-    {  6, NULL, CIF_WEIGHTED }, { 44, NULL, CIF_WEIGHTED },
-    { -1, NULL, 0 }
-};
-static struct ColumnInfo ci_one[] = {
-    {  8, NULL, CIF_WEIGHTED }, { 92, NULL, CIF_WEIGHTED },
-    { -1, NULL, 0 }
-};
-static struct ColumnInfo ci_tree[] = {
-    {  4, NULL, CIF_WEIGHTED }, { 96, NULL, CIF_WEIGHTED },
-    { -1, NULL, 0 }
-};
-
-static void arenareset(void)
+static void drawone(int vr)
 {
-    arenaused = 0;
+    if (view == 3)
+        drawdirrow(vr);
+    else if (view == 0)
+        drawrow(vr);
+    else
+        drawline(vr);
 }
 
-/* copy a DLine into the arena as a real C string, tabs expanded to
- * 8-stops so listbrowser sees the same alignment the file has */
-static char *arenaline(const DLine *l)
+/* content rows only - scrolling must never repaint the tab bar */
+static void drawrows(void)
 {
-    char *out;
-    int i, o = 0;
-    long need = (long)l->len * 8 + 2;
-    if (arena == NULL || arenaused + need > arenasz) return (char *)"";
-    out = arena + arenaused;
-    for (i = 0; i < l->len; i++) {
-        char ch = l->ptr[i];
-        if (ch == '\t') { do { out[o++] = ' '; } while (o & 7); }
-        else out[o++] = (ch >= 32 || ch < 0) ? ch : '.';
-    }
-    out[o++] = 0;
-    arenaused += o;
-    return out;
+    int vr;
+    for (vr = 0; vr < crows; vr++)
+        drawone(vr);
 }
 
-static char *arenafmt(const char *fmt, long v)
+/* scroll the ACTIVE view so `target` is on top, clamped. The CFile
+ * R1 rule (graphics-and-performance.md): a scroll step is ONE blit
+ * of the content rectangle plus repaints of only the entering rows
+ * - not a page of Texts, and never the tab bar. Jumps of a page or
+ * more repaint the content whole (one pass beats a huge blit plus
+ * a full repaint). ScrollWindowRaster (V39) keeps the damage
+ * regions honest under overlapping windows on the pubscreen. */
+static void scrollto(int target)
 {
-    char *out;
-    if (arena == NULL || arenaused + 24 > arenasz) return (char *)"";
-    out = arena + arenaused;
-    sprintf(out, fmt, v);
-    arenaused += strlen(out) + 1;
-    return out;
-}
-
-static void freerows(void)
-{
-    if (listobj)
-        SetGadgetAttrs((struct Gadget *)listobj, win, NULL,
-                       LISTBROWSER_Labels, (ULONG)~0, TAG_END);
-    FreeListBrowserList(&rowlist);
-    NewList(&rowlist);
-}
-
-/* build the listbrowser node list for the ACTIVE view. Changed rows
- * carry FILLPEN/FILLTEXTPEN so they read as bars, exactly the CFile
- * selection-bar look the custom renderer used to draw by hand. */
-static void buildlist(void)
-{
-    struct Node *n;
-    int i, fg, bg, bar;
-
-    freerows();
-    arenareset();
-    if (view == 3) {
-        for (i = 0; i < ndents; i++) {
-            char st[4], *nm;
-            DEnt *d = &dents[i];
-            bar = d->st != 'S';
-            st[0] = d->st == 'S' ? ' ' : d->st == 'D' ? '|' :
-                    d->st == 'L' ? '<' : '>';
-            st[1] = 0;
-            if (arena && arenaused + 8 < arenasz) {
-                nm = arena + arenaused;
-                strcpy(nm, st);
-                arenaused += 2;
-            } else nm = (char *)"";
-            fg = bar ? pfilltext : ptext;
-            bg = bar ? pfill : pback;
-            {
-                static char pb[440];
-                DLine tl;
-                sprintf(pb, "%.400s%s", d->rel, d->isdir ? "/" : "");
-                tl.ptr = pb; tl.len = strlen(pb); tl.hash = 0;
-                n = AllocListBrowserNode(2,
-                        LBNA_Column, 0,
-                            LBNCA_Text, (ULONG)nm,
-                            LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                        LBNA_Column, 1,
-                            LBNCA_Text, (ULONG)arenaline(&tl),
-                            LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                        TAG_END);
-            }
-            if (n) AddTail(&rowlist, n);
+    int *t = vtop(), d, vr;
+    int max = vcount() - crows;
+    if (max < 0) max = 0;
+    if (target > max) target = max;
+    if (target < 0) target = 0;
+    d = target - *t;
+    if (d == 0) return;
+    *t = target;
+    if ((d > -crows) && (d < crows) &&
+        (IntuitionBase->LibNode.lib_Version >= 39)) {
+        SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
+        ScrollWindowRaster(win, 0, d * fh,
+                           x0, conty,
+                           x0 + viscols * fw - 1,
+                           conty + crows * fh - 1);
+        if (d > 0) {            /* moved up: new rows at the bottom */
+            for (vr = crows - d; vr < crows; vr++)
+                drawone(vr);
+        } else {                /* moved down: new rows on top */
+            for (vr = 0; vr < -d; vr++)
+                drawone(vr);
         }
-    } else if (view == 0) {
-        for (i = 0; i < gnrows; i++) {
-            Row *r = &grows[i];
-            char mk[2];
-            bar = r->tag != ' ';
-            fg = bar ? pfilltext : ptext;
-            bg = bar ? pfill : pback;
-            mk[0] = r->tag; mk[1] = 0;
-            n = AllocListBrowserNode(5,
-                    LBNA_Column, 0,
-                        LBNCA_Text, (ULONG)(r->al >= 0 ?
-                            arenafmt("%ld", r->al + 1) : ""),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    LBNA_Column, 1,
-                        LBNCA_Text, (ULONG)(r->al >= 0 ?
-                            arenaline(&ga[r->al]) : ""),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    LBNA_Column, 2,
-                        LBNCA_Text, (ULONG)(bar ? mk : " "),
-                        LBNCA_CopyText, TRUE,
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    LBNA_Column, 3,
-                        LBNCA_Text, (ULONG)(r->bl >= 0 ?
-                            arenafmt("%ld", r->bl + 1) : ""),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    LBNA_Column, 4,
-                        LBNCA_Text, (ULONG)(r->bl >= 0 ?
-                            arenaline(&gb[r->bl]) : ""),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    TAG_END);
-            if (n) AddTail(&rowlist, n);
-        }
-    } else {
-        const DLine *src = view == 1 ? ga : gb;
-        const char *tg = view == 1 ? gatag : gbtag;
-        int cnt = view == 1 ? gna : gnb;
-        for (i = 0; i < cnt; i++) {
-            bar = tg && tg[i] != ' ';
-            fg = bar ? pfilltext : ptext;
-            bg = bar ? pfill : pback;
-            n = AllocListBrowserNode(2,
-                    LBNA_Column, 0,
-                        LBNCA_Text, (ULONG)arenafmt("%ld", (long)i + 1),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    LBNA_Column, 1,
-                        LBNCA_Text, (ULONG)arenaline(&src[i]),
-                        LBNCA_FGPen, fg, LBNCA_BGPen, bg,
-                    TAG_END);
-            if (n) AddTail(&rowlist, n);
-        }
-    }
-    if (listobj)
-        SetGadgetAttrs((struct Gadget *)listobj, win, NULL,
-                       LISTBROWSER_ColumnInfo, (ULONG)(view == 3 ? ci_tree :
-                                        view == 0 ? ci_both : ci_one),
-                       LISTBROWSER_Labels, (ULONG)&rowlist,
-                       LISTBROWSER_Top, 0,
-                       TAG_END);
+        updscrollers();
+    } else
+        drawrows();             /* full path: no tabs, but the
+                                 * knob still needs the new top */
+    if (d <= -crows || d >= crows)
+        updscrollers();
 }
 
-/* the arena must hold every expanded line of whichever view is
- * widest - size it once per load from the real byte counts */
-static void arenafit(void)
-{
-    long need = 4096;
-    int i;
-    if (ga) for (i = 0; i < gna; i++) need += ga[i].len * 2 + 24;
-    if (gb) for (i = 0; i < gnb; i++) need += gb[i].len * 2 + 24;
-    for (i = 0; i < ndents; i++) need += strlen(dents[i].rel) + 8;
-    if (need <= arenasz) return;
-    free(arena);
-    arena = malloc(need);
-    arenasz = arena ? need : 0;
-    arenaused = 0;
-}
-
+/* next/previous hunk in the active view: rows in the overview,
+ * tagged lines in a single-file tab, non-same entries in the Tree */
 static int nexthunk(int from, int dir)
 {
     const char *tg = view == 1 ? gatag : gbtag;
-    int n = view == 3 ? ndents : view == 0 ? gnrows :
-            view == 1 ? gna : gnb;
-    int i = from + dir;
+    int n = vcount(), i = from + dir;
     if (view == 3) {
         while (i >= 0 && i < n && dents[i].st == 'S') i += dir;
-    } else if (view == 0) {
+        if (i < 0 || i >= n) return from;
+        return i;
+    }
+    if (view == 0) {
         while (i > 0 && i < n && grows[i].tag != ' ') i += dir;
         while (i >= 0 && i < n && grows[i].tag == ' ') i += dir;
-        while (i > 0 && i < n && grows[i - 1].tag != ' ') i--;
+        if (i < 0 || i >= n) return from;
+        while (i > 0 && grows[i - 1].tag != ' ') i--;
     } else {
-        if (tg == NULL) return from;
         while (i > 0 && i < n && tg[i] != ' ') i += dir;
         while (i >= 0 && i < n && tg[i] == ' ') i += dir;
-        while (i > 0 && i < n && tg[i - 1] != ' ') i--;
+        if (i < 0 || i >= n) return from;
+        while (i > 0 && tg[i - 1] != ' ') i--;
     }
-    if (i < 0 || i >= n) return from;
     return i;
 }
 
-static void settitle(void);
-static void erq(const char *text);
-static int loaddiff(void);
-static void buildtabs(void);
-static void buildlist(void);
-static void arenafit(void);
-
-/* Enter (or a double-click) on a Tree row: run the real diff on that
- * pair. The selected row now comes from the listbrowser itself. */
-static void opensel(void)
+/* move the Tree selection to `target`: keep it visible (the edge
+ * cross rides scrollto's blit), repaint just the two cursor rows */
+static void movesel(int target)
 {
-    DEnt *d;
-    ULONG sel = 0;
-    static char eb[220];
-    if (!gdirmode || view != 3 || ndents <= 0 || listobj == NULL) return;
-    GetAttr(LISTBROWSER_Selected, listobj, &sel);
-    if ((int)sel < 0 || (int)sel >= ndents) return;
-    d = &dents[sel];
-    /* name the actual drawers - vague "left/right" helps nobody */
-    if (d->isdir) {
-        if (d->isdir == 2)
-            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
-                    "but a plain file in\n%.64s", d->rel, gdir1, gdir2);
-        else if (d->isdir == 3)
-            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
-                    "but a plain file in\n%.64s", d->rel, gdir2, gdir1);
-        else
-            sprintf(eb, "the drawer \"%.40s\"\nexists only in\n%.64s",
-                    d->rel, d->st == 'L' ? gdir1 : gdir2);
-        erq(eb);
-        return;
-    }
-    if (d->st == 'L' || d->st == 'R') {
-        sprintf(eb, "\"%.40s\"\nexists only in\n%.64s",
-                d->rel, d->st == 'L' ? gdir1 : gdir2);
-        erq(eb);
-        return;
-    }
-    strcpy(gf1, gdir1);
-    AddPart((STRPTR)gf1, (STRPTR)d->rel, 310);
-    strcpy(gf2, gdir2);
-    AddPart((STRPTR)gf2, (STRPTR)d->rel, 310);
-    view = (loaddiff() == 0) ? 0 : 3;
-    arenafit();
-    buildtabs();
-    buildlist();
-    settitle();
+    int old = dsel;
+    if (ndents <= 0) return;
+    if (target < 0) target = 0;
+    if (target >= ndents) target = ndents - 1;
+    if (target == dsel) return;
+    dsel = target;
+    if (dsel < dtop)
+        scrollto(dsel);
+    else if (dsel >= dtop + crows)
+        scrollto(dsel - crows + 1);
+    if (old >= dtop && old < dtop + crows)
+        drawone(old - dtop);
+    if (dsel >= dtop && dsel < dtop + crows)
+        drawone(dsel - dtop);
 }
 
-/* the clicktab labels: Tree first when in directory mode, then the
- * file three once a pair is loaded - same live-tab rule the hand
- * drawn bar had, now expressed as clicktab nodes */
-/* there is no FreeClickTabList in the API - only per-node, which is
- * how DiskMaster2 does it too */
-static void freetabs(void)
-{
-    struct Node *n;
-    while ((n = RemHead(&tablist))) FreeClickTabNode(n);
-}
-
-static void buildtabs(void)
-{
-    struct Node *n;
-    static char l1[40], l2[40];
-    int nt = 0;
-    if (tabobj)
-        SetGadgetAttrs((struct Gadget *)tabobj, win, NULL,
-                       CLICKTAB_Labels, (ULONG)~0, TAG_END);
-    freetabs();
-    if (gdirmode) {
-        if ((n = AllocClickTabNode(TNA_Text, (ULONG)"Tree",
-                                   TNA_Number, nt, TAG_END))) {
-            AddTail(&tablist, n);
-            gtabvid[nt++] = 3;
-        }
-    }
-    if (ga) {
-        if ((n = AllocClickTabNode(TNA_Text, (ULONG)"Both",
-                                   TNA_Number, nt, TAG_END))) {
-            AddTail(&tablist, n);
-            gtabvid[nt++] = 0;
-        }
-        sprintf(l1, "%.30s", (char *)FilePart((STRPTR)gf1));
-        if ((n = AllocClickTabNode(TNA_Text, (ULONG)l1,
-                                   TNA_Number, nt, TAG_END))) {
-            AddTail(&tablist, n);
-            gtabvid[nt++] = 1;
-        }
-        sprintf(l2, "%.30s", (char *)FilePart((STRPTR)gf2));
-        if ((n = AllocClickTabNode(TNA_Text, (ULONG)l2,
-                                   TNA_Number, nt, TAG_END))) {
-            AddTail(&tablist, n);
-            gtabvid[nt++] = 2;
-        }
-    }
-    gntabs = nt;
-    if (tabobj)
-        SetGadgetAttrs((struct Gadget *)tabobj, win, NULL,
-                       CLICKTAB_Labels, (ULONG)&tablist, TAG_END);
-}
-
+/* switch tabs, keeping the position: the top row/line carries over
+ * through the row list so all three views stay anchored. The Tree
+ * (3) keeps its own cursor - no anchor mapping to or from it. */
 static void setview(int v)
 {
+    int i, row = 0;
     if (v == view) return;
-    if (v == 3 ? !gdirmode : (ga == NULL)) return;
+    if (v == 3) {
+        if (!gdirmode) return;
+        view = 3;
+        settitle();             /* the title follows the view (his
+                                 * find: stale file title over the
+                                 * Tree) */
+        drawpage();
+        return;
+    }
+    if (ga == NULL) return;
+    if (view == 3) {
+        view = v;
+        settitle();
+        drawpage();
+        return;
+    }
+    if (view == 0) {
+        for (i = gtop; i < gnrows; i++) {
+            if (v == 1 && grows[i].al >= 0) { ltop = grows[i].al; break; }
+            if (v == 2 && grows[i].bl >= 0) { rtop = grows[i].bl; break; }
+        }
+    } else {
+        int line = view == 1 ? ltop : rtop;
+        for (i = 0; i < gnrows; i++) {
+            long here = view == 1 ? grows[i].al : grows[i].bl;
+            if (here >= line) { row = i; break; }
+        }
+        if (v == 0) {
+            gtop = row;
+        } else {
+            for (i = row; i < gnrows; i++) {
+                long other = v == 1 ? grows[i].al : grows[i].bl;
+                if (other >= 0) {
+                    if (v == 1) ltop = other; else rtop = other;
+                    break;
+                }
+            }
+        }
+    }
     view = v;
-    buildlist();
-    if (tabobj)
-        SetGadgetAttrs((struct Gadget *)tabobj, win, NULL,
-                       CLICKTAB_Current, v, TAG_END);
-    settitle();
+    /* re-clamp the landing view */
+    {
+        int *t = vtop(), max = vcount() - crows;
+        if (max < 0) max = 0;
+        if (*t > max) *t = max;
+        if (*t < 0) *t = 0;
+    }
+    drawpage();
 }
 
 /* ---- loading, requesters, menus --------------------------------- */
@@ -836,15 +991,48 @@ static void freediff(void)
     free(gbtag); gbtag = NULL;
     ga = gb = NULL;
     gna = gnb = 0;
+    gtop = 0; ltop = 0; rtop = 0;
+    hoff = 0;
     view = 0;
-    maxwdirty = 1;
 }
 
+static void calcgut(void)
+{
+    int m = gna > gnb ? gna : gnb;
+    gutw = 1;
+    while (m >= 10) { m /= 10; gutw++; }
+    if (halfw < gutw + 12) gutw = 0;    /* too narrow: no gutter */
+}
 
 /* the whole text grid from the window's current size - run at
  * open and again on every IDCMP_NEWSIZE */
+static void calcgrid(void)
+{
+    x0 = win->BorderLeft;
+    y0 = win->BorderTop;
+    viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
+    visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
+    halfw = (viscols - 3) / 2;
+    tabh = fh + 4;
+    conty = y0 + tabh + 2;
+    crows = (win->Height - win->BorderBottom - conty) / fh;
+    if (crows < 1) crows = 1;
+    calcgut();
+}
 
 /* clamp every view's top against the current extents */
+static void clamptops(void)
+{
+    int m;
+    m = gnrows - crows; if (m < 0) m = 0;
+    if (gtop > m) gtop = m;
+    m = gna - crows; if (m < 0) m = 0;
+    if (ltop > m) ltop = m;
+    m = gnb - crows; if (m < 0) m = 0;
+    if (rtop > m) rtop = m;
+    m = ndents - crows; if (m < 0) m = 0;
+    if (dtop > m) dtop = m;
+}
 
 /* load gf1/gf2 and diff them; replaces whatever was loaded */
 static int loaddiff(void)
@@ -889,6 +1077,7 @@ static int loaddiff(void)
     ga = gla; gb = glb;
     gna = na; gnb = nb;
     gnrows = nrows;
+    gtop = 0;
     return 0;
 }
 
@@ -919,31 +1108,90 @@ static int askfile(const char *title, char *dest)
 static void reload(void)
 {
     if (gf1[0] && gf2[0]) {
-        if (loaddiff() == 0) view = 0;
+        if (loaddiff() == 0) calcgut();
     }
-    arenafit();
-    buildtabs();
-    buildlist();
     settitle();
+    drawpage();
 }
 
-/* rediff the SAME pair, keeping the view and roughly the position -
- * the road home after an edit or an external change (F5) */
+/* rediff the SAME pair, keeping view and position - the road home
+ * after an edit or an external change (F5, the CFile reflex) */
 static void refreshdiff(void)
 {
-    int v = view;
-    ULONG top = 0;
-    if (listobj) GetAttr(LISTBROWSER_Top, listobj, &top);
+    int v = view, gt = gtop, lt = ltop, rt = rtop, m;
     if (gf1[0] && gf2[0]) {
-        if (loaddiff() == 0) view = v;
+        if (loaddiff() == 0) {
+            calcgut();
+            view = v;
+            gtop = gt; ltop = lt; rtop = rt;
+            m = gnrows - crows; if (m < 0) m = 0;
+            if (gtop > m) gtop = m;
+            m = gna - crows; if (m < 0) m = 0;
+            if (ltop > m) ltop = m;
+            m = gnb - crows; if (m < 0) m = 0;
+            if (rtop > m) rtop = m;
+        }
     }
-    arenafit();
-    buildtabs();
-    buildlist();
-    if (listobj)
-        SetGadgetAttrs((struct Gadget *)listobj, win, NULL,
-                       LISTBROWSER_Top, top, TAG_END);
     settitle();
+    drawpage();
+}
+
+/* Enter on a Tree entry: run the real diff on that file pair */
+static void opensel(void)
+{
+    DEnt *d;
+    static char eb[220];
+    if (!gdirmode || view != 3 || ndents <= 0) return;
+    d = &dents[dsel];
+    /* name the actual drawers (his point: we KNOW them - vague
+     * "left/right" helps nobody) */
+    if (d->isdir) {
+        if (d->isdir == 2)
+            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
+                    "but a plain file in\n%.64s",
+                    d->rel, gdir1, gdir2);
+        else if (d->isdir == 3)
+            sprintf(eb, "\"%.40s\" is a drawer in\n%.64s\n"
+                    "but a plain file in\n%.64s",
+                    d->rel, gdir2, gdir1);
+        else
+            sprintf(eb, "the drawer \"%.40s\"\nexists only in\n%.64s",
+                    d->rel, d->st == 'L' ? gdir1 : gdir2);
+        erq(eb);
+        return;
+    }
+    if (d->st == 'L' || d->st == 'R') {
+        sprintf(eb, "\"%.40s\"\nexists only in\n%.64s",
+                d->rel, d->st == 'L' ? gdir1 : gdir2);
+        erq(eb);
+        return;
+    }
+    strcpy(gf1, gdir1);
+    AddPart((STRPTR)gf1, (STRPTR)d->rel, 310);
+    strcpy(gf2, gdir2);
+    AddPart((STRPTR)gf2, (STRPTR)d->rel, 310);
+    if (loaddiff() == 0) {
+        calcgut();
+        view = 0;
+    } else
+        view = 3;               /* freediff reset it - stay in the Tree */
+    settitle();
+    drawpage();
+}
+
+/* Tab / Shift+Tab: cycle the LIVE views - the Tree only exists in
+ * directory mode, the file three only once a pair is loaded */
+static void cycleview(int dir)
+{
+    int v = view, i;
+    for (i = 0; i < 4; i++) {
+        v = (v + (dir > 0 ? 1 : 3)) & 3;
+        if (v == 3) {
+            if (gdirmode) break;
+        } else if (ga)
+            break;
+    }
+    setview(v);
 }
 
 /* hand a side to an editor, synchronously, then rediff in place.
@@ -995,10 +1243,6 @@ static struct NewMenu newmenu[] = {
  * whatever the resolution. OK or any key leaves. */
 static void centerreq(const char *text)
 {
-    /* metrics come from the screen's font now that the custom
-     * renderer (and its cached cell size) is gone */
-    int cfw = 8, cfh = 8, fbase = 6;
-    struct TextFont *font = NULL;
     struct Screen *scr;
     struct Window *w;
     struct IntuiMessage *m;
@@ -1011,22 +1255,13 @@ static void centerreq(const char *text)
         if (*p == '\n') { nl++; c = 0; }
         else if (++c > maxc) maxc = c;
     }
-    okw = 6 * cfw + 8;
-    okh = cfh + 6;
-    ww = maxc * cfw + 32;
+    okw = 6 * fw + 8;
+    okh = fh + 6;
+    ww = maxc * fw + 32;
     if (ww < okw + 32) ww = okw + 32;
-    wh = nl * cfh + okh + 28;
+    wh = nl * fh + okh + 28;
     scr = LockPubScreen(NULL);
     if (scr == NULL) return;
-    if (scr->RastPort.Font) {
-        font = scr->RastPort.Font;
-        cfw = font->tf_XSize;
-        cfh = font->tf_YSize;
-        fbase = font->tf_Baseline;
-    }
-    ww = maxc * cfw + 32;
-    if (ww < okw + 32) ww = okw + 32;
-    wh = nl * cfh + okh + 28;
     w = OpenWindowTags(NULL,
         WA_Left, (scr->Width - ww) / 2,
         WA_Top, (scr->Height - wh) / 2,
@@ -1041,7 +1276,7 @@ static void centerreq(const char *text)
     UnlockPubScreen(NULL, scr);
     if (w == NULL) return;
     r = w->RPort;
-    if (font) SetFont(r, font);
+    SetFont(r, font);
     okx = (ww - okw) / 2;
     oky = wh - okh - 8;
     while (!done) {
@@ -1064,7 +1299,7 @@ static void centerreq(const char *text)
                         Move(r, 16, y);
                         Text(r, (STRPTR)ls, p - ls);
                     }
-                    y += cfh;
+                    y += fh;
                     ls = p + 1;
                     if (*p == 0) break;
                 }
@@ -1078,7 +1313,7 @@ static void centerreq(const char *text)
             Draw(r, okx + 1, oky + okh - 1);
             SetAPen(r, ptext);
             SetBPen(r, pback);
-            Move(r, okx + (okw - 2 * cfw) / 2, oky + 3 + fbase);
+            Move(r, okx + (okw - 2 * fw) / 2, oky + 3 + fbase);
             Text(r, (STRPTR)"OK", 2);
         }
         WaitPort(w->UserPort);
@@ -1159,7 +1394,7 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                     scandirs();
                     view = 3;
                     settitle();
-                    buildlist();
+                    drawpage();
                 } else if (r1 == 2 || r2 == 2) {
                     erq("pick two files - or two drawers for a "
                         "tree compare\n(a drawer = leave the File "
@@ -1220,12 +1455,8 @@ static int domenu(UWORD code)   /* returns 1 = quit */
 static void guimode(void)
 {
     struct Screen *scr;
-    ULONG sigmask, result;
-    UWORD code;
+    struct IntuiMessage *msg;
     int done = 0;
-
-    NewList(&rowlist);
-    NewList(&tablist);
 
     IntuitionBase = (struct IntuitionBase *)
         OpenLibrary((STRPTR)"intuition.library", 37);
@@ -1233,25 +1464,45 @@ static void guimode(void)
         OpenLibrary((STRPTR)"graphics.library", 37);
     GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
     AslBase = OpenLibrary((STRPTR)"asl.library", 37);
-    /* the ReAction classes that make this a real GUI app */
-    WindowBase = OpenLibrary((STRPTR)"window.class", REACTVER);
-    LayoutBase = OpenLibrary((STRPTR)"gadgets/layout.gadget", REACTVER);
-    ListBrowserBase =
-        OpenLibrary((STRPTR)"gadgets/listbrowser.gadget", REACTVER);
-    ClickTabBase =
-        OpenLibrary((STRPTR)"gadgets/clicktab.gadget", REACTVER);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
-    if (WindowBase == NULL || LayoutBase == NULL ||
-        ListBrowserBase == NULL || ClickTabBase == NULL) {
-        erq("cdiff needs the ReAction classes:\n"
-            "window.class, layout.gadget,\n"
-            "listbrowser.gadget, clicktab.gadget");
-        goto out;
-    }
 
     scr = LockPubScreen(NULL);
     if (scr == NULL) goto out;
+    win = OpenWindowTags(NULL,
+        WA_Left, 0, WA_Top, scr->BarHeight + 1,
+        WA_Width, scr->Width,
+        WA_Height, scr->Height - scr->BarHeight - 1,
+        WA_Title, (ULONG)"cdiff",
+        WA_PubScreen, (ULONG)scr,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
+                  IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
+                  IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
+                  IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
+                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE,
+        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
+                  /* SMART: Intuition itself restores regions a
+                   * requester covered - the app is BLOCKED inside
+                   * EasyRequest and cannot repaint (his find: move
+                   * the requester, holes stay). Backing store is
+                   * the price, correctness is the product.
+                   * SIZEBRIGHT widens the right border for the
+                   * vertical scroller. */
+                  WFLG_CLOSEGADGET | WFLG_SMART_REFRESH |
+                  WFLG_ACTIVATE | WFLG_SIZEGADGET |
+                  WFLG_SIZEBBOTTOM | WFLG_SIZEBRIGHT,
+        WA_MinWidth, 240,
+        WA_MinHeight, 120,
+        WA_MaxWidth, ~0,
+        WA_MaxHeight, ~0,
+        WA_NewLookMenus, TRUE,
+        TAG_DONE);
+    if (win == NULL) {
+        UnlockPubScreen(NULL, scr);
+        goto out;
+    }
     {
+        /* the screen's GUI pens for the tab bevels; fall back to
+         * the 4-colour defaults if DrawInfo is unavailable */
         struct DrawInfo *dri = GetScreenDrawInfo(scr);
         if (dri) {
             pshine = dri->dri_Pens[SHINEPEN];
@@ -1267,153 +1518,207 @@ static void guimode(void)
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
             gmenu = CreateMenus(newmenu, TAG_DONE);
-            if (gmenu)
-                if (!LayoutMenus(gmenu, gvi,
-                                 GTMN_NewLookMenus, TRUE, TAG_DONE)) {
+            if (gmenu) {
+                if (LayoutMenus(gmenu, gvi,
+                                GTMN_NewLookMenus, TRUE, TAG_DONE))
+                    SetMenuStrip(win, gmenu);
+                else {
                     FreeMenus(gmenu);
                     gmenu = NULL;
                 }
+            }
         }
     }
+    UnlockPubScreen(NULL, scr);
 
-    /* load first, so the tabs and the list have content to describe */
-    if (gdirmode) {
+    rp = win->RPort;
+    font = GfxBase->DefaultFont;    /* system monospace */
+    SetFont(rp, font);
+    fw = font->tf_XSize;
+    fh = font->tf_YSize;
+    fbase = font->tf_Baseline;
+    addscrollers();
+    calcgrid();
+
+    if (gdirmode) {                 /* CLI gave two directories */
         scandirs();
         view = 3;
-    } else if (gf1[0] && gf2[0]) {
-        if (loaddiff() == 0) view = 0;
+    } else if (gf1[0] && gf2[0]) {  /* CLI gave the pair up front */
+        if (loaddiff() == 0) calcgut();
     }
-    arenafit();
-    buildtabs();
-
-    /* Each object is built by its OWN complete NewObject call
-     * rather than the nested WindowObject/End macro style. Those
-     * macros deliberately leave NewObject( unterminated and rely on
-     * End to close it - which cannot work here, because in this NDK
-     * NewObject is itself a variadic MACRO, and the preprocessor
-     * does not expand the inner macros while collecting its
-     * arguments, so it never sees a closing paren. Building each
-     * object separately is equivalent, balanced, and lets every
-     * step be checked. */
-    tabobj = NewObject(CLICKTAB_GetClass(), NULL,
-                       GA_ID, 100,
-                       GA_RelVerify, TRUE,
-                       CLICKTAB_Labels, (ULONG)&tablist,
-                       CLICKTAB_Current, view == 3 ? 0 : view,
-                       TAG_END);
-    listobj = NewObject(LISTBROWSER_GetClass(), NULL,
-                        GA_ID, 101,
-                        GA_RelVerify, TRUE,
-                        LISTBROWSER_AutoFit, TRUE,
-                        LISTBROWSER_HorizontalProp, TRUE,
-                        LISTBROWSER_ShowSelected, TRUE,
-                        LISTBROWSER_ColumnInfo,
-                            (ULONG)(view == 3 ? ci_tree :
-                                    view == 0 ? ci_both : ci_one),
-                        LISTBROWSER_Labels, (ULONG)&rowlist,
-                        TAG_END);
-    layoutobj = NewObject(LAYOUT_GetClass(), NULL,
-                          LAYOUT_Orientation, LAYOUT_ORIENT_VERT,
-                          LAYOUT_DeferLayout, TRUE,
-                          LAYOUT_SpaceOuter, FALSE,
-                          LAYOUT_AddChild, (ULONG)tabobj,
-                          CHILD_WeightedHeight, 0,
-                          LAYOUT_AddChild, (ULONG)listobj,
-                          TAG_END);
-    winobj = NewObject(WINDOW_GetClass(), NULL,
-                       WA_Title, (ULONG)"cdiff",
-                       WA_Activate, TRUE,
-                       WA_DragBar, TRUE,
-                       WA_DepthGadget, TRUE,
-                       WA_CloseGadget, TRUE,
-                       WA_SizeGadget, TRUE,
-                       WA_SizeBBottom, TRUE,
-                       WA_PubScreen, (ULONG)scr,
-                       WA_Width, scr->Width,
-                       WA_Height, scr->Height - scr->BarHeight - 1,
-                       WA_IDCMP, IDCMP_RAWKEY | IDCMP_VANILLAKEY |
-                                 IDCMP_IDCMPUPDATE,
-                       WINDOW_Position, WPOS_CENTERSCREEN,
-                       WINDOW_MenuStrip, (ULONG)gmenu,
-                       WINDOW_ParentGroup, (ULONG)layoutobj,
-                       TAG_END);
-    UnlockPubScreen(NULL, scr);
-    if (winobj == NULL) goto out;
-
-    win = (struct Window *)RA_OpenWindow(winobj);
-    if (win == NULL) goto out;
-
-    buildlist();
     settitle();
+    drawpage();
 
-    GetAttr(WINDOW_SigMask, winobj, &sigmask);
     while (!done) {
-        ULONG sigs = Wait(sigmask | SIGBREAKF_CTRL_C);
-        if (sigs & SIGBREAKF_CTRL_C) break;
-        while ((result = RA_HandleInput(winobj, &code)) != WMHI_LASTMSG) {
-            switch (result & WMHI_CLASSMASK) {
-            case WMHI_CLOSEWINDOW:
-                done = 1;
-                break;
-            case WMHI_MENUPICK:
-                if (gmenu && domenu(code)) done = 1;
-                break;
-            case WMHI_GADGETUP:
-                if ((result & WMHI_GADGETMASK) == 100) {
-                    ULONG cur = 0;
-                    GetAttr(CLICKTAB_Current, tabobj, &cur);
-                    if ((int)cur < gntabs) setview(gtabvid[cur]);
-                } else if ((result & WMHI_GADGETMASK) == 101) {
-                    if (view == 3) opensel();
+        WaitPort(win->UserPort);
+        while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            ULONG class = msg->Class;
+            UWORD code = msg->Code;
+            UWORD qual = msg->Qualifier;
+            WORD mx = msg->MouseX, my = msg->MouseY;
+            APTR iaddr = msg->IAddress;
+            ULONG csec = msg->Seconds, cmic = msg->Micros;
+            ReplyMsg((struct Message *)msg);
+            if (class == IDCMP_CLOSEWINDOW) done = 1;
+            if (class == IDCMP_GADGETDOWN ||
+                class == IDCMP_GADGETUP ||
+                class == IDCMP_MOUSEMOVE) {
+                if (iaddr == (APTR)&vgad) {
+                    long total = vcount(), vis = crows;
+                    if (total > vis)
+                        scrollto(((ULONG)vpi.VertPot *
+                                  (total - vis) + 0x7FFF) / 0xFFFF);
+                } else if (iaddr == (APTR)&hgad) {
+                    if (HTOT > viscols) {
+                        int nh = ((ULONG)hpi.HorizPot *
+                                  (HTOT - viscols) + 0x7FFF) / 0xFFFF;
+                        if (nh != hoff) {
+                            hoff = nh;
+                            drawrows();
+                            updscrollers();
+                        }
+                    }
                 }
-                break;
-            case WMHI_VANILLAKEY:
-                switch (result & WMHI_KEYMASK) {
-                case 27:
+            }
+            if (class == IDCMP_MENUPICK) {
+                if (gmenu && domenu(code)) done = 1;
+            }
+            if (class == IDCMP_REFRESHWINDOW) {
+                BeginRefresh(win);
+                drawpage();
+                EndRefresh(win, TRUE);
+            }
+            if (class == IDCMP_NEWSIZE) {
+                calcgrid();
+                clamptops();
+                drawpage();
+            }
+            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
+                if (tabsok && my >= y0 && my <= y0 + tabh) {
+                    int i;
+                    for (i = 0; i < gntabs; i++)
+                        if (mx >= tabx[i] && mx < tabe[i])
+                            setview(gtabvid[i]);
+                } else if (view == 3 && my >= conty &&
+                           my < conty + crows * fh) {
+                    /* Tree rows: click selects, double-click
+                     * opens (his verdict: a GUI must click) */
+                    static ULONG lsec, lmic;
+                    static int lrow = -1;
+                    int row = dtop + (my - conty) / fh;
+                    if (row < ndents) {
+                        if (row == dsel && lrow == row &&
+                            DoubleClick(lsec, lmic, csec, cmic)) {
+                            lrow = -1;
+                            opensel();
+                        } else {
+                            movesel(row);
+                            lrow = row;
+                            lsec = csec;
+                            lmic = cmic;
+                        }
+                    }
+                }
+            }
+            if (class == IDCMP_VANILLAKEY) {
+                int tree = view == 3;
+                switch (code) {
+                case 27:            /* Esc pops: file view -> Tree,
+                                     * Tree (or plain mode) -> quit
+                                     * (his instinct, the CFile way).
+                                     * Amiga+Q quits via the menu
+                                     * shortcut - no bare q (his
+                                     * call: GUI apps do not quit
+                                     * on a plain letter) */
                     if (gdirmode && view != 3) setview(3);
                     else done = 1;
                     break;
-                case 13: if (view == 3) opensel(); break;
-                case 8: if (gdirmode && view != 3) setview(3); break;
+                case 13: opensel(); break;             /* Enter */
+                case 8:             /* Backspace: file -> Tree */
+                    if (gdirmode && view != 3) setview(3);
+                    break;
+                case 9:             /* Tab cycles; Shift+Tab back */
+                    cycleview((qual & (IEQUALIFIER_LSHIFT |
+                                       IEQUALIFIER_RSHIFT)) ? -1 : 1);
+                    break;
                 case '1': setview(0); break;
                 case '2': setview(1); break;
                 case '3': setview(2); break;
                 case '0': setview(3); break;
+                case ' ':
+                    if (tree) movesel(dsel + crows);
+                    else scrollto(*vtop() + crows);
+                    break;
+                case 'b': case 'B':
+                    if (tree) movesel(dsel - crows);
+                    else scrollto(*vtop() - crows);
+                    break;
+                case 't': case 'T':
+                    if (tree) movesel(0);
+                    else scrollto(0);
+                    break;
+                case 'e': case 'E':
+                    if (tree) movesel(ndents);
+                    else scrollto(vcount());
+                    break;
                 case 'n': case 'N':
-                case 'p': case 'P': {
-                    ULONG top = 0;
-                    int d = ((result & WMHI_KEYMASK) == 'n' ||
-                             (result & WMHI_KEYMASK) == 'N') ? 1 : -1;
-                    GetAttr(LISTBROWSER_Top, listobj, &top);
-                    SetGadgetAttrs((struct Gadget *)listobj, win, NULL,
-                        LISTBROWSER_Top, nexthunk((int)top, d), TAG_END);
+                    if (tree) movesel(nexthunk(dsel, 1));
+                    else scrollto(nexthunk(*vtop(), 1));
+                    break;
+                case 'p': case 'P':
+                    if (tree) movesel(nexthunk(dsel, -1));
+                    else scrollto(nexthunk(*vtop(), -1));
                     break;
                 }
-                }
-                break;
-            case WMHI_RAWKEY:
-                if ((result & WMHI_KEYMASK) == 0x54) refreshdiff();
-                break;
             }
-            if (done) break;
+            if (class == IDCMP_RAWKEY) {
+                int page = (qual & (IEQUALIFIER_LSHIFT |
+                                    IEQUALIFIER_RSHIFT)) != 0;
+                int tree = view == 3;
+                if (code == 0x4C) {    /* cursor up */
+                    if (tree) movesel(dsel - (page ? crows : 1));
+                    else scrollto(*vtop() - (page ? crows : 1));
+                } else if (code == 0x4D) { /* cursor down */
+                    if (tree) movesel(dsel + (page ? crows : 1));
+                    else scrollto(*vtop() + (page ? crows : 1));
+                }
+                else if (code == 0x54) /* F5: reload, the CFile reflex */
+                    refreshdiff();
+                else if (code == 0x42 && page)
+                    /* Shift+Tab has NO vanilla translation - it
+                     * falls through as RAWKEY (plain Tab arrives
+                     * as VANILLAKEY 9 and never gets here) */
+                    cycleview(-1);
+                else if (code == 0x7A) { /* NewMouse: wheel up */
+                    if (tree) movesel(dsel - (page ? crows : 3));
+                    else scrollto(*vtop() - (page ? crows : 3));
+                } else if (code == 0x7B) { /* NewMouse: wheel down */
+                    if (tree) movesel(dsel + (page ? crows : 3));
+                    else scrollto(*vtop() + (page ? crows : 3));
+                }
+                else if (code == 0x4F || code == 0x4E) {
+                    /* horizontal: every row's text moves, so this
+                     * stays a content repaint (the CFile editor's
+                     * edxoff precedent) - the gutter is pinned */
+                    int step = page ? 40 : 8;
+                    int nh = hoff + (code == 0x4E ? step : -step);
+                    if (nh < 0) nh = 0;
+                    if (nh > 440) nh = 440;
+                    if (nh != hoff) {
+                        hoff = nh;
+                        drawrows();
+                        updscrollers();
+                    }
+                }
+            }
         }
     }
-
-    freerows();
-    RA_CloseWindow(winobj);
-    win = NULL;
+    if (gmenu) ClearMenuStrip(win);
+    CloseWindow(win);
 out:
-    if (winobj) DisposeObject(winobj);
-    freetabs();
-    free(arena);
-    arena = NULL;
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
-    if (ClickTabBase) CloseLibrary(ClickTabBase);
-    if (ListBrowserBase) CloseLibrary(ListBrowserBase);
-    if (LayoutBase) CloseLibrary(LayoutBase);
-    if (WindowBase) CloseLibrary(WindowBase);
     if (AslBase) CloseLibrary(AslBase);
     if (GadToolsBase) CloseLibrary(GadToolsBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);
