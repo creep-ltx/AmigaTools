@@ -28,3 +28,5 @@ CompileFlags:
     - -isystem/opt/amiga/m68k-amigaos/ndk-include
     - -isystem/opt/amiga/m68k-amigaos/sys-include
     - -isystem/usr/lib/clang/22/include
+    # the shared GUI chassis, included as "ltxwin.h" from any tool
+    - -I/home/creep/Projects/AmigaTools/ltxgui

@@ -3,14 +3,17 @@
 # anything boots - the harness-first rule.
 
 CC      = /opt/amiga/bin/m68k-amigaos-gcc
-CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall
+CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -I$(GUI)
 HOSTCC  = cc
 DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
+# cedit b0: the shared GUI chassis, built from here rather than
+# copied - one fix, both tools
+GUI     = ../ltxgui
 
 all: cdiff
 
-cdiff: cdiff.c diff.c diff.h
-	$(CC) $(CFLAGS) cdiff.c diff.c -o cdiff
+cdiff: cdiff.c diff.c diff.h $(GUI)/ltxwin.c $(GUI)/ltxwin.h
+	$(CC) $(CFLAGS) cdiff.c diff.c $(GUI)/ltxwin.c -o cdiff
 
 test: test-host test-vamos
 
