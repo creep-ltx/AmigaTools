@@ -356,28 +356,64 @@ lets cedit hand the same engine a Buffer.
       the boxes on screen and the boxes being tested are the same
       numbers by construction — cdiff uses it as well now.
 
-## 0.1b3 — undo
+## 0.1b3 — undo — BUILT 2.8.26, AWAITING BOOT
 
-- [ ] Undo/redo stack per buffer. Coalesce a typing run into one
-      entry — the same instinct as coalescing a held-key input
-      burst.
+- [x] **Command records, not snapshots** — a 5,000-line file cannot
+      afford a copy per keystroke on an 8MB machine, and the inverse
+      of every edit here is exactly one other edit. Four ops: INS,
+      DEL, SPLIT, JOIN.
+- [x] **The primitives record, not the call sites.** `edinsch`,
+      `eddelch`, `edsplitline` and `edjoinline` push their own undo
+      records, so no path can change a buffer without becoming
+      undoable — worth more than any amount of care at the callers.
+      Undo applies its inverse back through those same primitives
+      with a `uapply` flag set, so it can never drift from what an
+      edit actually does.
+- [x] **One array, one cursor**: records below `utop` are undoable,
+      records at or above it are redoable, a fresh edit throws the
+      latter away. Bounded at 500; the oldest falls off rather than
+      the newest being refused.
+- [x] **A typing RUN is one undo**, not one per letter — the same
+      instinct as coalescing a held-key input burst. The run
+      continues only while the next character lands exactly where
+      the last ended on the same line, and any cursor movement ends
+      it. Backspace and Del coalesce too, and they grow the stored
+      text at opposite ends: Backspace walks left, Del stays put.
+- [x] **INS carries its text, not just a count.** Writing it the
+      other way produced a record that could be undone but never
+      redone — caught while implementing, not after.
+- [x] **The save point moves with the file**: `dirty` is
+      `utop != usaved`, so undoing back to the last save clears it
+      and redoing away sets it again. When the stack overflows and
+      the record that would reach the saved state falls off the end,
+      the save point is abandoned rather than lied about.
+- [x] Repaint follows the chassis's own rules: a structural undo
+      moved every row below it and gets a content repaint; anything
+      else touched one line and goes through the same one-row damage
+      path that typing uses.
+- [x] **Harness ALL GREEN both roads**, and it caught two things
+      during the build: `ed_marksaved` moved the save point without
+      reclearing `dirty`, and one of my own tests constructed a join
+      that could not happen. Coverage: run coalescing, run breaking,
+      a run only continuing where the last character ended,
+      Backspace and Del order, structural undo/redo of split and
+      join at the right seam, redo discarded by a new edit, dirty
+      tracking in both directions, undo/redo past the ends as
+      no-ops, a load leaving nothing on the stack, and the bound.
+- [ ] **BOOT GATE:** type a word, one Amiga+Z takes the word back.
+      Then Return/Backspace/Del at line boundaries undone, redo,
+      undo after a save marking the file unmodified again, and the
+      status row's `[no undo]` marker appearing at the bottom of the
+      stack.
 
-## 0.1b4 — multi-buffer, and closeable tabs
+## 0.1b4 — multi-buffer, and closeable tabs — DONE AT b2
 
-- [ ] N buffers; tabs labelled with basenames, ellipsised when
-      narrow.
-- [ ] A close box per tab: a second hit range tested before the tab
-      body, drawn in the same bevel primitives so it follows the WB
-      palette.
-- [ ] Closing a dirty buffer prompts; so does quitting with any
-      dirty buffer.
-- [ ] **Overflow** — three tabs never outgrow a PAL Hires window,
-      twelve open files do. What cdiff does today is clip the last
-      tab to the window edge and give any that still don't fit a
-      zero-width hit range (`tabx[i] = tabe[i] = winr`) — correct
-      for a fixed three, wrong here, because a tab you cannot reach
-      is a file you cannot reach. Scroll the bar, or a `»`
-      more-indicator. Decide before the array shape is fixed.
+Pulled forward: his Project menu spec (New / Open / Open New / Close
+/ Close All / Save / Save As) only makes sense with tabs, so the
+whole of b4 landed inside b2 and its tab work. Everything on this
+list is done and boot-green — the documents, the close boxes, the
+overflow arrows, the per-document prompts. See the b2 entry above,
+which carries the detail and the two edge bugs it cost.
 
 ## 0.1b5 — the E lexer, behind a toggle
 

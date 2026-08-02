@@ -40,7 +40,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cedit 0.1b2 (2.8.26)";
+    "$VER: cedit 0.1b3 (2.8.26)";
 
 /* ---- the buffer -------------------------------------------------
  * The line table, the splitter and the width arithmetic live in
@@ -178,6 +178,9 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Save As...",   (STRPTR)"A", 0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Quit",         (STRPTR)"Q", 0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Edit",         NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Undo",         (STRPTR)"Z", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Redo",         (STRPTR)"Y", 0, 0, NULL },
     { NM_TITLE, (STRPTR)"Settings",   NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Line numbers", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
@@ -385,10 +388,11 @@ static void epage(void)
  * on every position change. Both numbers here are O(1). */
 static void estatus(char *dst, int max)
 {
-    sprintf(dst, " %.40s%s  line %d/%d  col %d",
+    sprintf(dst, " %.40s%s  line %d/%d  col %d%s",
             cur->name[0] ? cur->name : "untitled",
             cur->dirty ? " *" : "",
-            cur->cy + 1, cur->n, curcol() + 1);
+            cur->cy + 1, cur->n, curcol() + 1,
+            ed_canundo(cur) ? "" : "  [no undo]");
     (void)max;
 }
 
@@ -649,6 +653,7 @@ static void doclose(void);
 static void docloseall(void);
 static void dosave(void);
 static void dosaveas(void);
+static void doundo(int redo);
 static int  askquit(void);      /* and the unsaved-changes prompt */
 static void follow(void);       /* keep the caret on screen */
 
@@ -672,7 +677,11 @@ static int domenu(UWORD code)   /* 1 = quit */
             if (i == 8)  { dosaveas();   return 0; }
             if (i == 10) return askquit();
         }
-        if (m == 1) {
+        if (m == 1) {                                   /* Edit */
+            if (i == 0) { doundo(0); return 0; }
+            if (i == 1) { doundo(1); return 0; }
+        }
+        if (m == 2) {                                   /* Settings */
             int on = (it->Flags & CHECKED) ? 1 : 0;
             if (i == 0) {                               /* Line numbers */
                 ttgutter = on;
@@ -741,6 +750,10 @@ static void gotoyx(int ny, int nx)
     if (ny == cur->cy && nx == cur->cx) return;
     cur->cy = ny;
     cur->cx = nx;
+    ed_break(cur);              /* b3: a move ends the typing run, so
+                                 * one undo takes back one word and
+                                 * not everything since the file
+                                 * opened */
     follow();
     damage(oldcy);
 }
@@ -1015,10 +1028,36 @@ static void dosaveas(void)
     cur->name[sizeof(cur->name) - 1] = 0;
     if (!savebuf(cur, cur->path))
         msg("Could not write that file.");
+    else
+        ed_marksaved(cur);      /* undoing back here is 'unmodified' */
     busy(0);
     settitle();
     shown_dirty = cur->dirty;
     epage();                    /* the tab and the status row renamed */
+}
+
+/* b3. The chassis's own rules decide the repaint: a structural undo
+ * moved every row below it, so that is a content repaint; anything
+ * else touched one line and gets one row, through the same damage
+ * path typing uses. */
+static void doundo(int redo)
+{
+    int structural = 0, oldcy = cur->cy;
+    int line = redo ? ed_redo(cur, &structural)
+                    : ed_undo(cur, &structural);
+    if (line < 0) {
+        DisplayBeep(NULL);      /* nothing to undo is not an error */
+        return;
+    }
+    goalx = cur->cx;
+    follow();
+    if (structural) {
+        dirtyrows = 1;
+        dmgold = -1;
+        calcgut();              /* the line count may have changed */
+    } else
+        damage(oldcy);
+    marktitle();
 }
 
 static void dosave(void)
@@ -1027,6 +1066,8 @@ static void dosave(void)
     busy(1);
     if (!savebuf(cur, cur->path))
         msg("Could not write that file.");
+    else
+        ed_marksaved(cur);      /* undoing back here is 'unmodified' */
     busy(0);
     marktitle();
 }

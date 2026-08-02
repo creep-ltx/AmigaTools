@@ -7,12 +7,15 @@ void bufinit(Buffer *b)
 {
     memset(b, 0, sizeof(*b));
     b->maxwdirty = 1;
+    b->usaved = 0;      /* a freshly loaded buffer IS its saved state */
 }
 
 void buffree(Buffer *b)
 {
     int i;
     for (i = 0; i < b->n; i++) free(b->ln[i]);
+    for (i = 0; i < b->nur; i++) free(b->ur[i].text);
+    free(b->ur);
     free(b->ln);
     free(b->len);
     free(b->cap);
@@ -109,6 +112,13 @@ int bufsplit(Buffer *b, const char *raw, long got)
         }
         b->noeol = 1;           /* and saving must not add one */
     }
+    /* the load is not an edit: every addline above ran through the
+     * primitives, so clear what they recorded and call THIS the
+     * saved state. Otherwise undo would walk a fresh file apart. */
+    for (i = 0; i < b->nur; i++) free(b->ur[i].text);
+    b->nur = b->utop = 0;
+    b->usaved = 0;
+    b->dirty = 0;
     if (b->n == 0) {
         /* an empty file still gets one empty line - a buffer with no
          * lines has no cursor position to be in - but that line is
@@ -123,6 +133,75 @@ int bufsplit(Buffer *b, const char *raw, long got)
     return 1;
 }
 
+/* ---- undo -------------------------------------------------------- */
+
+static void urfree(UndoRec *r)
+{
+    free(r->text);
+    r->text = NULL;
+}
+
+/* throw away everything above the split point - a fresh edit means
+ * the redo future never happened */
+static void urclip(Buffer *b)
+{
+    while (b->nur > b->utop) urfree(&b->ur[--b->nur]);
+    /* and a save point above the new top can never be reached again */
+    if (b->usaved > b->nur) b->usaved = -1;
+}
+
+static UndoRec *urpush(Buffer *b)
+{
+    UndoRec *r;
+    urclip(b);
+    if (b->nur >= b->urcap) {
+        int nc = b->urcap ? b->urcap * 2 : 64;
+        UndoRec *nr;
+        if (nc > UNDO_MAX) nc = UNDO_MAX;
+        if (b->nur >= nc) {
+            /* full: the oldest record falls off the end. The save
+             * point goes with it - once the record that would undo
+             * back to the saved state is gone, "unmodified" is a
+             * claim we can no longer make honestly. */
+            urfree(&b->ur[0]);
+            memmove(b->ur, b->ur + 1, (b->nur - 1) * sizeof(UndoRec));
+            b->nur--;
+            b->utop--;
+            if (b->usaved >= 0) b->usaved--;
+        } else {
+            nr = realloc(b->ur, nc * sizeof(UndoRec));
+            if (nr == NULL) return NULL;
+            b->ur = nr;
+            b->urcap = nc;
+        }
+    }
+    r = &b->ur[b->nur++];
+    b->utop = b->nur;
+    memset(r, 0, sizeof(*r));
+    r->cy = b->cy;
+    r->cx = b->cx;
+    return r;
+}
+
+void ed_break(Buffer *b)
+{
+    b->ubreak = 1;
+}
+
+void ed_marksaved(Buffer *b)
+{
+    b->usaved = b->utop;
+    b->dirty = 0;               /* THIS is now the unmodified state */
+}
+
+int ed_canundo(const Buffer *b) { return b->utop > 0; }
+int ed_canredo(const Buffer *b) { return b->utop < b->nur; }
+
+static void udirty(Buffer *b)
+{
+    b->dirty = (b->utop != b->usaved);
+}
+
 /* ---- editing ----------------------------------------------------- */
 
 int edinsch(Buffer *b, int y, int x, char c)
@@ -132,19 +211,87 @@ int edinsch(Buffer *b, int y, int x, char c)
     memmove(b->ln[y] + x + 1, b->ln[y] + x, n - x + 1);   /* with NUL */
     b->ln[y][x] = c;
     b->len[y] = n + 1;
-    b->dirty = 1;
     b->maxwdirty = 1;
+    if (!b->uapply) {
+        /* coalesce a typing RUN into one record - the same instinct
+         * as coalescing a held-key input burst: one undo should take
+         * back a word, not a letter. The run continues only while
+         * the next character lands exactly where the last one ended
+         * on the same line, and the app has not broken it. */
+        UndoRec *t = b->utop > 0 ? &b->ur[b->utop - 1] : NULL;
+        int done = 0;
+        if (t && !b->ubreak && t->op == UNDO_INS && t->y == y &&
+            t->x + t->n == x && b->utop == b->nur) {
+            char *nt = realloc(t->text, t->n + 2);
+            if (nt) {
+                t->text = nt;
+                t->text[t->n++] = c;
+                t->text[t->n] = 0;
+                done = 1;
+            }
+        }
+        if (!done) {
+            UndoRec *r = urpush(b);
+            if (r == NULL) return 0;
+            r->op = UNDO_INS;
+            r->y = y; r->x = x; r->n = 1;
+            r->text = malloc(2);
+            if (r->text == NULL) { r->n = 0; }
+            else { r->text[0] = c; r->text[1] = 0; }
+        }
+        b->ubreak = 0;
+        udirty(b);
+    }
     return 1;
 }
 
 void eddelch(Buffer *b, int y, int x)
 {
     int n = b->len[y];
+    char gone;
     if (x >= n) return;
+    gone = b->ln[y][x];
     memmove(b->ln[y] + x, b->ln[y] + x + 1, n - x);       /* with NUL */
     b->len[y] = n - 1;
-    b->dirty = 1;
     b->maxwdirty = 1;
+    if (!b->uapply) {
+        UndoRec *t = b->utop > 0 ? &b->ur[b->utop - 1] : NULL;
+        /* two runs coalesce, and they grow the stored text at
+         * opposite ends: Backspace walks LEFT (each removal is one
+         * before the last), Del stays PUT (each removal is at the
+         * same column). Anything else starts a new record. */
+        if (t && !b->ubreak && t->op == UNDO_DEL && t->y == y &&
+            b->utop == b->nur &&
+            (t->x == x + 1 || t->x == x)) {
+            char *nt = realloc(t->text, t->n + 2);
+            if (nt) {
+                t->text = nt;
+                if (t->x == x + 1) {            /* Backspace */
+                    memmove(t->text + 1, t->text, t->n);
+                    t->text[0] = gone;
+                    t->x = x;
+                } else                          /* Del */
+                    t->text[t->n] = gone;
+                t->n++;
+                t->text[t->n] = 0;
+                b->ubreak = 0;
+                udirty(b);
+                return;
+            }
+        }
+        {
+            UndoRec *r = urpush(b);
+            if (r) {
+                r->op = UNDO_DEL;
+                r->y = y; r->x = x; r->n = 1;
+                r->text = malloc(2);
+                if (r->text) { r->text[0] = gone; r->text[1] = 0; }
+                else { r->n = 0; }
+            }
+        }
+        b->ubreak = 0;
+        udirty(b);
+    }
 }
 
 /* make room for one more line at index y, shifting the rest down.
@@ -194,8 +341,15 @@ int edsplitline(Buffer *b, int y, int x)
     b->len[y + 1] = tail;
     b->ln[y][x] = 0;
     b->len[y] = x;
-    b->dirty = 1;
     b->maxwdirty = 1;
+    if (!b->uapply) {
+        UndoRec *r = urpush(b);
+        if (r == NULL) return 0;
+        r->op = UNDO_SPLIT;
+        r->y = y; r->x = x;
+        b->ubreak = 0;
+        udirty(b);
+    }
     return 1;
 }
 
@@ -210,9 +364,118 @@ int edjoinline(Buffer *b, int y)
     memcpy(b->ln[y] + a, b->ln[y + 1], t + 1);          /* with NUL */
     b->len[y] = a + t;
     rowclose(b, y + 1);
-    b->dirty = 1;
     b->maxwdirty = 1;
+    if (!b->uapply) {
+        UndoRec *r = urpush(b);
+        if (r == NULL) return 0;
+        r->op = UNDO_JOIN;
+        r->y = y; r->x = a;     /* where the seam was */
+        b->ubreak = 0;
+        udirty(b);
+    }
     return 1;
+}
+
+/* ---- undo/redo, applied -------------------------------------------
+ * Every record's inverse is one of the other three operations, run
+ * through the ordinary primitives with `uapply` set so they do not
+ * record what they are undoing. Nothing here reaches into the line
+ * table directly, so undo can never drift from what an edit does. */
+
+/* the four operations and their inverses, run through the ordinary
+ * primitives with `uapply` set so they do not record what they are
+ * undoing. Nothing here touches the line table directly, so undo can
+ * never drift from what an edit actually does.
+ *
+ * INS and DEL are exact mirrors and both carry their text: an INS
+ * record with only a count could be undone but never redone, which
+ * is the flaw this shape exists to avoid. */
+static int insert_text(Buffer *b, int y, int x, const char *t, int n)
+{
+    int i;
+    for (i = 0; i < n; i++)
+        if (!edinsch(b, y, x + i, t[i])) return 0;
+    return 1;
+}
+
+static void delete_n(Buffer *b, int y, int x, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) eddelch(b, y, x);
+}
+
+static int applyrec(Buffer *b, UndoRec *r, int inverse, int *structural)
+{
+    int ok = 1;
+    *structural = 0;
+    b->uapply = 1;
+    switch (r->op) {
+    case UNDO_INS:
+        if (inverse) {
+            delete_n(b, r->y, r->x, r->n);
+            b->cy = r->y; b->cx = r->x;
+        } else {
+            ok = r->text && insert_text(b, r->y, r->x, r->text, r->n);
+            b->cy = r->y; b->cx = r->x + r->n;
+        }
+        break;
+    case UNDO_DEL:
+        if (inverse) {
+            ok = r->text && insert_text(b, r->y, r->x, r->text, r->n);
+            b->cy = r->y; b->cx = r->x + r->n;
+        } else {
+            delete_n(b, r->y, r->x, r->n);
+            b->cy = r->y; b->cx = r->x;
+        }
+        break;
+    case UNDO_SPLIT:
+        ok = inverse ? edjoinline(b, r->y)
+                     : edsplitline(b, r->y, r->x);
+        b->cy = inverse ? r->y : r->y + 1;
+        b->cx = inverse ? r->x : 0;
+        *structural = 1;
+        break;
+    case UNDO_JOIN:
+        ok = inverse ? edsplitline(b, r->y, r->x)
+                     : edjoinline(b, r->y);
+        b->cy = r->y;
+        b->cx = inverse ? r->x : r->x;
+        if (inverse) { b->cy = r->y + 1; b->cx = 0; }
+        *structural = 1;
+        break;
+    }
+    b->uapply = 0;
+    return ok;
+}
+
+int ed_undo(Buffer *b, int *structural)
+{
+    UndoRec *r;
+    int line;
+    if (b->utop <= 0) return -1;
+    r = &b->ur[b->utop - 1];
+    line = r->y;
+    if (!applyrec(b, r, 1, structural)) return -1;
+    b->utop--;
+    b->ubreak = 1;
+    b->maxwdirty = 1;
+    udirty(b);
+    return line;
+}
+
+int ed_redo(Buffer *b, int *structural)
+{
+    UndoRec *r;
+    int line;
+    if (b->utop >= b->nur) return -1;
+    r = &b->ur[b->utop];
+    line = r->y;
+    if (!applyrec(b, r, 0, structural)) return -1;
+    b->utop++;
+    b->ubreak = 1;
+    b->maxwdirty = 1;
+    udirty(b);
+    return line;
 }
 
 /* ---- saving ------------------------------------------------------ */

@@ -337,9 +337,174 @@ static void saving(void)
     roundtrip("save empty", "", 0);
 }
 
+/* type a string one character at a time, the way a user does */
+static void typerun(Buffer *b, int y, int x, const char *t)
+{
+    int i;
+    for (i = 0; t[i]; i++) edinsch(b, y, x + i, t[i]);
+}
+
+static void undoing(void)
+{
+    Buffer b;
+    int st, line;
+
+    /* a typing RUN is one undo, not one per letter */
+    bufinit(&b);
+    bufsplit(&b, "hello\n", 6);
+    ck(!ed_canundo(&b), "a fresh buffer has nothing to undo");
+    ck(!b.dirty, "a fresh buffer is clean");
+    typerun(&b, 0, 5, " world");
+    ck(!strcmp(b.ln[0], "hello world"), "typed");
+    ck(b.dirty, "typing dirties");
+    ck(ed_canundo(&b), "and can be undone");
+    line = ed_undo(&b, &st);
+    ck(line == 0 && !st, "undo reports its line, not structural");
+    ck(!strcmp(b.ln[0], "hello"), "ONE undo took back the whole run");
+    ck(!b.dirty, "undone back to the saved state is clean again");
+    ck(!ed_canundo(&b), "and there is nothing left to undo");
+
+    /* and redo puts it back, character for character */
+    ck(ed_canredo(&b), "redo is available");
+    ed_redo(&b, &st);
+    ck(!strcmp(b.ln[0], "hello world"), "redo restored the run");
+    ck(b.dirty, "redone away from the saved state is dirty");
+    buffree(&b);
+
+    /* ed_break splits a run in two */
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    typerun(&b, 0, 0, "abc");
+    ed_break(&b);
+    typerun(&b, 0, 3, "def");
+    ed_undo(&b, &st);
+    ck(!strcmp(b.ln[0], "abc"), "break ends a run");
+    ed_undo(&b, &st);
+    ck(!strcmp(b.ln[0], ""), "and the first run undoes separately");
+    buffree(&b);
+
+    /* a run only continues where the last character ENDED */
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    typerun(&b, 0, 0, "ab");
+    edinsch(&b, 0, 0, 'X');     /* back at the head: a new run */
+    ck(!strcmp(b.ln[0], "Xab"), "inserted at the head");
+    ed_undo(&b, &st);
+    ck(!strcmp(b.ln[0], "ab"), "only the head insert came back out");
+    buffree(&b);
+
+    /* Backspace walks left; Del stays put. Both coalesce, and both
+     * must restore the text in the RIGHT ORDER. */
+    bufinit(&b);
+    bufsplit(&b, "abcdef\n", 7);
+    eddelch(&b, 0, 5);
+    eddelch(&b, 0, 4);
+    eddelch(&b, 0, 3);          /* backspacing f, e, d */
+    ck(!strcmp(b.ln[0], "abc"), "backspaced to abc");
+    ed_undo(&b, &st);
+    ck(!strcmp(b.ln[0], "abcdef"), "one undo restored def in order");
+    buffree(&b);
+
+    bufinit(&b);
+    bufsplit(&b, "abcdef\n", 7);
+    eddelch(&b, 0, 0);
+    eddelch(&b, 0, 0);
+    eddelch(&b, 0, 0);          /* Del at the head, three times */
+    ck(!strcmp(b.ln[0], "def"), "deleted to def");
+    ed_undo(&b, &st);
+    ck(!strcmp(b.ln[0], "abcdef"), "one undo restored abc in order");
+    buffree(&b);
+
+    /* structural edits report themselves as such */
+    bufinit(&b);
+    bufsplit(&b, "onetwo\n", 7);
+    edsplitline(&b, 0, 3);
+    ck(b.n == 2, "split happened");
+    line = ed_undo(&b, &st);
+    ck(st, "undoing a split is structural");
+    ck(b.n == 1 && !strcmp(b.ln[0], "onetwo"), "split undone");
+    ed_redo(&b, &st);
+    ck(st && b.n == 2, "and redone");
+    ck(!strcmp(b.ln[0], "one") && !strcmp(b.ln[1], "two"),
+       "redone split is the same split");
+    buffree(&b);
+
+    /* a join of two REAL lines, undone - the seam has to come back
+     * exactly where it was, not at the end of the joined text */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\n", 8);
+    edjoinline(&b, 0);
+    ck(b.n == 1 && !strcmp(b.ln[0], "onetwo"), "joined");
+    ed_undo(&b, &st);
+    ck(st && b.n == 2 && !strcmp(b.ln[0], "one") &&
+       !strcmp(b.ln[1], "two"), "join undone at the right seam");
+    ed_redo(&b, &st);
+    ck(st && b.n == 1 && !strcmp(b.ln[0], "onetwo"), "join redone");
+    buffree(&b);
+    (void)line;
+
+    /* a new edit throws the redo future away */
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    typerun(&b, 0, 0, "abc");
+    ed_undo(&b, &st);
+    ck(ed_canredo(&b), "redo available before the new edit");
+    typerun(&b, 0, 0, "z");
+    ck(!ed_canredo(&b), "a new edit discards the redo future");
+    ck(!strcmp(b.ln[0], "z"), "and the new edit stands");
+    buffree(&b);
+
+    /* the save point moves, and dirty follows it in both directions */
+    bufinit(&b);
+    bufsplit(&b, "a\n", 2);
+    typerun(&b, 0, 1, "bc");
+    ck(b.dirty, "dirty after typing");
+    ed_marksaved(&b);
+    ck(!b.dirty, "clean at the new save point");
+    ed_undo(&b, &st);
+    ck(b.dirty, "undoing AWAY from the save point dirties again");
+    ed_redo(&b, &st);
+    ck(!b.dirty, "and redoing back to it is clean");
+    buffree(&b);
+
+    /* undo past the beginning, redo past the end: no-ops, not
+     * crashes, and they say so */
+    bufinit(&b);
+    bufsplit(&b, "x\n", 2);
+    ck(ed_undo(&b, &st) == -1, "undo with nothing to undo");
+    ck(ed_redo(&b, &st) == -1, "redo with nothing to redo");
+    ck(!strcmp(b.ln[0], "x"), "and the buffer is untouched");
+    buffree(&b);
+
+    /* loading a file is not an edit */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\n", 8);
+    ck(!ed_canundo(&b), "a load leaves nothing on the undo stack");
+    ck(!b.dirty, "and leaves the buffer clean");
+    buffree(&b);
+
+    /* the stack is bounded, and the oldest records fall off rather
+     * than the newest being refused */
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    {
+        int i;
+        for (i = 0; i < UNDO_MAX + 50; i++) {
+            edinsch(&b, 0, 0, 'x');
+            ed_break(&b);       /* one record each, no coalescing */
+        }
+        ck(b.nur <= UNDO_MAX, "the undo stack is bounded");
+        ck(ed_canundo(&b), "and the newest edits are still undoable");
+        ed_undo(&b, &st);
+        ck(b.len[0] == UNDO_MAX + 49, "the last edit undid");
+    }
+    buffree(&b);
+}
+
 int main(void)
 {
     lineends();
+    undoing();
     saving();
     eolstyle();
     edits();

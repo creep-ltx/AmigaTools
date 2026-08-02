@@ -18,6 +18,33 @@
  * virtue is proven rather than argued - CFile's editor lost its
  * 8192-line cap and its 200-char line cap by growing these arrays,
  * and real memory is the only wall left. */
+/* ---- undo -------------------------------------------------------
+ * Command records, not snapshots: a 5,000-line file cannot afford a
+ * copy per keystroke on a machine with 8MB, and the inverse of every
+ * edit here is exactly one other edit.
+ *
+ * The records are pushed by the ed* primitives THEMSELVES, so no
+ * path can change a buffer without becoming undoable - a rule worth
+ * more than any amount of care at the call sites.
+ *
+ * One array, one cursor: records below `utop` are undoable, records
+ * at or above it are redoable, and a fresh edit throws the latter
+ * away. That is the whole model. */
+#define UNDO_INS   0            /* n characters went in at (y,x) */
+#define UNDO_DEL   1            /* `text` came out at (y,x) */
+#define UNDO_SPLIT 2            /* line y split at x */
+#define UNDO_JOIN  3            /* line y+1 joined onto y, which was
+                                 * x characters long at the time */
+#define UNDO_MAX   500          /* oldest records fall off the end */
+
+typedef struct {
+    unsigned char op;
+    int  y, x;
+    int  n;                     /* INS: how many; DEL: strlen(text) */
+    char *text;                 /* DEL only, else NULL */
+    int  cy, cx;                /* where the cursor was before it */
+} UndoRec;
+
 typedef struct {
     char **ln;                  /* per-line text, NUL-terminated */
     int   *len;                 /* used length, excluding the NUL */
@@ -40,6 +67,17 @@ typedef struct {
      * saved would show every line changed. */
     int    eol;                 /* EOL_LF / EOL_CRLF / EOL_CR */
     int    noeol;               /* the last line had no terminator */
+    /* undo */
+    UndoRec *ur;
+    int    nur;                 /* records held */
+    int    utop;                /* the undo/redo split point */
+    int    urcap;
+    int    ubreak;              /* 1 = do not merge with the top
+                                 * record; set by the app whenever
+                                 * the cursor moves on its own */
+    int    usaved;              /* utop as of the last save, so undo
+                                 * back to it clears `dirty` */
+    int    uapply;              /* inside an undo: do not record */
     char   path[310];
     char   name[110];
 } Buffer;
@@ -82,6 +120,26 @@ void eddelch(Buffer *b, int y, int x);
 int  edsplitline(Buffer *b, int y, int x);
 /* join line y+1 onto the end of line y */
 int  edjoinline(Buffer *b, int y);
+
+/* undo/redo one step. Returns -1 when there was nothing to do,
+ * otherwise the line the change starts at; *structural is set when
+ * lines were added or removed, so every row below moved and the
+ * caller must repaint rather than touch one row. The cursor is left
+ * where the edit happened, in b->cy/b->cx. */
+int  ed_undo(Buffer *b, int *structural);
+int  ed_redo(Buffer *b, int *structural);
+
+/* end the current coalescing run: the next typed character starts a
+ * new undo record rather than extending the last. The app calls this
+ * whenever the cursor moves for any reason other than typing. */
+void ed_break(Buffer *b);
+
+/* remember this point as the saved state, so undoing back to it
+ * clears `dirty` and redoing away from it sets it again */
+void ed_marksaved(Buffer *b);
+
+int  ed_canundo(const Buffer *b);
+int  ed_canredo(const Buffer *b);
 
 /* ---- saving -----------------------------------------------------
  * The bytes a save produces are the one thing in an editor that must

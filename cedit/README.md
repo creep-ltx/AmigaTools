@@ -5,8 +5,7 @@ is more than one — a single document keeps the row for text), a
 line-number gutter, border scrollbars with the system's own arrows, a
 status row, and syntax highlighting that knows **Amiga E** first.
 
-**Not finished.** This is `0.1b2` — it edits and saves, but has no
-undo yet. See
+**Not finished.** This is `0.1b3` — it edits, saves and undoes. See
 [roadmap.md](roadmap.md) for where it is going and what is already
 done.
 
@@ -57,6 +56,11 @@ way. Anything
 that would throw away unsaved changes asks first, with Cancel as the
 default — and Close All and Quit ask **once** for the whole set
 rather than once per document.
+
+Edit menu: `Undo` (Amiga+Z) and `Redo` (Amiga+Y). One undo takes back
+a whole typing run, not a letter at a time — a run ends when you move
+the cursor. Undoing back to the last save marks the file unmodified
+again, and redoing away from it marks it changed.
 
 Settings menu: line numbers, status bar, fast scroll, and **Tab size**
 1–10. Every one of them writes straight back to the icon, so the menu
