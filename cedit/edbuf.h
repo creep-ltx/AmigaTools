@@ -53,9 +53,14 @@ typedef struct {
     char **ln;                  /* per-line text, NUL-terminated */
     int   *len;                 /* used length, excluding the NUL */
     int   *cap;                 /* allocated per line */
-    unsigned char *lex;         /* b5: per-line lexer state. Carried
-                                 * now so growing the table later
-                                 * touches one place, not four. */
+    unsigned char *lex;         /* the state each line STARTS in.
+                                 * lex[0] is always 0. Kept narrow on
+                                 * purpose - one byte per line across
+                                 * a 12,000-line file is worth it -
+                                 * and always read through an int
+                                 * local before comparing, because of
+                                 * the -O2 m68k narrow-load bug that
+                                 * widened LxRun.cls. */
     int    n;                   /* lines in use */
     int    tab;                 /* table capacity */
     int    top;                 /* scroll top, in rows */
@@ -88,6 +93,8 @@ typedef struct {
      * 0; the two ends may be in either order and ed_selrange sorts
      * them, because a drag can go backwards. */
     int    selon, say, sax;
+    int    lang;                /* LX_E, or LX_NONE for plain text */
+    int    lexdone;             /* lines whose lex[] state is known */
     char   path[310];
     char   name[110];
 } Buffer;
@@ -182,6 +189,19 @@ int  ed_instext(Buffer *b, int y, int x, const char *t, long n);
  * character index in line y, and back. A click lands on a column;
  * the buffer is indexed by character. */
 int  ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask);
+
+/* ---- syntax state -------------------------------------------------
+ * lex[i] is the state line i STARTS in, so line i can be coloured
+ * knowing only that byte. ed_lexupto brings the array up to date as
+ * far as `upto`, lexing forward from wherever it already was.
+ *
+ * After an edit, ed_lexdirty walks forward from the edited line and
+ * stops the moment a recomputed state matches the one already
+ * stored: a change inside a line almost never reaches the line after
+ * it, so this is one line of work in the ordinary case and only runs
+ * long when a block comment was opened or closed. */
+void ed_lexupto(Buffer *b, int upto);
+void ed_lexdirty(Buffer *b, int y);
 
 /* ---- saving -----------------------------------------------------
  * The bytes a save produces are the one thing in an editor that must

@@ -220,7 +220,6 @@ void ltx_setapp(const LtxApp *a);
 
 /* ---- scrolling and the deferred paint --------------------------- */
 
-extern int ttfast;              /* FASTSCROLL= - blit, or repaint */
 /* b62/b63: while `defer` is set the state still updates exactly as
  * before, but painting is skipped and merely OWED, and flushpaint()
  * settles it once the port is empty. The debt is TYPED so paying it

@@ -5,8 +5,8 @@ is more than one — a single document keeps the row for text), a
 line-number gutter, border scrollbars with the system's own arrows, a
 status row, and syntax highlighting that knows **Amiga E** first.
 
-**Not finished.** This is `0.1b5` — it edits, saves, undoes and talks
-to the clipboard. See
+**Not finished.** This is `0.1b6` — it edits, saves, undoes, talks to
+the clipboard and colours Amiga E. See
 [roadmap.md](roadmap.md) for where it is going and what is already
 done.
 
@@ -74,8 +74,30 @@ a whole typing run, not a letter at a time — a run ends when you move
 the cursor. Undoing back to the last save marks the file unmodified
 again, and redoing away from it marks it changed.
 
-Settings menu: line numbers, status bar, fast scroll, and **Tab size**
-1–10. Every one of them writes straight back to the icon, so the menu
+Settings menu: line numbers, status bar, **Syntax colour**, and
+**Tab size** 1–10.
+
+### Syntax colour
+
+`.e` files are coloured; anything else is plain text. On a stock
+4-colour Workbench there are three usable pens and one of them is the
+selection bar, so the honest scheme is *one* distinction that reads
+well — comments and strings recede to blue and everything else stays
+black. Three colours that all looked the same would be worse.
+
+For the real thing, give cedit a screen of its own:
+
+```
+OPENSCREEN=cedit
+SCREENDEPTH=3
+```
+
+Pens 4 and up are then cedit's to define, and comments go green,
+strings amber, keywords blue and numbers mauve — while pens 0–3 stay
+exactly as Workbench set them, so the tabs, the gutter and the
+selection keep looking native. On somebody *else's* screen those pens
+belong to whoever opened it, so cedit degrades rather than repainting
+another program's palette. Every one of them writes straight back to the icon, so the menu
 and the tooltypes never disagree.
 
 Saving writes back the line endings the file arrived with — LF, CRLF
@@ -88,7 +110,7 @@ rather than a truncated source.
 
 All optional, all inert when absent, so a shell launch is unchanged.
 `FONT=topaz/8` · `TABSIZE=1..10` · `GUTTER=YES|NO` (line numbers) ·
-`STATUSBAR=YES|NO` · `FASTSCROLL=YES|NO` · `DRAWER=` where the file
+`STATUSBAR=YES|NO` · `HIGHLIGHT=YES|NO` · `DRAWER=` where the file
 requester starts · `OPENSCREEN=name` and `SCREENDEPTH=n` for a screen
 of cedit's own · `PUBSCREEN=name` to attach to somebody else's ·
 `LEFT= TOP= WIDTH= HEIGHT=`.

@@ -662,7 +662,6 @@ int defer;
 int dirtyall, dirtyrows, dirtyknob;
 int scrollfrom, scrollfromset;
 int ltx_appowed;
-int ttfast;
 
 /* keep both knobs honest: body = visible share, pot = position */
 void updscrollers(void)
@@ -954,26 +953,22 @@ void paintscroll(int from, int to)
 {
     int d = to - from, vr;
     if (d == 0 || ltxapp == NULL) return;
-    /* b92: with Fast scroll OFF every step is a full row repaint -
-     * no blit, no retained pixels. His screenshots show the screen
-     * holding TWO scroll states split at a seam, and since scrolling
-     * only ever blits and redraws the entering rows, nothing ever
-     * repairs that. Turning the blit off decides in one boot whether
-     * the fault is in the blit or in the row drawing, and if it is
-     * the blit this is also a working fallback - b65/b66 made a full
-     * repaint far cheaper than it used to be. */
-    if (ttfast && (d > -crows) && (d < crows)) {
-        SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
-        /* b93: ScrollRaster, NOT ScrollWindowRaster. His bisection
-         * settled it - Fast scroll OFF (full row repaint) is clean,
-         * ON was not, so the fault was the blit and not the row
-         * drawing. And cdiff was the only tool in this family using
-         * the V39 Intuition call: CCON scrolls with graphics.library's
-         * ScrollRaster, seventeen call sites, on this same PiStorm
-         * A1200 at five times stock speed with no artifacts. Use the
-         * primitive that is proven on the hardware in front of us.
-         * Bonus: ScrollRaster is V33, so the fast path no longer
-         * needs the >= V39 guard the old call did. */
+    /* A jump of a page or more is repainted WHOLE - one pass beats a
+     * huge blit plus a full repaint anyway - so the distance guard
+     * stays. What is gone is the choice.
+     *
+     * There used to be a FASTSCROLL switch here. It was born at
+     * cdiff b92 as a BISECTION TOOL, to answer whether an artefact
+     * lived in the blit or in the row drawing; it answered (the
+     * blit), which sent b93 from ScrollWindowRaster to graphics
+     * library's ScrollRaster - the primitive CCON already ran at
+     * five times stock speed on this same hardware. Then the option
+     * stayed, with its default left on the slow side, and cedit
+     * inherited that: every one-line scroll repainting every row.
+     * His word for it was "slideshow", and his verdict on the option
+     * was to remove it altogether. A setting whose only effect is to
+     * make things worse is a trap, not a choice. */
+    if ((d > -crows) && (d < crows)) {
         ScrollRaster(rp, 0, d * fh,
                      gx0, conty,
                      gx0 + viscols * fw - 1,

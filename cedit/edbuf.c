@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "edbuf.h"
+#include "elex.h"
 
 void bufinit(Buffer *b)
 {
@@ -119,6 +120,7 @@ int bufsplit(Buffer *b, const char *raw, long got)
     b->nur = b->utop = 0;
     b->usaved = 0;
     b->dirty = 0;
+    b->lexdone = 0;
     if (b->n == 0) {
         /* an empty file still gets one empty line - a buffer with no
          * lines has no cursor position to be in - but that line is
@@ -636,6 +638,49 @@ int ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask)
         if (o == col) return i + 1;
     }
     return b->len[y];
+}
+
+/* ---- syntax state -------------------------------------------------- */
+
+void ed_lexupto(Buffer *b, int upto)
+{
+    LxRun scratch[8];
+    int nr;
+    if (b->lang == LX_NONE) return;
+    if (upto >= b->n) upto = b->n - 1;
+    if (b->lexdone < 1) { if (b->n) b->lex[0] = 0; b->lexdone = 1; }
+    while (b->lexdone <= upto) {
+        int i = b->lexdone - 1;
+        unsigned char st = lx_line(b->lang, b->lex[i], b->ln[i],
+                                   b->len[i], scratch,
+                                   (int)(sizeof(scratch) / sizeof(scratch[0])),
+                                   &nr);
+        b->lex[b->lexdone] = st;
+        b->lexdone++;
+    }
+}
+
+void ed_lexdirty(Buffer *b, int y)
+{
+    LxRun scratch[8];
+    int nr, i;
+    if (b->lang == LX_NONE) return;
+    if (y < 0) y = 0;
+    if (y >= b->n) { if (b->lexdone > b->n) b->lexdone = b->n; return; }
+    /* the state line y STARTS in cannot have changed - only what it
+     * hands to the lines after it */
+    for (i = y; i + 1 < b->lexdone && i + 1 < b->n; i++) {
+        int old, now;
+        unsigned char st = lx_line(b->lang, b->lex[i], b->ln[i],
+                                   b->len[i], scratch,
+                                   (int)(sizeof(scratch) / sizeof(scratch[0])),
+                                   &nr);
+        old = b->lex[i + 1];    /* through an int: the -O2 rule */
+        now = st;
+        if (old == now) return;             /* converged - stop */
+        b->lex[i + 1] = st;
+    }
+    if (b->lexdone > b->n) b->lexdone = b->n;
 }
 
 /* ---- saving ------------------------------------------------------ */

@@ -465,27 +465,84 @@ area, so nothing had to be rebound. It is also how CCON selects.
       bringing all of it back; and a copy pasting into a `CON:`
       shell to prove the FTXT interop.
 
-## 0.1b6 — the E lexer, behind a toggle
+## 0.1b6 — the E lexer — BUILT 2.8.26, AWAITING BOOT
 
-- [ ] One state byte per line (normal / in-block-comment /
-      in-string). An edit re-lexes from that line until the state
-      byte matches what it was — almost always one line. A scroll
-      lexes only the rows that entered.
-- [ ] E first: `->` line comments, `/* */`, `'` strings, `PROC`/
-      `ENDPROC`/`DEF`/`OBJECT`/`PTR TO`/`HANDLE`. Corpus: 31,906
-      lines of E in cfile, ccon and cfile13 alone (39,183 across the
-      family), lexed on the host by the harness before anything
-      boots.
-- [ ] **Pen map chosen by screen depth, not by taste.** On a
-      4-colour WB there are about three usable pens — comment,
-      keyword, everything else. `OPENSCREEN=` + `SCREENDEPTH=3`
-      gives eight and a real scheme fits. Same lesson as "no dark
-      grey on a 4-colour WB", generalised.
-- [ ] **`HIGHLIGHT` toggle from day one, and measure it.** Plain row
-      = one `Text()` call; a highlighted C row = five to eight.
-      Count them on the 020 before highlighting is allowed to
-      default on. If the number is bad it goes off by default, or
-      it goes entirely — the Myers rule.
+The reason cedit exists rather than being another editor.
+
+- [x] **`elex.{c,h}`, pure logic**, harness-proven on host and vamos
+      exactly as `edbuf` is. Knows nothing about pens, screens or
+      columns: it hands back spans in SOURCE character positions and
+      the renderer decides what they look like.
+- [x] **One state byte per line** (`lex[i]` = the state line i
+      *starts* in), so a row can be coloured knowing only that byte.
+      After an edit, `ed_lexdirty` walks forward and **stops the
+      moment a recomputed state matches the stored one** — a change
+      inside a line almost never reaches the next, so it is one
+      line of work in the ordinary case and only runs long when a
+      block comment was opened or closed.
+- [x] E's real shape, not a C lexer with different keywords: `->` to
+      end of line, **nested** `/* */` (E nests them, so the state is
+      a depth and not a flag), `'…'` and `"…"` with backslash
+      escapes, `$hex`/`%binary`, and whole-word uppercase keywords —
+      because E is case sensitive and a variable called `to` or a
+      field called `list` is very common.
+- [x] **The corpus is the test.** The harness lexes cfile.e,
+      ccon-handler.e, cfile13.e and cmenu.e — **33,735 lines** nobody
+      wrote with a lexer in mind — and asserts spans are ordered,
+      start at 0, never run past the line, and that the comment state
+      **closes at 0 at end of file**. All four compile, so that last
+      one is real evidence and not a tautology.
+- [x] **A SECOND gcc `-O2` m68k miscompilation, found by the vamos
+      leg.** `runs[i].cls != runs[i-1].cls` on an `unsigned char`
+      struct field reported a false match on data that printed
+      correctly one statement earlier. Host fine, `-O0`/`-O1` fine,
+      the same loop over the `int` field beside it fine, and a
+      `printf` in the body fine. Every rewrite of the *comparison*
+      still failed; widening the *field* to `int` fixed it. Written
+      up in AmigaReferences/toolchain-and-testing.md beside cdiff's
+      b100. It also matters for the product, not just the test —
+      `push()` compares that field on every span.
+- [x] **The colours answer his question.** Content had been drawn in
+      four pens; the furniture already used the screen's own. On a
+      stock 4-colour WB the honest scheme is ONE distinction that
+      reads well — comments and strings recede to blue — because
+      three that all look alike is worse than one that works. With
+      `OPENSCREEN=` + `SCREENDEPTH=3` pens 4–7 are cedit's: comment
+      green, string amber, keyword blue, number mauve, with 0–3 left
+      exactly as Workbench set them so tabs, gutter and selection
+      stay native. On somebody else's screen it degrades rather than
+      repainting another program's palette.
+- [x] Syntax and selection merge into ONE run list per row, the
+      selection winning where they overlap, every run written exactly
+      once — so a highlighted, partly-selected row is still one pass
+      and can never be caught half-painted.
+- [x] `HIGHLIGHT=` tooltype and a Settings menu toggle that writes
+      back to the icon.
+- [x] **Scrolling, and the option that should never have been one.**
+      He measured cedit against Annotate and called it a slideshow.
+      Two causes, both mine. The small one: `erow` called `explen()`
+      per span and `explen` walks from column zero, so a row with six
+      spans walked its line twelve times over — now one pass converts
+      every span start and both selection ends together. The large
+      one: `FASTSCROLL` **defaulted to OFF**, inherited from cdiff's
+      b94, so every one-line scroll repainted every row and since b6
+      lexed every one of them too. Annotate does exactly what our
+      fast path does (`annDraw.c scrollnormal()`: ClipBlit the
+      content rectangle, redraw only the entering lines) — we simply
+      were not doing it.
+      **His verdict: remove the option entirely** — code, tooltype
+      and menu, in both tools. It was a bisection tool from b92 that
+      outlived its question, and a setting whose only effect is to
+      make things worse is a trap, not a choice. The distance guard
+      stays: a jump of a page or more is still repainted whole,
+      because one pass beats a huge blit plus a full repaint.
+      **cdiff gets faster for free** — it had the same inverted
+      default since b94.
+- [ ] **BOOT GATE:** open a `.e` file and see comments recede. Then
+      `OPENSCREEN=cedit`/`SCREENDEPTH=3` for the full scheme. And the
+      measurement that was promised at b0: scroll a long `.e` file
+      with Syntax colour on and off and see whether the difference is
+      felt on the 020 — if it is, the default changes.
 
 ## Later, not promised
 

@@ -77,10 +77,10 @@ static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
 static int  ttdepth;            /* SCREENDEPTH= - 0 = clone WB */
 /* cedit b0b: ttstatus lives in ltxwin.c - it decides the grid */
 static int  ttcontext = 3;      /* CONTEXT=n around each change */
-/* cedit b0b: ttfast lives in ltxwin.c beside the blit it governs.
- * b94: DEFAULT OFF - on his machine the blit corrupts and a full row
- * repaint does not. b92: use the scroll blit at all? - a bisection,
- * and a usable fallback if the blit is at fault. */
+/* cedit b6: FASTSCROLL is gone entirely (his call). It was a
+ * bisection tool from b92 that outlived its question, and its
+ * default was left on the slow side - so every one-line scroll
+ * repainted every row. The blit is now simply what scrolling is. */
 /* cedit b0b: tttab/ttmask live in ltxwin.c - the row painter owns
  * the tab grid. readtooltypes still sets them from TABSIZE=. */
 static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
@@ -2132,8 +2132,6 @@ static struct NewMenu newmenu[] = {
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Differences only", (STRPTR)"D",
       CHECKIT | MENUTOGGLE, 0, NULL },
-    { NM_ITEM,  (STRPTR)"Fast scroll",   NULL,
-      CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Keys...",       (STRPTR)"K",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"About...",      NULL,         0, 0, NULL },
@@ -2395,13 +2393,6 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                 findrow = -1; findn = findof = 0;
                 clamptops();
                 drawpage();
-            } else if (ITEMNUM(c) == 2 && item) {
-                ttfast = (item->Flags & CHECKED) ? 1 : 0;
-                drawpage();     /* repaint clean either way */
-                if (ttoollock && ttoolname[0] &&
-                    !iconset("FASTSCROLL", ttfast ? "YES" : "NO"))
-                    ltx_msg("could not write FASTSCROLL to the icon\n"
-                        "(the setting still applies this session)");
             }
         } else if (MENUNUM(c) == 4) {           /* Help */
             switch (ITEMNUM(c)) {
@@ -2463,9 +2454,6 @@ static int openmain(void)
                     if (!strcmp(lb, "Status bar")) {
                         if (ttstatus) newmenu[mi].nm_Flags |= CHECKED;
                         else          newmenu[mi].nm_Flags &= ~CHECKED;
-                    } else if (!strcmp(lb, "Fast scroll")) {
-                        if (ttfast) newmenu[mi].nm_Flags |= CHECKED;
-                        else        newmenu[mi].nm_Flags &= ~CHECKED;
                     }
                     continue;
                 }
@@ -2939,10 +2927,6 @@ static void readtooltypes(struct WBStartup *wbs)
          * a 2-colour screen pens 2 and 3 do not exist */
         ttdepth = ttnum(tt, "SCREENDEPTH", 2, 8, 0);
         ttcontext = ttnum(tt, "CONTEXT", 0, 50, 3);
-        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"FASTSCROLL");
-        if (v) ttfast = !(tteq((char *)v, "NO") ||
-                          tteq((char *)v, "OFF") ||
-                          tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"STATUSBAR");
         if (v) ttstatus = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||

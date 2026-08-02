@@ -38,10 +38,11 @@
 #include <string.h>
 #include "ltxwin.h"
 #include "edbuf.h"
+#include "elex.h"
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cedit 0.1b5 (2.8.26)";
+    "$VER: cedit 0.1b6 (2.8.26)";
 
 /* ---- the buffer -------------------------------------------------
  * The line table, the splitter and the width arithmetic live in
@@ -100,6 +101,8 @@ static int loadbuf(Buffer *b, const char *path)
     free(raw);
     strncpy(b->path, path, sizeof(b->path) - 1);
     strncpy(b->name, (char *)FilePart((STRPTR)path), sizeof(b->name) - 1);
+    b->lang = lx_language(b->name);
+    b->lexdone = 0;
     return 1;
 }
 
@@ -294,6 +297,46 @@ static int  ttdepth;            /* SCREENDEPTH= */
 static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 static int  ttgutter = 1;       /* GUTTER=YES/NO - line numbers */
 static char ttdrawer[310];      /* DRAWER= - where the requester starts */
+static int  tthilite = 1;       /* HIGHLIGHT=YES/NO - syntax colour */
+
+/* ---- syntax colours ----------------------------------------------
+ * On a plain 4-colour Workbench there are three usable pens and one
+ * of them is the selection bar, so the honest scheme is ONE
+ * distinction that reads well: comments and strings recede to blue,
+ * everything else stays black. Three colours that all look the same
+ * would be worse than one that does not.
+ *
+ * On a screen of cedit's OWN at SCREENDEPTH=3 or more, pens 4 and up
+ * are ours to define and the real scheme appears. On somebody else's
+ * screen those pens belong to whoever opened it - so we degrade
+ * rather than repaint another program's palette. */
+static int lxpen[LX_NCLASS];
+static int lxrich;              /* the deep scheme is in force */
+
+static void setuppens(struct Screen *scr)
+{
+    int i, deep = 0;
+    if (scr && ltx_myscr == scr && scr->RastPort.BitMap &&
+        scr->RastPort.BitMap->Depth >= 3)
+        deep = 1;
+    lxrich = deep;
+    for (i = 0; i < LX_NCLASS; i++) lxpen[i] = 1;   /* plain text */
+    if (!deep) {
+        lxpen[LX_COMMENT] = 3;
+        lxpen[LX_STRING]  = 3;
+        return;
+    }
+    lxpen[LX_COMMENT] = 4;
+    lxpen[LX_STRING]  = 5;
+    lxpen[LX_KEYWORD] = 6;
+    lxpen[LX_NUMBER]  = 7;
+    /* 0-3 are Workbench's and stay exactly as they are, so the tabs,
+     * the gutter and the selection keep looking native */
+    SetRGB4(&scr->ViewPort, 4,  0,  9,  0);   /* comment  - green */
+    SetRGB4(&scr->ViewPort, 5, 12,  5,  0);   /* string   - amber */
+    SetRGB4(&scr->ViewPort, 6,  1,  1, 13);   /* keyword  - blue  */
+    SetRGB4(&scr->ViewPort, 7, 11,  0, 11);   /* number   - mauve */
+}
 
 static struct MsgPort *appport;
 static APTR   appwin;
@@ -326,7 +369,7 @@ static struct NewMenu newmenu[] = {
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Status bar", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
-    { NM_ITEM,  (STRPTR)"Fast scroll", NULL,
+    { NM_ITEM,  (STRPTR)"Syntax colour", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     /* his ask: tab size from the menu, 1-10. Radio rather than
      * toggle - exactly one is true - which in GadTools means CHECKIT
@@ -444,7 +487,6 @@ static void erow(int vr)
     int i = cur->top + vr;
     int y = conty + vr * fh;
     int w;
-    LtxRun run;
     if (i >= cur->n) {                  /* past the end: blank */
         SetAPen(rp, 0);
         RectFill(rp, gx0, y, gx0 + viscols * fw - 1, y + fh - 1);
@@ -452,43 +494,100 @@ static void erow(int vr)
     }
     if (gutw > 0) drawnum(gx0, y, (long)i, 3, 0);
     w = ltx_expandvis(cur->ln[i], cur->len[i], textw());
-    /* b5: the selection, and the first real use of the N-run painter
-     * that b0b widened for the lexer. Up to three runs - before the
-     * selection, the selection itself in the CFile bar colours, and
-     * after it - each written exactly once, so a selected row is
-     * still one pass of Text() calls and never half-painted. */
+    /* One run list per row, built from two independent things: what
+     * the lexer says the text IS, and what the selection says is
+     * picked. The selection wins where they overlap - it is the
+     * user's own statement about the text, and it has to read as one
+     * solid block or it stops looking like a selection at all.
+     *
+     * Every run is written exactly once (the b66 rule), so a
+     * highlighted row is still one pass and can never be caught
+     * half-painted. This is what b0b widened the painter for. */
     {
-        int y0, x0, y1, x1, nr = 0;
-        int s0 = -1, s1 = -1;
-        LtxRun runs[3];
-        if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
-            i >= y0 && i <= y1) {
-            /* the selected span of THIS row, in display columns */
-            int cs = (i == y0) ? explen(cur->ln[i], x0, tttab, ttmask) : 0;
-            int ce = (i == y1) ? explen(cur->ln[i], x1, tttab, ttmask)
-                               : explen(cur->ln[i], cur->len[i],
-                                        tttab, ttmask) + 1;
-            s0 = cs - hoff;
-            s1 = ce - hoff;
-            if (s0 < 0) s0 = 0;
-            if (s1 > w) s1 = w;
+        LtxRun runs[LX_MAXSPAN * 2 + 4];
+        LxRun sp[LX_MAXSPAN];
+        int spcol[LX_MAXSPAN + 1];
+        int nsp = 1, nr = 0, k;
+        int s0 = -1, s1 = -1, y0, x0, y1, x1;
+
+        sp[0].start = 0; sp[0].cls = LX_TEXT;
+        if (tthilite && cur->lang != LX_NONE) {
+            ed_lexupto(cur, i);
+            lx_line(cur->lang, cur->lex[i], cur->ln[i], cur->len[i],
+                    sp, LX_MAXSPAN, &nsp);
         }
-        runs[nr].start = 0; runs[nr].pen = 1; runs[nr].bg = 0; nr++;
-        if (s0 >= 0 && s1 > s0) {
-            if (s0 > 0) {
-                runs[nr].start = s0; runs[nr].pen = 2; runs[nr].bg = 3;
-                nr++;
+        /* ONE walk of the line, converting every character position
+         * we care about into a display column as we pass it: each
+         * span start, and the two selection ends.
+         *
+         * It used to call explen() per boundary, and explen walks
+         * from column zero - so a row with six spans walked the line
+         * twelve times over, on top of the expand pass. That is what
+         * made b6 scroll heavily, and it is exactly the kind of cost
+         * that is invisible on a host and obvious at 14MHz. */
+        {
+            const char *ln = cur->ln[i];
+            int len = cur->len[i], ci, col = 0, next = 0;
+            int wc0 = -1, wc1 = -1, sc0 = 0, sc1 = 0;
+            if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
+                i >= y0 && i <= y1) {
+                wc0 = (i == y0) ? x0 : 0;
+                wc1 = (i == y1) ? x1 : len + 1;  /* +1 = past the end,
+                                                  * so a whole line
+                                                  * reads as selected */
+            }
+            for (ci = 0; ci <= len; ci++) {
+                while (next < nsp && sp[next].start == ci)
+                    spcol[next++] = col;
+                if (ci == wc0) sc0 = col;
+                if (ci == wc1) sc1 = col;
+                if (ci == len) break;
+                if (ln[ci] == '\t') {
+                    do { col++; } while (ttmask ? (col & ttmask)
+                                                : (col % tttab));
+                } else
+                    col++;
+            }
+            while (next < nsp) spcol[next++] = col;
+            spcol[nsp] = col;           /* the line's full width */
+            if (wc1 > len) sc1 = col + 1;
+            if (wc0 >= 0) {
+                s0 = sc0 - hoff;
+                s1 = sc1 - hoff;
+                if (s0 < 0) s0 = 0;
+                if (s1 > w) s1 = w;
+            }
+        }
+
+        for (k = 0; k < nsp && nr < (int)(sizeof(runs)/sizeof(runs[0])) - 3; k++) {
+            int c0 = spcol[k] - hoff;
+            int c1 = spcol[k + 1] - hoff;
+            int pen = lxpen[sp[k].cls];
+            if (c1 > w) c1 = w;
+            if (c0 < 0) c0 = 0;
+            if (c1 <= c0 && k + 1 < nsp) continue;
+            if (s0 >= 0 && s1 > s0 && c0 < s1 && c1 > s0) {
+                if (c0 < s0) {
+                    runs[nr].start = c0; runs[nr].pen = pen;
+                    runs[nr].bg = 0; nr++;
+                }
+                runs[nr].start = (c0 > s0) ? c0 : s0;
+                runs[nr].pen = 2; runs[nr].bg = 3; nr++;
+                if (c1 > s1) {
+                    runs[nr].start = s1; runs[nr].pen = pen;
+                    runs[nr].bg = 0; nr++;
+                }
             } else {
-                runs[0].pen = 2; runs[0].bg = 3;
-            }
-            if (s1 < w) {
-                runs[nr].start = s1; runs[nr].pen = 1; runs[nr].bg = 0;
-                nr++;
+                runs[nr].start = c0; runs[nr].pen = pen;
+                runs[nr].bg = 0; nr++;
             }
         }
+        if (nr == 0) {
+            runs[0].start = 0; runs[0].pen = 1; runs[0].bg = 0; nr = 1;
+        }
+        runs[0].start = 0;      /* the painter requires it */
         ltx_drawruns(textx(), y, ltx_vis, w, runs, nr);
     }
-    (void)run;
     /* no caret inside a live selection - the range is the statement,
      * and a caret in the middle of it says something else */
     if (i == cur->cy && !cur->selon) drawcaret(y);
@@ -697,7 +796,7 @@ static int openmain(void)
                     on = (atoi(lb) == tttab);
                 else if (!strcmp(lb, "Line numbers")) on = ttgutter;
                 else if (!strcmp(lb, "Status bar"))   on = ttstatus;
-                else if (!strcmp(lb, "Fast scroll"))  on = ttfast;
+                else if (!strcmp(lb, "Syntax colour")) on = tthilite;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -716,6 +815,7 @@ static int openmain(void)
     }
     if (appport) appwin = AddAppWindowA(0, 0, win, appport, NULL);
     addscrollers(dri, scr);
+    setuppens(scr);             /* while the screen is still in hand */
     ltx_screendone(scr, dri);
     calcgrid();
     return 1;
@@ -761,12 +861,12 @@ static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
         ttstr(tt, "PUBSCREEN", ttpubscr, sizeof(ttpubscr));
         /* floor of 2 planes: cedit draws in pens 0-3 */
         ttdepth = ttnum(tt, "SCREENDEPTH", 2, 8, 0);
-        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"FASTSCROLL");
-        if (v) ttfast = !(tteq((char *)v, "NO") ||
-                          tteq((char *)v, "OFF") ||
-                          tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"STATUSBAR");
         if (v) ttstatus = !(tteq((char *)v, "NO") ||
+                            tteq((char *)v, "OFF") ||
+                            tteq((char *)v, "FALSE"));
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"HIGHLIGHT");
+        if (v) tthilite = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
                             tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"GUTTER");
@@ -879,9 +979,10 @@ static int domenu(UWORD code)   /* 1 = quit */
                 calcgrid();
                 clamptop();
                 epage();
-            } else if (i == 2) {                        /* Fast scroll */
-                ttfast = on;
-                (void)iconset("FASTSCROLL", on ? "YES" : "NO");
+            } else if (i == 2) {                        /* Syntax */
+                tthilite = on;
+                (void)iconset("HIGHLIGHT", on ? "YES" : "NO");
+                epage();
             } else if (i == 3) {                        /* Tab size */
                 UWORD sub = SUBNUM(code);
                 if (sub != NOSUB) {
@@ -1026,6 +1127,7 @@ static void typech(char c)
     cur->cx++;
     if (had) ed_ungroup(cur);
     goalx = cur->cx;
+    ed_lexdirty(cur, cur->cy);  /* almost always one line of work */
     follow();
     damage(oldcy);              /* one row - the b2 minimal-redraw case */
     marktitle();
@@ -1040,6 +1142,10 @@ static void structural(void)
     dirtyrows = 1;
     dmgold = -1;                /* the whole page covers both rows */
     cur->maxwdirty = 1;
+    /* a line came or went, so every state byte after it shifted with
+     * the table - the cheapest honest answer is to re-lex from here */
+    if (cur->lexdone > cur->cy) cur->lexdone = cur->cy + 1;
+    ed_lexdirty(cur, cur->cy);
     calcgut();                  /* the line count changed */
     marktitle();
 }
@@ -1245,6 +1351,9 @@ static void dosaveas(void)
     strncpy(cur->name, (char *)FilePart((STRPTR)path),
             sizeof(cur->name) - 1);
     cur->name[sizeof(cur->name) - 1] = 0;
+    /* saving under a new name can change what the file IS */
+    cur->lang = lx_language(cur->name);
+    cur->lexdone = 0;
     if (!savebuf(cur, cur->path))
         msg("Could not write that file.");
     else
@@ -1273,9 +1382,11 @@ static void doundo(int redo)
     if (structural) {
         dirtyrows = 1;
         dmgold = -1;
+        if (cur->lexdone > line) cur->lexdone = line + 1;
         calcgut();              /* the line count may have changed */
     } else
         damage(oldcy);
+    ed_lexdirty(cur, line);
     marktitle();
 }
 
@@ -1335,6 +1446,8 @@ static void dopaste(void)
     free(t);
     goalx = cur->cx;
     ed_selclear(cur);
+    if (cur->lexdone > cur->cy) cur->lexdone = cur->cy + 1;
+    ed_lexdirty(cur, cur->cy);
     calcgut();
     follow();
     selpaint();
