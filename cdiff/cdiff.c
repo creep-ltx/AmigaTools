@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b81 (2.8.26)";
+    "$VER: cdiff 0.1b95 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -79,6 +79,14 @@ static char ttscrname[64];      /* OPENSCREEN= - name of OUR screen */
  * attach to the first one's screen. */
 static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
 static int  ttdepth;            /* SCREENDEPTH= - 0 = clone WB */
+static int  ttstatus = 1;       /* STATUSBAR=YES/NO, default on */
+static int  ttfast;             /* b94: DEFAULT OFF - on his machine
+                                 * the blit corrupts and a full row
+                                 * repaint does not. b92: use the
+                                 * scroll blit at all?
+                                 * session only - a bisection, and a
+                                 * usable fallback if the blit is at
+                                 * fault */
 static int  tttab = 8, ttmask = 7;      /* TABSIZE= */
 static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 /* b75: VIEW= removed (his call). It earned nothing: TREE re-set a
@@ -219,6 +227,14 @@ static int ndents, dtop, dsel;
  * when it threw the rest of that detour away.) */
 static int gmaxw, maxwdirty = 1;
 
+/* b82: the status row's numbers. Hunk starts are per-VIEW (the row
+ * numbering differs), the diffstat is per-PAIR. Both cached and
+ * rebuilt lazily - a status row that rescanned 12000 rows on every
+ * scroll would undo b12 and b62 in one go. */
+static int *ghs;                /* hunk start rows, ascending */
+static int ghn, ghcap, ghdirty = 1;
+static int gadds, gdels;        /* +a -d, counted from grows */
+
 /* b67: find state (his ask, modelled on a Navigation menu with
  * Find.../Find Next/Find Previous). findrow is the matched row in
  * the ACTIVE view's row numbering, -1 when nothing is current.
@@ -336,6 +352,7 @@ static void freedirs(void)
     dents = NULL;
     ndents = 0; dtop = 0; dsel = 0;
     maxwdirty = 1;          /* b58: the Tree's widest path is gone */
+    ghdirty = 1;            /* b82: and the hunk index */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gndiff = gnleft = gnright = 0;
     gdirmode = 0;
@@ -417,6 +434,7 @@ static void scandirs(void)
     slfree(&la);
     slfree(&lb);
     maxwdirty = 1;              /* b58: the Tree just gained rows */
+    ghdirty = 1;            /* b82: and the hunk index */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
@@ -504,6 +522,15 @@ static int hoff;                /* horizontal column offset - text
                                  * only, the gutter stays pinned */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
 static int conty, crows;        /* content grid below the tab bar */
+static int staty = -1;          /* b82: status row y, -1 = no room */
+/* b86, his find: both rules reached the LEFT border but stopped
+ * short of the right one "depending on the window width". viscols is
+ * (width / fw), so viscols*fw falls short of the real edge by the
+ * remainder - 0 to fw-1 pixels. Anything drawn to the CELL grid ends
+ * there; anything that should meet the border needs the PIXEL edge.
+ * xend is that edge, and slx is the first pixel of the leftover
+ * sliver, which nothing painted at all until now. */
+static int xend, slx;
 
 static int tabx[4], tabe[4];    /* tab bar hit ranges (pixels) */
 static int tabsok;              /* tab bar live (files loaded) */
@@ -776,6 +803,112 @@ static int htotal(void)
 {
     if (maxwdirty) calcmaxw();
     return gmaxw > viscols ? gmaxw : viscols;
+}
+
+/* b82: one pass collecting every hunk START in the active view, and
+ * the pair's +a/-d. A hunk is a maximal run of non-equal rows, the
+ * same definition nexthunk() walks. Lazy, like calcmaxw. */
+static void calchunks(void)
+{
+    const char *tg = view == 1 ? gatag : view == 2 ? gbtag : NULL;
+    int n = vcount(), i, prev = 0;
+
+    ghn = 0;
+    ghdirty = 0;
+    gadds = gdels = 0;
+    /* the diffstat describes the PAIR, not the tab he happens to be
+     * on, so it always comes from the row model. A changed line is
+     * one deletion and one insertion, as diffstat has it. */
+    if (grows) {
+        for (i = 0; i < gnrows; i++) {
+            char t = grows[i].tag;
+            if (t == '>') gadds++;
+            else if (t == '<') gdels++;
+            else if (t == '|') { gadds++; gdels++; }
+        }
+    }
+    if (n <= 0) return;
+    for (i = 0; i < n; i++) {
+        int hit;
+        if (view == 3)      hit = dents[i].st != 'S';
+        else if (view == 0) hit = grows && grows[i].tag != ' ';
+        else                hit = tg && tg[i] != ' ';
+        if (hit && !prev) {
+            if (ghn >= ghcap) {
+                int nc = ghcap ? ghcap * 2 : 64;
+                int *np = realloc(ghs, nc * sizeof(int));
+                if (np == NULL) break;  /* keep what we have */
+                ghs = np;
+                ghcap = nc;
+            }
+            ghs[ghn++] = i;
+        }
+        prev = hit;
+    }
+}
+
+/* b82: the status row - hunk position, the diffstat and how far down
+ * we are. ONE padded Text, so it repaints in a single blit and can
+ * never be caught half-drawn (the b66 rule). It sits OUTSIDE the
+ * scroll rectangle, so ScrollWindowRaster never disturbs it; it just
+ * needs redrawing whenever the position changes. */
+static void drawstatus(void)
+{
+    static char sb[320];
+    int n, max, pct, idx, lo, hi, w, i, len;
+    char pc[16];
+
+    if (win == NULL || staty < 0 || rp == NULL) return;
+    if (ghdirty) calchunks();
+    w = viscols;
+    if (w > (int)sizeof(sb) - 1) w = sizeof(sb) - 1;
+    if (w < 1) return;
+
+    n = vcount();
+    max = n - crows;
+    if (max < 0) max = 0;
+    pct = max > 0 ? (int)(((long)*vtop() * 100 + max / 2) / max) : 100;
+
+    /* how many hunks have begun by the top of the screen - so n/p,
+     * which lands exactly on a hunk start, reads 1/17, 2/17, ... */
+    lo = 0; hi = ghn;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (ghs[mid] <= *vtop()) lo = mid + 1; else hi = mid;
+    }
+    idx = lo;
+
+    if (view == 3 && gdirmode)
+        sprintf(sb, " %d entries  %d differ %d left %d right",
+                ndents, gndiff, gnleft, gnright);
+    else if (ga)
+        sprintf(sb, " hunk %d/%d  +%d -%d", idx, ghn, gadds, gdels);
+    else
+        strcpy(sb, " nothing loaded");
+
+
+    len = strlen(sb);
+    if (len > w) len = w;
+    for (i = len; i < w; i++) sb[i] = ' ';
+    sb[w] = 0;
+    /* the percentage right-aligned, written over the padding */
+    sprintf(pc, "%d%% ", pct);
+    len = strlen(pc);
+    if (len < w) memcpy(sb + w - len, pc, len);
+
+    /* b84, his ask: a rule above the row, with exactly one blank
+     * pixel between it and the text. calcgrid reserved those two
+     * pixels, so this can never land on a content row. b86: back to
+     * SHINEPEN after seeing both (his eye). */
+    if (staty - 2 >= conty) {
+        SetAPen(rp, pshine);
+        Move(rp, x0, staty - 2);
+        Draw(rp, xend, staty - 2);
+    }
+    SetAPen(rp, 1);
+    SetBPen(rp, 0);
+    Move(rp, x0, staty + fbase);
+    Text(rp, (STRPTR)sb, w);
 }
 
 /* keep both knobs honest: body = visible share, pot = position */
@@ -1121,7 +1254,7 @@ blank:
 static void drawtabs(void)
 {
     static char lab[4][40];
-    int i, x, w, yr = y0 + tabh, winr = x0 + viscols * fw - 1;
+    int i, x, w, yr = y0 + tabh, winr = xend;
     int nt = 0, act = 0;
     SetAPen(rp, pback);
     RectFill(rp, x0, y0, winr, yr + 1);
@@ -1232,7 +1365,14 @@ static void drawpage(void)
     s = conty + crows * fh;
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
-        RectFill(rp, x0, s, x0 + viscols * fw - 1, e);
+        RectFill(rp, x0, s, xend, e);
+    /* b86: the right-hand sliver, once, for the full content height.
+     * The scroll rect stops at the cell grid so ScrollWindowRaster
+     * never disturbs it - it only needs painting when the whole page
+     * does, which is one blit instead of one per row. */
+    if (slx <= xend)
+        RectFill(rp, slx, conty, xend, e);
+    drawstatus();               /* b82: over the slack we just cleared */
     updscrollers();
     if (ga == NULL && !gdirmode) {  /* WB start, nothing loaded -
                                      * in dirmode the Tree IS the
@@ -1322,13 +1462,46 @@ static void paintscroll(int from, int to)
 {
     int d = to - from, vr;
     if (d == 0) return;
-    if ((d > -crows) && (d < crows) &&
-        (IntuitionBase->LibNode.lib_Version >= 39)) {
+    /* b92: with Fast scroll OFF every step is a full row repaint -
+     * no blit, no retained pixels. His screenshots show the screen
+     * holding TWO scroll states split at a seam, and since scrolling
+     * only ever blits and redraws the entering rows, nothing ever
+     * repairs that. Turning the blit off decides in one boot whether
+     * the fault is in the blit or in the row drawing, and if it is
+     * the blit this is also a working fallback - b65/b66 made a full
+     * repaint far cheaper than it used to be. */
+    if (ttfast && (d > -crows) && (d < crows)) {
         SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
-        ScrollWindowRaster(win, 0, d * fh,
-                           x0, conty,
-                           x0 + viscols * fw - 1,
-                           conty + crows * fh - 1);
+        /* b93: ScrollRaster, NOT ScrollWindowRaster. His bisection
+         * settled it - Fast scroll OFF (full row repaint) is clean,
+         * ON was not, so the fault was the blit and not the row
+         * drawing. And cdiff was the only tool in this family using
+         * the V39 Intuition call: CCON scrolls with graphics.library's
+         * ScrollRaster, seventeen call sites, on this same PiStorm
+         * A1200 at five times stock speed with no artifacts. Use the
+         * primitive that is proven on the hardware in front of us.
+         * Bonus: ScrollRaster is V33, so the fast path no longer
+         * needs the >= V39 guard the old call did. */
+        ScrollRaster(rp, 0, d * fh,
+                     x0, conty,
+                     x0 + viscols * fw - 1,
+                     conty + crows * fh - 1);
+        /* b91, and the whole diagnosis is his two screenshots plus
+         * the telemetry: every number was RIGHT (rb 222 clear of
+         * st-2 224, d 3 well under crows 25), so the arithmetic was
+         * never the fault. The picture showed line numbers running
+         * 458..472 then 476..484 - exactly d rows missing, with a
+         * torn row at the seam. The LOWER part of the rect had
+         * scrolled and the upper part had not: a partial blit.
+         *
+         * ScrollWindowRaster queues blitter work; Text() renders
+         * with the CPU. Without a barrier the glyphs can land in a
+         * region the blitter has not finished moving - which is why
+         * scrolling DOWN garbled and scrolling UP never did. The
+         * entering rows for a downward scroll sit at the BOTTOM,
+         * the part the blit reaches LAST; for an upward scroll they
+         * sit at the top, already moved by the time we draw. */
+        WaitBlit();
         if (d > 0) {            /* moved up: new rows at the bottom */
             for (vr = crows - d; vr < crows; vr++)
                 drawone(vr);
@@ -1487,6 +1660,21 @@ static void flushpaint(void)
      * the drop had painted into a deferred debt nobody settled. */
     defer = 0;
     if (!owed && !dirtyknob) return;
+    /* b95: start the repaint just after the beam has passed, so as
+     * much of it as possible lands inside one frame. This does NOT
+     * cure the tearing he chased for six builds - a 25-row repaint
+     * outlasts a 20ms PAL frame, so the beam still catches it - but
+     * it makes the seam land in a consistent place instead of
+     * wandering, which the eye tolerates far better. Coalescing
+     * already limits us to one repaint per input burst, so the wait
+     * costs at most one frame per burst.
+     *
+     * The tearing is NOT a bug in this program: it is what a
+     * single-buffered display does. His tests proved it - it clears
+     * the instant scrolling stops, it is identical on a stock A1200
+     * PAL Hires with no RTG, and it is indifferent to whether we use
+     * ScrollWindowRaster, ScrollRaster, or no blit at all. */
+    WaitTOF();
     if (dirtyall)
         drawpage();                     /* tabs and every row */
     else if (dirtyrows)
@@ -1503,6 +1691,7 @@ static void flushpaint(void)
     }
     dirtyall = dirtyrows = dirtyknob = 0;
     scrollfromset = seloldset = 0;
+    drawstatus();       /* b82: position changed, so this did too */
     /* b64: NOT while a knob is held - Intuition is rendering that
      * knob as it tracks the mouse, and NewModifyProp would stamp
      * our own idea of the position back over the drag. */
@@ -1534,6 +1723,7 @@ static void setview(int v)
      * b67: and findrow is a row index in the OLD view's numbering -
      * the term survives a view switch, the hit cannot. */
     maxwdirty = 1;
+    ghdirty = 1;            /* b82: and the hunk index */
     findrow = -1; findn = findof = 0;
     if (v == 3) {
         if (!gdirmode) return;
@@ -1717,6 +1907,7 @@ static void freediff(void)
     hoff = 0;
     view = 0;
     maxwdirty = 1;          /* b58: both sides freed */
+    ghdirty = 1;            /* b82: and the hunk index */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
@@ -1748,6 +1939,8 @@ static void calcgrid(void)
         if (viscols - 1 >= 8) { cx0 = x0 + fw; cvis = viscols - 1; }
         else markcol = 0;
     }
+    xend = win->Width - win->BorderRight - 1;
+    slx  = x0 + viscols * fw;   /* first pixel past the last cell */
     halfw = (cvis - 3) / 2;
     /* b60: 2px shorter (his eye). The label baseline is fixed at
      * y0 + 2 + fbase, so the text does not move and the whole
@@ -1755,8 +1948,24 @@ static void calcgrid(void)
      * gains the content a couple of pixels. */
     tabh = fh + 2;
     conty = y0 + tabh + 2;
-    crows = (win->Height - win->BorderBottom - conty) / fh;
-    if (crows < 1) crows = 1;
+    /* b83, his ask: the status text sits exactly ONE pixel above the
+     * window border at every window size. So it is PINNED to the
+     * bottom rather than riding the text grid - the sub-cell slack
+     * now lands between the last content row and the status row,
+     * instead of below the status row where it varied with height.
+     * Text occupies staty..staty+fh-1, and the border begins at
+     * Height-BorderBottom, so this leaves precisely one blank row. */
+    staty = ttstatus ? win->Height - win->BorderBottom - 1 - fh : -1;
+    /* b84: and two more pixels above the text - one for the shine
+     * rule at staty-2, one blank at staty-1 - so the content can
+     * never run into the divider */
+    crows = staty >= 0 ? (staty - 2 - conty) / fh
+                       : (win->Height - win->BorderBottom - conty) / fh;
+    if (crows < 1) {            /* too short for both - content wins */
+        staty = -1;
+        crows = (win->Height - win->BorderBottom - conty) / fh;
+        if (crows < 1) crows = 1;
+    }
     calcgut();
 }
 
@@ -1817,6 +2026,7 @@ static int loaddiff(void)
     ga = gla; gb = glb;
     gna = na; gnb = nb;
     maxwdirty = 1;          /* b58: new content, new widest line */
+    ghdirty = 1;            /* b82: and the hunk index */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gnrows = nrows;
     gtop = 0;
@@ -1872,6 +2082,7 @@ static struct AppIcon *appicon;         /* b72: only while iconified */
 static struct DiskObject *appdob;
 static int iconified;
 static void reload(void);       /* defined below with the loaders */
+static int iconset(const char *name, const char *value);   /* b87 */
 
 /* WBArg -> a full path we can hand to the loader */
 static int wbargpath(struct WBArg *wa, char *dest, int max)
@@ -2219,6 +2430,11 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Find...",       (STRPTR)"F",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Find Next",     (STRPTR)"N",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Find Previous", NULL,         0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Settings",      NULL,         0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Status bar",    NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Fast scroll",   NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Keys...",       (STRPTR)"K",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"About...",      NULL,         0, 0, NULL },
@@ -2443,7 +2659,26 @@ static int domenu(UWORD code)   /* returns 1 = quit */
             case 1: gofind(1, 0); break;        /* Find Next */
             case 2: gofind(-1, 0); break;       /* Find Previous */
             }
-        } else if (MENUNUM(c) == 3) {           /* Help */
+        } else if (MENUNUM(c) == 3) {           /* Settings */
+            if (ITEMNUM(c) == 0 && item) {
+                /* b87, his ask: the menu IS the setting - toggling
+                 * it writes STATUSBAR= back to the icon, so the
+                 * choice survives the next launch. A CLI start has
+                 * no icon to write to; the toggle still applies for
+                 * this session. */
+                ttstatus = (item->Flags & CHECKED) ? 1 : 0;
+                calcgrid();
+                clamptops();
+                drawpage();
+                if (ttoollock && ttoolname[0] &&
+                    !iconset("STATUSBAR", ttstatus ? "YES" : "NO"))
+                    erq("could not write STATUSBAR to the icon\n"
+                        "(the setting still applies this session)");
+            } else if (ITEMNUM(c) == 1 && item) {
+                ttfast = (item->Flags & CHECKED) ? 1 : 0;
+                drawpage();     /* repaint clean either way */
+            }
+        } else if (MENUNUM(c) == 4) {           /* Help */
             switch (ITEMNUM(c)) {
             case 0: keysreq(); break;
             case 1: aboutreq(); break;
@@ -2550,6 +2785,20 @@ static int openmain(void)
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
+            /* b87: the checkmark starts wherever the tooltype
+             * left it, so menu and icon never disagree on entry */
+            {
+                int mi;
+                for (mi = 0; newmenu[mi].nm_Type != NM_END; mi++) {
+                    const char *lb = (const char *)newmenu[mi].nm_Label;
+                    if (lb == NULL || lb == (const char *)NM_BARLABEL)
+                        continue;
+                    if (strcmp(lb, "Status bar")) continue;
+                    if (ttstatus) newmenu[mi].nm_Flags |= CHECKIT | CHECKED;
+                    else          newmenu[mi].nm_Flags &= ~CHECKED;
+                    break;
+                }
+            }
             gmenu = CreateMenus(newmenu, TAG_DONE);
             if (gmenu) {
                 if (LayoutMenus(gmenu, gvi,
@@ -2838,7 +3087,32 @@ static void guimode(void)
                 if (gadsok) RefreshWindowFrame(win);
                 calcgrid();
                 clamptops();
-                drawpage();
+                /* b83, his find: EXPANDING the window redrew at
+                 * once, SHRINKING left stale content until the next
+                 * scroll. A resize leaves the window with damage
+                 * pending (WFLG_WINDOWREFRESH), and ordinary
+                 * rendering into a damaged region is suppressed
+                 * until BeginRefresh/EndRefresh - so the deferred
+                 * repaint was simply discarded. Expanding escaped it
+                 * only because it ALSO produced a REFRESHWINDOW
+                 * message, which b64 already paints properly; a
+                 * shrink produces no newly-exposed area and so no
+                 * such message. Paint here and now, through the
+                 * refresh when one is pending, and a resize no
+                 * longer depends on a second event arriving. */
+                {
+                    int od = defer;
+                    defer = 0;
+                    if (win->Flags & WFLG_WINDOWREFRESH) {
+                        BeginRefresh(win);
+                        drawpage();
+                        EndRefresh(win, TRUE);
+                    } else
+                        drawpage();
+                    defer = od;
+                    dirtyall = dirtyrows = 0;
+                    scrollfromset = seloldset = 0;
+                }
             }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
                 if (tabsok && my >= y0 && my <= y0 + tabh) {
@@ -2984,6 +3258,7 @@ out:
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
     if (AslBase) CloseLibrary(AslBase);
+    free(ghs); ghs = NULL; ghcap = ghn = 0;
     if (ttfont2) { CloseFont(ttfont2); ttfont2 = NULL; }
     if (ttoollock) { UnLock(ttoollock); ttoollock = 0; }
     if (DiskfontBase) CloseLibrary(DiskfontBase);
@@ -2995,6 +3270,179 @@ out:
 }
 
 /* ---- main ------------------------------------------------------- */
+
+/* ---- b87: writing a tooltype back to the icon ------------------
+ * NOT via PutDiskObject: that rewrites the whole file from
+ * icon.library's in-memory parse, so anything the running library
+ * version did not understand is silently dropped - an OS3.5+ colour
+ * icon appendix under an older icon.library, for instance. The
+ * surgical route instead, ported from CFile 0.5b51's editor (proven
+ * against 400 real .info files, all 107 with tooltypes rebuilt
+ * byte-identical by a no-change save) and documented in
+ * AmigaReferences/icon-info-files.md:
+ *
+ *   new file = bytes[0..block) + rebuilt block + bytes[block end..EOF)
+ *
+ * Everything before and after the tooltype block is copied untouched.
+ * Any bounds check that fails means we do not understand the file,
+ * and an icon we do not understand is one we leave alone. */
+
+static UWORD rdw(const UBYTE *b, long o)
+{
+    return (UWORD)((b[o] << 8) | b[o + 1]);
+}
+
+static ULONG rdl(const UBYTE *b, long o)
+{
+    return ((ULONG)b[o] << 24) | ((ULONG)b[o + 1] << 16) |
+           ((ULONG)b[o + 2] << 8) | (ULONG)b[o + 3];
+}
+
+static void wrl(UBYTE *b, long o, ULONG v)
+{
+    b[o] = (UBYTE)(v >> 24); b[o + 1] = (UBYTE)(v >> 16);
+    b[o + 2] = (UBYTE)(v >> 8); b[o + 3] = (UBYTE)v;
+}
+
+/* an Image: 20-byte header, then ((W+15)/16)*2 * H * D of planes */
+static long skipimage(const UBYTE *b, long size, long off)
+{
+    long w, h, d;
+    if (off + 20 > size) return -1;
+    w = rdw(b, off + 4);
+    h = rdw(b, off + 6);
+    d = rdw(b, off + 8);
+    if (w < 1 || h < 1 || d < 1) return -1;
+    if (w > 4096 || h > 4096 || d > 8) return -1;
+    off += 20 + (long)(((w + 15) >> 4) * 2) * (h * d);
+    if (off > size) return -1;
+    return off;
+}
+
+/* where the tooltype block starts, and where the suffix after it
+ * begins (equal when the icon has none) */
+static int ttlocate(const UBYTE *b, long size, long *start, long *end)
+{
+    long off, nent, j, l;
+    if (size < 78) return 0;
+    if (rdw(b, 0) != 0xE310) return 0;          /* do_Magic */
+    off = 78;
+    if (rdl(b, 66)) off += 56;                  /* DrawerData */
+    if (off > size) return 0;
+    if (rdl(b, 22) && (off = skipimage(b, size, off)) < 0) return 0;
+    if (rdl(b, 26) && (off = skipimage(b, size, off)) < 0) return 0;
+    if (rdl(b, 50)) {                           /* DefaultTool string */
+        if (off + 4 > size) return 0;
+        l = (long)rdl(b, off);
+        if (l < 0 || off + 4 + l > size) return 0;
+        off += 4 + l;
+    }
+    *start = off;
+    if (rdl(b, 54)) {                           /* the block */
+        if (off + 4 > size) return 0;
+        nent = (long)(rdl(b, off) >> 2) - 1;    /* count = n/4 - 1 */
+        if (nent < 0 || nent > 4096) return 0;
+        off += 4;
+        for (j = 0; j < nent; j++) {
+            if (off + 4 > size) return 0;
+            l = (long)rdl(b, off);
+            if (l < 0 || off + 4 + l > size) return 0;
+            off += 4 + l;
+        }
+    }
+    *end = off;
+    return 1;
+}
+
+/* does this entry carry the tooltype called `name`? Compares the
+ * text before the '=', so a parenthesised (NAME=...) does not match
+ * and a disabled line is left exactly where he put it. */
+static int ttnamed(const char *e, const char *name)
+{
+    int i = 0;
+    while (name[i] && e[i] && e[i] != '=') {
+        char a = e[i], b = name[i];
+        if (a >= 'A' && a <= 'Z') a += 32;
+        if (b >= 'A' && b <= 'Z') b += 32;
+        if (a != b) return 0;
+        i++;
+    }
+    return name[i] == 0 && e[i] == '=';
+}
+
+/* set NAME=value on our own icon, preserving every other byte */
+static int iconset(const char *name, const char *value)
+{
+    char path[400], neu[160];
+    UBYTE *buf = NULL, *out = NULL;
+    long size, st, en, off, nent, j, l, need, o, nn;
+    BPTR fh, old;
+    int ok = 0, replaced = 0;
+
+    if (!ttoollock || !ttoolname[0]) return 0;  /* not a WB launch */
+    sprintf(neu, "%.60s=%.60s", name, value);
+    old = CurrentDir(ttoollock);
+    sprintf(path, "%.300s.info", ttoolname);
+
+    fh = Open((STRPTR)path, MODE_OLDFILE);
+    if (fh == 0) goto done;
+    Seek(fh, 0, OFFSET_END);
+    size = Seek(fh, 0, OFFSET_BEGINNING);
+    if (size < 78 || size > 1000000L) { Close(fh); goto done; }
+    buf = malloc(size);
+    if (buf == NULL) { Close(fh); goto done; }
+    if (Read(fh, buf, size) != size) { Close(fh); goto done; }
+    Close(fh);
+
+    if (!ttlocate(buf, size, &st, &en)) goto done;
+
+    /* worst case: every old byte, plus our entry, plus the count */
+    need = size + strlen(neu) + 16;
+    out = malloc(need);
+    if (out == NULL) goto done;
+
+    memcpy(out, buf, st);
+    o = st + 4;                         /* leave room for the count */
+    nn = 0;
+    if (rdl(buf, 54)) {                 /* copy the entries we keep */
+        nent = (long)(rdl(buf, st) >> 2) - 1;
+        off = st + 4;
+        for (j = 0; j < nent; j++) {
+            l = (long)rdl(buf, off);
+            if (ttnamed((char *)buf + off + 4, name)) {
+                wrl(out, o, (ULONG)(strlen(neu) + 1));
+                memcpy(out + o + 4, neu, strlen(neu) + 1);
+                o += 4 + strlen(neu) + 1;
+                replaced = 1;
+            } else {
+                memcpy(out + o, buf + off, 4 + l);
+                o += 4 + l;
+            }
+            nn++;
+            off += 4 + l;
+        }
+    }
+    if (!replaced) {                    /* new setting: append it */
+        wrl(out, o, (ULONG)(strlen(neu) + 1));
+        memcpy(out + o + 4, neu, strlen(neu) + 1);
+        o += 4 + strlen(neu) + 1;
+        nn++;
+    }
+    wrl(out, st, (ULONG)((nn + 1) * 4));        /* the format's rule */
+    memcpy(out + o, buf + en, size - en);
+    o += size - en;
+    if (!rdl(buf, 54)) wrl(out, 54, 1);         /* present-flag on */
+
+    fh = Open((STRPTR)path, MODE_NEWFILE);
+    if (fh == 0) goto done;
+    ok = (Write(fh, out, o) == o);
+    Close(fh);
+done:
+    free(buf);
+    free(out);
+    CurrentDir(old);
+    return ok;
+}
 
 /* ---- b73: tooltypes -------------------------------------------
  * Read from the WBStartup message, which smain used to throw away as
@@ -3076,6 +3524,10 @@ static void readtooltypes(struct WBStartup *wbs)
         /* floor of 2 planes, not 1: cdiff draws in pens 0-3, and on
          * a 2-colour screen pens 2 and 3 do not exist */
         ttdepth = ttnum(tt, "SCREENDEPTH", 2, 8, 0);
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"STATUSBAR");
+        if (v) ttstatus = !(tteq((char *)v, "NO") ||
+                            tteq((char *)v, "OFF") ||
+                            tteq((char *)v, "FALSE"));
         ttleft   = ttnum(tt, "LEFT",   0, 20000, -1);
         tttop    = ttnum(tt, "TOP",    0, 20000, -1);
         ttwidth  = ttdim(tt, "WIDTH");

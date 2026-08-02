@@ -407,10 +407,75 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       The AppIcon also wears HIS icon now (DupLock of our drawer +
       the tool name from WBStartup), falling back to the generic
       tool image — the couple of lines promised at b72.
-- [ ] A status row for the screen tooltypes: whether SCREENDEPTH=2
-      measurably beats a 4-plane Workbench on his machine. Blit cost
-      is per bitplane, so it should — worth confirming rather than
-      assuming.
+- [x] **b82-b86: THE STATUS ROW** — hunk i/N, +a −d and position %,
+      in its own row above the bottom border. ONE padded Text (the
+      b66 rule), sitting OUTSIDE the scroll rect so ScrollRaster
+      never disturbs it, hooked into flushpaint() beside
+      updscrollers() so it costs one repaint per BURST rather than
+      per keypress. Hunk starts are cached and invalidated at the
+      same five points as the width scan — identical lifetime, so
+      they were mirrored mechanically rather than hand-picked.
+      His three corrections: the text is PINNED one pixel off the
+      border rather than riding the text grid (b83), so the gap does
+      not vary with window height; a shine rule above it with one
+      blank pixel between, calcgrid reserving those two pixels so
+      content can never reach the divider (b84-b85, tried in
+      SHADOWPEN and put back to SHINEPEN by eye); and both rules now
+      run to the true PIXEL edge (b86) — they used to stop at
+      viscols*fw, short of the right border by the remainder, which
+      is why the left met the border and the right did not. That
+      also exposed a sliver 0..fw-1 px wide down the right of the
+      content that NOTHING had ever painted since b66 removed the row
+      fills; it is now cleared once per drawpage, full height, since
+      the scroll rect stops at the cell grid and never touches it.
+- [x] **b87: SETTINGS MENU + non-destructive tooltype write** (his
+      design: the menu IS the setting). Settings/Status bar toggles
+      the row and writes STATUSBAR=YES/NO back to the icon, so the
+      choice survives the next launch; the checkmark starts wherever
+      the tooltype left it. The write does NOT go through
+      PutDiskObject — his own point, and AmigaReferences says why:
+      that rewrites the file from icon.library's in-memory parse and
+      silently drops whatever the running version did not understand.
+      It is the SPLICE instead, ported from CFile 0.5b51 (proven on
+      400 real .info files): header + rebuilt tooltype block + suffix,
+      every other byte copied untouched, and any failed bounds check
+      means we leave the icon alone. Matching compares the text
+      before the '=', so a parenthesised (STATUSBAR=NO) is left
+      exactly where he put it.
+- [x] **b88-b95: THE SCROLL "ARTIFACTS" — NOT A BUG IN THIS PROGRAM.**
+      Six builds, and the fault was never in cdiff. The chase:
+      WaitBlit after the scroll (b91, blitter/CPU race - wrong);
+      ScrollRaster instead of ScrollWindowRaster (b93, wrong
+      primitive - wrong, though it did drop the >= V39 guard and is
+      what the rest of the family uses); a Fast scroll toggle to
+      bisect blit vs row drawing (b92 - HIS bisection, and the first
+      useful step); telemetry in the status row after the window
+      title proved too narrow with two paths open (b89-b90, his
+      design: a MODE of the row, not a suffix on it).
+      The telemetry read `ct23 cr25 fh8 st226 rb222 | d3 483>486` -
+      every number RIGHT, which is what redirected the search. Then
+      his screenshots showed the seam falling BOTH ways (bottom ahead
+      in one, behind in another), which no geometry error can do.
+      **Settled by the question I should have asked first: does it
+      survive when you stop?** It does not. It clears the instant
+      scrolling stops, is identical on a stock A1200 PAL Hires with
+      no RTG, and is indifferent to blit primitive or to having no
+      blit at all. It is raster tearing: a 25-row repaint outlasts a
+      20ms frame, so the beam displays part of the old frame and part
+      of the new.
+      b95 keeps WaitTOF() before the flush repaint - it does not cure
+      the tearing, it makes the seam land in a CONSISTENT place
+      instead of wandering, which reads as "scrolling fast" rather
+      than "broken". Fast scroll stays a toggle, defaulting OFF,
+      because one blit displacing 200 pixels mid-frame is more
+      visible than rows being rewritten.
+      LESSON, and it cost six builds: before debugging a visual
+      artifact, establish whether it SURVIVES the thing that caused
+      it. Transient and persistent are different worlds, and no
+      amount of code-reading tells them apart.
+- [ ] Whether SCREENDEPTH=2 measurably beats a 4-plane Workbench on
+      his machine. Blit cost is per bitplane, so it should — worth
+      confirming rather than assuming.
 
 ## 0.1b3 — directory mode
 

@@ -49,6 +49,7 @@ the settings). All optional; a shell launch ignores them.
 | `OPENSCREEN=cdiff` | **opens cdiff's own public screen** under that name, cloned from Workbench. Absent = the window opens on Workbench as usual. The screen closes when cdiff quits or iconifies, so it never leaves an empty screen behind |
 | `PUBSCREEN=name` | **attaches** to a public screen someone else already opened (the opposite of `OPENSCREEN`). Falls back to Workbench if that screen is not there. `OPENSCREEN` wins if both are set |
 | `SCREENDEPTH=2` | bitplanes for that screen (2–8). Only meaningful alongside `OPENSCREEN` — on its own it does nothing. Absent = clone Workbench's depth. cdiff only draws in pens 0–3, so 2 planes is enough, and blit cost is per plane: a 2-plane screen scrolls in half the blits of a 4-plane one |
+| `STATUSBAR=YES` | the status row at the bottom (`YES` if unset). **Settings / Status bar** toggles it and writes this tooltype back to the icon, so the choice survives the next launch |
 | `TABSIZE=4` | tab expansion width (8 if unset) |
 | `LEFT/TOP` | window position; default is the top-left of the screen, below the title bar |
 | `WIDTH/HEIGHT` | window size, measured **from** `LEFT`/`TOP`. `-1` (or leaving it out) reaches the screen edge without overrunning it |
