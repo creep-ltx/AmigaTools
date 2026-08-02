@@ -25,6 +25,7 @@
 #include <proto/gadtools.h>
 #include <proto/asl.h>
 #include <proto/wb.h>
+#include <proto/icon.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -32,7 +33,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b71 (2.8.26)";
+    "$VER: cdiff 0.1b72 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -46,6 +47,7 @@ struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct Library *AslBase = NULL;
 struct Library *WorkbenchBase = NULL;   /* b69: AppWindow drops */
+struct Library *IconBase = NULL;        /* b72: the AppIcon's image */
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -1158,6 +1160,7 @@ static void calcgrid(void);     /* b68: the grid follows find state */
 static void drawpage(void)
 {
     int vr, s, e;
+    if (win == NULL) return;    /* b72: iconified */
     if (defer) { dirtyall = 1; return; }
     /* the caret column comes and goes with the search, and a find
      * can be cleared from paths that never call calcgrid (reload,
@@ -1210,6 +1213,7 @@ static void drawpage(void)
 static void settitle(void)
 {
     static char t[400];
+    if (win == NULL) return;    /* b72: iconified */
     if (gdirmode && view == 3)
         sprintf(t, "cdiff: %.60s | %.60s"
                 "  (%d entries: %d differ, %d left-only, %d right-only)",
@@ -1428,6 +1432,7 @@ static int inputwaiting(void)
 static void flushpaint(void)
 {
     int owed = dirtyall || dirtyrows || scrollfromset || seloldset;
+    if (win == NULL) return;    /* b72: iconified - nothing to paint */
     /* b70: clear defer BEFORE the early return. It used to sit
      * inside the "something is owed" path, so a message that owed
      * no painting left the flag armed - harmless while every
@@ -1813,6 +1818,9 @@ static int askfile(const char *title, char *dest)
 
 static struct MsgPort *appport;
 static struct AppWindow *appwin;
+static struct AppIcon *appicon;         /* b72: only while iconified */
+static struct DiskObject *appdob;
+static int iconified;
 static void reload(void);       /* defined below with the loaders */
 
 /* WBArg -> a full path we can hand to the loader */
@@ -2278,6 +2286,8 @@ static void keysreq(void)
         "t / e - top / end\n"
         "n / p - next / previous hunk (or tree entry)\n"
         "Enter - diff the selected tree entry\n"
+        "the iconify gadget hides cdiff to a Workbench icon;\n"
+        "  double-click it to come back, nothing is lost\n"
         "Amiga+F / Amiga+N - find, find next (Navigation menu;\n"
         "  Find Previous has no shortcut). Case-insensitive,\n"
         "  searches the view you are in, wraps at the ends\n"
@@ -2382,29 +2392,23 @@ static int domenu(UWORD code)   /* returns 1 = quit */
     return 0;
 }
 
-static void guimode(void)
+/* b72: window setup, split out of guimode so iconify can tear the
+ * window down and build it back with every piece of state - the
+ * loaded diff, the view, the scroll positions - untouched. Returns
+ * 0 if the window could not be opened. */
+static int openmain(void)
 {
     struct Screen *scr;
     struct DrawInfo *dri = NULL;
-    struct IntuiMessage *msg;
-    int done = 0, burst = 0;
-
-    IntuitionBase = (struct IntuitionBase *)
-        OpenLibrary((STRPTR)"intuition.library", 37);
-    GfxBase = (struct GfxBase *)
-        OpenLibrary((STRPTR)"graphics.library", 37);
-    GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
-    AslBase = OpenLibrary((STRPTR)"asl.library", 37);
-    WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
-    if (IntuitionBase == NULL || GfxBase == NULL) goto out;
 
     scr = LockPubScreen(NULL);
-    if (scr == NULL) goto out;
+    if (scr == NULL) return 0;
     win = OpenWindowTags(NULL,
         WA_Left, 0, WA_Top, scr->BarHeight + 1,
         WA_Width, scr->Width,
         WA_Height, scr->Height - scr->BarHeight - 1,
         WA_Title, (ULONG)"cdiff",
+        WA_IconifyGadget, TRUE,   /* b72: V47 - ignored below it */
         WA_PubScreen, (ULONG)scr,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
@@ -2431,7 +2435,7 @@ static void guimode(void)
         TAG_DONE);
     if (win == NULL) {
         UnlockPubScreen(NULL, scr);
-        goto out;
+        return 0;
     }
     /* the screen's GUI pens for the tab bevels; fall back to the
      * 4-colour defaults if DrawInfo is unavailable. b48: the pens
@@ -2471,22 +2475,94 @@ static void guimode(void)
     /* b48: both the DrawInfo and the pubscreen lock are still held
      * here on purpose - sysiclass reads them while it builds the
      * arrow images. Released the moment the gadgets exist. */
-    /* b69: an AppWindow, so Workbench icons can be dropped on us.
-     * Optional in every sense - no workbench.library, no port or no
-     * AddAppWindow just means drops are not offered. */
-    if (WorkbenchBase) {
-        appport = CreateMsgPort();
-        if (appport)
-            appwin = AddAppWindowA(0, 0, win, appport, NULL);
-        if (appwin == NULL && appport) {
-            DeleteMsgPort(appport);
-            appport = NULL;
-        }
-    }
+    /* b72: the AppWindow is per-window, but the PORT is not - it
+     * has to outlive the window so the AppIcon can still reach us
+     * while iconified. Created once in guimode. */
+    if (appport) appwin = AddAppWindowA(0, 0, win, appport, NULL);
     addscrollers(dri, scr);
     if (dri) FreeScreenDrawInfo(scr, dri);
     UnlockPubScreen(NULL, scr);
     calcgrid();
+
+    calcgrid();
+    return 1;
+}
+
+/* b72: everything openmain built, in reverse. The app PORT and the
+ * loaded document survive; the window, its menus, its gadgets and
+ * the arrow images do not. Each pointer is cleared so a reopen
+ * rebuilds rather than double-freeing. */
+static void closemain(void)
+{
+    if (appwin) { RemoveAppWindow(appwin); appwin = NULL; }
+    if (gmenu) ClearMenuStrip(win);
+    if (gadsok) { RemoveGList(win, &vgad, -1); gadsok = 0; }
+    CloseWindow(win);
+    win = NULL;
+    if (gmenu) { FreeMenus(gmenu); gmenu = NULL; }
+    if (gvi) { FreeVisualInfo(gvi); gvi = NULL; }
+    if (iup) { DisposeObject(iup); iup = NULL; }
+    if (idn) { DisposeObject(idn); idn = NULL; }
+    if (ilt) { DisposeObject(ilt); ilt = NULL; }
+    if (irt) { DisposeObject(irt); irt = NULL; }
+    arrowsok = 0;
+}
+
+/* b72: hide. The window goes away entirely and an AppIcon takes its
+ * place on Workbench; the document, the view and every scroll
+ * position stay exactly as they were. If the AppIcon cannot be made
+ * (no icon.library, no port, Workbench refuses) the window comes
+ * straight back rather than leaving the program unreachable. */
+static void goiconify(void)
+{
+    if (iconified || appport == NULL || IconBase == NULL) return;
+    appdob = GetDefDiskObject(WBTOOL);
+    if (appdob == NULL) return;
+    closemain();
+    appicon = AddAppIconA(0, 0, (STRPTR)"cdiff", appport, 0, appdob, NULL);
+    if (appicon == NULL) {              /* refused - undo the hide */
+        FreeDiskObject(appdob);
+        appdob = NULL;
+        if (!openmain()) return;        /* nothing left to try */
+        settitle();
+        drawpage();
+        return;
+    }
+    iconified = 1;
+}
+
+/* b72: and back. */
+static void unicon(void)
+{
+    if (!iconified) return;
+    if (appicon) { RemoveAppIcon(appicon); appicon = NULL; }
+    if (appdob) { FreeDiskObject(appdob); appdob = NULL; }
+    iconified = 0;
+    if (!openmain()) return;
+    settitle();
+    drawpage();
+}
+
+static void guimode(void)
+{
+    struct IntuiMessage *msg;
+    int done = 0, burst = 0;
+
+    IntuitionBase = (struct IntuitionBase *)
+        OpenLibrary((STRPTR)"intuition.library", 37);
+    GfxBase = (struct GfxBase *)
+        OpenLibrary((STRPTR)"graphics.library", 37);
+    GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
+    AslBase = OpenLibrary((STRPTR)"asl.library", 37);
+    WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
+    if (IntuitionBase == NULL || GfxBase == NULL) goto out;
+    IconBase = OpenLibrary((STRPTR)"icon.library", 37);
+    /* b72: one port for the lifetime of the program - the AppWindow
+     * comes and goes with the window, the AppIcon exists only while
+     * iconified, and both report here. */
+    if (WorkbenchBase) appport = CreateMsgPort();
+
+    if (!openmain()) goto out;
 
     if (gdirmode) {                 /* CLI gave two directories */
         scandirs();
@@ -2498,14 +2574,31 @@ static void guimode(void)
     drawpage();
 
     while (!done) {
-        ULONG wsig = 1UL << win->UserPort->mp_SigBit;
-        ULONG asig = appport ? 1UL << appport->mp_SigBit : 0;
-        ULONG got = Wait(wsig | asig);
+        ULONG wsig, asig, got;
+
+        /* b72: hidden. There is no window to wait on or paint into -
+         * only the AppIcon can reach us, and only to bring us back. */
+        if (iconified) {
+            struct AppMessage *am;
+            int wake = 0;
+            if (appport == NULL) break;         /* unreachable: bail */
+            Wait(1UL << appport->mp_SigBit);
+            while ((am = (struct AppMessage *)GetMsg(appport))) {
+                if (am->am_Type == AMTYPE_APPICON) wake = 1;
+                ReplyMsg((struct Message *)am);
+            }
+            if (wake) unicon();
+            continue;
+        }
+
+        wsig = 1UL << win->UserPort->mp_SigBit;
+        asig = appport ? 1UL << appport->mp_SigBit : 0;
+        got = Wait(wsig | asig);
 
         if (asig && (got & asig)) {     /* b69: dropped icons */
             struct AppMessage *am;
             while ((am = (struct AppMessage *)GetMsg(appport))) {
-                dropped(am);
+                if (am->am_Type == AMTYPE_APPWINDOW) dropped(am);
                 ReplyMsg((struct Message *)am);
             }
             flushpaint();       /* b70: settle it here and now - this
@@ -2526,7 +2619,15 @@ static void guimode(void)
             defer = 1;
             ULONG csec = msg->Seconds, cmic = msg->Micros;
             ReplyMsg((struct Message *)msg);
-            if (class == IDCMP_CLOSEWINDOW) done = 1;
+            /* b72, straight out of AmigaReferences/intuition-
+             * iconify.md: with WA_IconifyGadget set, the iconify
+             * click arrives as IDCMP_CLOSEWINDOW with Code == 1 (a
+             * real close is 0). Branch on Code or the new gadget
+             * quits the program. */
+            if (class == IDCMP_CLOSEWINDOW) {
+                if (code == 1) { goiconify(); break; }
+                done = 1;
+            }
             if (class == IDCMP_GADGETDOWN ||
                 class == IDCMP_GADGETUP ||
                 class == IDCMP_MOUSEMOVE) {
@@ -2733,29 +2834,24 @@ static void guimode(void)
         }
         flushpaint();           /* burst ended by the port emptying */
     }
-    if (appwin) RemoveAppWindow(appwin);
+    /* b48's ordering lives in closemain now: RemoveGList detaches
+     * the gadgets before the images they point at are disposed, so
+     * Intuition can never be left holding a freed Image. */
+    if (win) closemain();
+    if (appicon) { RemoveAppIcon(appicon); appicon = NULL; }
+    if (appdob) { FreeDiskObject(appdob); appdob = NULL; }
     if (appport) {                      /* drain what is still queued */
         struct Message *m;
         while ((m = GetMsg(appport))) ReplyMsg(m);
         DeleteMsgPort(appport);
         appport = NULL;
-        appwin = NULL;
     }
-    if (gmenu) ClearMenuStrip(win);
-    if (gadsok) RemoveGList(win, &vgad, -1);
-    CloseWindow(win);
-    /* b48: dispose the images only AFTER the gadgets that pointed
-     * at them are gone - RemoveGList detached them above, so this
-     * order can never leave Intuition holding a freed Image */
-    if (iup) DisposeObject(iup);
-    if (idn) DisposeObject(idn);
-    if (ilt) DisposeObject(ilt);
-    if (irt) DisposeObject(irt);
 out:
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
     if (AslBase) CloseLibrary(AslBase);
+    if (IconBase) CloseLibrary(IconBase);
     if (WorkbenchBase) CloseLibrary(WorkbenchBase);
     if (GadToolsBase) CloseLibrary(GadToolsBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);

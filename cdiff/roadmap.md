@@ -333,13 +333,33 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       LESSON: a flag that is only ever correct because of where it
       happens to be set is not correct, it is lucky.
 - [ ] A status row: hunk i/N, +a −d, position %.
-- [ ] **Iconify** (his ask) — WA_ICONIFYGADGET, and the click arrives
-      as IDCMP_CLOSEWINDOW with **Code == 1**, so the existing
-      `CLOSEWINDOW -> done` MUST branch on Code first or the gadget
-      quits. Hiding is the app's job: close the window, AddAppIcon,
-      reopen on double-click. Needs the window torn down and rebuilt
-      with all state preserved. Contract and V47 timeline in
-      AmigaReferences/intuition-iconify.md.
+- [x] **b72: ICONIFY** (his ask) — **boot-verified: "works as
+      intended"**. The tag is in the shipped NDK after all, as
+      `WA_IconifyGadget` (WA_Dummy + 0x60 = $800000C3) — the exact
+      value AmigaReferences recorded from E-VO's modules, so no
+      hand-defined constant and the reference is confirmed against
+      the header. THE TRAP, avoided only because it was written down
+      first: the click arrives as IDCMP_CLOSEWINDOW with **Code ==
+      1**, and cdiff's handler was a bare `CLOSEWINDOW -> done`, so
+      setting the tag without branching on Code would have made the
+      new gadget QUIT the program.
+      Window setup/teardown split into openmain()/closemain() so the
+      window can be destroyed and rebuilt with the loaded diff, the
+      view and every scroll position untouched. The lifetime rule
+      that matters: the AppWindow is per-window, the message PORT is
+      not — it outlives the window because that is how the AppIcon
+      reaches us while hidden. closemain() nulls every pointer it
+      frees so a reopen rebuilds instead of double-freeing.
+      If the AppIcon cannot be made the window comes straight back,
+      rather than leaving the program running and unreachable. While
+      hidden, settitle/drawpage/flushpaint are no-ops — several
+      paths call them and `win` is NULL.
+      Open: the AppIcon uses GetDefDiskObject(WBTOOL), the generic
+      tool icon (his call: fine for now, he will draw one later).
+      The tooltype build has the program's path from WBStartup, so
+      pointing it at his own icon becomes a couple of lines. Icons
+      dropped ON the AppIcon restore the window but do not load -
+      the drop bands are meaningless with no window.
 - [ ] **Tooltypes** (his ask; a config file is explicitly NOT wanted,
       the icon carries the settings) — read from the WBStartup
       message, which `smain` currently discards as `(void)argv`.
