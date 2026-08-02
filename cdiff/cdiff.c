@@ -75,16 +75,14 @@ static char ttscrname[64];      /* OPENSCREEN= - name of OUR screen */
  * attach to the first one's screen. */
 static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
 static int  ttdepth;            /* SCREENDEPTH= - 0 = clone WB */
-static int  ttstatus = 1;       /* STATUSBAR=YES/NO, default on */
+/* cedit b0b: ttstatus lives in ltxwin.c - it decides the grid */
 static int  ttcontext = 3;      /* CONTEXT=n around each change */
-static int  ttfast;             /* b94: DEFAULT OFF - on his machine
-                                 * the blit corrupts and a full row
-                                 * repaint does not. b92: use the
-                                 * scroll blit at all?
-                                 * session only - a bisection, and a
-                                 * usable fallback if the blit is at
-                                 * fault */
-static int  tttab = 8, ttmask = 7;      /* TABSIZE= */
+/* cedit b0b: ttfast lives in ltxwin.c beside the blit it governs.
+ * b94: DEFAULT OFF - on his machine the blit corrupts and a full row
+ * repaint does not. b92: use the scroll blit at all? - a bisection,
+ * and a usable fallback if the blit is at fault. */
+/* cedit b0b: tttab/ttmask live in ltxwin.c - the row painter owns
+ * the tab grid. readtooltypes still sets them from TABSIZE=. */
 static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 /* b75: VIEW= removed (his call). It earned nothing: TREE re-set a
  * view gdirmode had already set, BOTH re-set the zero default, and
@@ -94,7 +92,7 @@ static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
  * document, while 1/2/3 and Tab switch views instantly anyway. */
 /* cedit b0: ttoollock/ttoolname moved to ltxwin.c - iconset() needs
  * them and so does the AppIcon, both of which are chassis business */
-static struct TextFont *ttfont2;        /* what we opened, to close */
+/* cedit b0b: the font we opened is the chassis's - ltx_closefont */
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -517,10 +515,7 @@ static int ispathdir(const char *p)
  * window handle keeps its name there, so every use below is
  * unchanged. */
 
-static struct RastPort *rp;
-static struct TextFont *font;
-static int fw, fh, fbase;              /* cell metrics */
-static int x0, y0, viscols, visrows;   /* drawable grid */
+/* cedit b0b: rp, font and the cell metrics live in ltxwin.c now */
 static int halfw;                      /* columns per side */
 /* b67: the leftmost content column is reserved for the find caret,
  * so cx0/cvis are the grid the file views actually lay out in. The
@@ -532,7 +527,7 @@ static const DLine *ga, *gb;
 static Row *grows;
 static int gnrows, gtop;
 static int gna, gnb;            /* line counts, for the gutter width */
-static int gutw;                /* gutter digits; 0 = no gutter */
+/* cedit b0b: gutw lives in ltxwin.c, beside the drawnum that uses it */
 
 /* the loaded pair, owned here so the menu can swap files in place */
 static char gf1[310], gf2[310];
@@ -545,78 +540,25 @@ static DOp *gops;
  * bar their changed lines without walking the row list. */
 static int view;
 static int ltop, rtop;          /* single-view scroll tops (lines) */
-static int hoff;                /* horizontal column offset - text
-                                 * only, the gutter stays pinned */
+/* cedit b0b: hoff lives in ltxwin.c - the painter windows by it */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
-static int conty, crows;        /* content grid below the tab bar */
-static int staty = -1;          /* b82: status row y, -1 = no room */
-/* b86, his find: both rules reached the LEFT border but stopped
- * short of the right one "depending on the window width". viscols is
- * (width / fw), so viscols*fw falls short of the real edge by the
- * remainder - 0 to fw-1 pixels. Anything drawn to the CELL grid ends
- * there; anything that should meet the border needs the PIXEL edge.
- * xend is that edge, and slx is the first pixel of the leftover
- * sliver, which nothing painted at all until now. */
-static int xend, slx;
 
-static int tabx[4], tabe[4];    /* tab bar hit ranges (pixels) */
+/* cedit b0b: the hit ranges are ltx_tabx/ltx_tabe now */
 static int tabsok;              /* tab bar live (files loaded) */
-static int tabh;                /* tab bar height in pixels */
 
-/* the screen's own GUI pens (DrawInfo), with 4-colour WB fallbacks -
- * the tabs are drawn in Intuition's bevel language (his ask: GUI
- * tabs, not text cells), so they follow the user's WB palette */
-static int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
-           ptext = 1, pback = 0;
+/* cedit b0b: the grid, the pens and the scroll engine live in
+ * ltxwin.c now - see the LtxApp vtable further down for how the
+ * chassis asks this program what it is scrolling. */
 
 static int gntabs, gtabvid[4];  /* live tabs -> view ids */
 
-/* border scrollers (his verdict: "a CLI program in a GUI") - raw
- * prop gadgets, border-relative so resize repositions them free */
-static struct Gadget vgad, hgad;
-static struct PropInfo vpi, hpi;
-static struct Image vim, him;
-static int gadsok;
+/* cedit b0b: the scroller gadgets and the deferred-paint flags
+ * live in ltxwin.c */
 
-/* b48: the arrows, from b30's post-mortem rather than a new guess.
- * Boolean gadgets rendering sysiclass images, held in the same two
- * borders as the props. arrheld is the button under the mouse for
- * the INTUITICKS repeat; 0 when none. */
-static struct Gadget agup, agdn, aglt, agrt;
-static APTR iup, idn, ilt, irt;
-static int arrowsok, arrheld;
-
-/* b62, his find (stutter and torn rows on held up/down, Shift+
- * up/down and Tab, while the wheel stayed clean): the event loop
- * drains the whole port and PAINTS on every message. A held key
- * repeats faster than a scroll can be blitted, so one burst of N
- * repeats did N scroll blits and N knob refreshes to reach a state
- * that one paint could have drawn - and the intermediate frames
- * are what the eye catches as stutter. The wheel escaped it only
- * because a notch is one message, not a repeat stream.
- *
- * So: while `defer` is set the state still updates exactly as
- * before - every clamp, anchor mapping and view switch runs
- * untouched - but the painting is skipped and merely OWED, and
- * flushpaint() settles it once the port is empty. Same rule as
- * b12, moved up a level: the metric is blits per burst, not blits
- * per step.
- *
- * b63 fixed two things b62 got wrong. The debt is TYPED, so paying
- * it picks the cheapest sufficient repaint - b62 always ran a full
- * drawpage, which made a single keypress dearer than the
- * incremental scroll it replaced and stuttered worse than before.
- * And the flush runs inside the drain loop the moment the port is
- * empty, not after the loop exits - during a knob drag the stream
- * of MOUSEMOVE kept that loop alive, so b62 painted nothing at all
- * until the button came up. */
-static int propheld;            /* 1 = vgad knob held, 2 = hgad */
-static int defer;               /* inside message handling */
-static int dirtyall;            /* a whole drawpage is owed */
-static int dirtyrows;           /* every content row is owed */
-static int dirtyknob;           /* the props need re-syncing */
-static int scrollfrom, scrollfromset;   /* top the SCREEN still shows */
-static int selold, seloldset;           /* Tree cursor's painted row */
+static int selold, seloldset;   /* Tree cursor's painted row - the
+                                 * app half of the paint debt; the
+                                 * chassis knows it only as
+                                 * ltx_appowed */
 
 /* draw one text cell run, tab-expanded, clipped to width cells,
  * starting hoff source columns in (tab stops stay absolute) */
@@ -735,72 +677,40 @@ static void intraspan(const DLine *a, const DLine *b,
     snapspan(ca, la, cb, lb, pre, enda, endb);
 }
 
+/* cedit b0b: the painter itself is ltx_drawruns() now, and takes N
+ * runs instead of exactly three. This is the same b97 arithmetic,
+ * only it builds a run list rather than laying the three Texts down
+ * itself: hs/he are SOURCE columns, mapped into visible ones and
+ * clamped exactly as before, and an empty span still collapses to
+ * one full-width run. What cdiff hands over is a diff span; what
+ * cedit will hand over is a lexer's output. */
 static void drawtext(int x, int y, const DLine *l, int width,
                      int pen, int bg, int hs, int he, int hpen, int hbg)
 {
-    static char vis[256];
-    int i, o = 0, n, end;
+    LtxRun runs[3];
+    int nr = 0;
+    width = ltx_expandvis(l->ptr, l->len, width);
     if (width <= 0) return;
-    if (width > (int)sizeof(vis)) width = sizeof(vis);
-    end = hoff + width;
-    for (i = 0; i < l->len && o < end; i++) {
-        char ch = l->ptr[i];
-        if (ch == '\t') {
-            do {
-                if (o >= hoff) vis[o - hoff] = ' ';
-                o++;
-            } while ((ttmask ? (o & ttmask) : (o % tttab)) && o < end);
-        } else {
-            if (o >= hoff) vis[o - hoff] = (ch >= 32 || ch < 0) ? ch : '.';
-            o++;
-        }
-    }
-    n = o - hoff;
-    if (n < 0) n = 0;
-    while (n < width) vis[n++] = ' ';
-    /* b97: up to three runs - before, the changed span, after. Each
-     * pixel is still written exactly once (the b66 rule); the spans
-     * are adjacent, never overlapping. */
     hs -= hoff; he -= hoff;             /* into visible columns */
     if (hs < 0) hs = 0;
     if (he > width) he = width;
-    if (hs >= he) {                     /* nothing to mark */
-        SetAPen(rp, pen);
-        SetBPen(rp, bg);
-        Move(rp, x, y + fbase);
-        Text(rp, (STRPTR)vis, width);
-        return;
+    runs[nr].start = 0; runs[nr].pen = pen; runs[nr].bg = bg; nr++;
+    if (hs < he) {                      /* something to mark */
+        if (hs > 0) {
+            runs[nr].start = hs; runs[nr].pen = hpen; runs[nr].bg = hbg;
+            nr++;
+        } else {                        /* the span starts at column 0 */
+            runs[0].pen = hpen; runs[0].bg = hbg;
+        }
+        if (he < width) {
+            runs[nr].start = he; runs[nr].pen = pen; runs[nr].bg = bg;
+            nr++;
+        }
     }
-    if (hs > 0) {
-        SetAPen(rp, pen);
-        SetBPen(rp, bg);
-        Move(rp, x, y + fbase);
-        Text(rp, (STRPTR)vis, hs);
-    }
-    SetAPen(rp, hpen);
-    SetBPen(rp, hbg);
-    Move(rp, x + hs * fw, y + fbase);
-    Text(rp, (STRPTR)vis + hs, he - hs);
-    if (he < width) {
-        SetAPen(rp, pen);
-        SetBPen(rp, bg);
-        Move(rp, x + he * fw, y + fbase);
-        Text(rp, (STRPTR)vis + he, width - he);
-    }
+    ltx_drawruns(x, y, ltx_vis, width, runs, nr);
 }
 
-/* right-aligned 1-based line number in the gutter cells */
-/* b66: gutw digits PLUS the separator column, so this Text covers
- * the whole gutw+1 span drawside skips over - no fill needed */
-static void drawnum(int x, int y, long line, int pen, int bg)
-{
-    static char nb[24];
-    sprintf(nb, "%*ld ", gutw, line + 1);
-    SetAPen(rp, pen);
-    SetBPen(rp, bg);
-    Move(rp, x, y + fbase);
-    Text(rp, (STRPTR)nb, gutw + 1);
-}
+/* cedit b0b: drawnum moved to ltxwin.c - a gutter is a gutter */
 
 /* one side of a row: optional bar fill, gutter number, the text,
  * within a `w`-column budget (halfw in the overview, viscols in a
@@ -835,7 +745,7 @@ static void drawgap(int y, int hidden)
      * hierarchy b4 used to push the gutter back. */
     SetAPen(rp, 2);
     SetBPen(rp, 0);
-    Move(rp, x0, y + fbase);
+    Move(rp, gx0, y + fbase);
     Text(rp, (STRPTR)gb, w);
 }
 
@@ -848,7 +758,7 @@ static void drawmark(int y, int hit)
     if (!markcol) return;
     SetAPen(rp, 1);
     SetBPen(rp, 0);
-    Move(rp, x0, y + fbase);
+    Move(rp, gx0, y + fbase);
     Text(rp, (STRPTR)(hit ? m : b), 1);
 }
 
@@ -879,25 +789,25 @@ static void drawrow(int vr)
 {
     int di = gtop + vr, idx;
     int y = conty + vr * fh, ye = y + fh - 1;
-    int rend = x0 + viscols * fw - 1;
+    int rend = gx0 + viscols * fw - 1;
     int bar, x1, se;
     int hpre = 0, hea = 0, heb = 0;     /* b97: intra-line span */
     Row *r;
     if (di >= vcount()) {               /* past the end: blank */
         SetAPen(rp, 0);
-        RectFill(rp, x0, y, rend, ye);
+        RectFill(rp, gx0, y, rend, ye);
         return;
     }
     idx = drow(di);                     /* b104 */
     if (idx < 0) {                      /* a collapsed run */
         SetAPen(rp, 0);
-        RectFill(rp, x0, y, rend, ye);
+        RectFill(rp, gx0, y, rend, ye);
         drawgap(y, -idx);
         return;
     }
     if (idx >= gnrows) {
         SetAPen(rp, 0);
-        RectFill(rp, x0, y, rend, ye);
+        RectFill(rp, gx0, y, rend, ye);
         return;
     }
     r = &grows[idx];
@@ -1109,332 +1019,7 @@ static void calchunks(void)
     }
 }
 
-/* b82: the status row - hunk position, the diffstat and how far down
- * we are. ONE padded Text, so it repaints in a single blit and can
- * never be caught half-drawn (the b66 rule). It sits OUTSIDE the
- * scroll rectangle, so ScrollWindowRaster never disturbs it; it just
- * needs redrawing whenever the position changes. */
-static void drawstatus(void)
-{
-    static char sb[320];
-    int n, max, pct, idx, lo, hi, w, i, len;
-    char pc[16];
 
-    if (win == NULL || staty < 0 || rp == NULL) return;
-    if (ghdirty) calchunks();
-    w = viscols;
-    if (w > (int)sizeof(sb) - 1) w = sizeof(sb) - 1;
-    if (w < 1) return;
-
-    n = vcount();
-    max = n - crows;
-    if (max < 0) max = 0;
-    pct = max > 0 ? (int)(((long)*vtop() * 100 + max / 2) / max) : 100;
-
-    /* how many hunks have begun by the top of the screen - so n/p,
-     * which lands exactly on a hunk start, reads 1/17, 2/17, ... */
-    lo = 0; hi = ghn;
-    while (lo < hi) {
-        int mid = (lo + hi) / 2;
-        if (ghs[mid] <= *vtop()) lo = mid + 1; else hi = mid;
-    }
-    idx = lo;
-
-    if (view == 3 && gdirmode)
-        sprintf(sb, " %d entries  %d differ %d left %d right",
-                ndents, gndiff, gnleft, gnright);
-    else if (ga)
-        sprintf(sb, " hunk %d/%d  +%d -%d", idx, ghn, gadds, gdels);
-    else
-        strcpy(sb, " nothing loaded");
-
-
-    len = strlen(sb);
-    if (len > w) len = w;
-    for (i = len; i < w; i++) sb[i] = ' ';
-    sb[w] = 0;
-    /* the percentage right-aligned, written over the padding */
-    sprintf(pc, "%d%% ", pct);
-    len = strlen(pc);
-    if (len < w) memcpy(sb + w - len, pc, len);
-
-    /* b84, his ask: a rule above the row, with exactly one blank
-     * pixel between it and the text. calcgrid reserved those two
-     * pixels, so this can never land on a content row. b86: back to
-     * SHINEPEN after seeing both (his eye). */
-    if (staty - 2 >= conty) {
-        SetAPen(rp, pshine);
-        Move(rp, x0, staty - 2);
-        Draw(rp, xend, staty - 2);
-    }
-    SetAPen(rp, 1);
-    SetBPen(rp, 0);
-    Move(rp, x0, staty + fbase);
-    Text(rp, (STRPTR)sb, w);
-}
-
-/* keep both knobs honest: body = visible share, pot = position */
-static void updscrollers(void)
-{
-    ULONG vbody, vpot, hbody, hpot;
-    long total = vcount(), vis = crows, top = *vtop();
-    int ht;
-    if (!gadsok) return;
-    if (defer) { dirtyknob = 1; return; }
-    /* after the guard, and floored at 1: htotal() is max(gmaxw,
-     * viscols) and both are 0 before the first calcgrid, which
-     * would divide by zero below */
-    ht = htotal();
-    if (ht < 1) ht = 1;
-    if (total < 1) total = 1;
-    if (vis > total) vis = total;
-    vbody = (0xFFFFUL * vis) / total;
-    vpot = total > vis ? (0xFFFFUL * top) / (total - vis) : 0;
-    hbody = (0xFFFFUL * (viscols < ht ? viscols : ht)) / ht;
-    hpot = ht > viscols ? (0xFFFFUL * hoff) / (ht - viscols) : 0;
-    NewModifyProp(&vgad, win, NULL, vpi.Flags, 0, vpot, 0, vbody, 1);
-    NewModifyProp(&hgad, win, NULL, hpi.Flags, hpot, 0, hbody, 0, 1);
-}
-
-/* one sysiclass arrow image. w > 0 asks the class for an explicit
- * size; w == 0 takes whatever it considers natural for SYSIA_Size.
- * The caller ALWAYS re-reads Width/Height from the object it gets
- * back rather than assuming the request was honoured - if this
- * Intuition ignores IA_Width/IA_Height the geometry simply falls
- * back to the natural size instead of drifting out of the border. */
-static APTR mksysi(struct DrawInfo *dri, ULONG which, int sysz,
-                   int w, int h)
-{
-    if (w > 0)
-        return NewObject(NULL, (STRPTR)"sysiclass",
-                         SYSIA_DrawInfo, (ULONG)dri,
-                         SYSIA_Which, which,
-                         SYSIA_Size, sysz,
-                         IA_Width, w, IA_Height, h, TAG_DONE);
-    return NewObject(NULL, (STRPTR)"sysiclass",
-                     SYSIA_DrawInfo, (ULONG)dri,
-                     SYSIA_Which, which,
-                     SYSIA_Size, sysz, TAG_DONE);
-}
-
-/* THE arrow fix, and the only reason b26-b28 failed: a plain struct
- * Gadget renders a class-based image ONLY with GFLG_GADGIMAGE set
- * (intuition.h 0x0004 - "set if GadgetRender and SelectRender point
- * to an Image structure, clear if they point to Border structures").
- * Without it Intuition walks the sysiclass Image as a struct Border
- * and draws nothing at all. b26 had every other detail right and
- * omitted this one bit, which is what sent b27/b28 chasing GadTools
- * SCROLLER_KIND - a client-area widget kind that cannot live in a
- * window border, hence "nothing rendered" twice over. */
-static void mkarrow(struct Gadget *g, APTR im, int le, int te,
-                    int rel, int act, int id)
-{
-    struct Image *i = (struct Image *)im;
-    g->LeftEdge = le;
-    g->TopEdge = te;
-    g->Width = i->Width;
-    g->Height = i->Height;
-    g->Flags = rel | GFLG_GADGIMAGE | GFLG_GADGHCOMP;
-    g->Activation = act | GACT_RELVERIFY | GACT_IMMEDIATE;
-    g->GadgetType = GTYP_BOOLGADGET;
-    g->GadgetRender = im;
-    g->GadgetID = id;
-    g->NextGadget = NULL;
-}
-
-/* the border scrollers: vertical right, horizontal bottom (beside
- * the size gadget), AUTOKNOB props in the new look.
- *
- * b48 adds the arrows WITHOUT disturbing the track geometry he
- * signed off at b47: every b47 constant below is untouched except
- * the two extents, which give up exactly the room the arrows need
- * (2*ah off the vertical's height, 2*aw off the horizontal's
- * width). The arrows are centred on the track they drive rather
- * than in the raw border, so they stay aligned with the insets he
- * tuned by eye whatever size sysiclass hands back. */
-static void addscrollers(struct DrawInfo *dri, struct Screen *scr)
-{
-    int brw = win->BorderRight, bbh = win->BorderBottom;
-    int vaw = 0, vah = 0, haw = 0, hah = 0, hahnat = 0, sysz;
-    int vawnat = 0;                 /* natural width at sysz */
-    struct Gadget *tail;
-    int n = 2;
-
-    /* medium-res arrows on a tall screen, low-res on a short one -
-     * sysiclass sizes its own imagery from this.
-     *
-     * b49, his eye on b48: the up/down pair wants a pixel on EACH
-     * side, the left/right pair wants a pixel off the BOTTOM with
-     * its top staying put. Neither is a placement constant - the
-     * drawn size comes from the image, so the size has to be asked
-     * of the class. Two passes: build one of each pair at its
-     * natural size to measure it, then rebuild all four at the
-     * measured size plus his deltas. b48 measured BOTH pairs off
-     * the up arrow, which was only correct while the two pairs
-     * happened to share dimensions - each pair is measured on its
-     * own here. */
-    sysz = scr->Height >= 400 ? SYSISIZE_MEDRES : SYSISIZE_LOWRES;
-    if (dri) {
-        static const int cand[3] = { SYSISIZE_LOWRES, SYSISIZE_MEDRES,
-                                     SYSISIZE_HIRES };
-        int cw[3], ch[3], i, pick = -1, want;
-        APTR ph = mksysi(dri, LEFTIMAGE, sysz, 0, 0);
-
-        /* b52, settled by b51's telemetry ("nat 13 req 17 got 13"):
-         * this sysiclass IGNORES IA_Width/IA_Height. b49's +2 and
-         * b51's +4 were both silently discarded - the arrows have
-         * been at natural size since b48, and no further nudging of
-         * that number can ever do anything. SYSIA_Size is the only
-         * real lever, so measure every size the class offers and
-         * choose, instead of guessing which one to hardcode. */
-        for (i = 0; i < 3; i++) {
-            APTR p = mksysi(dri, UPIMAGE, cand[i], 0, 0);
-            cw[i] = ch[i] = 0;
-            if (p) {
-                cw[i] = ((struct Image *)p)->Width;
-                ch[i] = ((struct Image *)p)->Height;
-                DisposeObject(p);
-            }
-            if (cand[i] == sysz) vawnat = cw[i];
-        }
-        /* his ask, in his units: the width he saw, plus a pixel per
-         * side. Take the SMALLEST size that reaches it - overshoot
-         * is as wrong as undershoot - and the widest available if
-         * nothing does. */
-        want = vawnat > 0 ? vawnat + 2 : 0;
-        for (i = 0; i < 3; i++)
-            if (cw[i] >= want && cw[i] > 0 &&
-                (pick < 0 || cw[i] < cw[pick])) pick = i;
-        if (pick < 0)
-            for (i = 0; i < 3; i++)
-                if (cw[i] > 0 && (pick < 0 || cw[i] > cw[pick])) pick = i;
-
-        if (ph) {
-            haw = ((struct Image *)ph)->Width;
-            hah = ((struct Image *)ph)->Height;
-            DisposeObject(ph);
-        }
-        if (pick >= 0 && haw > 0) {
-            vaw = cw[pick];
-            vah = ch[pick];
-            hahnat = hah;       /* the top is pinned to THIS */
-            /* the vertical pair takes the chosen SIZE; the
-             * horizontal pair is left exactly as b50 built it -
-             * his eye signed that pair off and nothing here
-             * touches it */
-            iup = mksysi(dri, UPIMAGE, cand[pick], 0, 0);
-            idn = mksysi(dri, DOWNIMAGE, cand[pick], 0, 0);
-            ilt = mksysi(dri, LEFTIMAGE, sysz, haw, hah - 1);
-            irt = mksysi(dri, RIGHTIMAGE, sysz, haw, hah - 1);
-        }
-    }
-    arrowsok = iup && idn && ilt && irt;
-    if (arrowsok) {
-        /* what the class actually built, not what was asked for */
-        vaw = ((struct Image *)iup)->Width;
-        vah = ((struct Image *)iup)->Height;
-        haw = ((struct Image *)ilt)->Width;
-        hah = ((struct Image *)ilt)->Height;
-    } else
-        vaw = vah = haw = hah = 0;
-
-    vpi.Flags = AUTOKNOB | FREEVERT | PROPNEWLOOK | PROPBORDERLESS;
-    /* b47: left edge in 1px, right edge pinned (his eye: "perfectly
-     * positioned to the right, 1 pixel too wide to the left"). Both
-     * constants move together - LeftEdge is RELRIGHT-anchored, so
-     * +1 on it and -1 on Width shifts the left side alone */
-    vgad.LeftEdge = -(brw - 5);
-    vgad.TopEdge = win->BorderTop + 1;
-    vgad.Width = brw - 8;
-    /* b54: 1px taller at the BOTTOM (his eye) - TopEdge is absolute
-     * and untouched, so the whole pixel goes to the bottom end */
-    vgad.Height = -(win->BorderTop + bbh + 2 + 2 * vah);
-    vgad.Flags = GFLG_RELRIGHT | GFLG_RELHEIGHT;
-    vgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
-                      GACT_RIGHTBORDER | GACT_FOLLOWMOUSE;
-    vgad.GadgetType = GTYP_PROPGADGET;
-    vgad.GadgetRender = (APTR)&vim;
-    vgad.SpecialInfo = (APTR)&vpi;
-    vgad.GadgetID = 1;
-    hpi.Flags = AUTOKNOB | FREEHORIZ | PROPNEWLOOK | PROPBORDERLESS;
-    hgad.LeftEdge = win->BorderLeft;
-    /* b47: grow 1px upward, bottom edge pinned (his eye: "perfectly
-     * positioned to the bottom but 1 pixel too thin"). TopEdge back
-     * to b45's value while Height gains the pixel, so the bar gets
-     * taller instead of moving - the b46 bottom he approved holds */
-    hgad.TopEdge = -(bbh - 3);
-    /* b57: another 2px to the RIGHT (his eye), 17 in total since
-     * b54. LeftEdge is absolute and untouched, so every pixel goes
-     * to the right end. The trailing constant IS the gap in pixels
-     * before the left/right arrows: 20 originally, 3 now. The
-     * arrows are anchored to the right border and do not move, so
-     * that 3 is all the room left - past it the track and the left
-     * arrow overlap, and the arrows have to move instead. */
-    hgad.Width = -(win->BorderLeft + brw + 3 + 2 * haw);
-    hgad.Height = bbh - 4;
-    hgad.Flags = GFLG_RELBOTTOM | GFLG_RELWIDTH;
-    hgad.Activation = GACT_RELVERIFY | GACT_IMMEDIATE |
-                      GACT_BOTTOMBORDER | GACT_FOLLOWMOUSE;
-    hgad.GadgetType = GTYP_PROPGADGET;
-    hgad.GadgetRender = (APTR)&him;
-    hgad.SpecialInfo = (APTR)&hpi;
-    hgad.GadgetID = 2;
-    vgad.NextGadget = &hgad;
-    hgad.NextGadget = NULL;
-    tail = &hgad;
-
-    if (arrowsok) {
-        /* Up/down stack in the right border directly above the size
-         * gadget; left/right sit in the bottom border directly left
-         * of it. The offsets are exact: with RELRIGHT the real x is
-         * win->Width + LeftEdge, with RELBOTTOM the real y is
-         * win->Height + TopEdge - so -(bbh + vah) puts a button's
-         * last row exactly one pixel above the bottom border, and
-         * -(brw + haw) its last column one pixel left of the right
-         * border. The cross-axis inset centres each arrow on its
-         * own track, so a sysiclass image wider or narrower than
-         * the track still lines up with it.
-         *
-         * b49: the vertical pair re-centres on its NEW width, so
-         * the two extra pixels land one per side exactly as he
-         * asked. The horizontal pair does NOT re-centre - hy is
-         * computed from the natural height it had at b48, which he
-         * called correct, so losing a pixel takes it off the
-         * bottom and leaves the top where it is. */
-        int vx = vgad.LeftEdge + (vgad.Width - vaw) / 2;
-        int hy = hgad.TopEdge + (hgad.Height - hahnat) / 2;
-        /* b53: both down 1px (his eye) - the pair moves together,
-         * the track above them is left where he tuned it */
-        mkarrow(&agup, iup, vx, -(bbh + 2 * vah - 1),
-                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 3);
-        mkarrow(&agdn, idn, vx, -(bbh + vah - 1),
-                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_RIGHTBORDER, 4);
-        mkarrow(&aglt, ilt, -(brw + 2 * haw), hy,
-                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 5);
-        mkarrow(&agrt, irt, -(brw + haw), hy,
-                GFLG_RELRIGHT | GFLG_RELBOTTOM, GACT_BOTTOMBORDER, 6);
-        tail->NextGadget = &agup;
-        agup.NextGadget = &agdn;
-        agdn.NextGadget = &aglt;
-        aglt.NextGadget = &agrt;
-        n += 4;
-    }
-
-    AddGList(win, &vgad, -1, n, NULL);
-    /* b50, his find: the arrows drew wrong on open and on every
-     * resize, then corrected themselves the moment the window was
-     * deactivated and reactivated - and stayed correct until the
-     * next resize. That is the whole diagnosis. Deactivating makes
-     * Intuition redraw the window FRAME: border background first,
-     * then the border gadgets on top of it. RefreshGList only ever
-     * paints the gadget imagery - it does not repaint the border
-     * underneath - so every one of our own refreshes stamped the
-     * arrows onto stale border pixels. Every gadget here lives in
-     * a border, so the frame refresh is the correct call for all
-     * six and RefreshGList has no business in this window. */
-    RefreshWindowFrame(win);
-    gadsok = 1;
-}
 
 /* one row of the Tree tab: selection arrow, status marker, path.
  * One-sided and differing rows bar like changed lines do. */
@@ -1449,7 +1034,7 @@ static void drawdirrow(int vr)
     DEnt *d;
     if (idx >= ndents) {
         SetAPen(rp, 0);
-        RectFill(rp, x0, y, x0 + viscols * fw - 1, y + fh - 1);
+        RectFill(rp, gx0, y, gx0 + viscols * fw - 1, y + fh - 1);
         return;
     }
     d = &dents[idx];
@@ -1466,19 +1051,19 @@ static void drawdirrow(int vr)
         pre[1] = ' ';
         SetAPen(rp, 1);
         SetBPen(rp, 0);
-        Move(rp, x0, y + fbase);
+        Move(rp, gx0, y + fbase);
         Text(rp, (STRPTR)pre, 2);
         pre[0] = st;
         SetAPen(rp, bar ? 2 : 1);
         SetBPen(rp, bar ? 3 : 0);
-        Move(rp, x0 + 2 * fw, y + fbase);
+        Move(rp, gx0 + 2 * fw, y + fbase);
         Text(rp, (STRPTR)pre, 2);
     }
     sprintf(pbuf, "%.400s%s", d->rel, d->isdir ? "/" : "");
     tl.ptr = pbuf;
     tl.len = strlen(pbuf);
     tl.hash = 0;
-    drawtext(x0 + 4 * fw, y, &tl, viscols - 4,
+    drawtext(gx0 + 4 * fw, y, &tl, viscols - 4,
              bar ? 2 : 1, bar ? 3 : 0, 0, 0, 0, 0);
 }
 
@@ -1487,14 +1072,14 @@ static void drawline(int vr)
 {
     int di = *vtop() + vr, line;
     int y = conty + vr * fh, ye = y + fh - 1;
-    int rend = x0 + viscols * fw - 1;
+    int rend = gx0 + viscols * fw - 1;
     const DLine *l;
     char tag;
     if (di >= vcount()) goto blank;
     line = drow(di);                    /* b104 */
     if (line < 0) {                     /* a collapsed run */
         SetAPen(rp, 0);
-        RectFill(rp, x0, y, rend, ye);
+        RectFill(rp, gx0, y, rend, ye);
         drawgap(y, -line);
         return;
     }
@@ -1517,22 +1102,27 @@ static void drawline(int vr)
     return;
 blank:
     SetAPen(rp, 0);
-    RectFill(rp, x0, y, rend, ye);
+    RectFill(rp, gx0, y, rend, ye);
 }
 
 /* the tab bar: real GUI tabs (his ask) - beveled boxes in the
  * screen's DrawInfo pens, the active one filled and opening into
  * the content through a gap in the base rule. Directory mode adds
  * a Tree tab ahead of the file three. */
+/* cedit b0b: the bevel drawing and the hit ranges are the chassis's
+ * ltx_drawtabs() now. What stays here is what the tabs MEAN - which
+ * views exist, what they are called, and which one is current. */
 static void drawtabs(void)
 {
     static char lab[4][40];
-    int i, x, w, yr = y0 + tabh, winr = xend;
-    int nt = 0, act = 0;
-    SetAPen(rp, pback);
-    RectFill(rp, x0, y0, winr, yr + 1);
+    const char *labs[4];
+    int i, nt = 0, act = 0;
     tabsok = (ga != NULL) || gdirmode;
-    if (!tabsok) { gntabs = 0; return; }
+    if (!tabsok) {
+        gntabs = 0;
+        ltx_drawtabs(NULL, 0, 0);       /* clears the bar */
+        return;
+    }
     if (gdirmode) {
         strcpy(lab[nt], "Tree");
         gtabvid[nt++] = 3;
@@ -1546,63 +1136,11 @@ static void drawtabs(void)
         gtabvid[nt++] = 2;
     }
     gntabs = nt;
-    x = x0 + 2;
     for (i = 0; i < nt; i++) {
-        int lw = strlen(lab[i]);
-        w = lw * fw + 12;               /* label + side padding */
-        /* clip into the window - narrow windows must not get
-         * their border overpainted (his find, the hint lesson) */
-        if (x + w > winr) {
-            w = winr - x;
-            lw = (w - 12) / fw;
-            if (lw < 1) {               /* no room left at all */
-                tabx[i] = winr;
-                tabe[i] = winr;
-                continue;
-            }
-        }
-        tabx[i] = x;
-        tabe[i] = x + w;
+        labs[i] = lab[i];
         if (gtabvid[i] == view) act = i;
-        /* body - b59: every tab takes the page background, active
-         * included (his ask: no blue). What marks the active one is
-         * the base rule breaking open under it, not a fill. */
-        SetAPen(rp, pback);
-        RectFill(rp, x + 1, y0 + 1, x + w - 2, yr - 1);
-        /* bevel: shine top+left, shadow right */
-        SetAPen(rp, pshine);
-        Move(rp, x, yr - 1);
-        Draw(rp, x, y0);
-        Draw(rp, x + w - 2, y0);
-        SetAPen(rp, pshadow);
-        Move(rp, x + w - 1, y0 + 1);
-        Draw(rp, x + w - 1, yr - 1);
-        /* label, centred in the tab - b59: one pen pair now that
-         * the active tab is no longer filled */
-        SetAPen(rp, ptext);
-        SetBPen(rp, pback);
-        Move(rp, x + 6, y0 + 2 + fbase);
-        Text(rp, (STRPTR)lab[i], lw);
-        x += w + 3;
     }
-    /* base rule in shine, broken open under the active tab - the
-     * classic "this tab is the page you are on" statement */
-    SetAPen(rp, pshine);
-    if (tabx[act] > x0) {
-        Move(rp, x0, yr);
-        Draw(rp, tabx[act], yr);
-    }
-    Move(rp, tabe[act] - 1, yr);
-    Draw(rp, winr, yr);
-    /* b59: the active tab's floor is the page background, so the
-     * rule span under it is erased to pback - tab and page read as
-     * one continuous surface and the separator does not cut across
-     * it (his ask). This is the ONLY thing distinguishing the
-     * active tab now, so the span must stay exactly as wide as the
-     * tab's own body. */
-    SetAPen(rp, pback);
-    Move(rp, tabx[act] + 1, yr);
-    Draw(rp, tabe[act] - 2, yr);
+    ltx_drawtabs(labs, nt, act);
 }
 
 static void calcgrid(void);     /* b68: the grid follows find state */
@@ -1631,14 +1169,14 @@ static void drawpage(void)
      * right of the last column keep STALE pixels across a resize
      * (his find - "the blue": old bar rows surviving there) */
     SetAPen(rp, 0);
-    s = x0 + viscols * fw;
+    s = gx0 + viscols * fw;
     e = win->Width - win->BorderRight - 1;
     if (s <= e)
-        RectFill(rp, s, y0, e, win->Height - win->BorderBottom - 1);
+        RectFill(rp, s, gy0, e, win->Height - win->BorderBottom - 1);
     s = conty + crows * fh;
     e = win->Height - win->BorderBottom - 1;
     if (s <= e)
-        RectFill(rp, x0, s, xend, e);
+        RectFill(rp, gx0, s, xend, e);
     /* b86: the right-hand sliver, once, for the full content height.
      * The scroll rect stops at the cell grid so ScrollWindowRaster
      * never disturbs it - it only needs painting when the whole page
@@ -1661,7 +1199,7 @@ static void drawpage(void)
         if (hl > 0) {
             SetAPen(rp, 1);
             SetBPen(rp, 0);
-            Move(rp, x0 + 2 * fw, conty + fh + fbase);
+            Move(rp, gx0 + 2 * fw, conty + fh + fbase);
             Text(rp, (STRPTR)hint, hl);
         }
     }
@@ -1718,94 +1256,53 @@ static void drawrows(void)
         drawone(vr);
 }
 
-/* scroll the ACTIVE view so `target` is on top, clamped. The CFile
- * R1 rule (graphics-and-performance.md): a scroll step is ONE blit
- * of the content rectangle plus repaints of only the entering rows
- * - not a page of Texts, and never the tab bar. Jumps of a page or
- * more repaint the content whole (one pass beats a huge blit plus
- * a full repaint). ScrollWindowRaster (V39) keeps the damage
- * regions honest under overlapping windows on the pubscreen. */
-/* b63: the scroll PAINT, from wherever the screen currently is to
- * wherever the state now says it should be. Split out of scrollto
- * so a deferred burst can replay it ONCE over the whole distance
- * instead of the caller having to paint every step. Still b12's
- * rule: one ScrollWindowRaster plus only the entering rows, the
- * tab bar never touched. */
-static void paintscroll(int from, int to)
+/* ---- cedit b0b: what the chassis is allowed to ask this program --
+ * The scroll engine in ltxwin.c knows how to blit a rectangle and
+ * repaint the rows that entered; it does not know that cdiff's rows
+ * are diff rows, or that view 3 is a directory tree. These eight
+ * answers are the entire surface between the two, and they are the
+ * reason cedit can hand the same engine a Buffer instead. */
+
+/* b82: the status row's left-hand text - hunk position and the
+ * diffstat. The hunk index is a binary search over a lazily-rebuilt
+ * array, never a rescan of 12000 rows: this runs on every position
+ * change, and b82's whole lesson was that it has to be cheap. */
+static void cdiffstatus(char *dst, int max)
 {
-    int d = to - from, vr;
-    if (d == 0) return;
-    /* b92: with Fast scroll OFF every step is a full row repaint -
-     * no blit, no retained pixels. His screenshots show the screen
-     * holding TWO scroll states split at a seam, and since scrolling
-     * only ever blits and redraws the entering rows, nothing ever
-     * repairs that. Turning the blit off decides in one boot whether
-     * the fault is in the blit or in the row drawing, and if it is
-     * the blit this is also a working fallback - b65/b66 made a full
-     * repaint far cheaper than it used to be. */
-    if (ttfast && (d > -crows) && (d < crows)) {
-        SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
-        /* b93: ScrollRaster, NOT ScrollWindowRaster. His bisection
-         * settled it - Fast scroll OFF (full row repaint) is clean,
-         * ON was not, so the fault was the blit and not the row
-         * drawing. And cdiff was the only tool in this family using
-         * the V39 Intuition call: CCON scrolls with graphics.library's
-         * ScrollRaster, seventeen call sites, on this same PiStorm
-         * A1200 at five times stock speed with no artifacts. Use the
-         * primitive that is proven on the hardware in front of us.
-         * Bonus: ScrollRaster is V33, so the fast path no longer
-         * needs the >= V39 guard the old call did. */
-        ScrollRaster(rp, 0, d * fh,
-                     x0, conty,
-                     x0 + viscols * fw - 1,
-                     conty + crows * fh - 1);
-        /* b91, and the whole diagnosis is his two screenshots plus
-         * the telemetry: every number was RIGHT (rb 222 clear of
-         * st-2 224, d 3 well under crows 25), so the arithmetic was
-         * never the fault. The picture showed line numbers running
-         * 458..472 then 476..484 - exactly d rows missing, with a
-         * torn row at the seam. The LOWER part of the rect had
-         * scrolled and the upper part had not: a partial blit.
-         *
-         * ScrollWindowRaster queues blitter work; Text() renders
-         * with the CPU. Without a barrier the glyphs can land in a
-         * region the blitter has not finished moving - which is why
-         * scrolling DOWN garbled and scrolling UP never did. The
-         * entering rows for a downward scroll sit at the BOTTOM,
-         * the part the blit reaches LAST; for an upward scroll they
-         * sit at the top, already moved by the time we draw. */
-        WaitBlit();
-        if (d > 0) {            /* moved up: new rows at the bottom */
-            for (vr = crows - d; vr < crows; vr++)
-                drawone(vr);
-        } else {                /* moved down: new rows on top */
-            for (vr = 0; vr < -d; vr++)
-                drawone(vr);
-        }
-    } else
-        drawrows();             /* too far to blit: full rows */
+    int idx, lo, hi;
+    if (ghdirty) calchunks();
+    lo = 0; hi = ghn;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (ghs[mid] <= *vtop()) lo = mid + 1; else hi = mid;
+    }
+    idx = lo;
+    if (view == 3 && gdirmode)
+        sprintf(dst, " %d entries  %d differ %d left %d right",
+                ndents, gndiff, gnleft, gnright);
+    else if (ga)
+        sprintf(dst, " hunk %d/%d  +%d -%d", idx, ghn, gadds, gdels);
+    else
+        strcpy(dst, " nothing loaded");
+    (void)max;      /* every branch above is far inside sb[320] */
 }
 
-static void scrollto(int target)
+/* the Tree cursor's two rows - the app's own half of the paint debt */
+static void cdiffflush(void)
 {
-    int *t = vtop(), from;
-    int max = vcount() - crows;
-    if (max < 0) max = 0;
-    if (target > max) target = max;
-    if (target < 0) target = 0;
-    from = *t;
-    if (target == from) return;
-    *t = target;
-    if (defer) {
-        /* Only the FIRST deferred step of a burst knows what is
-         * actually on screen - every later one would report a top
-         * that was never painted. Hence "if not already set". */
-        if (!scrollfromset) { scrollfrom = from; scrollfromset = 1; }
-        return;
-    }
-    paintscroll(from, target);
-    updscrollers();
+    if (!seloldset) return;
+    if (selold >= dtop && selold < dtop + crows)
+        drawone(selold - dtop);
+    if (dsel >= dtop && dsel < dtop + crows)
+        drawone(dsel - dtop);
+    seloldset = 0;
 }
+
+static const LtxApp cdiffapp = {
+    vcount, vtop, htotal, drawone, drawrows, drawpage,
+    cdiffstatus, cdiffflush
+};
+
 
 /* next/previous hunk in the active view: rows in the overview,
  * tagged lines in a single-file tab, non-same entries in the Tree */
@@ -1858,6 +1355,7 @@ static void movesel(int target)
         scrollto(dsel - crows + 1);
     if (defer) {
         if (!seloldset) { selold = old; seloldset = 1; }
+        ltx_appowed = 1;        /* cedit b0b: tell the chassis */
         return;
     }
     if (old >= dtop && old < dtop + crows)
@@ -1866,118 +1364,6 @@ static void movesel(int target)
         drawone(dsel - dtop);
 }
 
-/* pan to column `nh`, clamped to the real content width - the one
- * path to hoff for arrows and keys alike, so a held-down arrow can
- * never walk it past what drawtext will show. b58: the clamp was a
- * flat 440, which is why panning worked over an empty window; with
- * nothing loaded htotal() == viscols and the ceiling is 0. */
-static void sethoff(int nh)
-{
-    int ht = htotal();
-    if (nh > ht - viscols) nh = ht - viscols;
-    if (nh < 0) nh = 0;
-    if (nh == hoff) return;
-    hoff = nh;
-    if (defer) { dirtyrows = 1; return; }
-    drawrows();
-    updscrollers();
-}
-
-/* b64: follow a knob that Intuition is dragging. The PropInfo pot
- * is the truth - Intuition updates it in place as the mouse moves,
- * so converting it to a row/column here tracks the drag no matter
- * which IDCMP class happened to wake us. Cheap and idempotent: if
- * the pot still agrees with where we are, both calls return
- * immediately having done nothing. */
-static void proptrack(void)
-{
-    if (propheld == 1) {
-        long total = vcount(), vis = crows;
-        if (total > vis)
-            scrollto((int)(((ULONG)vpi.VertPot * (total - vis)
-                            + 0x7FFF) / 0xFFFF));
-    } else if (propheld == 2) {
-        int ht = htotal();
-        if (ht > viscols)
-            sethoff((int)(((ULONG)hpi.HorizPot * (ht - viscols)
-                           + 0x7FFF) / 0xFFFF));
-    }
-}
-
-/* b63: is another message ALREADY queued? A held key or a dragged
- * knob arrives as a stream, and painting every message of it is
- * what stutters. This answers "is more coming right now", so the
- * paint can be skipped for every message but the last of a burst.
- * Forbid/Permit because Intuition appends to this list from input
- * server context. */
-static int inputwaiting(void)
-{
-    int more;
-    Forbid();
-    more = win->UserPort->mp_MsgList.lh_Head->ln_Succ != NULL;
-    Permit();
-    return more;
-}
-
-/* b63: settle whatever painting the burst ran up, ONCE, on the
- * final state. b62 got this wrong twice: it always paid the debt
- * with a full drawpage (making a SINGLE keypress more expensive
- * than the incremental scroll it replaced), and it only ran after
- * the message loop exited - which during a knob drag never
- * happened, so nothing moved until the button came up. Now the
- * debt is typed, the cheapest sufficient repaint is chosen, and
- * the caller runs this the moment the port is empty. */
-static void flushpaint(void)
-{
-    int owed = dirtyall || dirtyrows || scrollfromset || seloldset;
-    if (win == NULL) return;    /* b72: iconified - nothing to paint */
-    /* b70: clear defer BEFORE the early return. It used to sit
-     * inside the "something is owed" path, so a message that owed
-     * no painting left the flag armed - harmless while every
-     * painter ran inside the IDCMP drain that re-arms it each
-     * message, and a real bug the moment anything painted from
-     * OUTSIDE that drain. His find: a dropped icon loaded the files
-     * but the window did not change until it was activated again -
-     * the drop had painted into a deferred debt nobody settled. */
-    defer = 0;
-    if (!owed && !dirtyknob) return;
-    /* b95: start the repaint just after the beam has passed, so as
-     * much of it as possible lands inside one frame. This does NOT
-     * cure the tearing he chased for six builds - a 25-row repaint
-     * outlasts a 20ms PAL frame, so the beam still catches it - but
-     * it makes the seam land in a consistent place instead of
-     * wandering, which the eye tolerates far better. Coalescing
-     * already limits us to one repaint per input burst, so the wait
-     * costs at most one frame per burst.
-     *
-     * The tearing is NOT a bug in this program: it is what a
-     * single-buffered display does. His tests proved it - it clears
-     * the instant scrolling stops, it is identical on a stock A1200
-     * PAL Hires with no RTG, and it is indifferent to whether we use
-     * ScrollWindowRaster, ScrollRaster, or no blit at all. */
-    WaitTOF();
-    if (dirtyall)
-        drawpage();                     /* tabs and every row */
-    else if (dirtyrows)
-        drawrows();                     /* every row's text moved */
-    else {
-        if (scrollfromset)
-            paintscroll(scrollfrom, *vtop());
-        if (seloldset) {                /* Tree cursor: two rows */
-            if (selold >= dtop && selold < dtop + crows)
-                drawone(selold - dtop);
-            if (dsel >= dtop && dsel < dtop + crows)
-                drawone(dsel - dtop);
-        }
-    }
-    dirtyall = dirtyrows = dirtyknob = 0;
-    scrollfromset = seloldset = 0;
-    drawstatus();       /* b82: position changed, so this did too */
-    /* b64: NOT while a knob is held - Intuition is rendering that
-     * knob as it tracks the mouse, and NewModifyProp would stamp
-     * our own idea of the position back over the drag. */
-    if (!propheld) updscrollers();
-}
 
 /* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. The Tree
  * moves its selection (matching click-to-select); every other view
@@ -2205,52 +1591,29 @@ static void calcgut(void)
 }
 
 /* the whole text grid from the window's current size - run at
- * open and again on every IDCMP_NEWSIZE */
+ * open and again on every IDCMP_NEWSIZE.
+ *
+ * cedit b0b: the generic half is ltx_calcgrid() - the drawable
+ * grid, the tab bar height, the status row and the content rows.
+ * What stays here is what depends on WHAT CDIFF PUTS IN the grid:
+ * the find caret's reserved column, the two panes, the gutter. None
+ * of it feeds back into the chassis numbers, so the order is safe. */
 static void calcgrid(void)
 {
-    x0 = win->BorderLeft;
-    y0 = win->BorderTop;
-    viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
-    visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
+    ltx_calcgrid();
     /* b68 (his call): the caret column is reserved ONLY while a
      * find is current - no search, no shifted text. b67 reserved it
      * always, which moved a layout he had already signed off for a
      * feature that is idle most of the time. Dropped again when the
      * window is too narrow to spare the column. */
     markcol = findrow >= 0;
-    cx0 = x0;
+    cx0 = gx0;
     cvis = viscols;
     if (markcol) {
-        if (viscols - 1 >= 8) { cx0 = x0 + fw; cvis = viscols - 1; }
+        if (viscols - 1 >= 8) { cx0 = gx0 + fw; cvis = viscols - 1; }
         else markcol = 0;
     }
-    xend = win->Width - win->BorderRight - 1;
-    slx  = x0 + viscols * fw;   /* first pixel past the last cell */
     halfw = (cvis - 3) / 2;
-    /* b60: 2px shorter (his eye). The label baseline is fixed at
-     * y0 + 2 + fbase, so the text does not move and the whole
-     * saving comes off the bottom - which also lifts conty and
-     * gains the content a couple of pixels. */
-    tabh = fh + 2;
-    conty = y0 + tabh + 2;
-    /* b83, his ask: the status text sits exactly ONE pixel above the
-     * window border at every window size. So it is PINNED to the
-     * bottom rather than riding the text grid - the sub-cell slack
-     * now lands between the last content row and the status row,
-     * instead of below the status row where it varied with height.
-     * Text occupies staty..staty+fh-1, and the border begins at
-     * Height-BorderBottom, so this leaves precisely one blank row. */
-    staty = ttstatus ? win->Height - win->BorderBottom - 1 - fh : -1;
-    /* b84: and two more pixels above the text - one for the shine
-     * rule at staty-2, one blank at staty-1 - so the content can
-     * never run into the divider */
-    crows = staty >= 0 ? (staty - 2 - conty) / fh
-                       : (win->Height - win->BorderBottom - conty) / fh;
-    if (crows < 1) {            /* too short for both - content wins */
-        staty = -1;
-        crows = (win->Height - win->BorderBottom - conty) / fh;
-        if (crows < 1) crows = 1;
-    }
     calcgut();
 }
 
@@ -2440,7 +1803,7 @@ static int askfile(const char *title, char *dest)
 
 static struct MsgPort *appport;
 static struct AppWindow *appwin;
-static struct Screen *myscr;            /* b78: our own, if PUBSCREEN= */
+/* cedit b0b: our own screen, if any, is ltx_myscr */
 static struct AppIcon *appicon;         /* b72: only while iconified */
 static struct DiskObject *appdob;
 static int iconified;
@@ -3087,91 +2450,33 @@ static int domenu(UWORD code)   /* returns 1 = quit */
 static int openmain(void)
 {
     struct Screen *scr;
-    struct DrawInfo *dri = NULL;
-    int wleft, wtop, wwide, whigh;
-
-    /* b78: our own screen when PUBSCREEN= names one. Cloned from
-     * Workbench (mode, colours, and depth unless SCREENDEPTH= says
-     * otherwise), published under that name so it behaves like any
-     * other public screen. If it will not open we fall back to
-     * Workbench rather than refusing to start. */
-    if (ttscrname[0] && myscr == NULL) {
-        myscr = OpenScreenTags(NULL,
-            SA_LikeWorkbench, TRUE,
-            ttdepth ? SA_Depth : TAG_IGNORE, (ULONG)ttdepth,
-            SA_Type,      PUBLICSCREEN,
-            SA_PubName,   (ULONG)ttscrname,
-            SA_Title,     (ULONG)ttscrname,
-            SA_SharePens, TRUE,
-            TAG_DONE);
-        if (myscr) PubScreenStatus(myscr, 0);   /* let others in */
-    }
-    /* precedence: our own screen, then a named one to attach to,
-     * then Workbench. OPENSCREEN wins when both are set - asking for
-     * a screen of your own is the more specific request, and
-     * attaching is the fallback. A named screen that is not there
-     * falls through to Workbench rather than refusing to start. */
-    scr = myscr;
-    if (scr == NULL && ttpubscr[0])
-        scr = LockPubScreen((STRPTR)ttpubscr);
-    if (scr == NULL) scr = LockPubScreen(NULL);
-    if (scr == NULL) return 0;
-    /* b73/b81: LEFT/TOP/WIDTH/HEIGHT, each independent. The size is
-     * measured FROM the position, so -1 (or no size at all) reaches
-     * the screen edge without ever overrunning it. */
-    wleft = ttleft >= 0 ? ttleft : 0;
-    wtop  = tttop  >= 0 ? tttop  : scr->BarHeight + 1;
-    wwide = ttwidth  > 0 ? ttwidth  : scr->Width  - wleft;
-    whigh = ttheight > 0 ? ttheight : scr->Height - wtop;
-    win = OpenWindowTags(NULL,
-        WA_Left,   wleft,
-        WA_Top,    wtop,
-        WA_Width,  wwide,
-        WA_Height, whigh,
-        WA_Title, (ULONG)"cdiff",
-        WA_IconifyGadget, TRUE,   /* b72: V47 - ignored below it */
-        myscr ? WA_CustomScreen : WA_PubScreen, (ULONG)scr,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
-                  IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
-                  IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
-                  IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
-                  IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
-                  IDCMP_INTUITICKS,   /* b48: arrow auto-repeat */
-        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
-                  /* SMART: Intuition itself restores regions a
-                   * requester covered - the app is BLOCKED inside
-                   * EasyRequest and cannot repaint (his find: move
-                   * the requester, holes stay). Backing store is
-                   * the price, correctness is the product.
-                   * SIZEBRIGHT widens the right border for the
-                   * vertical scroller. */
-                  WFLG_CLOSEGADGET | WFLG_SMART_REFRESH |
-                  WFLG_ACTIVATE | WFLG_SIZEGADGET |
-                  WFLG_SIZEBBOTTOM | WFLG_SIZEBRIGHT,
-        WA_MinWidth, 240,
-        WA_MinHeight, 120,
-        WA_MaxWidth, ~0,
-        WA_MaxHeight, ~0,
-        WA_NewLookMenus, TRUE,
-        TAG_DONE);
-    if (win == NULL) {
-        UnlockPubScreen(NULL, scr);
-        return 0;
-    }
-    /* the screen's GUI pens for the tab bevels; fall back to the
-     * 4-colour defaults if DrawInfo is unavailable. b48: the pens
-     * are read here but the DrawInfo is NOT freed yet - sysiclass
-     * needs it to build the arrow images, so it stays alive (and
-     * the pubscreen stays locked) until addscrollers has run */
-    dri = GetScreenDrawInfo(scr);
-    if (dri) {
-        pshine = dri->dri_Pens[SHINEPEN];
-        pshadow = dri->dri_Pens[SHADOWPEN];
-        pfill = dri->dri_Pens[FILLPEN];
-        pfilltext = dri->dri_Pens[FILLTEXTPEN];
-        ptext = dri->dri_Pens[TEXTPEN];
-        pback = dri->dri_Pens[BACKGROUNDPEN];
-    }
+    struct DrawInfo *dri;
+    /* cedit b0b: the screen precedence, the window geometry rules and
+     * the font road are the chassis's now. What is left here is what
+     * is cdiff's: its title, its IDCMP set, its menus and its grid. */
+    static LtxWinSpec spec;
+    spec.title     = "cdiff";
+    spec.scrname   = ttscrname;
+    spec.pubscr    = ttpubscr;
+    spec.depth     = ttdepth;
+    spec.left      = ttleft;
+    spec.top       = tttop;
+    spec.width     = ttwidth;
+    spec.height    = ttheight;
+    spec.fontname  = ttfont;
+    spec.fontsize  = ttfsize;
+    spec.minwidth  = 240;
+    spec.minheight = 120;
+    spec.idcmp     = IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
+                     IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
+                     IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
+                     IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
+                     IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
+                     IDCMP_INTUITICKS;  /* b48: arrow auto-repeat */
+    if (!ltx_openwin(&spec, &scr, &dri)) return 0;
+    /* b109: we asked for a font and got the system default, so it
+     * was not there - do not retry it on every reopen */
+    if (ttfont[0] && font == GfxBase->DefaultFont) ttfont[0] = 0;
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
@@ -3205,48 +2510,12 @@ static int openmain(void)
             }
         }
     }
-    rp = win->RPort;
-    /* b73: FONT=name.font/size. Opened once and kept for the life of
-     * the program - openmain can run again after an iconify, and
-     * re-opening per window would leak.
-     *
-     * A PROPORTIONAL font is refused outright: every measurement in
-     * this program is columns x fw, so a variable-width face would
-     * not render badly, it would render nonsense. Falling back to
-     * the system font is the honest answer. */
-    if (font == NULL && ttfont[0]) {
-        struct TextFont *tf = tryfont(ttfont, ttfsize);
-        if (tf == NULL) {
-            /* b109: retry lowercased. OpenFont's list is
-             * case-sensitive but the filesystem is not, so "Topaz"
-             * misses the ROM topaz while "microknight" still finds
-             * MicroKnight.font on disk. */
-            char lc[64];
-            int i2;
-            for (i2 = 0; ttfont[i2] && i2 < (int)sizeof(lc) - 1; i2++)
-                lc[i2] = (ttfont[i2] >= 'A' && ttfont[i2] <= 'Z')
-                             ? ttfont[i2] + 32 : ttfont[i2];
-            lc[i2] = 0;
-            if (strcmp(lc, ttfont)) tf = tryfont(lc, ttfsize);
-        }
-        if (tf) font = ttfont2 = tf;
-        else    ttfont[0] = 0;      /* do not retry on every reopen */
-    }
-    if (font == NULL) font = GfxBase->DefaultFont;  /* system monospace */
-    SetFont(rp, font);
-    fw = font->tf_XSize;
-    fh = font->tf_YSize;
-    fbase = font->tf_Baseline;
-    /* b48: both the DrawInfo and the pubscreen lock are still held
-     * here on purpose - sysiclass reads them while it builds the
-     * arrow images. Released the moment the gadgets exist. */
     /* b72: the AppWindow is per-window, but the PORT is not - it
      * has to outlive the window so the AppIcon can still reach us
      * while iconified. Created once in guimode. */
     if (appport) appwin = AddAppWindowA(0, 0, win, appport, NULL);
     addscrollers(dri, scr);
-    if (dri) FreeScreenDrawInfo(scr, dri);
-    if (!myscr) UnlockPubScreen(NULL, scr);     /* ours needs no lock */
+    ltx_screendone(scr, dri);
     calcgrid();
     return 1;
 }
@@ -3260,19 +2529,13 @@ static void closemain(void)
     if (appwin) { RemoveAppWindow(appwin); appwin = NULL; }
     if (gmenu) ClearMenuStrip(win);
     if (gadsok) { RemoveGList(win, &vgad, -1); gadsok = 0; }
-    CloseWindow(win);
-    win = NULL;
+    ltx_closewindow();
     if (gmenu) { FreeMenus(gmenu); gmenu = NULL; }
     if (gvi) { FreeVisualInfo(gvi); gvi = NULL; }
-    if (iup) { DisposeObject(iup); iup = NULL; }
-    if (idn) { DisposeObject(idn); idn = NULL; }
-    if (ilt) { DisposeObject(ilt); ilt = NULL; }
-    if (irt) { DisposeObject(irt); irt = NULL; }
-    arrowsok = 0;
-    /* b78: the screen goes with the window - iconifying must not
-     * leave an empty cdiff screen sitting on the display. Window
-     * first (CloseWindow above), then the screen it lived on. */
-    if (myscr) { CloseScreen(myscr); myscr = NULL; }
+    freearrows();               /* cedit b0b: the four sysiclass images */
+    /* the VisualInfo above came FROM the screen, so it has to be
+     * freed before the screen is - hence two calls, in this order */
+    ltx_closescreen();
 }
 
 /* b72: hide. The window goes away entirely and an AppIcon takes its
@@ -3323,6 +2586,10 @@ static void guimode(void)
 {
     struct IntuiMessage *msg;
     int done = 0, burst = 0;
+
+    /* cedit b0b: before anything can paint. The chassis refuses to
+     * scroll, flush or draw a status row without it. */
+    ltx_setapp(&cdiffapp);
 
     IntuitionBase = (struct IntuitionBase *)
         OpenLibrary((STRPTR)"intuition.library", 37);
@@ -3426,15 +2693,9 @@ static void guimode(void)
                 else if (class == IDCMP_GADGETUP)
                     propheld = 0;
                 if (iaddr == (APTR)&vgad) {
-                    long total = vcount(), vis = crows;
-                    if (total > vis)
-                        scrollto(((ULONG)vpi.VertPot *
-                                  (total - vis) + 0x7FFF) / 0xFFFF);
+                    ltx_trackvert();
                 } else if (iaddr == (APTR)&hgad) {
-                    int ht = htotal();
-                    if (ht > viscols)
-                        sethoff(((ULONG)hpi.HorizPot *
-                                 (ht - viscols) + 0x7FFF) / 0xFFFF);
+                    ltx_trackhoriz();
                 } else if (class == IDCMP_GADGETDOWN) {
                     /* b48: the arrows are plain boolean gadgets -
                      * GADGETDOWN starts the repeat and takes the
@@ -3473,7 +2734,7 @@ static void guimode(void)
                 /* the whole page was just painted - drop the debt
                  * so the flush does not redraw it a second time */
                 dirtyall = dirtyrows = 0;
-                scrollfromset = seloldset = 0;
+                scrollfromset = seloldset = ltx_appowed = 0;
             }
             if (class == IDCMP_NEWSIZE) {
                 /* the RELxxx flags let Intuition reposition each
@@ -3510,14 +2771,14 @@ static void guimode(void)
                         drawpage();
                     defer = od;
                     dirtyall = dirtyrows = 0;
-                    scrollfromset = seloldset = 0;
+                    scrollfromset = seloldset = ltx_appowed = 0;
                 }
             }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
-                if (tabsok && my >= y0 && my <= y0 + tabh) {
+                if (tabsok && my >= gy0 && my <= gy0 + tabh) {
                     int i;
                     for (i = 0; i < gntabs; i++)
-                        if (mx >= tabx[i] && mx < tabe[i])
+                        if (mx >= ltx_tabx[i] && mx < ltx_tabe[i])
                             setview(gtabvid[i]);
                 } else if (view == 3 && my >= conty &&
                            my < conty + crows * fh) {
@@ -3658,7 +2919,7 @@ out:
     if (freq) FreeAslRequest(freq);
     if (AslBase) CloseLibrary(AslBase);
     free(ghs); ghs = NULL; ghcap = ghn = 0;
-    if (ttfont2) { CloseFont(ttfont2); ttfont2 = NULL; }
+    ltx_closefont();
     if (ttoollock) { UnLock(ttoollock); ttoollock = 0; }
     if (DiskfontBase) CloseLibrary(DiskfontBase);
     if (IconBase) CloseLibrary(IconBase);

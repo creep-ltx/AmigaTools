@@ -85,50 +85,61 @@ one bisection.
       the Settings menu's STATUSBAR/FASTSCROLL toggles still write
       back to the icon. Those four exercise every line that moved.
 
-### b0b — the render core (NEXT)
+### b0b — the render core — BUILT 2.8.26, AWAITING BOOT
 
-Not code motion. `drawstatus`, `updscrollers`, `paintscroll`,
-`scrollto`, `flushpaint`, `proptrack`, `sethoff` and `arrowstep` all
-call back into cdiff's content model — `vcount()`, `vtop()`,
-`htotal()`, `drawone()`, `drawrows()` — so the scroll engine cannot
-move without an interface. That interface is the point: cdiff's
-model is Rows and DLines, cedit's is a Buffer, and the chassis must
-not know which.
+Not code motion, and that was the whole point. `drawstatus`,
+`updscrollers`, `paintscroll`, `scrollto`, `flushpaint`, `proptrack`
+and `sethoff` all reached into cdiff's content model, so the engine
+could not move without an interface — and that interface is what
+lets cedit hand the same engine a Buffer.
 
-- [ ] A small callback struct the app fills in at init: total rows,
-      the active scroll top, total columns, paint-one-row,
-      paint-all-rows, compose-the-status-string.
-- [ ] Then the move: `rp` and the cell metrics, the grid geometry,
-      the border scrollbars end to end (`mksysi`, `mkarrow`,
-      `addscrollers`, `updscrollers`, `proptrack`, `arrowstep`), the
-      scroll engine (`paintscroll`, `scrollto`, `flushpaint`,
-      `inputwaiting`, the typed dirty flags), the row-paint
-      primitives (`drawtext`, `drawnum`), the tab bar, the status
-      row, window/screen open+close, iconify/uniconify, and the
-      requesters (`erq`, `centerreq`, ASL `askfile`).
-- [ ] **cdiff keeps** `diff.c`, the tree walker, the intra-line
-      span, its row model (`drawside`, `drawrow`, `drawdirrow`,
-      `drawline`, hunks, the diffstat), find, and its menus.
-- [ ] **Three widenings** — the risky part, because each changes the
-      signature of a function that currently renders right:
-      1. `drawtext()` takes a char buffer plus a **run list**
-         (start, pen, bg), not a `DLine*` and one highlight span.
-         cdiff's intra-line highlight becomes a 3-run list; the
-         lexer will hand it N. The b66 rule holds: every pixel
-         written exactly once, runs adjacent and never overlapping.
-      2. `drawtabs()` takes an array of labels and returns hit
-         ranges, instead of knowing view ids 0–3.
-      3. `drawstatus()` takes the string the app composed, instead
-         of reaching into the diffstat. b82's lesson travels with
-         it: whatever fills that string must be cheap or cached.
-- [ ] **GATE: cdiff boot-green, visually unchanged.** Same window,
-      same tabs, same scrolling, same status row, on the same
-      screenshot pair as before the split. Nothing about cedit
-      begins until that passes.
-- [ ] Scrolling is the thing to watch hardest here: b62's
-      coalescing, b91's `WaitBlit` barrier and b93's choice of
-      `ScrollRaster` over `ScrollWindowRaster` are all in the code
-      being moved, and all three were paid for in builds.
+- [x] **The `LtxApp` vtable** — eight questions, the entire surface
+      between chassis and app: `rowcount`, `toprow`, `colcount`,
+      `paintrow`, `paintrows`, `pageall`, `statustext`, `flushapp`.
+      cdiff fills it with `vcount`/`vtop`/`htotal`/`drawone`/
+      `drawrows`/`drawpage` and two small adapters; `ltx_setapp()`
+      runs first thing in guimode, and every chassis painter
+      no-ops until it has been called.
+- [x] **The three widenings**, all done:
+      1. `ltx_drawruns()` takes N runs, not three. cdiff's b97
+         intra-line span became a 3-run list built by the same
+         arithmetic (source columns → visible, same clamps, empty
+         span still collapsing to one full-width run). Tab
+         expansion split off into `ltx_expandvis()`, which is what
+         cedit's lexer will feed.
+      2. `ltx_drawtabs()` takes labels and an active INDEX and
+         fills `ltx_tabx`/`ltx_tabe`, instead of knowing view ids
+         0–3. What the tabs MEAN stayed in cdiff.
+      3. `drawstatus()` takes the app-composed left-hand text and
+         owns the padding, the right-aligned percentage and the
+         rule above. cdiff's hunk binary-search moved into its
+         `statustext` adapter, still lazily rebuilt.
+- [x] Also moved: the grid (`ltx_calcgrid`), the screen pens, the
+      border scrollers end to end, the scroll engine with b62's
+      coalescing / b91's `WaitBlit` / b93's `ScrollRaster` intact,
+      and screen+window+font opening behind an `LtxWinSpec`.
+- [x] **What stayed cdiff's:** `diff.c`, the tree walker, the
+      intra-line span, the row model, find, the menus, and the
+      composition of a page. Chassis = widgets, app = composition.
+- [x] cdiff.c 3,968 → 3,229 lines; ltxgui 397 → 1,507. Clean at
+      `-O2 -Wall`, `make test` ALL GREEN both roads, TEXT mode
+      byte-identical under vamos. Binary 77,108 → 78,200.
+- [ ] **BOOT GATE: visually unchanged.** Same window, same tabs,
+      same scrolling, same status row, on the same screenshot pair
+      as before. Watch scrolling hardest — b62, b91 and b93 were
+      each paid for in builds, and all three are in the moved code.
+- [ ] Two deliberate behaviour changes to know about before boot:
+      1. `y0` had to be renamed (`gy0`, with `x0` → `gx0` to keep
+         the pair): as a non-static extern it collided with gcc's
+         Bessel builtin `y0` and warned on every build.
+      2. If `OpenWindowTags` fails on a screen of OUR OWN, the
+         chassis no longer calls `UnlockPubScreen` on it. The old
+         code unlocked a screen it had never locked. Rare path,
+         real fix, but it IS a change.
+- [ ] Deferred out of b0b on purpose: the requesters (`erq`,
+      `centerreq`, ASL `askfile`). Generic and small, but cedit b1
+      does not need them, and every extra moved line widens the
+      bisection if this boot goes wrong.
 
 ## 0.1b1 — one buffer, read-only
 
