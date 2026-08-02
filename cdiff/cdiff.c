@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b95 (2.8.26)";
+    "$VER: cdiff 0.1b96 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -1984,6 +1984,53 @@ static void clamptops(void)
 }
 
 /* load gf1/gf2 and diff them; replaces whatever was loaded */
+/* b96, his question - "should I really be able to open binaries,
+ * images, .info files, modules, samples, archives?" No.
+ *
+ * A line diff of a binary is not merely useless, it MISLEADS: lines
+ * break at stray 0x0A bytes that mean nothing, every non-printable
+ * renders as '.', so two rows that genuinely differ get flagged as
+ * changed and drawn as a bar while looking identical on screen. The
+ * tool would be saying "these differ" and then showing nothing. That
+ * is the same lie b24 refused for the Tree's same-size pairs and the
+ * find refuses by only searching what is on screen.
+ *
+ * A NUL byte is the standard test and is reliable for Amiga text -
+ * source, scripts, guides and readmes do not contain one. Only the
+ * head is scanned: enough to classify, cheap on a big file. */
+#define BINSCAN 8192
+
+static int isbinary(const char *buf, long size)
+{
+    long i, n = size < BINSCAN ? size : BINSCAN;
+    for (i = 0; i < n; i++)
+        if (buf[i] == 0) return 1;
+    return 0;
+}
+
+/* where the two byte streams first disagree, or -1 when the shorter
+ * is a prefix of the longer AND they are the same length */
+static long firstdiff(const char *a, long na, const char *b, long nb)
+{
+    long i, n = na < nb ? na : nb;
+    for (i = 0; i < n; i++)
+        if (a[i] != b[i]) return i;
+    return na == nb ? -1 : n;   /* identical prefix, one runs on */
+}
+
+/* the honest verdict, in place of a diff that would mean nothing */
+static void binverdict(char *out, const char *n1, long s1, int b1,
+                       const char *n2, long s2, int b2)
+{
+    const char *what = (b1 && b2) ? "both files are binary" :
+                       b1 ? "the LEFT file is binary"
+                          : "the RIGHT file is binary";
+    sprintf(out, "%s - cdiff compares text\n\n"
+                 "%.40s  %ld bytes\n%.40s  %ld bytes\n\n",
+            what, (char *)FilePart((STRPTR)n1), s1,
+            (char *)FilePart((STRPTR)n2), s2);
+}
+
 static int loaddiff(void)
 {
     long sz1, sz2;
@@ -2002,6 +2049,23 @@ static int loaddiff(void)
         erq(eb);
         freediff();
         return -1;
+    }
+    {   /* b96: classify before splitting - a line diff of a binary
+         * would be a lie, and building one costs a DLine per stray
+         * newline in a file that has no lines at all */
+        int b1 = isbinary(gbuf1, sz1), b2 = isbinary(gbuf2, sz2);
+        if (b1 || b2) {
+            long at = firstdiff(gbuf1, sz1, gbuf2, sz2);
+            binverdict(eb, gf1, sz1, b1, gf2, sz2, b2);
+            if (at < 0)
+                strcat(eb, "the bytes are IDENTICAL");
+            else
+                sprintf(eb + strlen(eb),
+                        "first difference at byte %ld", at);
+            erq(eb);
+            freediff();
+            return -1;
+        }
     }
     if (diff_split(gbuf1, sz1, &gla, &na) != 0 ||
         diff_split(gbuf2, sz2, &glb, &nb) != 0 ||
@@ -3645,6 +3709,30 @@ static int smain(int argc, char **argv)
                                 : (char *)argarr[1]);
             FreeArgs(rda);
             return 20;
+        }
+        {   /* b96: same refusal as the GUI - the TEXT road is the
+             * regression gate, so it must not disagree about what a
+             * binary is. Exit 5 (WARN): not a failure, but not a
+             * clean "no differences" either. */
+            int b1 = isbinary(buf1, sz1), b2 = isbinary(buf2, sz2);
+            if (b1 || b2) {
+                long at = firstdiff(buf1, sz1, buf2, sz2);
+                printf("cdiff: %s - cdiff compares text\n",
+                       (b1 && b2) ? "both files are binary" :
+                       b1 ? "the LEFT file is binary"
+                          : "the RIGHT file is binary");
+                printf("cdiff: %s %ld bytes, %s %ld bytes\n",
+                       (char *)argarr[0], sz1,
+                       (char *)argarr[1], sz2);
+                if (at < 0)
+                    printf("cdiff: the bytes are IDENTICAL\n");
+                else
+                    printf("cdiff: first difference at byte %ld\n", at);
+                free(buf1);
+                free(buf2);
+                FreeArgs(rda);
+                return 5;
+            }
         }
         if (diff_split(buf1, sz1, &la, &na) != 0 ||
             diff_split(buf2, sz2, &lb, &nb) != 0 ||

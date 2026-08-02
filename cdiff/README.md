@@ -57,6 +57,26 @@ the settings). All optional; a shell launch ignores them.
 Two project icons dropped on the cdiff icon are compared as a pair;
 one icon becomes the left side.
 
+## Binary files
+
+cdiff compares **text**. Opening a binary — an executable, `.info`,
+module, sample, image or archive — is refused with an honest verdict
+instead of a meaningless line diff:
+
+```
+both files are binary - cdiff compares text
+cfile.info  1284 bytes
+cfile13.info  1290 bytes
+first difference at byte 312
+```
+
+A line diff of a binary breaks "lines" at stray `0x0A` bytes and
+renders every non-printable as `.`, so two rows that genuinely differ
+are flagged as changed while looking identical on screen — the tool
+saying "these differ" and then showing nothing. Detection is a NUL
+byte in the first 8K, which is reliable for Amiga text. `TEXT` mode
+prints the same verdict and exits `5` (WARN).
+
 `TEXT`: unified-style listing to stdout — and the on-target test
 road under vamos, where the GUI cannot run.
 

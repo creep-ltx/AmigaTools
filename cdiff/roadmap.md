@@ -473,6 +473,32 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       artifact, establish whether it SURVIVES the thing that caused
       it. Transient and persistent are different worlds, and no
       amount of code-reading tells them apart.
+- [x] **b96: BINARIES ARE REFUSED** (his question: "should I really
+      be able to open files like binaries, images, .info files,
+      modules, samples, archives?"). No — and the old behaviour was
+      not merely useless, it MISLED. A line diff of a binary breaks
+      "lines" at stray 0x0A bytes that mean nothing and renders every
+      non-printable as '.', so two rows that genuinely differ were
+      flagged as changed and drawn as a bar WHILE LOOKING IDENTICAL:
+      the tool saying "these differ" and then showing nothing. That
+      is the same lie b24 refused for the Tree's same-size pairs and
+      the find refuses by only searching what is on screen.
+      Detection is a NUL byte in the first 8K - the standard test,
+      reliable for Amiga text, and cheap because only the head is
+      scanned. The check runs BEFORE diff_split, so a binary never
+      becomes a DLine per stray newline (which was also the real
+      memory risk on a file with no lines in it at all).
+      In its place, the honest verdict the machinery already had:
+      both sizes and the offset of the first differing byte, or that
+      the bytes are identical. The GUI shows a requester, TEXT prints
+      the same and exits 5 (WARN) - the TEXT road is the regression
+      gate, so it must not disagree with the GUI about what a binary
+      is. Proven under vamos across all four cases (text pair,
+      binaries differing, binaries identical, one of each) before it
+      reached a boot.
+      Deliberately NOT built: an override for a file that is mostly
+      text with a stray NUL. His call to start with refuse-and-report;
+      the escape hatch waits until there is a real case for it.
 - [ ] Whether SCREENDEPTH=2 measurably beats a 4-plane Workbench on
       his machine. Blit cost is per bitplane, so it should — worth
       confirming rather than assuming.
