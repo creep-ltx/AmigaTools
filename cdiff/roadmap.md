@@ -523,31 +523,30 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## 0.1b4 — engine deepening
 
-- [x] **b99: Myers middle-snake inside replace blocks** — patience
-      anchors on lines unique in BOTH files, so a block with no
-      unique lines had nothing to anchor on and degraded to "delete
-      all n, insert all m". Myers finds the genuinely shortest edit
-      script; the middle snake makes it affordable (search forward
-      from the start and backward from the end until they meet, then
-      recurse on the halves — linear memory, not quadratic). Applied
-      ONLY at middle()'s replace label, so patience keeps its good
-      anchoring everywhere else. Capped at n+m <= 1024 lines with
-      one pair of work vectors allocated per run, never inside the
-      recursion; past the cap, or if the allocation fails, the plain
-      replace is emitted exactly as before.
-      Three harness cases added, and PROVEN to have teeth: with
-      MYERSMAX forced to 0 they fail with exactly 0 equal lines,
-      which is the degeneration itself.
-      **MEASURED, and weaker than this entry assumed.** On the real
-      cfile/cfile13 pair: 489 -> 560 hunks, +1083/-2145 -> +1081/
-      -2143, 1869 -> 2035 ms under vamos. That is +9% time for TWO
-      extra matched lines and 71 more hunks, most of the output
-      difference being hunk boundaries shifting rather than new
-      alignments. The reason: rec() trims the common prefix and
-      suffix BEFORE middle() is reached, so genuinely anchorless
-      blocks are rare in a fork-style diff. Kept pending his verdict
-      on whether the WA_-tag blocks read better by eye; if not, this
-      is a roadmap item that measured worse than it sounded.
+- [ ] **Myers middle-snake — BUILT (b99), MEASURED, REMOVED (b101).**
+      Patience anchors on lines unique in BOTH files, so a block with
+      no unique lines degrades to "delete all n, insert all m". Myers
+      fixes exactly that, and the implementation worked: three
+      harness cases proved it, and proved they had TEETH (with the
+      cap forced to 0 they failed with exactly 0 equal lines).
+      It was removed anyway, on his call, because it was measured:
+      on the real cfile/cfile13 pair it cost **+9% time for TWO extra
+      matched lines and 71 more hunks**, and comparing the outputs
+      showed most of the difference was hunk boundaries shifting
+      rather than better alignment. The cause: rec() trims the common
+      prefix and suffix BEFORE middle() is reached, so genuinely
+      anchorless blocks are rare in a fork-style diff — Myers only
+      ever got the leftovers.
+      Removal verified by the op stream returning byte-for-byte to
+      the pre-Myers baseline (489 hunks, +1083/-2145, against b99's
+      560/+1081/-2143).
+      LESSON: this was a roadmap item that sounded better than it
+      measured. Building it was the only way to find that out, and
+      deleting it afterwards is the right end to that story - not a
+      wasted build. Reopened as a known, deliberate limitation rather
+      than a promise: if a real file pair ever shows a block that
+      badly needs it, the measurement is here to argue against, and
+      the git history has the working implementation.
 - [x] **b97-b98, b100: INTRA-LINE CHANGE HIGHLIGHT** (his pick, and
       the one that changes daily use most). On a '|' row, trim the
       longest common prefix and suffix and mark what is left — two
