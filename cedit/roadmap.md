@@ -141,17 +141,46 @@ lets cedit hand the same engine a Buffer.
       does not need them, and every extra moved line widens the
       bisection if this boot goes wrong.
 
-## 0.1b1 — one buffer, read-only
+## 0.1b1 — one buffer, read-only — BUILT 2.8.26, AWAITING BOOT
 
-- [ ] `Buffer`: line table (the CFile `edensure`/`edgrow` model —
-      doubling table, per-line allocation, no line-length cap),
-      cursor, scroll top, `hoff`, dirty flag, path, and a
-      per-line lexer-state byte reserved but unused.
-- [ ] Load a file, display it in the lifted chassis: gutter,
-      scrollbars, status row, mouse wheel, horizontal pan.
-- [ ] **GATE: it opens a file and scrolls exactly like cdiff does.**
-      If the chassis lift was clean this is nearly free, and that is
-      the point of gating here.
+- [x] **`edbuf.{c,h}`** — the buffer as PURE logic, no Amiga headers,
+      so a harness builds and runs it on the host AND under vamos.
+      The CFile `edensure`/`edgrow` model: a doubling line table of
+      independently grown per-line buffers, no line cap and no line
+      count cap. Chosen over a gap buffer for what the rest of cedit
+      needs — rendering row N is an O(1) lookup, the gutter number IS
+      the index, and b5's lexer state is one byte alongside.
+- [x] **The `Buffer` struct carries b2–b5's fields already** (cursor,
+      dirty, per-line `lex`, per-buffer `top`/`hoff`), with exactly
+      one buffer in it. Tabs at b4 are a data change, not a rewrite.
+- [x] **`tests/edtest.c`, ALL GREEN both roads** — line endings (LF,
+      CR, CRLF, mixed, no trailing newline, empty file, lone
+      newline, blank lines), table growth to 5,000 lines, a
+      4,999-character line, free-then-reuse, and absolute tab-stop
+      arithmetic on both the mask and modulo roads. Plus a tamper
+      control that feeds a deliberately wrong expectation and
+      requires the suite to notice — a suite that cannot fail proves
+      nothing.
+- [x] **The whole GUI is the lifted chassis**: window/screen/font via
+      `LtxWinSpec`, border scrollbars, tab bar, status row, gutter,
+      row painter, and the deferred-paint scroll engine driven
+      through the `LtxApp` vtable. cedit's own GUI code is the eight
+      adapters, a page composer and an event loop.
+- [x] Tooltypes: `FONT=`, `TABSIZE=`, `GUTTER=`, `STATUSBAR=`,
+      `FASTSCROLL=`, `OPENSCREEN=`/`SCREENDEPTH=`, `PUBSCREEN=`,
+      `LEFT=`/`TOP=`/`WIDTH=`/`HEIGHT=`. The Settings menu writes
+      back to the icon through the chassis's `iconset`.
+- [x] Builds clean at `-O2 -Wall`; binary 36K.
+- [ ] **BOOT GATE: it opens a file and scrolls exactly like cdiff.**
+      Same gutter, same scrollbars, same status row, same feel on
+      held keys / Shift+page / knob drag / wheel / resize. If the
+      lift was clean this is nearly free — which is the point of
+      gating here rather than after editing exists.
+- [ ] Known limit inherited from the chassis: `LTX_MAXCOLS` is 256,
+      so a window wider than 256 cells clips the painted row. Fine
+      on PAL Hires (80), a real ceiling on a big RTG screen. cdiff
+      has always had it; worth lifting when something actually meets
+      it.
 
 ## 0.1b2 — editing, and save
 
