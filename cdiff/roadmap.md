@@ -265,6 +265,34 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       LESSON: scheduling was not the bug, it only exposed one. Three
       builds went into WHEN to paint before the cost of HOW each row
       painted got looked at.
+- [x] **b67-b68: FIND** (his ask, with a MultiView-style Navigation
+      menu as the model): Find... / Find Next / Find Previous on
+      Amiga+F and Amiga+N, the third deliberately shortcut-less like
+      the menu he pointed at. The requester is a real GadTools
+      STRING_KIND — his standing "use the OS's own" rule — reusing
+      the VisualInfo the menus already hold, and using GT_GetIMsg/
+      GT_ReplyIMsg, which become mandatory the moment real GadTools
+      *gadgets* (not just its menus) live in a window.
+      Case-insensitive substring over the ACTIVE view's rows: Both
+      searches either side of a row, a single-file tab searches that
+      file, the Tree searches paths. Searching what is on screen is
+      the contract — a hit he could not see would be a lie. Wraps at
+      both ends. One pass counts every match AND picks the hit, so
+      the title can say `[Find "x" 3/17]` honestly; counting costs
+      the same scan the search needs anyway, and being exact after a
+      reload beats caching a number that can rot.
+      The hit is centred and marked by a caret in a reserved column
+      0, drawn on the plain background so it stays legible on a
+      changed row too. The Tree gets no caret — a find there moves
+      the selection cursor, which already marks the row.
+      **b68, his call:** that column is reserved ONLY while a find is
+      current. b67 reserved it always, which shifted a text layout he
+      had already signed off for a feature that is idle most of the
+      time. Since the grid is cached (cx0/cvis/halfw/gutw), gofind
+      re-grids BEFORE scrolling, and drawpage reconciles for the
+      paths that drop a find without going through gofind (reload,
+      view switch, rescan) — the term survives those, the hit cannot,
+      because findrow is an index in one view's numbering.
 - [ ] A status row: hunk i/N, +a −d, position %.
 
 ## 0.1b3 — directory mode

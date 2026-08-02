@@ -31,6 +31,8 @@ menu works in a CLI-started window.
 | space / b | page down / up |
 | t / e | top / end |
 | n / p | next / previous hunk |
+| Amiga+F | find... (Navigation menu) |
+| Amiga+N | find next; Find Previous from the menu |
 | Esc / Backspace | back to the Tree (never quits) |
 | Amiga+Q | quit |
 

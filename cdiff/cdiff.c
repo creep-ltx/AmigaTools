@@ -29,7 +29,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b66 (2.8.26)";
+    "$VER: cdiff 0.1b68 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -170,6 +170,14 @@ static int ndents, dtop, dsel;
  * dirty too. (The scan is b27's one keeper, which b30 also kept
  * when it threw the rest of that detour away.) */
 static int gmaxw, maxwdirty = 1;
+
+/* b67: find state (his ask, modelled on a Navigation menu with
+ * Find.../Find Next/Find Previous). findrow is the matched row in
+ * the ACTIVE view's row numbering, -1 when nothing is current.
+ * Declared up here with gmaxw for the same reason: freedirs and
+ * scandirs need to clear it. */
+static char findstr[80];
+static int findrow = -1, findn, findof;
 static int gndiff, gnleft, gnright;
 
 typedef struct {
@@ -280,6 +288,7 @@ static void freedirs(void)
     dents = NULL;
     ndents = 0; dtop = 0; dsel = 0;
     maxwdirty = 1;          /* b58: the Tree's widest path is gone */
+    findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gndiff = gnleft = gnright = 0;
     gdirmode = 0;
 }
@@ -360,6 +369,7 @@ static void scandirs(void)
     slfree(&la);
     slfree(&lb);
     maxwdirty = 1;              /* b58: the Tree just gained rows */
+    findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
 /* same-size pair: do the BYTES differ? Chunked compare with an
@@ -419,6 +429,11 @@ static struct TextFont *font;
 static int fw, fh, fbase;              /* cell metrics */
 static int x0, y0, viscols, visrows;   /* drawable grid */
 static int halfw;                      /* columns per side */
+/* b67: the leftmost content column is reserved for the find caret,
+ * so cx0/cvis are the grid the file views actually lay out in. The
+ * Tree keeps its own 4-column prefix and ignores these - a find
+ * there moves the selection cursor, which is marker enough. */
+static int cx0, cvis, markcol;
 
 static const DLine *ga, *gb;
 static Row *grows;
@@ -441,6 +456,7 @@ static int hoff;                /* horizontal column offset - text
                                  * only, the gutter stays pinned */
 static char *gatag, *gbtag;     /* per-line diff tag, ' ' = equal */
 static int conty, crows;        /* content grid below the tab bar */
+
 static int tabx[4], tabe[4];    /* tab bar hit ranges (pixels) */
 static int tabsok;              /* tab bar live (files loaded) */
 static int tabh;                /* tab bar height in pixels */
@@ -560,6 +576,19 @@ static void drawnum(int x, int y, long line, int pen, int bg)
  * ask - there is no dark grey on a 4-colour WB): blue-on-gray for
  * plain rows, black-on-blue under the bar - always a step quieter
  * than the content beside it. */
+/* b67: the find caret in the reserved column - always on the plain
+ * background so it stays legible whether or not the row is a bar */
+static void drawmark(int y, int hit)
+{
+    static const char m[1] = { '>' };
+    static const char b[1] = { ' ' };
+    if (!markcol) return;
+    SetAPen(rp, 1);
+    SetBPen(rp, 0);
+    Move(rp, x0, y + fbase);
+    Text(rp, (STRPTR)(hit ? m : b), 1);
+}
+
 static void drawside(int x, int y, const DLine *l, long line,
                      int bar, int w)
 {
@@ -594,7 +623,8 @@ static void drawrow(int vr)
     }
     r = &grows[idx];
     bar = r->tag != ' ';
-    x1 = x0 + (halfw + 3) * fw;         /* right pane's left edge */
+    x1 = cx0 + (halfw + 3) * fw;        /* right pane's left edge */
+    drawmark(y, findrow >= 0 && idx == findrow);
     /* b65, his find (up/down clean, Shift+up/down and left/right
      * glitchy): those two land in drawrows(), which repaints every
      * row IN PLACE - and each row was being filled grey, then
@@ -610,19 +640,19 @@ static void drawrow(int vr)
      * one-sided row, and the sub-cell slack at the right edge. No
      * pixel is written twice, and no row is ever briefly blank. */
     SetAPen(rp, 0);
-    RectFill(rp, x0 + halfw * fw, y, x1 - 1, ye);       /* marker gap */
+    RectFill(rp, cx0 + halfw * fw, y, x1 - 1, ye);      /* marker gap */
     if (r->al < 0)                      /* one-sided: no left pane */
-        RectFill(rp, x0, y, x0 + halfw * fw - 1, ye);
+        RectFill(rp, cx0, y, cx0 + halfw * fw - 1, ye);
     if (r->bl < 0)
         RectFill(rp, x1, y, x1 + halfw * fw - 1, ye);
     se = x1 + halfw * fw;               /* sub-cell slack on the right */
     if (se <= rend) RectFill(rp, se, y, rend, ye);
     if (r->al >= 0)
-        drawside(x0, y, &ga[r->al], r->al, bar, halfw);
+        drawside(cx0, y, &ga[r->al], r->al, bar, halfw);
     if (bar) {
         SetAPen(rp, 3);
         SetBPen(rp, 0);
-        Move(rp, x0 + (halfw + 1) * fw, y + fbase);
+        Move(rp, cx0 + (halfw + 1) * fw, y + fbase);
         Text(rp, (STRPTR)&r->tag, 1);
     }
     if (r->bl >= 0)
@@ -1026,7 +1056,8 @@ static void drawline(int vr)
     }
     /* b66: drawside covers the full width via drawnum+drawtext,
      * each painting its own background - no fill at all here */
-    drawside(x0, y, l, line, tag != ' ', viscols);
+    drawmark(y, findrow >= 0 && line == findrow);
+    drawside(cx0, y, l, line, tag != ' ', cvis);
     return;
 blank:
     SetAPen(rp, 0);
@@ -1118,10 +1149,17 @@ static void drawtabs(void)
     Draw(rp, tabe[act] - 2, yr);
 }
 
+static void calcgrid(void);     /* b68: the grid follows find state */
+
 static void drawpage(void)
 {
     int vr, s, e;
     if (defer) { dirtyall = 1; return; }
+    /* the caret column comes and goes with the search, and a find
+     * can be cleared from paths that never call calcgrid (reload,
+     * view switch, rescan) - so reconcile here, cheaply, and only
+     * when the two actually disagree */
+    if (markcol != (findrow >= 0)) calcgrid();
     drawtabs();
     for (vr = 0; vr < crows; vr++) {
         if (view == 3)
@@ -1167,7 +1205,7 @@ static void drawpage(void)
 
 static void settitle(void)
 {
-    static char t[260];
+    static char t[400];
     if (gdirmode && view == 3)
         sprintf(t, "cdiff: %.60s | %.60s"
                 "  (%d entries: %d differ, %d left-only, %d right-only)",
@@ -1180,6 +1218,11 @@ static void settitle(void)
         sprintf(t, "cdiff: (now open the left file) | %.70s", gf2);
     else
         strcpy(t, "cdiff");
+    if (findrow >= 0 && findn > 0) {    /* b67: which match, of how many */
+        char fb[140];
+        sprintf(fb, "  [Find \"%.40s\" %d/%d]", findstr, findof, findn);
+        strcat(t, fb);
+    }
     SetWindowTitles(win, (STRPTR)t, (STRPTR)~0);
 }
 
@@ -1420,8 +1463,11 @@ static void setview(int v)
     int i, row = 0;
     if (v == view) return;
     /* b58: gmaxw is per-view (Both needs the wider of the two
-     * sides, Tree measures paths), so a view change invalidates it */
+     * sides, Tree measures paths), so a view change invalidates it.
+     * b67: and findrow is a row index in the OLD view's numbering -
+     * the term survives a view switch, the hit cannot. */
     maxwdirty = 1;
+    findrow = -1; findn = findof = 0;
     if (v == 3) {
         if (!gdirmode) return;
         view = 3;
@@ -1493,6 +1539,101 @@ static void erq(const char *text)
     EasyRequestArgs(win, &es, NULL, args);
 }
 
+/* ---- b67: find ------------------------------------------------
+ * Case-insensitive substring over the ACTIVE view's rows: Both
+ * searches either side of a row, a single-file tab searches that
+ * file, the Tree searches the paths. Searching what is on screen is
+ * the whole contract - a hit you cannot see would be a lie. */
+
+static int memfind(const char *hay, int hlen, const char *nee, int nlen)
+{
+    int i, j;
+    if (nlen <= 0 || nlen > hlen) return 0;
+    for (i = 0; i <= hlen - nlen; i++) {
+        for (j = 0; j < nlen; j++) {
+            char a = hay[i + j], b = nee[j];
+            if (a >= 'A' && a <= 'Z') a += 32;
+            if (b >= 'A' && b <= 'Z') b += 32;
+            if (a != b) break;
+        }
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
+static int rowhas(int row, const char *nee, int nlen)
+{
+    if (view == 3) {
+        if (row < 0 || row >= ndents) return 0;
+        return memfind(dents[row].rel, strlen(dents[row].rel), nee, nlen);
+    }
+    if (view == 0) {
+        Row *r;
+        if (row < 0 || row >= gnrows) return 0;
+        r = &grows[row];
+        if (r->al >= 0 && ga &&
+            memfind(ga[r->al].ptr, ga[r->al].len, nee, nlen)) return 1;
+        if (r->bl >= 0 && gb &&
+            memfind(gb[r->bl].ptr, gb[r->bl].len, nee, nlen)) return 1;
+        return 0;
+    }
+    if (view == 1) {
+        if (!ga || row < 0 || row >= gna) return 0;
+        return memfind(ga[row].ptr, ga[row].len, nee, nlen);
+    }
+    if (!gb || row < 0 || row >= gnb) return 0;
+    return memfind(gb[row].ptr, gb[row].len, nee, nlen);
+}
+
+/* One pass over the view: count EVERY match (so the title can say
+ * "3/17") and pick the hit in `dir`, wrapping at the ends. Counting
+ * costs the same scan the search needs anyway, and being exact after
+ * a reload or a view switch beats caching a number that can rot.
+ * `fresh` starts from where he is looking rather than from the
+ * previous hit. */
+static void gofind(int dir, int fresh)
+{
+    int n = vcount(), nlen = strlen(findstr);
+    int r, cnt = 0, ord = 0;
+    int first = -1, last = -1, nxt = -1, prv = -1;
+    int fo = 0, lo = 0, no = 0, po = 0, start, hit;
+
+    if (nlen == 0) return;
+    if (n <= 0) { erq("nothing loaded to search"); return; }
+    start = fresh ? (view == 3 ? dsel : *vtop())
+                  : (findrow >= 0 ? findrow + dir : 0);
+
+    for (r = 0; r < n; r++) {
+        if (!rowhas(r, findstr, nlen)) continue;
+        ord = ++cnt;
+        if (first < 0) { first = r; fo = ord; }
+        last = r; lo = ord;
+        if (dir > 0 && nxt < 0 && r >= start) { nxt = r; no = ord; }
+        if (dir < 0 && r <= start)            { prv = r; po = ord; }
+    }
+    if (cnt == 0) {
+        findrow = -1;
+        findn = findof = 0;
+        calcgrid();                     /* b68: and goes away again */
+        settitle();
+        drawpage();
+        erq("not found");
+        return;
+    }
+    if (dir > 0) { hit = nxt >= 0 ? nxt : first; findof = nxt >= 0 ? no : fo; }
+    else         { hit = prv >= 0 ? prv : last;  findof = prv >= 0 ? po : lo; }
+
+    findrow = hit;
+    findn = cnt;
+    calcgrid();                         /* b68: the caret column appears */
+    if (view == 3)
+        movesel(hit);                   /* the Tree's own cursor marks it */
+    else
+        scrollto(hit - crows / 2);      /* centred, per his pick */
+    settitle();
+    drawpage();                         /* the caret moved rows */
+}
+
 static void freediff(void)
 {
     free(grows); grows = NULL; gnrows = 0;
@@ -1509,6 +1650,7 @@ static void freediff(void)
     hoff = 0;
     view = 0;
     maxwdirty = 1;          /* b58: both sides freed */
+    findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
 static void calcgut(void)
@@ -1527,7 +1669,19 @@ static void calcgrid(void)
     y0 = win->BorderTop;
     viscols = (win->Width - win->BorderLeft - win->BorderRight) / fw;
     visrows = (win->Height - win->BorderTop - win->BorderBottom) / fh;
-    halfw = (viscols - 3) / 2;
+    /* b68 (his call): the caret column is reserved ONLY while a
+     * find is current - no search, no shifted text. b67 reserved it
+     * always, which moved a layout he had already signed off for a
+     * feature that is idle most of the time. Dropped again when the
+     * window is too narrow to spare the column. */
+    markcol = findrow >= 0;
+    cx0 = x0;
+    cvis = viscols;
+    if (markcol) {
+        if (viscols - 1 >= 8) { cx0 = x0 + fw; cvis = viscols - 1; }
+        else markcol = 0;
+    }
+    halfw = (cvis - 3) / 2;
     /* b60: 2px shorter (his eye). The label baseline is fixed at
      * y0 + 2 + fbase, so the text does not move and the whole
      * saving comes off the bottom - which also lifts conty and
@@ -1596,6 +1750,7 @@ static int loaddiff(void)
     ga = gla; gb = glb;
     gna = na; gnb = nb;
     maxwdirty = 1;          /* b58: new content, new widest line */
+    findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gnrows = nrows;
     gtop = 0;
     return 0;
@@ -1622,6 +1777,104 @@ static int askfile(const char *title, char *dest)
         return 2;
     AddPart((STRPTR)dest, freq->fr_File, 310);
     return 1;
+}
+
+/* b67: the Find requester - a real gadtools STRING_KIND, not a
+ * hand-rolled line editor (his standing instruction: use the OS's
+ * own). Reuses the VisualInfo the menus already hold. Enter accepts,
+ * Esc or the close gadget cancels. Returns 1 when findstr changed
+ * into something searchable. */
+static int askfind(void)
+{
+    struct Screen *scr;
+    struct Window *w;
+    struct Gadget *glist = NULL, *sg;
+    struct NewGadget ng;
+    struct IntuiMessage *m;
+    int done = 0, ok = 0, ww, wh;
+
+    if (!GadToolsBase || !gvi) {
+        erq("gadtools.library is not available - no Find requester");
+        return 0;
+    }
+    if (CreateContext(&glist) == NULL) return 0;
+    scr = LockPubScreen(NULL);
+    if (scr == NULL) { FreeGadgets(glist); return 0; }
+
+    ww = 44 * fw + 6 * fw + 40;
+    wh = scr->WBorTop + scr->Font->ta_YSize + 1 + fh + 26;
+    memset(&ng, 0, sizeof(ng));
+    ng.ng_LeftEdge   = 6 * fw + 16;
+    ng.ng_TopEdge    = scr->WBorTop + scr->Font->ta_YSize + 1 + 8;
+    ng.ng_Width      = 44 * fw;
+    ng.ng_Height     = fh + 6;
+    ng.ng_GadgetText = (STRPTR)"Find:";
+    ng.ng_TextAttr   = scr->Font;
+    ng.ng_GadgetID   = 1;
+    ng.ng_Flags      = PLACETEXT_LEFT;
+    ng.ng_VisualInfo = gvi;
+    sg = CreateGadget(STRING_KIND, glist, &ng,
+                      GTST_String, (ULONG)findstr,
+                      GTST_MaxChars, (ULONG)(sizeof(findstr) - 1),
+                      TAG_DONE);
+    if (sg == NULL) {
+        UnlockPubScreen(NULL, scr);
+        FreeGadgets(glist);
+        return 0;
+    }
+    w = OpenWindowTags(NULL,
+        WA_Left, (scr->Width - ww) / 2,
+        WA_Top, (scr->Height - wh) / 3,
+        WA_Width, ww,
+        WA_Height, wh,
+        WA_Title, (ULONG)"cdiff: Find",
+        WA_PubScreen, (ULONG)scr,
+        WA_Gadgets, (ULONG)glist,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
+                  IDCMP_REFRESHWINDOW | IDCMP_GADGETUP |
+                  IDCMP_ACTIVEWINDOW,
+        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
+                  WFLG_ACTIVATE | WFLG_SMART_REFRESH | WFLG_RMBTRAP,
+        TAG_DONE);
+    UnlockPubScreen(NULL, scr);
+    if (w == NULL) { FreeGadgets(glist); return 0; }
+    GT_RefreshWindow(w, NULL);
+    ActivateGadget(sg, w, NULL);
+
+    while (!done) {
+        WaitPort(w->UserPort);
+        /* GT_GetIMsg/GT_ReplyIMsg are REQUIRED once real gadtools
+         * gadgets exist in a window - plain GetMsg is only safe for
+         * its menus (the lesson b30 wrote down the hard way) */
+        while ((m = GT_GetIMsg(w->UserPort))) {
+            ULONG cls = m->Class;
+            UWORD cod = m->Code;
+            APTR  iad = m->IAddress;
+            GT_ReplyIMsg(m);
+            if (cls == IDCMP_CLOSEWINDOW) done = 1;
+            else if (cls == IDCMP_GADGETUP && iad == (APTR)sg) {
+                ok = 1;                 /* Enter in the string gadget */
+                done = 1;
+            } else if (cls == IDCMP_VANILLAKEY) {
+                if (cod == 27) done = 1;            /* Esc cancels */
+                else if (cod == 13) { ok = 1; done = 1; }
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                GT_BeginRefresh(w);
+                GT_EndRefresh(w, TRUE);
+            }
+        }
+    }
+    if (ok) {
+        struct StringInfo *si = (struct StringInfo *)sg->SpecialInfo;
+        if (si && si->Buffer) {
+            strncpy(findstr, (char *)si->Buffer, sizeof(findstr) - 1);
+            findstr[sizeof(findstr) - 1] = 0;
+        } else
+            ok = 0;
+    }
+    CloseWindow(w);
+    FreeGadgets(glist);
+    return ok && findstr[0];
 }
 
 /* a menu open picked new file(s): rediff if the pair is complete */
@@ -1751,6 +2004,10 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Right File...", NULL,         0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,             NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Reload",        NULL,         0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Navigation",    NULL,         0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find...",       (STRPTR)"F",  0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find Next",     (STRPTR)"N",  0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find Previous", NULL,         0, 0, NULL },
     { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Keys...",       (STRPTR)"K",  0, 0, NULL },
     { NM_ITEM,  (STRPTR)"About...",      NULL,         0, 0, NULL },
@@ -1879,6 +2136,9 @@ static void keysreq(void)
         "t / e - top / end\n"
         "n / p - next / previous hunk (or tree entry)\n"
         "Enter - diff the selected tree entry\n"
+        "Amiga+F / Amiga+N - find, find next (Navigation menu;\n"
+        "  Find Previous has no shortcut). Case-insensitive,\n"
+        "  searches the view you are in, wraps at the ends\n"
         "Esc or Backspace - back to the Tree\n"
         "F5 - reload both files, keep position\n"
         "Edit menu - edit a side (ENV:EDITOR), rediff on return\n"
@@ -1960,7 +2220,15 @@ static int domenu(UWORD code)   /* returns 1 = quit */
             case 1: editfile(2); break;
             case 3: refreshdiff(); break;   /* 2 is the bar */
             }
-        } else if (MENUNUM(c) == 2) {
+        } else if (MENUNUM(c) == 2) {           /* Navigation */
+            switch (ITEMNUM(c)) {
+            case 0:                             /* Find... */
+                if (askfind()) gofind(1, 1);
+                break;
+            case 1: gofind(1, 0); break;        /* Find Next */
+            case 2: gofind(-1, 0); break;       /* Find Previous */
+            }
+        } else if (MENUNUM(c) == 3) {           /* Help */
             switch (ITEMNUM(c)) {
             case 0: keysreq(); break;
             case 1: aboutreq(); break;
