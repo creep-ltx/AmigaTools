@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b101 (2.8.26)";
+    "$VER: cdiff 0.1b103 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -242,6 +242,11 @@ static int gadds, gdels;        /* +a -d, counted from grows */
  * scandirs need to clear it. */
 static char findstr[80];
 static int findrow = -1, findn, findof;
+
+/* b102, his ask: a busy pointer while we are working, so loading a
+ * pair or walking two directory trees does not look like a hang.
+ * Defined below, next to the window it needs. */
+static void busy(int on);
 static int gndiff, gnleft, gnright;
 
 typedef struct {
@@ -385,7 +390,16 @@ static int filesdiffer(const char *rel, long sz);
 /* walk both roots, sort, merge: presence decides L/R, then the
  * BYTES decide S/D (size shortcut first); both-sided dirs get no
  * row (their children speak) */
+static void scandirs_(void);
+
 static void scandirs(void)
+{
+    busy(1);
+    scandirs_();
+    busy(0);
+}
+
+static void scandirs_(void)
 {
     SList la, lb;
     static char rel[420];
@@ -490,6 +504,20 @@ static int ispathdir(const char *p)
 /* ---- the window ------------------------------------------------- */
 
 static struct Window *win;
+
+/* b102: WA_PointerDelay means the busy pointer only appears if the
+ * job actually takes a moment - a fast load never flashes it. V39+;
+ * older Kickstarts keep the normal pointer, as they always did. */
+static void busy(int on)
+{
+    if (win == NULL) return;
+    if (IntuitionBase->LibNode.lib_Version < 39) return;
+    if (on)
+        SetWindowPointer(win, WA_BusyPointer, TRUE,
+                              WA_PointerDelay, TRUE, TAG_DONE);
+    else
+        SetWindowPointer(win, TAG_DONE);
+}
 static struct RastPort *rp;
 static struct TextFont *font;
 static int fw, fh, fbase;              /* cell metrics */
@@ -628,6 +656,53 @@ static int expandcols(const DLine *l, char *out, int max)
  * renamed, a number changed, a word inserted. When a line was
  * rewritten wholesale the span is the whole line, which is the
  * truth. Columns, not bytes, so tabs cannot shift it. */
+/* b103, his find: character-exact trimming cuts INSIDE words. On
+ *   left  "       'dos/datetime','dos/dostags','devices/inputevent',"
+ *   right "       'devices/inputevent',"
+ * both lines happen to share "'d", so the prefix ate it and the span
+ * came out shifted one character right - starting mid-token and
+ * ending on a stray "d". Correct to the letter, and it reads as a
+ * mistake.
+ *
+ * So: back each boundary off a split word. Moving the FRONT left is
+ * always safe (the prefix was common, marking more of it can only be
+ * honest). Moving the BACK left extends the common suffix, so it is
+ * allowed only while the characters being moved into it actually
+ * match on both sides.
+ *
+ * Deliberately only ever shrinks the marked span or grows it at the
+ * front - never grows it at the back. Growing outward to whole words
+ * would tidy "1000" vs "600" (marked "10"/"6" today) but it would
+ * also mark text that DID NOT CHANGE, and marking unchanged text is
+ * the one thing this must not do. */
+static int wordch(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* is position i a clean break - i.e. NOT in the middle of a word? */
+static int cleanat(const char *s, int len, int i)
+{
+    return i <= 0 || i >= len || !wordch(s[i - 1]) || !wordch(s[i]);
+}
+
+static void snapspan(const char *ca, int la, const char *cb, int lb,
+                     int *pre, int *enda, int *endb)
+{
+    int p = *pre, ea = *enda, eb = *endb;
+    while (p > 0 && (!cleanat(ca, la, p) || !cleanat(cb, lb, p)))
+        p--;
+    while (ea > p && eb > p &&
+           (!cleanat(ca, la, ea) || !cleanat(cb, lb, eb)) &&
+           ca[ea - 1] == cb[eb - 1]) {
+        ea--; eb--;
+    }
+    *pre = p;
+    *enda = ea < p ? p : ea;
+    *endb = eb < p ? p : eb;
+}
+
 static void intraspan(const DLine *a, const DLine *b,
                       int *pre, int *enda, int *endb)
 {
@@ -658,6 +733,7 @@ static void intraspan(const DLine *a, const DLine *b,
     *pre = p;
     *enda = la - sfx;
     *endb = lb - sfx;
+    snapspan(ca, la, cb, lb, pre, enda, endb);
 }
 
 static void drawtext(int x, int y, const DLine *l, int width,
@@ -2125,7 +2201,20 @@ static void binverdict(char *out, const char *n1, long s1, int b1,
             (char *)FilePart((STRPTR)n2), s2);
 }
 
+static int loaddiff_(void);
+
+/* b102: wrapped rather than threaded through - loaddiff_ has four
+ * exit paths and every one of them must clear the pointer */
 static int loaddiff(void)
+{
+    int r;
+    busy(1);
+    r = loaddiff_();
+    busy(0);
+    return r;
+}
+
+static int loaddiff_(void)
 {
     long sz1, sz2;
     int na, nb, nops, nrows;

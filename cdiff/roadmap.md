@@ -332,7 +332,34 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       the app-message branch flushes for itself.
       LESSON: a flag that is only ever correct because of where it
       happens to be set is not correct, it is lucky.
-- [ ] A status row: hunk i/N, +a −d, position %.
+- [x] **b102: busy pointer while working** (his ask, and the third
+      of directory mode's parked items). SetWindowPointer with
+      WA_BusyPointer around loaddiff and scandirs, plus
+      WA_PointerDelay so it only appears if the job actually takes a
+      moment - a fast load never flashes it. WRAPPED rather than
+      threaded through: loaddiff has four exit paths and every one
+      would have had to clear the pointer, so the inner function was
+      renamed and the wrapper does it once. V39+; older Kickstarts
+      keep the normal pointer, as they always did.
+- [x] **b103: the intra-line span snaps off split words** (his find,
+      from a screenshot). Character-exact trimming cut INSIDE tokens:
+      two MODULE lines both containing "'d" (one "'dos", the other
+      "'devices") made the prefix eat it, shifting the span one
+      character right so it began mid-word and ended on a stray "d".
+      Now each boundary backs off a split word - the front always
+      (the prefix was common, so marking more of it is honest), the
+      back only while the characters moving into the suffix genuinely
+      match on both sides.
+      It only ever shrinks the span or grows it at the FRONT, never
+      at the back: growing outward to whole words would tidy "1000"
+      vs "600" (still marked "10"/"6") but would also mark text that
+      DID NOT CHANGE on the other side, and marking unchanged text is
+      the one thing this must not do.
+      Footnote worth keeping: he reported it after misreading the
+      screenshot - he saw "'d" and did not spot it was "'dos" versus
+      "'devices". The reason was wrong and the report was still
+      right, because a highlight that starts mid-word reads as broken
+      whether or not the arithmetic behind it is correct.
 - [x] **b72: ICONIFY** (his ask) — **boot-verified: "works as
       intended"**. The tag is in the shipped NDK after all, as
       `WA_IconifyGadget` (WA_Dummy + 0x60 = $800000C3) — the exact
@@ -505,7 +532,7 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
 
 ## 0.1b3 — directory mode
 
-- [~] **DIRECTORY MODE (build b16, 1.8.26)** — `cdiff DIR1 DIR2`
+- [x] **DIRECTORY MODE (build b16, 1.8.26)** — `cdiff DIR1 DIR2`
       or Open Files... with two DRAWERS (empty File field in the
       requester): both trees walked (recursive ExNext, own lock +
       AllocDosObject fib per level), sorted case-insensitively,
@@ -517,9 +544,22 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       TEXT mode with two dirs prints the compare listing - the
       scanner's vamos harness road (crafted-tree cases + the
       cfile/cfile13 pair GREEN before any boot) and a CLI tool for
-      free. Boot gate pending. Parked knowingly: ExAll batching
-      (CFile I3 - matters on real media), content hash for
-      same-size pairs, a busy pointer during big scans.
+      free.
+      **BOOT GATE CLOSED 2.8.26, his verdict: "I have tried it and
+      it works."** Two of the three knowingly-parked items are
+      settled: the content check for same-size pairs shipped at b24
+      (the chunked byte compare), and the busy pointer at b102. The
+      third is still open and now has its own entry below.
+- [ ] **ExAll batching for the tree scan** (CFile's I3 lesson) — the
+      scanner walks with ExNext one entry at a time. It matters on
+      real media, not on a hard file: a big drawer on a floppy or a
+      slow IDE is where the difference shows. Worth measuring on his
+      hardware before writing it, the way SCREENDEPTH should be.
+- [ ] Intra-line highlight in the single-file tabs — b97 does the
+      Both tab only, because the paired line is not in that view.
+      Needs a reverse line->row map (an int per line per side), which
+      is real memory on a 12000-line pair; measure before assuming
+      it is affordable.
 
 ## 0.1b4 — engine deepening
 
