@@ -26,6 +26,7 @@
 #include <proto/asl.h>
 #include <proto/wb.h>
 #include <proto/icon.h>
+#include <proto/diskfont.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b72 (2.8.26)";
+    "$VER: cdiff 0.1b81 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -48,6 +49,47 @@ struct Library *GadToolsBase = NULL;
 struct Library *AslBase = NULL;
 struct Library *WorkbenchBase = NULL;   /* b69: AppWindow drops */
 struct Library *IconBase = NULL;        /* b72: the AppIcon's image */
+struct Library *DiskfontBase = NULL;    /* b73: FONT= tooltype */
+
+/* ---- b73: tooltype settings (his ask; a config FILE is explicitly
+ * not wanted - the icon carries them). All optional, all inert when
+ * absent, so a CLI launch behaves exactly as before. */
+static char ttfont[64];         /* FONT=topaz.font/8 */
+static int  ttfsize = 8;
+static char tteditor[80];       /* EDITOR= - beats ENV:EDITOR */
+static char ttdrawer[310];      /* DRAWER= - where the requester starts */
+/* b79, his design and his keyword. OPENSCREEN= opens a screen of
+ * OUR own: its presence decides that cdiff gets one, its value names
+ * it. Deliberately NOT called PUBSCREEN - that keyword already means
+ * "open my window on somebody else's public screen" throughout
+ * Amiga software, which is the opposite of this and is exactly the
+ * inert behaviour b77 removed. Reusing it would have misled anyone
+ * who knows the convention. SCREENDEPTH= is a modifier and does
+ * nothing on its own - without OPENSCREEN there is no screen of
+ * ours to set the depth of, and without SCREENDEPTH the screen is
+ * cloned from Workbench exactly. */
+static char ttscrname[64];      /* OPENSCREEN= - name of OUR screen */
+/* b80, his ask: PUBSCREEN= comes back, but now meaning exactly what
+ * it means everywhere else in Amiga software - ATTACH to a public
+ * screen somebody else already opened. It was removed at b77 only
+ * because it was the sole screen option and could not create one;
+ * beside OPENSCREEN= the pair is unambiguous, each doing precisely
+ * what its name says. It is also more useful now than it was then:
+ * the screen OPENSCREEN= makes IS public, so a second cdiff can
+ * attach to the first one's screen. */
+static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
+static int  ttdepth;            /* SCREENDEPTH= - 0 = clone WB */
+static int  tttab = 8, ttmask = 7;      /* TABSIZE= */
+static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
+/* b75: VIEW= removed (his call). It earned nothing: TREE re-set a
+ * view gdirmode had already set, BOTH re-set the zero default, and
+ * LEFT/RIGHT only bit when a pair was already loaded - i.e. only
+ * when project icons had been dropped on the cdiff icon. Two live
+ * values in one narrow case, against a tooltype to learn and to
+ * document, while 1/2/3 and Tab switch views instantly anyway. */
+static BPTR ttoollock;          /* our own drawer, for the AppIcon */
+static char ttoolname[110];
+static struct TextFont *ttfont2;        /* what we opened, to close */
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -548,7 +590,7 @@ static void drawtext(int x, int y, const DLine *l, int width,
             do {
                 if (o >= hoff) vis[o - hoff] = ' ';
                 o++;
-            } while ((o & 7) && o < end);
+            } while ((ttmask ? (o & ttmask) : (o % tttab)) && o < end);
         } else {
             if (o >= hoff) vis[o - hoff] = (ch >= 32 || ch < 0) ? ch : '.';
             o++;
@@ -685,7 +727,9 @@ static int explen(const char *p, int n)
 {
     int i, o = 0;
     for (i = 0; i < n; i++) {
-        if (p[i] == '\t') { do { o++; } while (o & 7); }
+        if (p[i] == '\t') {
+            do { o++; } while (ttmask ? (o & ttmask) : (o % tttab));
+        }
         else o++;
     }
     return o;
@@ -1788,7 +1832,12 @@ static int askfile(const char *title, char *dest)
         return 0;
     }
     if (freq == NULL)
-        freq = AllocAslRequestTags(ASL_FileRequest, TAG_DONE);
+        freq = AllocAslRequestTags(ASL_FileRequest,
+                   /* b73: DRAWER= seeds it; after that the
+                    * requester remembers where he last was */
+                   ttdrawer[0] ? ASLFR_InitialDrawer : TAG_IGNORE,
+                   (ULONG)ttdrawer,
+                   TAG_DONE);
     if (freq == NULL) return 0;
     if (!AslRequestTags(freq,
             ASLFR_Window, (ULONG)win,
@@ -1818,6 +1867,7 @@ static int askfile(const char *title, char *dest)
 
 static struct MsgPort *appport;
 static struct AppWindow *appwin;
+static struct Screen *myscr;            /* b78: our own, if PUBSCREEN= */
 static struct AppIcon *appicon;         /* b72: only while iconified */
 static struct DiskObject *appdob;
 static int iconified;
@@ -1948,7 +1998,15 @@ static int askfind(void)
         return 0;
     }
     if (CreateContext(&glist) == NULL) return 0;
-    scr = LockPubScreen(NULL);
+    /* b76: the screen the MAIN window is on, not the default one.
+     * With PUBSCREEN= set those differ, and this requester would
+     * have opened on Workbench while cdiff sat on another screen.
+     * Worse than cosmetic here: gvi (VisualInfo) is built from the
+     * main window's screen, and GadTools VisualInfo is
+     * screen-specific - using it on a window opened elsewhere is
+     * simply wrong. No lock needed: our own window holds the screen
+     * open. */
+    scr = win ? win->WScreen : LockPubScreen(NULL);
     if (scr == NULL) { FreeGadgets(glist); return 0; }
 
     ww = 44 * fw + 6 * fw + 40;
@@ -1968,7 +2026,7 @@ static int askfind(void)
                       GTST_MaxChars, (ULONG)(sizeof(findstr) - 1),
                       TAG_DONE);
     if (sg == NULL) {
-        UnlockPubScreen(NULL, scr);
+        if (!win) UnlockPubScreen(NULL, scr);
         FreeGadgets(glist);
         return 0;
     }
@@ -1986,7 +2044,7 @@ static int askfind(void)
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
                   WFLG_ACTIVATE | WFLG_SMART_REFRESH | WFLG_RMBTRAP,
         TAG_DONE);
-    UnlockPubScreen(NULL, scr);
+    if (!win) UnlockPubScreen(NULL, scr);   /* only what we locked */
     if (w == NULL) { FreeGadgets(glist); return 0; }
     GT_RefreshWindow(w, NULL);
     ActivateGadget(sg, w, NULL);
@@ -2127,7 +2185,10 @@ static void editfile(int side)
     BPTR ch;
     LONG res;
     if (side == 1 ? !gf1[0] : !gf2[0]) return;
-    if (GetVar((STRPTR)"EDITOR", (STRPTR)ed, sizeof(ed), 0) <= 0)
+    /* b73: the EDITOR tooltype wins, then ENV:EDITOR, then Ed */
+    if (tteditor[0])
+        strcpy(ed, tteditor);
+    else if (GetVar((STRPTR)"EDITOR", (STRPTR)ed, sizeof(ed), 0) <= 0)
         strcpy(ed, "Ed");
     sprintf(cmd, "%s \"%s\"", ed, side == 1 ? gf1 : gf2);
     ch = Open((STRPTR)"CON:0/12/640/240/cdiff editor/AUTO/CLOSE",
@@ -2187,7 +2248,9 @@ static void centerreq(const char *text)
     ww = maxc * fw + 32;
     if (ww < okw + 32) ww = okw + 32;
     wh = nl * fh + okh + 28;
-    scr = LockPubScreen(NULL);
+    /* b76: follow the main window's screen, so About/Keys do not
+     * appear on Workbench while cdiff is on a PUBSCREEN= screen */
+    scr = win ? win->WScreen : LockPubScreen(NULL);
     if (scr == NULL) return;
     w = OpenWindowTags(NULL,
         WA_Left, (scr->Width - ww) / 2,
@@ -2200,7 +2263,7 @@ static void centerreq(const char *text)
         WA_Flags, WFLG_BORDERLESS | WFLG_ACTIVATE |
                   WFLG_SMART_REFRESH | WFLG_RMBTRAP,
         TAG_DONE);
-    UnlockPubScreen(NULL, scr);
+    if (!win) UnlockPubScreen(NULL, scr);   /* only what we locked */
     if (w == NULL) return;
     r = w->RPort;
     SetFont(r, font);
@@ -2400,16 +2463,49 @@ static int openmain(void)
 {
     struct Screen *scr;
     struct DrawInfo *dri = NULL;
+    int wleft, wtop, wwide, whigh;
 
-    scr = LockPubScreen(NULL);
+    /* b78: our own screen when PUBSCREEN= names one. Cloned from
+     * Workbench (mode, colours, and depth unless SCREENDEPTH= says
+     * otherwise), published under that name so it behaves like any
+     * other public screen. If it will not open we fall back to
+     * Workbench rather than refusing to start. */
+    if (ttscrname[0] && myscr == NULL) {
+        myscr = OpenScreenTags(NULL,
+            SA_LikeWorkbench, TRUE,
+            ttdepth ? SA_Depth : TAG_IGNORE, (ULONG)ttdepth,
+            SA_Type,      PUBLICSCREEN,
+            SA_PubName,   (ULONG)ttscrname,
+            SA_Title,     (ULONG)ttscrname,
+            SA_SharePens, TRUE,
+            TAG_DONE);
+        if (myscr) PubScreenStatus(myscr, 0);   /* let others in */
+    }
+    /* precedence: our own screen, then a named one to attach to,
+     * then Workbench. OPENSCREEN wins when both are set - asking for
+     * a screen of your own is the more specific request, and
+     * attaching is the fallback. A named screen that is not there
+     * falls through to Workbench rather than refusing to start. */
+    scr = myscr;
+    if (scr == NULL && ttpubscr[0])
+        scr = LockPubScreen((STRPTR)ttpubscr);
+    if (scr == NULL) scr = LockPubScreen(NULL);
     if (scr == NULL) return 0;
+    /* b73/b81: LEFT/TOP/WIDTH/HEIGHT, each independent. The size is
+     * measured FROM the position, so -1 (or no size at all) reaches
+     * the screen edge without ever overrunning it. */
+    wleft = ttleft >= 0 ? ttleft : 0;
+    wtop  = tttop  >= 0 ? tttop  : scr->BarHeight + 1;
+    wwide = ttwidth  > 0 ? ttwidth  : scr->Width  - wleft;
+    whigh = ttheight > 0 ? ttheight : scr->Height - wtop;
     win = OpenWindowTags(NULL,
-        WA_Left, 0, WA_Top, scr->BarHeight + 1,
-        WA_Width, scr->Width,
-        WA_Height, scr->Height - scr->BarHeight - 1,
+        WA_Left,   wleft,
+        WA_Top,    wtop,
+        WA_Width,  wwide,
+        WA_Height, whigh,
         WA_Title, (ULONG)"cdiff",
         WA_IconifyGadget, TRUE,   /* b72: V47 - ignored below it */
-        WA_PubScreen, (ULONG)scr,
+        myscr ? WA_CustomScreen : WA_PubScreen, (ULONG)scr,
         WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
                   IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                   IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
@@ -2467,7 +2563,32 @@ static int openmain(void)
         }
     }
     rp = win->RPort;
-    font = GfxBase->DefaultFont;    /* system monospace */
+    /* b73: FONT=name.font/size. Opened once and kept for the life of
+     * the program - openmain can run again after an iconify, and
+     * re-opening per window would leak.
+     *
+     * A PROPORTIONAL font is refused outright: every measurement in
+     * this program is columns x fw, so a variable-width face would
+     * not render badly, it would render nonsense. Falling back to
+     * the system font is the honest answer. */
+    if (font == NULL && ttfont[0] && DiskfontBase) {
+        struct TextAttr ta;
+        struct TextFont *tf;
+        ta.ta_Name  = (STRPTR)ttfont;
+        ta.ta_YSize = ttfsize;
+        ta.ta_Style = FS_NORMAL;
+        ta.ta_Flags = 0;
+        tf = OpenDiskFont(&ta);
+        if (tf) {
+            if (tf->tf_Flags & FPF_PROPORTIONAL) {
+                CloseFont(tf);
+                ttfont[0] = 0;      /* do not retry on every reopen */
+            } else
+                font = ttfont2 = tf;
+        } else
+            ttfont[0] = 0;
+    }
+    if (font == NULL) font = GfxBase->DefaultFont;  /* system monospace */
     SetFont(rp, font);
     fw = font->tf_XSize;
     fh = font->tf_YSize;
@@ -2481,9 +2602,7 @@ static int openmain(void)
     if (appport) appwin = AddAppWindowA(0, 0, win, appport, NULL);
     addscrollers(dri, scr);
     if (dri) FreeScreenDrawInfo(scr, dri);
-    UnlockPubScreen(NULL, scr);
-    calcgrid();
-
+    if (!myscr) UnlockPubScreen(NULL, scr);     /* ours needs no lock */
     calcgrid();
     return 1;
 }
@@ -2506,6 +2625,10 @@ static void closemain(void)
     if (ilt) { DisposeObject(ilt); ilt = NULL; }
     if (irt) { DisposeObject(irt); irt = NULL; }
     arrowsok = 0;
+    /* b78: the screen goes with the window - iconifying must not
+     * leave an empty cdiff screen sitting on the display. Window
+     * first (CloseWindow above), then the screen it lived on. */
+    if (myscr) { CloseScreen(myscr); myscr = NULL; }
 }
 
 /* b72: hide. The window goes away entirely and an AppIcon takes its
@@ -2516,7 +2639,16 @@ static void closemain(void)
 static void goiconify(void)
 {
     if (iconified || appport == NULL || IconBase == NULL) return;
-    appdob = GetDefDiskObject(WBTOOL);
+    /* b73: wear HIS icon when we know where we live (a Workbench
+     * launch tells us), and only fall back to the generic tool
+     * image otherwise - the couple of lines promised at b72 */
+    appdob = NULL;
+    if (ttoollock && ttoolname[0]) {
+        BPTR old = CurrentDir(ttoollock);
+        appdob = GetDiskObject((STRPTR)ttoolname);
+        CurrentDir(old);
+    }
+    if (appdob == NULL) appdob = GetDefDiskObject(WBTOOL);
     if (appdob == NULL) return;
     closemain();
     appicon = AddAppIconA(0, 0, (STRPTR)"cdiff", appport, 0, appdob, NULL);
@@ -2555,6 +2687,7 @@ static void guimode(void)
     GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
     AslBase = OpenLibrary((STRPTR)"asl.library", 37);
     WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
+    if (ttfont[0]) DiskfontBase = OpenLibrary((STRPTR)"diskfont.library", 37);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
     IconBase = OpenLibrary((STRPTR)"icon.library", 37);
     /* b72: one port for the lifetime of the program - the AppWindow
@@ -2851,6 +2984,9 @@ out:
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
     if (AslBase) CloseLibrary(AslBase);
+    if (ttfont2) { CloseFont(ttfont2); ttfont2 = NULL; }
+    if (ttoollock) { UnLock(ttoollock); ttoollock = 0; }
+    if (DiskfontBase) CloseLibrary(DiskfontBase);
     if (IconBase) CloseLibrary(IconBase);
     if (WorkbenchBase) CloseLibrary(WorkbenchBase);
     if (GadToolsBase) CloseLibrary(GadToolsBase);
@@ -2860,16 +2996,155 @@ out:
 
 /* ---- main ------------------------------------------------------- */
 
+/* ---- b73: tooltypes -------------------------------------------
+ * Read from the WBStartup message, which smain used to throw away as
+ * (void)argv. Every setting is optional and inert when absent, so a
+ * shell launch is unchanged. */
+
+/* case-insensitive equality, so VIEW=tree and VIEW=TREE both work.
+ * Local rather than utility.library's Stricmp - one more library
+ * open for four comparisons is not a trade worth making. */
+static int tteq(const char *a, const char *b)
+{
+    while (*a && *b) {
+        char x = *a++, y = *b++;
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y) return 0;
+    }
+    return *a == 0 && *b == 0;
+}
+
+/* b81: WIDTH=/HEIGHT= take a positive size, or -1 meaning "out to
+ * the screen edge from wherever LEFT=/TOP= put us". Absent means the
+ * same as -1 - which also fixes a real bug in the old defaults: a
+ * LEFT= with no WIDTH= used the FULL screen width, so the window ran
+ * off the right edge by exactly the left inset. Anything unparseable
+ * falls back to filling rather than to a silly size; the window's own
+ * WA_MinWidth/MinHeight clamp values that are too small. */
+static int ttdim(char **tt, const char *name)
+{
+    UBYTE *v = FindToolType((CONST_STRPTR *)tt, (STRPTR)name);
+    int n;
+    if (v == NULL) return -1;
+    n = atoi((char *)v);
+    return n > 0 ? n : -1;
+}
+
+static int ttnum(char **tt, const char *name, int lo, int hi, int def)
+{
+    UBYTE *v = FindToolType((CONST_STRPTR *)tt, (STRPTR)name);
+    int n;
+    if (v == NULL) return def;
+    n = atoi((char *)v);
+    if (n < lo || n > hi) return def;
+    return n;
+}
+
+static void ttstr(char **tt, const char *name, char *dest, int max)
+{
+    UBYTE *v = FindToolType((CONST_STRPTR *)tt, (STRPTR)name);
+    if (v == NULL || v[0] == 0) return;
+    strncpy(dest, (char *)v, max - 1);
+    dest[max - 1] = 0;
+}
+
+static void readtooltypes(struct WBStartup *wbs)
+{
+    struct DiskObject *dob;
+    struct WBArg *wa;
+    BPTR old;
+    char **tt;
+    UBYTE *v;
+
+    if (IconBase == NULL || wbs == NULL || wbs->sm_ArgList == NULL) return;
+    wa = wbs->sm_ArgList;
+    /* keep our own drawer+name: b72's AppIcon can then wear HIS icon
+     * instead of the generic tool image, the moment he draws one */
+    if (wa[0].wa_Lock) ttoollock = DupLock(wa[0].wa_Lock);
+    if (wa[0].wa_Name)
+        strncpy(ttoolname, (char *)wa[0].wa_Name, sizeof(ttoolname) - 1);
+
+    old = CurrentDir(wa[0].wa_Lock);
+    dob = GetDiskObject((STRPTR)wa[0].wa_Name);
+    if (dob) {
+        tt = (char **)dob->do_ToolTypes;
+        ttstr(tt, "EDITOR", tteditor, sizeof(tteditor));
+        ttstr(tt, "DRAWER", ttdrawer, sizeof(ttdrawer));
+        ttstr(tt, "OPENSCREEN", ttscrname, sizeof(ttscrname));
+        ttstr(tt, "PUBSCREEN", ttpubscr, sizeof(ttpubscr));
+        /* floor of 2 planes, not 1: cdiff draws in pens 0-3, and on
+         * a 2-colour screen pens 2 and 3 do not exist */
+        ttdepth = ttnum(tt, "SCREENDEPTH", 2, 8, 0);
+        ttleft   = ttnum(tt, "LEFT",   0, 20000, -1);
+        tttop    = ttnum(tt, "TOP",    0, 20000, -1);
+        ttwidth  = ttdim(tt, "WIDTH");
+        ttheight = ttdim(tt, "HEIGHT");
+        tttab    = ttnum(tt, "TABSIZE", 1, 16, 8);
+        /* a power of two can use a mask; anything else pays for a
+         * modulo per expanded column (the roadmap's own warning
+         * about DIVU in a per-cell loop at 14MHz) */
+        ttmask = (tttab & (tttab - 1)) ? 0 : tttab - 1;
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"FONT");
+        if (v) {                        /* b74, his call: name/size */
+            char *sl;
+            int n;
+            /* leave room to append ".font" ourselves */
+            strncpy(ttfont, (char *)v, sizeof(ttfont) - 6);
+            ttfont[sizeof(ttfont) - 6] = 0;
+            sl = strchr(ttfont, '/');
+            if (sl) { *sl = 0; ttfsize = atoi(sl + 1); }
+            if (ttfsize < 5 || ttfsize > 48) ttfsize = 8;
+            /* he types the family name, not the file name: FONT=
+             * topaz/8. ".font" is appended when missing, and the
+             * fully-spelled form still works. */
+            n = strlen(ttfont);
+            if (n == 0)
+                ttfont[0] = 0;
+            else if (n < 5 || !tteq(ttfont + n - 5, ".font"))
+                strcat(ttfont, ".font");
+        }
+        FreeDiskObject(dob);
+    }
+    CurrentDir(old);
+
+    /* project icons dropped ON the cdiff icon: the Workbench half of
+     * b69's drop gesture. Two of them are a pair to compare. */
+    if (wbs->sm_NumArgs >= 3) {
+        static char p1[310], p2[310];
+        if (wbargpath(&wa[1], p1, sizeof(p1)) &&
+            wbargpath(&wa[2], p2, sizeof(p2))) {
+            if (ispathdir(p1) && ispathdir(p2)) {
+                strcpy(gdir1, p1);
+                strcpy(gdir2, p2);
+                gdirmode = 1;
+            } else {
+                strcpy(gf1, p1);
+                strcpy(gf2, p2);
+            }
+        }
+    } else if (wbs->sm_NumArgs == 2) {  /* one icon: the left side */
+        static char p1[310];
+        if (wbargpath(&wa[1], p1, sizeof(p1))) {
+            if (ispathdir(p1)) strcpy(gdir1, p1);
+            else               strcpy(gf1, p1);
+        }
+    }
+}
+
 static int smain(int argc, char **argv)
 {
     static const char tmpl[] = "FILE1/A,FILE2/A,TEXT/S";
     LONG argarr[3] = { 0, 0, 0 };
     struct RDArgs *rda;
 
-    (void)argv;
     if (argc == 0) {
         /* Workbench start (his ask): empty window, the Project menu
-         * supplies the files one by one */
+         * supplies the files one by one. b73: argv IS the WBStartup
+         * message here - it used to be thrown away, and it carries
+         * both the tooltypes and any project icons dropped on us. */
+        IconBase = OpenLibrary((STRPTR)"icon.library", 37);
+        readtooltypes((struct WBStartup *)argv);
         guimode();
         freediff();
         return 0;

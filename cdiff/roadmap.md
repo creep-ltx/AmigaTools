@@ -360,13 +360,57 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       pointing it at his own icon becomes a couple of lines. Icons
       dropped ON the AppIcon restore the window but do not load -
       the drop bands are meaningless with no window.
-- [ ] **Tooltypes** (his ask; a config file is explicitly NOT wanted,
-      the icon carries the settings) — read from the WBStartup
-      message, which `smain` currently discards as `(void)argv`.
-      Planned: FONT, EDITOR, DRAWER, PUBSCREEN, TABSIZE (tab width is
-      hardcoded 8 today), LEFT/TOP/WIDTH/HEIGHT, VIEW. Two project
-      icons dropped on the cdiff icon should diff as a pair - the
-      Workbench half of the same gesture.
+- [x] **b73-b81: TOOLTYPES** (his ask; a config file explicitly NOT
+      wanted — the icon carries the settings). Read from the
+      WBStartup message, which `smain` had been discarding as
+      `(void)argv`. All optional and inert when absent, so a shell
+      launch is unchanged — and nothing here is reachable from CLI,
+      which is worth remembering when testing.
+      Final set: **OPENSCREEN** (opens a screen of our own, cloned
+      from Workbench, published under that name), **SCREENDEPTH**
+      (bitplanes for it, 2-8; nothing without OPENSCREEN; floored at
+      2 because cdiff draws in pens 0-3 and a 2-colour screen has no
+      pen 2 or 3), **PUBSCREEN** (attaches to somebody else's public
+      screen), **FONT** (family/size, `.font` appended; PROPORTIONAL
+      FONTS ARE REFUSED — every measurement here is columns x fw, so
+      a variable-width face would render nonsense, not merely look
+      wrong), **EDITOR** (beats ENV:EDITOR), **DRAWER**, **TABSIZE**
+      (mask when a power of two, modulo otherwise — the roadmap's own
+      warning about DIVU in a per-cell loop), **LEFT/TOP/WIDTH/
+      HEIGHT**. Project icons dropped on the cdiff icon load too:
+      two as a pair, one as the left side.
+      **Three of his corrections shaped the final set, and two of
+      them were deletions:**
+      *VIEW removed (b75)* — dead by construction, not merely
+      marginal: TREE re-set a view gdirmode had already set and BOTH
+      re-set the zero default, so two of four values could never do
+      anything on any machine.
+      *PUBSCREEN removed (b77), then rebuilt (b78-b80)* — as shipped
+      it only ATTACHED to a screen someone else had published, so on
+      a machine where nothing publishes one it was inert. His read:
+      the useful version OPENS a cloned screen. That became
+      OPENSCREEN, deliberately NOT called PUBSCREEN because that
+      keyword already means the opposite throughout Amiga software.
+      With OPENSCREEN in place PUBSCREEN came back at b80 meaning
+      exactly what it conventionally means — the pair is unambiguous,
+      and OPENSCREEN's screen is itself public, so there is now
+      something worth attaching to. Precedence: own screen, then a
+      named one, then Workbench.
+      *WIDTH/HEIGHT = -1 (b81)* — his ask, and it exposed a bug in
+      the defaults: an absent WIDTH used the FULL screen width while
+      ignoring LEFT, so `LEFT=100` ran the window exactly 100px off
+      the right edge. Size is now measured FROM the position, so -1
+      and "absent" both mean "reach the edge" and neither can
+      overrun.
+      The screen is closed by closemain() with the window, so an
+      iconify never strands an empty cdiff screen on the display.
+      The AppIcon also wears HIS icon now (DupLock of our drawer +
+      the tool name from WBStartup), falling back to the generic
+      tool image — the couple of lines promised at b72.
+- [ ] A status row for the screen tooltypes: whether SCREENDEPTH=2
+      measurably beats a 4-plane Workbench on his machine. Blit cost
+      is per bitplane, so it should — worth confirming rather than
+      assuming.
 
 ## 0.1b3 — directory mode
 
