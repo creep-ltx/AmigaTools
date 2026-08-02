@@ -15,6 +15,8 @@
 #include <devices/inputevent.h>
 #include <libraries/gadtools.h>
 #include <libraries/asl.h>
+#include <workbench/startup.h>
+#include <workbench/workbench.h>
 #include <dos/dostags.h>
 #include <proto/exec.h>
 #include <proto/dos.h>
@@ -22,6 +24,7 @@
 #include <proto/graphics.h>
 #include <proto/gadtools.h>
 #include <proto/asl.h>
+#include <proto/wb.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,7 +32,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b68 (2.8.26)";
+    "$VER: cdiff 0.1b71 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -42,6 +45,7 @@ struct IntuitionBase *IntuitionBase = NULL;
 struct GfxBase *GfxBase = NULL;
 struct Library *GadToolsBase = NULL;
 struct Library *AslBase = NULL;
+struct Library *WorkbenchBase = NULL;   /* b69: AppWindow drops */
 
 /* one display row of the side-by-side view */
 typedef struct {
@@ -1216,6 +1220,12 @@ static void settitle(void)
         sprintf(t, "cdiff: %.70s | (now open the right file)", gf1);
     else if (gf2[0])
         sprintf(t, "cdiff: (now open the left file) | %.70s", gf2);
+    /* b71: a drawer dropped on one side, still waiting for the
+     * other - say so, or the window just sits there looking idle */
+    else if (gdir1[0] && !gdir2[0])
+        sprintf(t, "cdiff: %.60s | (now drop the RIGHT drawer)", gdir1);
+    else if (gdir2[0] && !gdir1[0])
+        sprintf(t, "cdiff: (now drop the LEFT drawer) | %.60s", gdir2);
     else
         strcpy(t, "cdiff");
     if (findrow >= 0 && findn > 0) {    /* b67: which match, of how many */
@@ -1418,8 +1428,16 @@ static int inputwaiting(void)
 static void flushpaint(void)
 {
     int owed = dirtyall || dirtyrows || scrollfromset || seloldset;
-    if (!owed && !dirtyknob) return;
+    /* b70: clear defer BEFORE the early return. It used to sit
+     * inside the "something is owed" path, so a message that owed
+     * no painting left the flag armed - harmless while every
+     * painter ran inside the IDCMP drain that re-arms it each
+     * message, and a real bug the moment anything painted from
+     * OUTSIDE that drain. His find: a dropped icon loaded the files
+     * but the window did not change until it was activated again -
+     * the drop had painted into a deferred debt nobody settled. */
     defer = 0;
+    if (!owed && !dirtyknob) return;
     if (dirtyall)
         drawpage();                     /* tabs and every row */
     else if (dirtyrows)
@@ -1777,6 +1795,130 @@ static int askfile(const char *title, char *dest)
         return 2;
     AddPart((STRPTR)dest, freq->fr_File, 310);
     return 1;
+}
+
+/* ---- b69: AppWindow drops (his ask) --------------------------
+ * A dropped icon picks its side by WHERE it lands: the content
+ * width splits 40/20/40, left band sets the left file, right band
+ * the right, and the narrow middle asks. Two icons dropped together
+ * fill left and right in the order given - position cannot
+ * disambiguate two, so it is not consulted.
+ *
+ * The thirds apply in EVERY view, including an empty window and the
+ * Tree, so the gesture never changes meaning. That matters more than
+ * matching the pane geometry, because there IS no drawn boundary to
+ * aim at (the marker column only carries |/</> on differing rows,
+ * his correction) and AppWindow reports only the drop - there are no
+ * drag-over events, so nothing can highlight a target mid-drag. */
+
+static struct MsgPort *appport;
+static struct AppWindow *appwin;
+static void reload(void);       /* defined below with the loaders */
+
+/* WBArg -> a full path we can hand to the loader */
+static int wbargpath(struct WBArg *wa, char *dest, int max)
+{
+    dest[0] = 0;
+    if (wa->wa_Lock) {
+        if (!NameFromLock(wa->wa_Lock, (STRPTR)dest, max)) return 0;
+    } else if (wa->wa_Name == NULL)
+        return 0;
+    if (wa->wa_Name && wa->wa_Name[0]) {
+        if (!AddPart((STRPTR)dest, wa->wa_Name, max)) return 0;
+    }
+    return dest[0] != 0;
+}
+
+/* which band did it land in?  -1 left, 1 right, 0 the middle "ask" */
+static int dropband(WORD mx)
+{
+    int w = win->Width - win->BorderLeft - win->BorderRight;
+    int lx = win->BorderLeft, rel = mx - lx;
+    if (w <= 0) return 0;
+    if (rel < (w * 2) / 5) return -1;           /* 40% */
+    if (rel > (w * 3) / 5) return 1;            /* 40% */
+    return 0;                                   /* the narrow 20% */
+}
+
+static void dropped(struct AppMessage *am)
+{
+    static char p1[310], p2[310];
+    int side;
+
+    if (am->am_NumArgs <= 0) return;
+    if (am->am_NumArgs >= 2) {          /* a pair: order decides */
+        if (!wbargpath(&am->am_ArgList[0], p1, sizeof(p1)) ||
+            !wbargpath(&am->am_ArgList[1], p2, sizeof(p2)))
+            return;
+        if (ispathdir(p1) && ispathdir(p2)) {
+            freediff();
+            freedirs();
+            strcpy(gdir1, p1);
+            strcpy(gdir2, p2);
+            gf1[0] = gf2[0] = 0;
+            gdirmode = 1;
+            scandirs();
+            view = 3;
+            settitle();
+            drawpage();
+            return;
+        }
+        freedirs();
+        strcpy(gf1, p1);
+        strcpy(gf2, p2);
+        reload();
+        return;
+    }
+    if (!wbargpath(&am->am_ArgList[0], p1, sizeof(p1))) return;
+    side = dropband(am->am_MouseX);
+    if (side == 0) {                    /* the middle band asks */
+        static struct EasyStruct es;
+        ULONG args[1];
+        LONG r;
+        es.es_StructSize   = sizeof(es);
+        es.es_Flags        = 0;
+        es.es_Title        = (UBYTE *)"cdiff";
+        es.es_TextFormat   = (UBYTE *)"Put \"%s\" on which side?";
+        es.es_GadgetFormat = (UBYTE *)"Left|Right|Cancel";
+        args[0] = (ULONG)FilePart((STRPTR)p1);
+        r = EasyRequestArgs(win, &es, NULL, args);
+        if (r == 1) side = -1;
+        else if (r == 2) side = 1;
+        else return;                    /* Cancel, and the 0 case */
+    }
+    if (ispathdir(p1)) {
+        /* b71, his find: the two drawers to compare are rarely in
+         * the same place on the drive, so they often CANNOT be
+         * dragged together. One at a time then - a side each - and
+         * the tree compare runs when both sides hold a drawer. */
+        if (side < 0) { strcpy(gdir1, p1); gf1[0] = 0; }
+        else          { strcpy(gdir2, p1); gf2[0] = 0; }
+        if (gdir1[0] && gdir2[0]) {
+            freediff();
+            freedirs();                 /* clears gdirmode, so set it after */
+            gf1[0] = gf2[0] = 0;
+            gdirmode = 1;
+            scandirs();
+            view = 3;
+        } else if ((side < 0 && gf2[0]) || (side > 0 && gf1[0]))
+            erq("that side holds a drawer now - drop a drawer on the\n"
+                "other side too, or a file to go back to comparing files");
+        settitle();
+        drawpage();
+        return;
+    }
+    if (side < 0) { strcpy(gf1, p1); gdir1[0] = 0; }
+    else          { strcpy(gf2, p1); gdir2[0] = 0; }
+    if (gf1[0] && gf2[0]) {
+        freedirs();
+        reload();
+    } else {
+        if ((side < 0 && gdir2[0]) || (side > 0 && gdir1[0]))
+            erq("that side holds a file now - drop a file on the other\n"
+                "side too, or a drawer to go back to comparing trees");
+        settitle();
+        drawpage();
+    }
 }
 
 /* b67: the Find requester - a real gadtools STRING_KIND, not a
@@ -2253,6 +2395,7 @@ static void guimode(void)
         OpenLibrary((STRPTR)"graphics.library", 37);
     GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
     AslBase = OpenLibrary((STRPTR)"asl.library", 37);
+    WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
 
     scr = LockPubScreen(NULL);
@@ -2328,6 +2471,18 @@ static void guimode(void)
     /* b48: both the DrawInfo and the pubscreen lock are still held
      * here on purpose - sysiclass reads them while it builds the
      * arrow images. Released the moment the gadgets exist. */
+    /* b69: an AppWindow, so Workbench icons can be dropped on us.
+     * Optional in every sense - no workbench.library, no port or no
+     * AddAppWindow just means drops are not offered. */
+    if (WorkbenchBase) {
+        appport = CreateMsgPort();
+        if (appport)
+            appwin = AddAppWindowA(0, 0, win, appport, NULL);
+        if (appwin == NULL && appport) {
+            DeleteMsgPort(appport);
+            appport = NULL;
+        }
+    }
     addscrollers(dri, scr);
     if (dri) FreeScreenDrawInfo(scr, dri);
     UnlockPubScreen(NULL, scr);
@@ -2343,7 +2498,21 @@ static void guimode(void)
     drawpage();
 
     while (!done) {
-        WaitPort(win->UserPort);
+        ULONG wsig = 1UL << win->UserPort->mp_SigBit;
+        ULONG asig = appport ? 1UL << appport->mp_SigBit : 0;
+        ULONG got = Wait(wsig | asig);
+
+        if (asig && (got & asig)) {     /* b69: dropped icons */
+            struct AppMessage *am;
+            while ((am = (struct AppMessage *)GetMsg(appport))) {
+                dropped(am);
+                ReplyMsg((struct Message *)am);
+            }
+            flushpaint();       /* b70: settle it here and now - this
+                                 * is outside the IDCMP drain, so
+                                 * nothing else will */
+        }
+        if (!(got & wsig)) continue;
         while ((msg = (struct IntuiMessage *)GetMsg(win->UserPort))) {
             ULONG class = msg->Class;
             UWORD code = msg->Code;
@@ -2564,6 +2733,14 @@ static void guimode(void)
         }
         flushpaint();           /* burst ended by the port emptying */
     }
+    if (appwin) RemoveAppWindow(appwin);
+    if (appport) {                      /* drain what is still queued */
+        struct Message *m;
+        while ((m = GetMsg(appport))) ReplyMsg(m);
+        DeleteMsgPort(appport);
+        appport = NULL;
+        appwin = NULL;
+    }
     if (gmenu) ClearMenuStrip(win);
     if (gadsok) RemoveGList(win, &vgad, -1);
     CloseWindow(win);
@@ -2579,6 +2756,7 @@ out:
     if (gvi) FreeVisualInfo(gvi);
     if (freq) FreeAslRequest(freq);
     if (AslBase) CloseLibrary(AslBase);
+    if (WorkbenchBase) CloseLibrary(WorkbenchBase);
     if (GadToolsBase) CloseLibrary(GadToolsBase);
     if (GfxBase) CloseLibrary((struct Library *)GfxBase);
     if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);

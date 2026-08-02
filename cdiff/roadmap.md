@@ -293,7 +293,60 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       paths that drop a find without going through gofind (reload,
       view switch, rescan) — the term survives those, the hit cannot,
       because findrow is an index in one view's numbering.
+- [x] **b69-b71: APPWINDOW DROPS** (his ask: "dropping files onto
+      the window needs to exist"). A dropped icon picks its side by
+      WHERE it lands — content width split 40/20/40, left band sets
+      the left, right band the right, the narrow middle asks with a
+      Left/Right/Cancel requester. Two icons dropped together fill
+      both in the order given; position cannot disambiguate two, so
+      it is not consulted.
+      The bands are fixed fractions and identical in EVERY view —
+      empty window, Both, the single-file tabs, the Tree — rather
+      than tied to the pane geometry. **His correction is why:** the
+      marker column only carries `|`/`<`/`>` on DIFFERING rows, so
+      there is no drawn boundary to aim at, and an empty window (the
+      likeliest moment to drop) has nothing at all. AppWindow also
+      reports only the drop — there are no drag-over events, so
+      nothing can highlight a target mid-drag. A gesture aimed at an
+      invisible line must at least never change meaning.
+      **b71, his find:** a single DRAWER takes a side too, because
+      the two drawers to compare are rarely in the same place on the
+      drive and often cannot be dragged together. Each side holds a
+      file or a drawer; dropping one clears the other on that side,
+      so a session can switch between file and tree compare by
+      dropping alone. The title reports a half-set pair ("now drop
+      the RIGHT drawer") — without it the window just looks idle —
+      and a drawer-versus-file mismatch says so instead of silently
+      doing nothing.
+      Degrades quietly throughout: no workbench.library, no port, or
+      a failed AddAppWindow simply means drops are not offered.
+- [x] **b70: the stale `defer` flag** — a bug of MINE from b63, found
+      by his report that a dropped pair loaded but the window did not
+      change until it was activated again. `flushpaint()` cleared
+      `defer` only on the path where something was owed, so a message
+      owing no painting left the flag armed. Harmless for as long as
+      every painter ran inside the IDCMP drain (which re-arms it per
+      message anyway) — and a real defect the moment anything painted
+      from OUTSIDE that drain. The app port was the first thing that
+      ever did. `defer` is now cleared before the early return, and
+      the app-message branch flushes for itself.
+      LESSON: a flag that is only ever correct because of where it
+      happens to be set is not correct, it is lucky.
 - [ ] A status row: hunk i/N, +a −d, position %.
+- [ ] **Iconify** (his ask) — WA_ICONIFYGADGET, and the click arrives
+      as IDCMP_CLOSEWINDOW with **Code == 1**, so the existing
+      `CLOSEWINDOW -> done` MUST branch on Code first or the gadget
+      quits. Hiding is the app's job: close the window, AddAppIcon,
+      reopen on double-click. Needs the window torn down and rebuilt
+      with all state preserved. Contract and V47 timeline in
+      AmigaReferences/intuition-iconify.md.
+- [ ] **Tooltypes** (his ask; a config file is explicitly NOT wanted,
+      the icon carries the settings) — read from the WBStartup
+      message, which `smain` currently discards as `(void)argv`.
+      Planned: FONT, EDITOR, DRAWER, PUBSCREEN, TABSIZE (tab width is
+      hardcoded 8 today), LEFT/TOP/WIDTH/HEIGHT, VIEW. Two project
+      icons dropped on the cdiff icon should diff as a pair - the
+      Workbench half of the same gesture.
 
 ## 0.1b3 — directory mode
 
