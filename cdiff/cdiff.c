@@ -34,7 +34,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cdiff 0.1b103 (2.8.26)";
+    "$VER: cdiff 0.1b105 (2.8.26)";
 
 /* NO __stack here: his guru proved this libnix never reads it (nm
  * shows nothing referencing ___stack) - main swaps to a real 64K
@@ -80,6 +80,7 @@ static char ttscrname[64];      /* OPENSCREEN= - name of OUR screen */
 static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
 static int  ttdepth;            /* SCREENDEPTH= - 0 = clone WB */
 static int  ttstatus = 1;       /* STATUSBAR=YES/NO, default on */
+static int  ttcontext = 3;      /* CONTEXT=n around each change */
 static int  ttfast;             /* b94: DEFAULT OFF - on his machine
                                  * the blit corrupts and a full row
                                  * repaint does not. b92: use the
@@ -235,6 +236,18 @@ static int *ghs;                /* hunk start rows, ascending */
 static int ghn, ghcap, ghdirty = 1;
 static int gadds, gdels;        /* +a -d, counted from grows */
 
+/* b104, his ask: "differences only". A DISPLAY MAP over the active
+ * view - each entry is either a real row index, or a NEGATIVE number
+ * carrying how many rows were collapsed there, drawn as a marker.
+ * Everything else in the program keeps working in display indices,
+ * so scrolling, the scrollbars, find and the hunk counter need no
+ * idea the filter exists; only the three places that turn a display
+ * index into content have to translate. Rebuilt lazily like the
+ * width scan and the hunk index, and invalidated at the same points. */
+static int ttdiffs;             /* the mode, session only */
+static int *dmap;
+static int dmapn, dmapcap, dmapdirty = 1;
+
 /* b67: find state (his ask, modelled on a Navigation menu with
  * Find.../Find Next/Find Previous). findrow is the matched row in
  * the ACTIVE view's row numbering, -1 when nothing is current.
@@ -358,6 +371,7 @@ static void freedirs(void)
     ndents = 0; dtop = 0; dsel = 0;
     maxwdirty = 1;          /* b58: the Tree's widest path is gone */
     ghdirty = 1;            /* b82: and the hunk index */
+    dmapdirty = 1;          /* b104: and the diffs-only map */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gndiff = gnleft = gnright = 0;
     gdirmode = 0;
@@ -449,6 +463,7 @@ static void scandirs_(void)
     slfree(&lb);
     maxwdirty = 1;              /* b58: the Tree just gained rows */
     ghdirty = 1;            /* b82: and the hunk index */
+    dmapdirty = 1;          /* b104: and the diffs-only map */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
@@ -809,6 +824,37 @@ static void drawnum(int x, int y, long line, int pen, int bg)
  * ask - there is no dark grey on a 4-colour WB): blue-on-gray for
  * plain rows, black-on-blue under the bar - always a step quieter
  * than the content beside it. */
+static int vcount(void);        /* b104: all defined further down */
+static int drow(int i);
+static void builddmap(void);
+
+/* b104: a collapsed run, drawn as a centred rule with the count -
+ * "-- 47 lines --". Keeps the reader oriented across a gap, which
+ * is the whole reason gaps get a row at all instead of just closing
+ * up. One padded Text, like every other row (the b66 rule). */
+static void drawgap(int y, int hidden)
+{
+    static char gb[160];
+    int i, w = viscols, len, pad;
+    if (w > (int)sizeof(gb) - 1) w = sizeof(gb) - 1;
+    if (w < 1) return;
+    sprintf(gb, "-- %d line%s --", hidden, hidden == 1 ? "" : "s");
+    len = strlen(gb);
+    if (len > w) len = w;
+    pad = (w - len) / 2;
+    memmove(gb + pad, gb, len);
+    for (i = 0; i < pad; i++) gb[i] = ' ';
+    for (i = pad + len; i < w; i++) gb[i] = ' ';
+    /* b105 (his eye): white, not black. A gap marker should RECEDE -
+     * it says "nothing here", and white on the grey reads as quieter
+     * than the black the real content is drawn in. The same palette
+     * hierarchy b4 used to push the gutter back. */
+    SetAPen(rp, 2);
+    SetBPen(rp, 0);
+    Move(rp, x0, y + fbase);
+    Text(rp, (STRPTR)gb, w);
+}
+
 /* b67: the find caret in the reserved column - always on the plain
  * background so it stays legible whether or not the row is a bar */
 static void drawmark(int y, int hit)
@@ -847,13 +893,25 @@ static void drawside(int x, int y, const DLine *l, long line,
  * side of a one-sided row stays gray: nothing lives there. */
 static void drawrow(int vr)
 {
-    int idx = gtop + vr;
+    int di = gtop + vr, idx;
     int y = conty + vr * fh, ye = y + fh - 1;
     int rend = x0 + viscols * fw - 1;
     int bar, x1, se;
     int hpre = 0, hea = 0, heb = 0;     /* b97: intra-line span */
     Row *r;
-    if (idx >= gnrows) {                /* past the end: blank */
+    if (di >= vcount()) {               /* past the end: blank */
+        SetAPen(rp, 0);
+        RectFill(rp, x0, y, rend, ye);
+        return;
+    }
+    idx = drow(di);                     /* b104 */
+    if (idx < 0) {                      /* a collapsed run */
+        SetAPen(rp, 0);
+        RectFill(rp, x0, y, rend, ye);
+        drawgap(y, -idx);
+        return;
+    }
+    if (idx >= gnrows) {
         SetAPen(rp, 0);
         RectFill(rp, x0, y, rend, ye);
         return;
@@ -910,6 +968,11 @@ static int *vtop(void)
 
 static int vcount(void)
 {
+    /* b104: with the filter on, the view is as long as the map */
+    if (ttdiffs && view != 3) {
+        if (dmapdirty) builddmap();
+        if (dmapn > 0) return dmapn;
+    }
     return view == 0 ? gnrows : view == 1 ? gna :
            view == 2 ? gnb : ndents;
 }
@@ -972,6 +1035,53 @@ static int htotal(void)
     return gmaxw > viscols ? gmaxw : viscols;
 }
 
+/* b104: build the display map for the active view. A row is KEPT if
+ * it differs, or lies within CONTEXT rows of one that does; every
+ * run of dropped rows collapses to a single marker entry carrying
+ * its count. Context is what makes this readable rather than merely
+ * shorter - a changed line with nothing around it is hard to place. */
+static void builddmap(void)
+{
+    int n, i, run = 0;
+    dmapdirty = 0;
+    dmapn = 0;
+    if (view == 3) return;              /* the Tree is already only
+                                         * differing entries */
+    n = view == 0 ? gnrows : view == 1 ? gna : gnb;
+    for (i = 0; i < n; i++) {
+        int keep = 0, j;
+        for (j = i - ttcontext; j <= i + ttcontext && !keep; j++) {
+            if (j < 0 || j >= n) continue;
+            if (view == 0) keep = grows && grows[j].tag != ' ';
+            else if (view == 1) keep = gatag && gatag[j] != ' ';
+            else keep = gbtag && gbtag[j] != ' ';
+        }
+        if (!keep) { run++; continue; }
+        if (dmapn + 2 > dmapcap) {      /* room for a marker AND a row */
+            int nc = dmapcap ? dmapcap * 2 : 256;
+            int *np = realloc(dmap, nc * sizeof(int));
+            if (np == NULL) { dmapn = 0; return; }  /* degrade: no filter */
+            dmap = np;
+            dmapcap = nc;
+        }
+        if (run) { dmap[dmapn++] = -run; run = 0; }
+        dmap[dmapn++] = i;
+    }
+    if (run && dmapn + 1 <= dmapcap) dmap[dmapn++] = -run;
+}
+
+/* display index -> row index, or NEGATIVE carrying the collapsed
+ * count for a marker. Identity when the filter is off, which is why
+ * nothing else in the program has to know about it. */
+static int drow(int i)
+{
+    if (!ttdiffs || view == 3) return i;
+    if (dmapdirty) builddmap();
+    if (dmapn == 0) return i;           /* nothing built - fall back */
+    if (i < 0 || i >= dmapn) return -1;
+    return dmap[i];
+}
+
 /* b82: one pass collecting every hunk START in the active view, and
  * the pair's +a/-d. A hunk is a maximal run of non-equal rows, the
  * same definition nexthunk() walks. Lazy, like calcmaxw. */
@@ -996,10 +1106,11 @@ static void calchunks(void)
     }
     if (n <= 0) return;
     for (i = 0; i < n; i++) {
-        int hit;
-        if (view == 3)      hit = dents[i].st != 'S';
-        else if (view == 0) hit = grows && grows[i].tag != ' ';
-        else                hit = tg && tg[i] != ' ';
+        int hit, ri = drow(i);          /* b104 */
+        if (ri < 0) { prev = 0; continue; }     /* marker breaks a run */
+        if (view == 3)      hit = dents[ri].st != 'S';
+        else if (view == 0) hit = grows && grows[ri].tag != ' ';
+        else                hit = tg && tg[ri] != ' ';
         if (hit && !prev) {
             if (ghn >= ghcap) {
                 int nc = ghcap ? ghcap * 2 : 64;
@@ -1390,11 +1501,19 @@ static void drawdirrow(int vr)
 /* one full-width line of a single-file tab */
 static void drawline(int vr)
 {
-    int line = *vtop() + vr;
+    int di = *vtop() + vr, line;
     int y = conty + vr * fh, ye = y + fh - 1;
     int rend = x0 + viscols * fw - 1;
     const DLine *l;
     char tag;
+    if (di >= vcount()) goto blank;
+    line = drow(di);                    /* b104 */
+    if (line < 0) {                     /* a collapsed run */
+        SetAPen(rp, 0);
+        RectFill(rp, x0, y, rend, ye);
+        drawgap(y, -line);
+        return;
+    }
     if (view == 1) {
         if (line >= gna) goto blank;
         l = &ga[line];
@@ -1710,6 +1829,14 @@ static int nexthunk(int from, int dir)
 {
     const char *tg = view == 1 ? gatag : gbtag;
     int n = vcount(), i = from + dir;
+    if (ttdiffs && view != 3) {
+        /* b104: with the filter on almost every row is interesting,
+         * so walk the display rows and stop on the next real one
+         * that differs - the markers are the boundaries */
+        while (i > 0 && i < n && drow(i) < 0) i += dir;
+        if (i < 0 || i >= n) return from;
+        return i;
+    }
     if (view == 3) {
         while (i >= 0 && i < n && dents[i].st == 'S') i += dir;
         if (i < 0 || i >= n) return from;
@@ -1894,6 +2021,7 @@ static void setview(int v)
      * the term survives a view switch, the hit cannot. */
     maxwdirty = 1;
     ghdirty = 1;            /* b82: and the hunk index */
+    dmapdirty = 1;          /* b104: and the diffs-only map */
     findrow = -1; findn = findof = 0;
     if (v == 3) {
         if (!gdirmode) return;
@@ -1990,6 +2118,8 @@ static int memfind(const char *hay, int hlen, const char *nee, int nlen)
 
 static int rowhas(int row, const char *nee, int nlen)
 {
+    row = drow(row);            /* b104: display index -> real row */
+    if (row < 0) return 0;      /* a collapsed-run marker */
     if (view == 3) {
         if (row < 0 || row >= ndents) return 0;
         return memfind(dents[row].rel, strlen(dents[row].rel), nee, nlen);
@@ -2078,6 +2208,7 @@ static void freediff(void)
     view = 0;
     maxwdirty = 1;          /* b58: both sides freed */
     ghdirty = 1;            /* b82: and the hunk index */
+    dmapdirty = 1;          /* b104: and the diffs-only map */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
 }
 
@@ -2274,6 +2405,7 @@ static int loaddiff_(void)
     gna = na; gnb = nb;
     maxwdirty = 1;          /* b58: new content, new widest line */
     ghdirty = 1;            /* b82: and the hunk index */
+    dmapdirty = 1;          /* b104: and the diffs-only map */
     findrow = -1; findn = findof = 0;   /* b67: row numbering changed */
     gnrows = nrows;
     gtop = 0;
@@ -2680,6 +2812,8 @@ static struct NewMenu newmenu[] = {
     { NM_TITLE, (STRPTR)"Settings",      NULL,         0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Status bar",    NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Differences only", (STRPTR)"D",
+      CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Fast scroll",   NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_TITLE, (STRPTR)"Help",          NULL,         0, 0, NULL },
@@ -2814,6 +2948,8 @@ static void keysreq(void)
         "Enter - diff the selected tree entry\n"
         "the iconify gadget hides cdiff to a Workbench icon;\n"
         "  double-click it to come back, nothing is lost\n"
+        "Amiga+D - differences only (unchanged runs collapse to\n"
+        "  a marker; CONTEXT= tooltype sets how much is kept)\n"
         "Amiga+F / Amiga+N - find, find next (Navigation menu;\n"
         "  Find Previous has no shortcut). Case-insensitive,\n"
         "  searches the view you are in, wraps at the ends\n"
@@ -2922,8 +3058,32 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                     erq("could not write STATUSBAR to the icon\n"
                         "(the setting still applies this session)");
             } else if (ITEMNUM(c) == 1 && item) {
+                /* b104: Differences only. Keep the reader where they
+                 * were - map the current top row across instead of
+                 * dumping them at a different place in the file. */
+                int was = drow(*vtop());
+                ttdiffs = (item->Flags & CHECKED) ? 1 : 0;
+                dmapdirty = 1;
+                ghdirty = 1;
+                if (was >= 0 && view != 3) {
+                    int n = vcount(), i, best = 0;
+                    for (i = 0; i < n; i++) {
+                        int r = drow(i);
+                        if (r >= 0 && r <= was) best = i;
+                        if (r > was) break;
+                    }
+                    *vtop() = best;
+                }
+                findrow = -1; findn = findof = 0;
+                clamptops();
+                drawpage();
+            } else if (ITEMNUM(c) == 2 && item) {
                 ttfast = (item->Flags & CHECKED) ? 1 : 0;
                 drawpage();     /* repaint clean either way */
+                if (ttoollock && ttoolname[0] &&
+                    !iconset("FASTSCROLL", ttfast ? "YES" : "NO"))
+                    erq("could not write FASTSCROLL to the icon\n"
+                        "(the setting still applies this session)");
             }
         } else if (MENUNUM(c) == 4) {           /* Help */
             switch (ITEMNUM(c)) {
@@ -3040,10 +3200,14 @@ static int openmain(void)
                     const char *lb = (const char *)newmenu[mi].nm_Label;
                     if (lb == NULL || lb == (const char *)NM_BARLABEL)
                         continue;
-                    if (strcmp(lb, "Status bar")) continue;
-                    if (ttstatus) newmenu[mi].nm_Flags |= CHECKIT | CHECKED;
-                    else          newmenu[mi].nm_Flags &= ~CHECKED;
-                    break;
+                    if (!strcmp(lb, "Status bar")) {
+                        if (ttstatus) newmenu[mi].nm_Flags |= CHECKED;
+                        else          newmenu[mi].nm_Flags &= ~CHECKED;
+                    } else if (!strcmp(lb, "Fast scroll")) {
+                        if (ttfast) newmenu[mi].nm_Flags |= CHECKED;
+                        else        newmenu[mi].nm_Flags &= ~CHECKED;
+                    }
+                    continue;
                 }
             }
             gmenu = CreateMenus(newmenu, TAG_DONE);
@@ -3771,6 +3935,11 @@ static void readtooltypes(struct WBStartup *wbs)
         /* floor of 2 planes, not 1: cdiff draws in pens 0-3, and on
          * a 2-colour screen pens 2 and 3 do not exist */
         ttdepth = ttnum(tt, "SCREENDEPTH", 2, 8, 0);
+        ttcontext = ttnum(tt, "CONTEXT", 0, 50, 3);
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"FASTSCROLL");
+        if (v) ttfast = !(tteq((char *)v, "NO") ||
+                          tteq((char *)v, "OFF") ||
+                          tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"STATUSBAR");
         if (v) ttstatus = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||

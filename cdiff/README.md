@@ -31,6 +31,7 @@ menu works in a CLI-started window.
 | space / b | page down / up |
 | t / e | top / end |
 | n / p | next / previous hunk |
+| Amiga+D | differences only — collapse unchanged runs to a marker |
 | Amiga+F | find... (Navigation menu) |
 | Amiga+N | find next; Find Previous from the menu |
 | Esc / Backspace | back to the Tree (never quits) |
@@ -50,6 +51,8 @@ the settings). All optional; a shell launch ignores them.
 | `PUBSCREEN=name` | **attaches** to a public screen someone else already opened (the opposite of `OPENSCREEN`). Falls back to Workbench if that screen is not there. `OPENSCREEN` wins if both are set |
 | `SCREENDEPTH=2` | bitplanes for that screen (2–8). Only meaningful alongside `OPENSCREEN` — on its own it does nothing. Absent = clone Workbench's depth. cdiff only draws in pens 0–3, so 2 planes is enough, and blit cost is per plane: a 2-plane screen scrolls in half the blits of a 4-plane one |
 | `STATUSBAR=YES` | the status row at the bottom (`YES` if unset). **Settings / Status bar** toggles it and writes this tooltype back to the icon, so the choice survives the next launch |
+| `CONTEXT=3` | unchanged lines kept either side of a change in **Settings / Differences only** (3 if unset) |
+| `FASTSCROLL=NO` | the scroll blit (`NO` if unset — it tears more visibly than a full repaint on some displays). **Settings / Fast scroll** toggles it and writes this back |
 | `TABSIZE=4` | tab expansion width (8 if unset) |
 | `LEFT/TOP` | window position; default is the top-left of the screen, below the title bar |
 | `WIDTH/HEIGHT` | window size, measured **from** `LEFT`/`TOP`. `-1` (or leaving it out) reaches the screen edge without overrunning it |

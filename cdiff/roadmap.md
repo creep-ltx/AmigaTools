@@ -530,6 +530,33 @@ Legend: `[ ]` open · `[~]` in progress · `[x]` done
       his machine. Blit cost is per bitplane, so it should — worth
       confirming rather than assuming.
 
+- [x] **b104-b105: DIFFERENCES ONLY** (his ask). Settings /
+      Differences only, **Amiga+D**: unchanged runs collapse to a
+      centred marker row, "-- 47 lines --", drawn in WHITE (b105,
+      his eye) so the marker RECEDES - it says "nothing here", and
+      the same palette hierarchy b4 used to push the gutter back.
+      The design is a DISPLAY MAP over the active view: each entry is
+      either a real row index or a NEGATIVE number carrying how many
+      rows were collapsed there. vcount() returns the map length, so
+      scrolling, the scrollbars, the status row and the position
+      percentage keep working with no idea the filter exists - only
+      three places translate a display index into content (the two
+      row painters, and rowhas/calchunks for find and the hunk
+      counter). Rebuilt lazily and invalidated at the same five
+      points as the width scan and hunk index; same lifetime, so they
+      were mirrored mechanically rather than picked by hand.
+      **CONTEXT=n** (default 3) keeps that many unchanged rows either
+      side of a change - context is what makes this readable rather
+      than merely shorter, since a changed line with nothing around
+      it is hard to place. Toggling maps the current top row across
+      so the reader stays where they were, and n/p treat markers as
+      boundaries. File views only, by construction: the Tree already
+      shows only differing entries.
+      **FASTSCROLL=YES/NO** added in the same build (his ask) so that
+      setting survives a launch too, written back from the menu like
+      STATUSBAR. Differences only is deliberately NOT persisted - it
+      is a mode you flip while reading, not a preference.
+
 ## 0.1b3 — directory mode
 
 - [x] **DIRECTORY MODE (build b16, 1.8.26)** — `cdiff DIR1 DIR2`
