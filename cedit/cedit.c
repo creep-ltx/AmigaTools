@@ -1,15 +1,19 @@
 /* cedit - a GUI text editor for AmigaOS, on the LTX chassis.
  *
- * b1 is READ-ONLY on purpose. The gate for this build is that a file
- * opens and scrolls exactly the way cdiff does - same gutter, same
- * border scrollbars, same status row, same deferred-paint discipline
- * - because all of that is ltxgui/ltxwin.c, lifted out of cdiff at
- * b0 and boot-proven there. If this build scrolls right, the lift
- * was clean and everything after it is editing, not plumbing.
+ * b1 was read-only and proved the lifted chassis; b2 makes it an
+ * editor - a caret, the edits, and save. The GUI is still almost
+ * entirely ltxgui/ltxwin.c (window, screen, font, border scrollbars,
+ * tab bar, status row, row painter, scroll engine); cedit's own GUI
+ * code is the LtxApp adapters, a page composer and this event loop.
  *
- * The Buffer struct below already carries what b2-b5 need (cursor,
- * dirty flag, per-line lexer state) with exactly one buffer in it,
- * so multi-file tabs at b4 are a data change and not a rewrite.
+ * The editing PRIMITIVES are not here either - they are edbuf.c,
+ * pure logic, harness-proven on the host and under vamos before any
+ * of this boots. What lives in this file is the cursor: where it is
+ * allowed to be, what follows it, and which rows that dirties.
+ *
+ * The Buffer struct still carries what b3-b5 need (per-line lexer
+ * state, per-buffer top/hoff) with exactly one buffer in it, so
+ * multi-file tabs at b4 are a data change and not a rewrite.
  *
  * Usage: cedit [FILE]
  */
@@ -24,6 +28,7 @@
 #include <proto/intuition.h>
 #include <proto/graphics.h>
 #include <proto/gadtools.h>
+#include <proto/asl.h>
 #include <proto/wb.h>
 #include <proto/icon.h>
 #include <proto/diskfont.h>
@@ -35,7 +40,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cedit 0.1b1 (2.8.26)";
+    "$VER: cedit 0.1b2 (2.8.26)";
 
 /* ---- the buffer -------------------------------------------------
  * The line table, the splitter and the width arithmetic live in
@@ -43,8 +48,32 @@ static const char verstag[] __attribute__((used)) =
  * before this ever boots. What stays here is the file I/O, which
  * needs dos.library and so cannot be tested that way. */
 
-static Buffer buf;              /* b4: an array, and a current index */
-static Buffer *cur = &buf;
+/* b2/b4: the open documents. The Buffer struct was built at b1 to
+ * carry its own top, hoff, cursor and dirty flag precisely so that
+ * this could become an array without touching anything else - and it
+ * did: switching tabs is `cur = &docs[i]` plus one save/restore of
+ * the chassis's single hoff.
+ *
+ * There is ALWAYS at least one document. Closing the last tab leaves
+ * a blank untitled page rather than an empty window, which is also
+ * exactly what Close All does - one end state, not two. */
+#define MAXDOCS 16
+static Buffer docs[MAXDOCS];
+static int ndocs = 1;
+static int curdoc;
+static Buffer *cur = &docs[0];
+
+/* the column an up/down move TRIES to reach. Without it, walking
+ * down past a short line drags the cursor to its end and leaves it
+ * there - the single most-noticed absence in a young editor. Held in
+ * characters, clamped per line, and reset by every horizontal move
+ * or edit, which is exactly when the user has chosen a new column. */
+static int goalx;
+
+/* SetWindowTitles repaints the whole title bar, so calling it per
+ * keystroke would undo the point of repainting one row. The marker
+ * only ever changes when `dirty` does. */
+static int shown_dirty;
 
 /* whole-file read, then split. A file this size fits: cedit is for
  * source, and CFile's streaming viewer exists for the other case. */
@@ -73,6 +102,51 @@ static int loadbuf(Buffer *b, const char *path)
     return 1;
 }
 
+#define msg(t) ltx_msg(t)
+
+/* write the buffer back, in the line endings the file arrived with.
+ *
+ * Never straight over the original: the new text goes to a sibling
+ * file first and only replaces the old one once it is completely
+ * written. A save that fails halfway then costs nothing but a stray
+ * .new file, where a direct write would have left a truncated
+ * source. CFile's charter is non-destructive by default and this is
+ * the same rule with the same reason. */
+static int savebuf(Buffer *b, const char *path)
+{
+    char tmp[320];
+    char *out;
+    long n;
+    BPTR fh;
+    int ok;
+
+    if (b->path[0] == 0) return 0;
+    /* built by edbuf, where the harness checks the exact bytes, then
+     * written in ONE call - fewer packets to the filesystem than a
+     * line at a time, and nothing to get wrong here. */
+    n = bufbytes(b);
+    out = malloc(n ? n : 1);
+    if (out == NULL) return 0;
+    n = bufserialize(b, out);
+
+    sprintf(tmp, "%.310s.new", path);
+    fh = Open((STRPTR)tmp, MODE_NEWFILE);
+    if (fh == 0) { free(out); return 0; }
+    ok = (n == 0) || (Write(fh, out, n) == n);
+    if (Close(fh) == 0) ok = 0;         /* the buffered tail matters */
+    free(out);
+    if (!ok) { DeleteFile((STRPTR)tmp); return 0; }
+
+    DeleteFile((STRPTR)path);           /* may not exist yet */
+    if (!Rename((STRPTR)tmp, (STRPTR)path)) {
+        msg("Saved, but could not replace the original.\n"
+            "Your text is in the .new file beside it.");
+        return 0;
+    }
+    b->dirty = 0;
+    return 1;
+}
+
 /* ---- tooltype settings ------------------------------------------
  * The cdiff set, minus what has no meaning here yet. All optional,
  * all inert when absent, so a shell launch is unchanged. The typed
@@ -84,6 +158,7 @@ static char ttpubscr[64];       /* PUBSCREEN= - somebody else's */
 static int  ttdepth;            /* SCREENDEPTH= */
 static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 static int  ttgutter = 1;       /* GUTTER=YES/NO - line numbers */
+static char ttdrawer[310];      /* DRAWER= - where the requester starts */
 
 static struct MsgPort *appport;
 static APTR   appwin;
@@ -91,8 +166,18 @@ static APTR   gvi;
 static struct Menu *gmenu;
 
 static struct NewMenu newmenu[] = {
-    { NM_TITLE, (STRPTR)"Project",    NULL,        0, 0, NULL },
-    { NM_ITEM,  (STRPTR)"Quit",       (STRPTR)"Q", 0, 0, NULL },
+    { NM_TITLE, (STRPTR)"Project",      NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"New",          (STRPTR)"N", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Open...",      (STRPTR)"O", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Open New...",  (STRPTR)"D", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Close",        (STRPTR)"K", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Close All",    NULL,        0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Save",         (STRPTR)"S", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Save As...",   (STRPTR)"A", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Quit",         (STRPTR)"Q", 0, 0, NULL },
     { NM_TITLE, (STRPTR)"Settings",   NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Line numbers", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
@@ -100,8 +185,33 @@ static struct NewMenu newmenu[] = {
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Fast scroll", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
+    /* his ask: tab size from the menu, 1-10. Radio rather than
+     * toggle - exactly one is true - which in GadTools means CHECKIT
+     * plus a mutual-exclude mask naming every OTHER item at this
+     * level. TABSIZE= reads the same range, so menu and tooltype can
+     * always express the same thing. */
+    { NM_ITEM,  (STRPTR)"Tab size",   NULL,        0, 0, NULL },
+    { NM_SUB,   (STRPTR)"1",  NULL, CHECKIT, ~0x001 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"2",  NULL, CHECKIT, ~0x002 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"3",  NULL, CHECKIT, ~0x004 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"4",  NULL, CHECKIT, ~0x008 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"5",  NULL, CHECKIT, ~0x010 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"6",  NULL, CHECKIT, ~0x020 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"7",  NULL, CHECKIT, ~0x040 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"8",  NULL, CHECKIT, ~0x080 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"9",  NULL, CHECKIT, ~0x100 & 0x3FF, NULL },
+    { NM_SUB,   (STRPTR)"10", NULL, CHECKIT, ~0x200 & 0x3FF, NULL },
     { NM_END,   NULL,                 NULL,        0, 0, NULL },
 };
+
+/* the tab stop, and its mask when the stop is a power of two - the
+ * mask road costs an AND per expanded column, the other a DIVU at
+ * 14MHz. Both are correct; only one is cheap. */
+static void settabsize(int n)
+{
+    tttab = n;
+    ttmask = (n & (n - 1)) ? 0 : n - 1;
+}
 
 /* ---- what the chassis asks --------------------------------------- */
 
@@ -154,9 +264,38 @@ static int *etop(void)
     return &cur->top;
 }
 
-/* one visible row. b1 paints a single run; b5 hands ltx_drawruns()
+/* the cursor's DISPLAY column - cx counts characters, and a tab is
+ * one character but several columns. Everything on screen is
+ * measured in the second kind, so the two must never be confused. */
+static int curcol(void)
+{
+    return explen(cur->ln[cur->cy], cur->cx, tttab, ttmask);
+}
+
+/* b2: the caret, complemented over the cell rather than drawn into
+ * it - the ROM's own way, and what CCON does. It inverts whatever
+ * glyph is underneath, so it reads on any pen pair without the row
+ * painter knowing it exists, and erasing it is the same operation
+ * again. This is the ONE place a pixel is written twice; the b66
+ * rule holds for the row itself. */
+static void drawcaret(int y)
+{
+    int col = curcol() - hoff;
+    int tw = textw();
+    if (col < 0 || col >= tw) return;   /* panned out of sight */
+    SetDrMd(rp, COMPLEMENT);
+    RectFill(rp, textx() + col * fw, y,
+                 textx() + col * fw + fw - 1, y + fh - 1);
+    SetDrMd(rp, JAM2);
+}
+
+/* one visible row. b1 painted a single run; b5 hands ltx_drawruns()
  * the lexer's list instead, and nothing else on this path changes -
- * which is the whole reason the painter was widened at b0b. */
+ * which is the whole reason the painter was widened at b0b.
+ *
+ * The caret is painted here rather than by its own code path, so
+ * that EVERY repaint of this row - a scroll's entering row, a
+ * refresh, a resize - carries it automatically. */
 static void erow(int vr)
 {
     int i = cur->top + vr;
@@ -172,6 +311,7 @@ static void erow(int vr)
     w = ltx_expandvis(cur->ln[i], cur->len[i], textw());
     run.start = 0; run.pen = 1; run.bg = 0;
     ltx_drawruns(textx(), y, ltx_vis, w, &run, 1);
+    if (i == cur->cy) drawcaret(y);
 }
 
 static void erows(void)
@@ -188,12 +328,19 @@ static void erowone(int vr)
     erow(vr);
 }
 
+/* With one document ltx_tabbar is 0 and this draws nothing - the name
+ * is in the title bar and the status row already, so a one-tab bar
+ * would spend a whole row of text saying what is said twice over
+ * (his call). With two or more the bar appears and the grid shrinks
+ * by exactly that row. */
 static void drawtabbar(void)
 {
-    const char *labs[1];
-    if (cur->name[0] == 0) { ltx_drawtabs(NULL, 0, 0); return; }
-    labs[0] = cur->name;
-    ltx_drawtabs(labs, 1, 0);
+    const char *labs[MAXDOCS];
+    int i;
+    if (!ltx_tabbar) return;
+    for (i = 0; i < ndocs; i++)
+        labs[i] = docs[i].name[0] ? docs[i].name : "untitled";
+    ltx_drawtabs(labs, ndocs, curdoc);
 }
 
 static void epage(void)
@@ -219,35 +366,47 @@ static void epage(void)
         RectFill(rp, slx, conty, xend, e);
     drawstatus();
     updscrollers();
-    if (cur->n == 0 || cur->name[0] == 0) {
-        static const char hint[] = "no file loaded - cedit FILE";
-        int hl = sizeof(hint) - 1;
-        if (hl > viscols - 4) hl = viscols - 4;
-        if (hl > 0) {
-            SetAPen(rp, 1);
-            SetBPen(rp, 0);
-            Move(rp, gx0 + 2 * fw, conty + fh + fbase);
-            Text(rp, (STRPTR)hint, hl);
-        }
-    }
+    /* no hint here, and deliberately none: cdiff needs two files
+     * before it can do anything, so an empty cdiff window has to say
+     * so. An empty EDITOR window is not waiting for anything - it is
+     * a new document with the caret already in it. */
 }
 
 /* b82's rule: whatever fills this has to be cheap, because it runs
  * on every position change. Both numbers here are O(1). */
 static void estatus(char *dst, int max)
 {
-    if (cur->name[0] == 0)
-        strcpy(dst, " nothing loaded");
-    else
-        sprintf(dst, " %.60s  line %d/%d", cur->name,
-                cur->top + 1, cur->n);
+    sprintf(dst, " %.40s%s  line %d/%d  col %d",
+            cur->name[0] ? cur->name : "untitled",
+            cur->dirty ? " *" : "",
+            cur->cy + 1, cur->n, curcol() + 1);
     (void)max;
+}
+
+/* b2, and the standing rule: only redraw what actually changed.
+ * Typing repaints ONE row. Moving the cursor repaints two - the row
+ * it left, to erase the caret, and the row it reached. Only a
+ * structural change (a split or a join, which shifts every row
+ * below) escalates to dirtyrows. dmgold is a BUFFER index, not a
+ * screen row, so it survives a scroll happening in the same burst. */
+static int dmgold = -1;
+
+static void damage(int oldcy)
+{
+    if (dmgold < 0) dmgold = oldcy;
+    ltx_appowed = 1;
 }
 
 static void eflush(void)
 {
-    /* b2: the cursor's old and new rows land here, the way cdiff
-     * settles its Tree cursor. Nothing owes paint at b1. */
+    int vr;
+    if (dmgold >= 0 && dmgold != cur->cy) {
+        vr = dmgold - cur->top;
+        if (vr >= 0 && vr < crows) erow(vr);
+    }
+    dmgold = -1;
+    vr = cur->cy - cur->top;
+    if (vr >= 0 && vr < crows) erow(vr);
 }
 
 static const LtxApp ceditapp = {
@@ -256,10 +415,36 @@ static const LtxApp ceditapp = {
 
 /* ---- window ------------------------------------------------------ */
 
+static void settitle(void);
+static void clamptop(void);
+static void epage(void);
+
 static void calcgrid(void)
 {
+    /* decided before the grid is measured, because it is what the
+     * grid measures around */
+    ltx_tabbar = (ndocs > 1);
     ltx_calcgrid();
     calcgut();
+}
+
+/* make document `i` the current one. The chassis has ONE hoff, so
+ * the outgoing document's pan is stashed in its own Buffer and the
+ * incoming one's restored - the single reason Buffer carries an hoff
+ * field of its own. */
+static void setdoc(int i)
+{
+    if (i < 0 || i >= ndocs) return;
+    cur->hoff = hoff;
+    curdoc = i;
+    cur = &docs[i];
+    hoff = cur->hoff;
+    goalx = cur->cx;
+    calcgrid();                 /* the gutter follows THIS line count */
+    clamptop();
+    settitle();
+    shown_dirty = cur->dirty;
+    epage();
 }
 
 static void settitle(void)
@@ -309,13 +494,18 @@ static int openmain(void)
     if (GadToolsBase) {
         gvi = GetVisualInfo(scr, TAG_DONE);
         if (gvi) {
+            /* b87's rule, carried over: the checkmarks start
+             * wherever the tooltypes left them, so menu and icon
+             * never disagree on entry. */
             int mi;
             for (mi = 0; newmenu[mi].nm_Type != NM_END; mi++) {
                 const char *lb = (const char *)newmenu[mi].nm_Label;
                 int on;
                 if (lb == NULL || lb == (const char *)NM_BARLABEL)
                     continue;
-                if      (!strcmp(lb, "Line numbers")) on = ttgutter;
+                if (newmenu[mi].nm_Type == NM_SUB)
+                    on = (atoi(lb) == tttab);
+                else if (!strcmp(lb, "Line numbers")) on = ttgutter;
                 else if (!strcmp(lb, "Status bar"))   on = ttstatus;
                 else if (!strcmp(lb, "Fast scroll"))  on = ttfast;
                 else continue;
@@ -356,7 +546,8 @@ static void closemain(void)
 
 /* ---- tooltypes --------------------------------------------------- */
 
-static void readtooltypes(struct WBStartup *wbs, char *fpath, int fmax)
+/* returns how many file names it collected into fpaths */
+static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
 {
     struct DiskObject *dob;
     struct WBArg *wa;
@@ -364,7 +555,8 @@ static void readtooltypes(struct WBStartup *wbs, char *fpath, int fmax)
     char **tt;
     UBYTE *v;
 
-    if (IconBase == NULL || wbs == NULL || wbs->sm_ArgList == NULL) return;
+    if (IconBase == NULL || wbs == NULL || wbs->sm_ArgList == NULL)
+        return 0;
     wa = wbs->sm_ArgList;
     if (wa[0].wa_Lock) ttoollock = DupLock(wa[0].wa_Lock);
     if (wa[0].wa_Name)
@@ -374,6 +566,7 @@ static void readtooltypes(struct WBStartup *wbs, char *fpath, int fmax)
     dob = GetDiskObject((STRPTR)wa[0].wa_Name);
     if (dob) {
         tt = (char **)dob->do_ToolTypes;
+        ttstr(tt, "DRAWER", ttdrawer, sizeof(ttdrawer));
         ttstr(tt, "OPENSCREEN", ttscrname, sizeof(ttscrname));
         ttstr(tt, "PUBSCREEN", ttpubscr, sizeof(ttpubscr));
         /* floor of 2 planes: cedit draws in pens 0-3 */
@@ -394,10 +587,10 @@ static void readtooltypes(struct WBStartup *wbs, char *fpath, int fmax)
         tttop    = ttnum(tt, "TOP",    0, 20000, -1);
         ttwidth  = ttdim(tt, "WIDTH");
         ttheight = ttdim(tt, "HEIGHT");
-        tttab    = ttnum(tt, "TABSIZE", 1, 16, 8);
-        /* a power of two can use a mask; anything else pays for a
-         * modulo per expanded column (a DIVU per cell at 14MHz) */
-        ttmask = (tttab & (tttab - 1)) ? 0 : tttab - 1;
+        /* 1-10, the same range the Tab size menu offers, so the two
+         * can always express the same thing. Anything else falls
+         * back to 8 rather than to a size the menu cannot show. */
+        settabsize(ttnum(tt, "TABSIZE", 1, 10, 8));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"FONT");
         if (v) {
             char *sl;
@@ -418,20 +611,37 @@ static void readtooltypes(struct WBStartup *wbs, char *fpath, int fmax)
     }
     CurrentDir(old);
 
-    /* a project icon dropped on ours, or double-clicked with cedit
-     * as its default tool */
-    if (wbs->sm_NumArgs >= 2 && wa[1].wa_Name) {
-        BPTR o2 = CurrentDir(wa[1].wa_Lock);
-        BPTR l = Lock((STRPTR)wa[1].wa_Name, ACCESS_READ);
-        if (l) {
-            if (NameFromLock(l, (STRPTR)fpath, fmax) == 0) fpath[0] = 0;
-            UnLock(l);
+    /* project icons dropped on ours, or one double-clicked with
+     * cedit as its default tool. Each gets its own tab. */
+    {
+        int k, n = 0;
+        for (k = 1; k < wbs->sm_NumArgs && n < MAXDOCS; k++) {
+            BPTR o2, l;
+            if (wa[k].wa_Name == NULL) continue;
+            o2 = CurrentDir(wa[k].wa_Lock);
+            l = Lock((STRPTR)wa[k].wa_Name, ACCESS_READ);
+            if (l) {
+                if (NameFromLock(l, (STRPTR)fpaths[n], 310)) n++;
+                UnLock(l);
+            }
+            CurrentDir(o2);
         }
-        CurrentDir(o2);
+        return n;
     }
 }
 
 /* ---- the menu ---------------------------------------------------- */
+
+/* the Project menu's actions, defined below with the edits */
+static int  askdiscardall(const char *gadgets);
+static void donew(void);
+static void doopen(int newtab);
+static void doclose(void);
+static void docloseall(void);
+static void dosave(void);
+static void dosaveas(void);
+static int  askquit(void);      /* and the unsaved-changes prompt */
+static void follow(void);       /* keep the caret on screen */
 
 static int domenu(UWORD code)   /* 1 = quit */
 {
@@ -439,7 +649,20 @@ static int domenu(UWORD code)   /* 1 = quit */
         struct MenuItem *it = ItemAddress(gmenu, code);
         UWORD m = MENUNUM(code), i = ITEMNUM(code);
         if (it == NULL) break;
-        if (m == 0 && i == 0) return 1;                 /* Project/Quit */
+        /* New(0) Open(1) OpenNew(2) -(3) Close(4) CloseAll(5) -(6)
+         * Save(7) SaveAs(8) -(9) Quit(10). The separator bars ARE
+         * items and do take an index - cdiff's menu code says so in
+         * a comment, and this is why. */
+        if (m == 0) {
+            if (i == 0)  { donew();      return 0; }
+            if (i == 1)  { doopen(0);    return 0; }
+            if (i == 2)  { doopen(1);    return 0; }
+            if (i == 4)  { doclose();    return 0; }
+            if (i == 5)  { docloseall(); return 0; }
+            if (i == 7)  { dosave();     return 0; }
+            if (i == 8)  { dosaveas();   return 0; }
+            if (i == 10) return askquit();
+        }
         if (m == 1) {
             int on = (it->Flags & CHECKED) ? 1 : 0;
             if (i == 0) {                               /* Line numbers */
@@ -456,6 +679,21 @@ static int domenu(UWORD code)   /* 1 = quit */
             } else if (i == 2) {                        /* Fast scroll */
                 ttfast = on;
                 (void)iconset("FASTSCROLL", on ? "YES" : "NO");
+            } else if (i == 3) {                        /* Tab size */
+                UWORD sub = SUBNUM(code);
+                if (sub != NOSUB) {
+                    char v[8];
+                    settabsize(sub + 1);
+                    sprintf(v, "%d", tttab);
+                    (void)iconset("TABSIZE", v);
+                    /* every line's expanded width just changed, and
+                     * so did the caret's column - so this is the one
+                     * settings change that repaints the page */
+                    cur->maxwdirty = 1;
+                    calcgrid();
+                    follow();
+                    epage();
+                }
             }
         }
         code = it->NextSelect;
@@ -463,9 +701,333 @@ static int domenu(UWORD code)   /* 1 = quit */
     return 0;
 }
 
+/* ---- the cursor -------------------------------------------------- */
+
+/* keep the cursor on screen. Vertical goes through the chassis's
+ * scrollto so a one-line step is still one blit plus one entering
+ * row; horizontal through sethoff for the same reason. */
+static void follow(void)
+{
+    int col, tw;
+    if (cur->cy < cur->top) scrollto(cur->cy);
+    else if (cur->cy >= cur->top + crows) scrollto(cur->cy - crows + 1);
+    col = curcol();
+    tw = textw();
+    if (tw < 1) return;
+    if (col < hoff) sethoff(col);
+    else if (col >= hoff + tw) sethoff(col - tw + 1);
+}
+
+/* the one road to the cursor: clamp, follow, and mark the two rows
+ * that changed. Everything below calls this rather than assigning
+ * cy/cx itself, so no path can move the cursor off screen or forget
+ * to erase the caret it left behind. */
+static void gotoyx(int ny, int nx)
+{
+    int oldcy = cur->cy;
+    if (ny < 0) ny = 0;
+    if (ny >= cur->n) ny = cur->n - 1;
+    if (nx < 0) nx = 0;
+    if (nx > cur->len[ny]) nx = cur->len[ny];
+    if (ny == cur->cy && nx == cur->cx) return;
+    cur->cy = ny;
+    cur->cx = nx;
+    follow();
+    damage(oldcy);
+}
+
+static void moveh(int nx)       /* a horizontal move chooses a goal */
+{
+    gotoyx(cur->cy, nx);
+    goalx = cur->cx;
+}
+
+static void movev(int ny)       /* a vertical move keeps it */
+{
+    if (ny < 0) ny = 0;
+    if (ny >= cur->n) ny = cur->n - 1;
+    gotoyx(ny, goalx);
+}
+
+static int wordch(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Ctrl+left/right, the CCON line editor's jumps: over the run of
+ * separators, then over the word itself */
+static void wordjump(int dir)
+{
+    const char *l = cur->ln[cur->cy];
+    int n = cur->len[cur->cy], x = cur->cx;
+    if (dir > 0) {
+        while (x < n && wordch(l[x])) x++;
+        while (x < n && !wordch(l[x])) x++;
+    } else {
+        while (x > 0 && !wordch(l[x - 1])) x--;
+        while (x > 0 && wordch(l[x - 1])) x--;
+    }
+    moveh(x);
+}
+
+/* ---- editing ----------------------------------------------------- */
+
+static void oom(void)
+{
+    msg("Out of memory - that edit did not happen.");
+}
+
+static void marktitle(void)
+{
+    if (cur->dirty == shown_dirty) return;
+    shown_dirty = cur->dirty;
+    settitle();
+}
+
+static void typech(char c)
+{
+    int oldcy = cur->cy;
+    if (!edinsch(cur, cur->cy, cur->cx, c)) { oom(); return; }
+    cur->cx++;
+    goalx = cur->cx;
+    follow();
+    damage(oldcy);              /* one row - the b2 minimal-redraw case */
+    marktitle();
+}
+
+/* Return, Backspace over a line start and Delete at a line end all
+ * shift every row below, so these are the cases that escalate to a
+ * full content repaint. Nothing cheaper is correct: the rows below
+ * really did all move. */
+static void structural(void)
+{
+    dirtyrows = 1;
+    dmgold = -1;                /* the whole page covers both rows */
+    cur->maxwdirty = 1;
+    calcgut();                  /* the line count changed */
+    marktitle();
+}
+
+static void donewline(void)
+{
+    if (!edsplitline(cur, cur->cy, cur->cx)) { oom(); return; }
+    cur->cy++;
+    cur->cx = 0;
+    goalx = 0;
+    follow();
+    structural();
+}
+
+static void dobackspace(void)
+{
+    if (cur->cx > 0) {
+        int oldcy = cur->cy;
+        eddelch(cur, cur->cy, cur->cx - 1);
+        cur->cx--;
+        goalx = cur->cx;
+        follow();
+        damage(oldcy);
+        marktitle();
+        return;
+    }
+    if (cur->cy == 0) return;           /* start of the file */
+    {
+        int prev = cur->cy - 1, at = cur->len[prev];
+        if (!edjoinline(cur, prev)) { oom(); return; }
+        cur->cy = prev;
+        cur->cx = at;
+        goalx = at;
+        follow();
+        structural();
+    }
+}
+
+static void dodelete(void)
+{
+    if (cur->cx < cur->len[cur->cy]) {
+        int oldcy = cur->cy;
+        eddelch(cur, cur->cy, cur->cx);
+        follow();
+        damage(oldcy);
+        marktitle();
+        return;
+    }
+    if (cur->cy + 1 >= cur->n) return;  /* end of the file */
+    if (!edjoinline(cur, cur->cy)) { oom(); return; }
+    structural();
+}
+
+/* b2: losing unsaved work to a stray close gadget is not something
+ * to leave until b4's multi-buffer prompt. Two gadgets, and the
+ * SAFE one is the default (gadget 0 = the rightmost = Cancel). */
+/* quitting asks about EVERY open document, not just the visible one
+ * - the unsaved work in tab three is the work you forget about */
+static int askquit(void)
+{
+    return askdiscardall("Quit anyway|Cancel");
+}
+
+/* the one question, asked wherever a document is about to be thrown
+ * away: Close, Close All, Open (which replaces) and Quit. The SAFE
+ * gadget is the default - EasyRequest's rightmost is 0. */
+static int askdiscard(Buffer *b, const char *gadgets)
+{
+    struct EasyStruct es;
+    ULONG arg;
+    if (!b->dirty) return 1;
+    es.es_StructSize = sizeof(es);
+    es.es_Flags = 0;
+    es.es_Title = (STRPTR)"cedit";
+    es.es_TextFormat = (STRPTR)"%s has unsaved changes.";
+    es.es_GadgetFormat = (STRPTR)gadgets;
+    arg = (ULONG)(b->name[0] ? b->name : "This document");
+    return EasyRequestArgs(win, &es, NULL, &arg) != 0;
+}
+
+static int anydirty(void)
+{
+    int i;
+    for (i = 0; i < ndocs; i++) if (docs[i].dirty) return 1;
+    return 0;
+}
+
+/* ONE question for the whole set rather than one per document -
+ * being asked eight times in a row is how a user learns to click
+ * through prompts without reading them */
+static int askdiscardall(const char *gadgets)
+{
+    struct EasyStruct es;
+    if (!anydirty()) return 1;
+    es.es_StructSize = sizeof(es);
+    es.es_Flags = 0;
+    es.es_Title = (STRPTR)"cedit";
+    es.es_TextFormat = (STRPTR)"Some documents have unsaved changes.";
+    es.es_GadgetFormat = (STRPTR)gadgets;
+    return EasyRequestArgs(win, &es, NULL, NULL) != 0;
+}
+
+/* a fresh empty document in slot i */
+static int blankdoc(int i)
+{
+    bufinit(&docs[i]);
+    return bufsplit(&docs[i], "", 0);
+}
+
+static int docsfull(void)
+{
+    if (ndocs < MAXDOCS) return 0;
+    msg("That is as many documents as cedit will hold at once.");
+    return 1;
+}
+
+/* New: a blank page in a NEW tab */
+static void donew(void)
+{
+    if (docsfull()) return;
+    if (!blankdoc(ndocs)) { oom(); return; }
+    ndocs++;
+    setdoc(ndocs - 1);
+}
+
+/* Open replaces the current tab; Open New puts the file in one of
+ * its own. Same requester, same loader, one flag apart. */
+static void doopen(int newtab)
+{
+    char path[320];
+    int slot;
+
+    if (newtab && docsfull()) return;
+    /* replacing the current tab discards it, so ask first; opening
+     * into a NEW tab discards nothing and must not ask */
+    if (!newtab && !askdiscard(cur, "Replace it|Cancel")) return;
+    if (ltx_askfile("cedit: open a file", path, ttdrawer, 0) != 1)
+        return;                 /* cancelled, or only a drawer */
+
+    slot = newtab ? ndocs : curdoc;
+    if (newtab) bufinit(&docs[slot]);
+    busy(1);
+    if (!loadbuf(&docs[slot], path)) {
+        busy(0);
+        msg("Could not read that file.");
+        /* loadbuf frees before it reads, so the old text is gone
+         * either way - leave an empty document, never a dead table */
+        if (!blankdoc(slot)) { oom(); return; }
+        if (!newtab) { setdoc(curdoc); return; }
+    } else
+        busy(0);
+    if (newtab) ndocs++;
+    setdoc(slot);
+}
+
+/* Close: the active tab goes. There is ALWAYS at least one document,
+ * so closing the last one leaves a blank page - the same end state
+ * Close All produces, rather than a second kind of empty. */
+static void doclose(void)
+{
+    int i;
+    if (!askdiscard(cur, "Close it|Cancel")) return;
+    buffree(&docs[curdoc]);
+    for (i = curdoc; i < ndocs - 1; i++) docs[i] = docs[i + 1];
+    ndocs--;
+    if (ndocs == 0) {
+        if (!blankdoc(0)) { oom(); return; }
+        ndocs = 1;
+        curdoc = 0;
+    } else if (curdoc >= ndocs)
+        curdoc = ndocs - 1;
+    cur = &docs[curdoc];
+    hoff = cur->hoff;
+    setdoc(curdoc);
+}
+
+static void docloseall(void)
+{
+    int i;
+    if (!askdiscardall("Close them|Cancel")) return;
+    for (i = 0; i < ndocs; i++) buffree(&docs[i]);
+    ndocs = 1;
+    curdoc = 0;
+    cur = &docs[0];
+    hoff = 0;
+    if (!blankdoc(0)) { oom(); return; }
+    setdoc(0);
+}
+
+static void dosaveas(void)
+{
+    char path[320];
+    if (ltx_askfile("cedit: save as", path, ttdrawer, 1) != 1) return;
+    busy(1);
+    strncpy(cur->path, path, sizeof(cur->path) - 1);
+    cur->path[sizeof(cur->path) - 1] = 0;
+    strncpy(cur->name, (char *)FilePart((STRPTR)path),
+            sizeof(cur->name) - 1);
+    cur->name[sizeof(cur->name) - 1] = 0;
+    if (!savebuf(cur, cur->path))
+        msg("Could not write that file.");
+    busy(0);
+    settitle();
+    shown_dirty = cur->dirty;
+    epage();                    /* the tab and the status row renamed */
+}
+
+static void dosave(void)
+{
+    if (cur->path[0] == 0) { dosaveas(); return; }   /* untitled */
+    busy(1);
+    if (!savebuf(cur, cur->path))
+        msg("Could not write that file.");
+    busy(0);
+    marktitle();
+}
+
 /* ---- the event loop ---------------------------------------------- */
 
-/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right */
+/* one arrow-gadget step: 1 up, 2 down, 3 left, 4 right. The gadgets
+ * SCROLL - they do not move the cursor. A scrollbar is for looking
+ * around, and taking the caret with it would lose the user's place
+ * the moment they let go. */
 static void arrowstep(int which)
 {
     if (which == 1)      scrollto(cur->top - 1);
@@ -478,6 +1040,7 @@ static void guimode(void)
     struct IntuiMessage *msg;
     int done = 0, burst = 0;
 
+    ltx_appname = "cedit";      /* every requester's title */
     ltx_setapp(&ceditapp);      /* before anything can paint */
 
     IntuitionBase = (struct IntuitionBase *)
@@ -485,6 +1048,7 @@ static void guimode(void)
     GfxBase = (struct GfxBase *)
         OpenLibrary((STRPTR)"graphics.library", 37);
     GadToolsBase = OpenLibrary((STRPTR)"gadtools.library", 37);
+    AslBase = OpenLibrary((STRPTR)"asl.library", 37);   /* Open/Save As */
     WorkbenchBase = OpenLibrary((STRPTR)"workbench.library", 37);
     if (ttfont[0]) DiskfontBase = OpenLibrary((STRPTR)"diskfont.library", 37);
     if (IntuitionBase == NULL || GfxBase == NULL) goto out;
@@ -514,6 +1078,7 @@ static void guimode(void)
             ULONG class = msg->Class;
             UWORD code = msg->Code;
             UWORD qual = msg->Qualifier;
+            WORD mx = msg->MouseX, my = msg->MouseY;
             APTR iaddr = msg->IAddress;
             /* b63's rule, inherited: every message defers its paint
              * and flushpaint below settles it as soon as the port is
@@ -523,7 +1088,7 @@ static void guimode(void)
             ReplyMsg((struct Message *)msg);
 
             if (class == IDCMP_CLOSEWINDOW)
-                done = 1;
+                done = askquit();
             if (class == IDCMP_GADGETDOWN ||
                 class == IDCMP_GADGETUP ||
                 class == IDCMP_MOUSEMOVE) {
@@ -589,31 +1154,69 @@ static void guimode(void)
                     scrollfromset = ltx_appowed = 0;
                 }
             }
+            /* b2: b1's letter shortcuts are gone - in an editor 'b'
+             * types a b. Scrolling is the cursor, the wheel and the
+             * scrollbars now. VANILLAKEY is the right channel for
+             * text because it is keymap-translated: his Swedish
+             * layout produces the characters he actually pressed. */
+            /* a click on a tab switches to it. The hit ranges come
+             * from the chassis, which filled them when it drew the
+             * bar - so the boxes on screen and the boxes we test are
+             * the same numbers by construction. */
+            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN &&
+                ltx_tabbar && my >= gy0 && my <= gy0 + tabh) {
+                int t;
+                for (t = 0; t < ltx_ntabs && t < ndocs; t++)
+                    if (mx >= ltx_tabx[t] && mx < ltx_tabe[t]) {
+                        if (t != curdoc) setdoc(t);
+                        break;
+                    }
+            }
             if (class == IDCMP_VANILLAKEY) {
-                switch (code) {
-                case ' ': scrollto(cur->top + crows); break;
-                case 'b': case 'B': scrollto(cur->top - crows); break;
-                case 't': case 'T': scrollto(0); break;
-                case 'e': case 'E': scrollto(cur->n); break;
-                }
+                if (code == 13)                         /* Return */
+                    donewline();
+                else if (code == 8)                     /* Backspace */
+                    dobackspace();
+                else if (code == 127)                   /* Del */
+                    dodelete();
+                else if (code == 9)                     /* Tab: a real
+                                                         * tab byte */
+                    typech('\t');
+                else if (code >= 32 && code != 127)
+                    typech((char)code);
             }
             if (class == IDCMP_RAWKEY) {
                 int page = (qual & (IEQUALIFIER_LSHIFT |
                                     IEQUALIFIER_RSHIFT)) != 0;
+                int ctrl = (qual & IEQUALIFIER_CONTROL) != 0;
+                /* Shift = page / line ends, Ctrl = word jumps - the
+                 * CCON line editor's assignment, so the two programs
+                 * do not disagree about the same keys. */
                 if (code == 0x4C)                       /* cursor up */
-                    scrollto(cur->top - (page ? crows : 1));
+                    movev(cur->cy - (page ? crows : 1));
                 else if (code == 0x4D)                  /* cursor down */
-                    scrollto(cur->top + (page ? crows : 1));
+                    movev(cur->cy + (page ? crows : 1));
+                else if (code == 0x4F) {                /* cursor left */
+                    if (ctrl) wordjump(-1);
+                    else if (page) moveh(0);
+                    else if (cur->cx > 0) moveh(cur->cx - 1);
+                    else if (cur->cy > 0)               /* wrap up */
+                        { gotoyx(cur->cy - 1, cur->len[cur->cy - 1]);
+                          goalx = cur->cx; }
+                } else if (code == 0x4E) {              /* cursor right */
+                    if (ctrl) wordjump(1);
+                    else if (page) moveh(cur->len[cur->cy]);
+                    else if (cur->cx < cur->len[cur->cy])
+                        moveh(cur->cx + 1);
+                    else if (cur->cy + 1 < cur->n)      /* wrap down */
+                        { gotoyx(cur->cy + 1, 0); goalx = 0; }
+                }
+                /* the wheel SCROLLS and leaves the cursor alone -
+                 * same reason as the scrollbars */
                 else if (code == 0x7A)                  /* wheel up */
                     scrollto(cur->top - (page ? crows : 3));
                 else if (code == 0x7B)                  /* wheel down */
                     scrollto(cur->top + (page ? crows : 3));
-                else if (code == 0x4F || code == 0x4E) {
-                    /* horizontal: every row's text moves, so this is
-                     * a content repaint - the gutter stays pinned */
-                    int step = page ? 40 : 8;
-                    sethoff(hoff + (code == 0x4E ? step : -step));
-                }
             }
             /* b63/b64: pay the debt as soon as nothing else is
              * queued, and at least every 4 messages regardless, so a
@@ -634,8 +1237,10 @@ out:
         DeleteMsgPort(appport);
         appport = NULL;
     }
+    ltx_freefilereq();
     ltx_closefont();
     if (ttoollock) { UnLock(ttoollock); ttoollock = 0; }
+    if (AslBase) CloseLibrary(AslBase);
     if (DiskfontBase) CloseLibrary(DiskfontBase);
     if (IconBase) CloseLibrary(IconBase);
     if (WorkbenchBase) CloseLibrary(WorkbenchBase);
@@ -646,30 +1251,60 @@ out:
 
 /* ---- main -------------------------------------------------------- */
 
+/* open `path` into the next free slot; the FIRST one lands in the
+ * document that already exists rather than beside it */
+static int openinto(const char *path)
+{
+    int slot = ndocs;
+    if (ndocs == 1 && docs[0].path[0] == 0 && !docs[0].dirty &&
+        docs[0].n == 1 && docs[0].len[0] == 0)
+        slot = 0;               /* the untouched blank we started with */
+    if (slot >= MAXDOCS) return 0;
+    if (slot != 0) bufinit(&docs[slot]);
+    if (!loadbuf(&docs[slot], path)) {
+        if (!blankdoc(slot)) return 0;
+        return 0;
+    }
+    if (slot == ndocs) ndocs++;
+    return 1;
+}
+
 static int smain(int argc, char **argv)
 {
-    static char fpath[310];
-    struct RDArgs *rda;
-    LONG args[1] = { 0 };
+    static char fpaths[MAXDOCS][310];
+    int nf = 0, i, bad = 0;
+
+    /* one empty line, always. A buffer with no lines at all has no
+     * legal cursor position, and every edit indexes ln[cy] - so "no
+     * file" is an empty document, not an empty table. */
+    if (!blankdoc(0)) return 20;
 
     if (argc == 0) {                    /* Workbench */
         IconBase = OpenLibrary((STRPTR)"icon.library", 37);
-        readtooltypes((struct WBStartup *)argv, fpath, sizeof(fpath));
+        nf = readtooltypes((struct WBStartup *)argv, fpaths);
     } else {
-        rda = ReadArgs((STRPTR)"FILE", args, NULL);
+        /* FILE/M: tabs exist, so several names are a reasonable
+         * thing to type and each one gets its own */
+        struct RDArgs *rda;
+        LONG args[1] = { 0 };
+        rda = ReadArgs((STRPTR)"FILE/M", args, NULL);
         if (rda) {
-            if (args[0])
-                strncpy(fpath, (char *)args[0], sizeof(fpath) - 1);
+            STRPTR *list = (STRPTR *)args[0];
+            while (list && *list && nf < MAXDOCS) {
+                strncpy(fpaths[nf], (char *)*list, 309);
+                fpaths[nf][309] = 0;
+                nf++;
+                list++;
+            }
             FreeArgs(rda);
         }
     }
-    bufinit(&buf);
-    if (fpath[0] && !loadbuf(&buf, fpath)) {
-        if (argc) PutStr((STRPTR)"cedit: cannot read that file\n");
-        fpath[0] = 0;
-    }
+    for (i = 0; i < nf; i++)
+        if (!openinto(fpaths[i])) bad++;
+    if (bad && argc)
+        PutStr((STRPTR)"cedit: could not read every file named\n");
     guimode();
-    buffree(&buf);
+    for (i = 0; i < ndocs; i++) buffree(&docs[i]);
     return 0;
 }
 

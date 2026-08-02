@@ -1,10 +1,12 @@
 # cedit
 
-A GUI text editor for AmigaOS: tabs for open files, a line-number
-gutter, border scrollbars with the system's own arrows, a status row,
-and syntax highlighting that knows **Amiga E** first.
+A GUI text editor for AmigaOS: tabs for open files (only once there
+is more than one — a single document keeps the row for text), a
+line-number gutter, border scrollbars with the system's own arrows, a
+status row, and syntax highlighting that knows **Amiga E** first.
 
-**Not finished.** This is `0.1b1` — read-only. See
+**Not finished.** This is `0.1b2` — it edits and saves, but has no
+undo yet. See
 [roadmap.md](roadmap.md) for where it is going and what is already
 done.
 
@@ -22,23 +24,56 @@ points at when you want a window.
 ## Usage
 
 ```
-cedit [FILE]
+cedit [FILE ...]
 ```
 
-From Workbench: double-click a project icon with cedit as its default
-tool, or drop one on the cedit icon.
+Each file named gets its own tab. From Workbench: double-click a
+project icon with cedit as its default tool, or drop several on the
+cedit icon — same result.
 
-Keys at b1 (read-only): cursor up/down scroll, Shift = page, `space`
-and `b` page, `t`/`e` top and end, cursor left/right pan, mouse wheel,
-and the border scrollbars. `Amiga+Q` quits.
+Keys at b2: the cursor keys move the caret, Shift+up/down pages,
+Shift+left/right goes to the start and end of the line, and
+Ctrl+left/right jumps by word (the CCON line editor's assignment).
+Return, Backspace, Del and Tab do what they say. The mouse wheel and
+the scrollbars SCROLL without moving the caret — a scrollbar is for
+looking around, and taking the caret along would lose your place.
+
+Project menu:
+
+| | |
+|---|---|
+| `New` (Amiga+N) | a blank page in a new tab |
+| `Open...` (O) | replaces the file in the current tab |
+| `Open New...` (D) | opens a file in a new tab |
+| `Close` (K) | closes the active tab |
+| `Close All` | closes everything, leaves one blank page |
+| `Save` (S) | saves the active tab; untitled goes to Save As |
+| `Save As...` (A) | the requester |
+| `Quit` (Q) | |
+
+Up to 16 documents at once. Click a tab to switch to it. Anything
+that would throw away unsaved changes asks first, with Cancel as the
+default — and Close All and Quit ask **once** for the whole set
+rather than once per document.
+
+Settings menu: line numbers, status bar, fast scroll, and **Tab size**
+1–10. Every one of them writes straight back to the icon, so the menu
+and the tooltypes never disagree.
+
+Saving writes back the line endings the file arrived with — LF, CRLF
+or CR — and does not add a final newline to a file that had none. The
+new text goes to a sibling `.new` file and only replaces the original
+once it is completely written, so a failed save costs a stray file
+rather than a truncated source.
 
 ### Tooltypes
 
 All optional, all inert when absent, so a shell launch is unchanged.
-`FONT=topaz/8` · `TABSIZE=` · `GUTTER=YES|NO` (line numbers) ·
-`STATUSBAR=YES|NO` · `FASTSCROLL=YES|NO` · `OPENSCREEN=name` and
-`SCREENDEPTH=n` for a screen of cedit's own · `PUBSCREEN=name` to
-attach to somebody else's · `LEFT= TOP= WIDTH= HEIGHT=`.
+`FONT=topaz/8` · `TABSIZE=1..10` · `GUTTER=YES|NO` (line numbers) ·
+`STATUSBAR=YES|NO` · `FASTSCROLL=YES|NO` · `DRAWER=` where the file
+requester starts · `OPENSCREEN=name` and `SCREENDEPTH=n` for a screen
+of cedit's own · `PUBSCREEN=name` to attach to somebody else's ·
+`LEFT= TOP= WIDTH= HEIGHT=`.
 
 The Settings menu writes its toggles straight back to the icon, so
 menu and tooltype never disagree.

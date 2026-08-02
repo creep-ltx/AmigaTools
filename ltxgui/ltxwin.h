@@ -137,7 +137,14 @@ extern int gx0, gy0, viscols, visrows;    /* drawable grid */
  * sliver. */
 extern int xend, slx;
 extern int conty, crows;        /* content grid below the tab bar */
-extern int tabh;                /* tab bar height in pixels */
+extern int tabh;                /* tab bar height in pixels; 0 when
+                                 * the bar is off */
+/* 1 = reserve room for a tab bar (the default, and what cdiff always
+ * wants). 0 = no bar at all, and the content starts at the top
+ * border instead - a single document has nothing to switch between,
+ * so the row it would cost is better spent on text. Set it BEFORE
+ * ltx_calcgrid(); ltx_drawtabs() draws nothing while it is 0. */
+extern int ltx_tabbar;
 extern int staty;               /* b82: status row y, -1 = no room */
 extern int ttstatus;            /* STATUSBAR=YES/NO */
 
@@ -239,6 +246,28 @@ struct TextFont *tryfont(const char *name, int size);
  * it. V39+; older Kickstarts keep the normal pointer. No-op with no
  * window. */
 void busy(int on);
+
+/* ---- requesters -------------------------------------------------- */
+
+/* the app's name, used as the title of every requester below. Set it
+ * once at startup; "ltx" until then. */
+extern const char *ltx_appname;
+
+/* a plain OK requester */
+void ltx_msg(const char *text);
+
+/* the ASL file requester. ONE is kept for the life of the program,
+ * so it remembers where the user last was; `initdrawer` only seeds
+ * it the first time (a DRAWER= tooltype, or "").
+ *
+ * Returns 1 when a file was picked and `dest` holds its full path,
+ * 2 when only a drawer was picked and `dest` holds the drawer, and 0
+ * when the user cancelled or asl.library is not there. `dest` must
+ * have room for 310 bytes. `save` non-zero puts the requester in
+ * save mode, where a name that does not exist yet is the point. */
+int  ltx_askfile(const char *title, char *dest, const char *initdrawer,
+                 int save);
+void ltx_freefilereq(void);     /* at exit */
 
 /* ---- tooltypes ------------------------------------------------- */
 

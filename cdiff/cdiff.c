@@ -1447,22 +1447,11 @@ static void setview(int v)
 
 static struct Menu *gmenu;
 static APTR gvi;
-static struct FileRequester *freq;   /* one, so it remembers the drawer */
 
 /* error requester - works with win = NULL too (before the window),
  * and a WB start has no shell to print into */
-static void erq(const char *text)
-{
-    struct EasyStruct es;
-    ULONG args[1];
-    es.es_StructSize = sizeof(es);
-    es.es_Flags = 0;
-    es.es_Title = (UBYTE *)"cdiff";
-    es.es_TextFormat = (UBYTE *)"%s";
-    es.es_GadgetFormat = (UBYTE *)"OK";
-    args[0] = (ULONG)text;
-    EasyRequestArgs(win, &es, NULL, args);
-}
+/* cedit b2: erq/askfile are the chassis's ltx_msg/ltx_askfile now
+ * - cedit became the second caller, which is when they move. */
 
 /* ---- b67: find ------------------------------------------------
  * Case-insensitive substring over the ACTIVE view's rows: Both
@@ -1526,7 +1515,7 @@ static void gofind(int dir, int fresh)
     int fo = 0, lo = 0, no = 0, po = 0, start, hit;
 
     if (nlen == 0) return;
-    if (n <= 0) { erq("nothing loaded to search"); return; }
+    if (n <= 0) { ltx_msg("nothing loaded to search"); return; }
     start = fresh ? (view == 3 ? dsel : *vtop())
                   : (findrow >= 0 ? findrow + dir : 0);
 
@@ -1544,7 +1533,7 @@ static void gofind(int dir, int fresh)
         calcgrid();                     /* b68: and goes away again */
         settitle();
         drawpage();
-        erq("not found");
+        ltx_msg("not found");
         return;
     }
     if (dir > 0) { hit = nxt >= 0 ? nxt : first; findof = nxt >= 0 ? no : fo; }
@@ -1701,13 +1690,13 @@ static int loaddiff_(void)
     gbuf1 = loadfile(gf1, &sz1);
     if (gbuf1 == NULL) {
         sprintf(eb, "cannot read %.300s", gf1);
-        erq(eb);
+        ltx_msg(eb);
         return -1;
     }
     gbuf2 = loadfile(gf2, &sz2);
     if (gbuf2 == NULL) {
         sprintf(eb, "cannot read %.300s", gf2);
-        erq(eb);
+        ltx_msg(eb);
         freediff();
         return -1;
     }
@@ -1723,7 +1712,7 @@ static int loaddiff_(void)
             else
                 sprintf(eb + strlen(eb),
                         "first difference at byte %ld", at);
-            erq(eb);
+            ltx_msg(eb);
             freediff();
             return -1;
         }
@@ -1734,7 +1723,7 @@ static int loaddiff_(void)
         (grows = buildrows(gops, nops, &nrows)) == NULL ||
         (gatag = malloc(na > 0 ? na : 1)) == NULL ||
         (gbtag = malloc(nb > 0 ? nb : 1)) == NULL) {
-        erq("out of memory");
+        ltx_msg("out of memory");
         freediff();
         return -1;
     }
@@ -1761,31 +1750,6 @@ static int loaddiff_(void)
 
 /* 0 = cancelled, 1 = a file, 2 = a drawer (empty File field - the
  * road into directory mode) */
-static int askfile(const char *title, char *dest)
-{
-    if (AslBase == NULL) {
-        erq("asl.library v37 not available");
-        return 0;
-    }
-    if (freq == NULL)
-        freq = AllocAslRequestTags(ASL_FileRequest,
-                   /* b73: DRAWER= seeds it; after that the
-                    * requester remembers where he last was */
-                   ttdrawer[0] ? ASLFR_InitialDrawer : TAG_IGNORE,
-                   (ULONG)ttdrawer,
-                   TAG_DONE);
-    if (freq == NULL) return 0;
-    if (!AslRequestTags(freq,
-            ASLFR_Window, (ULONG)win,
-            ASLFR_TitleText, (ULONG)title,
-            TAG_DONE))
-        return 0;
-    strcpy(dest, (char *)freq->fr_Drawer);
-    if (freq->fr_File == NULL || freq->fr_File[0] == 0)
-        return 2;
-    AddPart((STRPTR)dest, freq->fr_File, 310);
-    return 1;
-}
 
 /* ---- b69: AppWindow drops (his ask) --------------------------
  * A dropped icon picks its side by WHERE it lands: the content
@@ -1895,7 +1859,7 @@ static void dropped(struct AppMessage *am)
             scandirs();
             view = 3;
         } else if ((side < 0 && gf2[0]) || (side > 0 && gf1[0]))
-            erq("that side holds a drawer now - drop a drawer on the\n"
+            ltx_msg("that side holds a drawer now - drop a drawer on the\n"
                 "other side too, or a file to go back to comparing files");
         settitle();
         drawpage();
@@ -1908,7 +1872,7 @@ static void dropped(struct AppMessage *am)
         reload();
     } else {
         if ((side < 0 && gdir2[0]) || (side > 0 && gdir1[0]))
-            erq("that side holds a file now - drop a file on the other\n"
+            ltx_msg("that side holds a file now - drop a file on the other\n"
                 "side too, or a drawer to go back to comparing trees");
         settitle();
         drawpage();
@@ -1930,7 +1894,7 @@ static int askfind(void)
     int done = 0, ok = 0, ww, wh;
 
     if (!GadToolsBase || !gvi) {
-        erq("gadtools.library is not available - no Find requester");
+        ltx_msg("gadtools.library is not available - no Find requester");
         return 0;
     }
     if (CreateContext(&glist) == NULL) return 0;
@@ -2074,13 +2038,13 @@ static void opensel(void)
         else
             sprintf(eb, "the drawer \"%.40s\"\nexists only in\n%.64s",
                     d->rel, d->st == 'L' ? gdir1 : gdir2);
-        erq(eb);
+        ltx_msg(eb);
         return;
     }
     if (d->st == 'L' || d->st == 'R') {
         sprintf(eb, "\"%.40s\"\nexists only in\n%.64s",
                 d->rel, d->st == 'L' ? gdir1 : gdir2);
-        erq(eb);
+        ltx_msg(eb);
         return;
     }
     strcpy(gf1, gdir1);
@@ -2135,7 +2099,7 @@ static void editfile(int side)
                      TAG_DONE);
     if (ch) Close(ch);
     if (res == -1)
-        erq("could not launch the editor\n(set ENV:EDITOR to name one)");
+        ltx_msg("could not launch the editor\n(set ENV:EDITOR to name one)");
     refreshdiff();
 }
 
@@ -2319,9 +2283,9 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                                  * two drawers = directory mode */
                 static char t1[310], t2[310];
                 int r1, r2;
-                r1 = askfile("cdiff: select the LEFT file or drawer", t1);
+                r1 = ltx_askfile("cdiff: select the LEFT file or drawer", t1, ttdrawer, 0);
                 if (!r1) break;
-                r2 = askfile("cdiff: select the RIGHT file or drawer", t2);
+                r2 = ltx_askfile("cdiff: select the RIGHT file or drawer", t2, ttdrawer, 0);
                 if (!r2) break;
                 if (r1 == 2 && r2 == 2) {
                     freediff();
@@ -2336,7 +2300,7 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                     settitle();
                     drawpage();
                 } else if (r1 == 2 || r2 == 2) {
-                    erq("pick two files - or two drawers for a "
+                    ltx_msg("pick two files - or two drawers for a "
                         "tree compare\n(a drawer = leave the File "
                         "field empty)");
                 } else {
@@ -2349,9 +2313,9 @@ static int domenu(UWORD code)   /* returns 1 = quit */
             }
             case 1: {           /* Open Left... */
                 static char t1[310];
-                int r = askfile("cdiff: select the LEFT file", t1);
+                int r = ltx_askfile("cdiff: select the LEFT file", t1, ttdrawer, 0);
                 if (r == 2)
-                    erq("that is a drawer - Open Files... with two "
+                    ltx_msg("that is a drawer - Open Files... with two "
                         "drawers runs a tree compare");
                 else if (r == 1) {
                     strcpy(gf1, t1);
@@ -2361,9 +2325,9 @@ static int domenu(UWORD code)   /* returns 1 = quit */
             }
             case 2: {           /* Open Right... */
                 static char t2[310];
-                int r = askfile("cdiff: select the RIGHT file", t2);
+                int r = ltx_askfile("cdiff: select the RIGHT file", t2, ttdrawer, 0);
                 if (r == 2)
-                    erq("that is a drawer - Open Files... with two "
+                    ltx_msg("that is a drawer - Open Files... with two "
                         "drawers runs a tree compare");
                 else if (r == 1) {
                     strcpy(gf2, t2);
@@ -2401,7 +2365,7 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                 drawpage();
                 if (ttoollock && ttoolname[0] &&
                     !iconset("STATUSBAR", ttstatus ? "YES" : "NO"))
-                    erq("could not write STATUSBAR to the icon\n"
+                    ltx_msg("could not write STATUSBAR to the icon\n"
                         "(the setting still applies this session)");
             } else if (ITEMNUM(c) == 1 && item) {
                 /* b104: Differences only. Keep the reader where they
@@ -2428,7 +2392,7 @@ static int domenu(UWORD code)   /* returns 1 = quit */
                 drawpage();     /* repaint clean either way */
                 if (ttoollock && ttoolname[0] &&
                     !iconset("FASTSCROLL", ttfast ? "YES" : "NO"))
-                    erq("could not write FASTSCROLL to the icon\n"
+                    ltx_msg("could not write FASTSCROLL to the icon\n"
                         "(the setting still applies this session)");
             }
         } else if (MENUNUM(c) == 4) {           /* Help */
@@ -2589,6 +2553,7 @@ static void guimode(void)
 
     /* cedit b0b: before anything can paint. The chassis refuses to
      * scroll, flush or draw a status row without it. */
+    ltx_appname = "cdiff";
     ltx_setapp(&cdiffapp);
 
     IntuitionBase = (struct IntuitionBase *)
@@ -2916,7 +2881,7 @@ static void guimode(void)
 out:
     if (gmenu) FreeMenus(gmenu);
     if (gvi) FreeVisualInfo(gvi);
-    if (freq) FreeAslRequest(freq);
+    ltx_freefilereq();
     if (AslBase) CloseLibrary(AslBase);
     free(ghs); ghs = NULL; ghcap = ghn = 0;
     ltx_closefont();

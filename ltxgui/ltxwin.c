@@ -16,6 +16,8 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#include <libraries/asl.h>
+#include <proto/asl.h>
 #include <proto/icon.h>
 #include <proto/diskfont.h>
 #include <stdio.h>
@@ -269,6 +271,7 @@ int gx0, gy0, viscols, visrows;
 int xend, slx;
 int conty, crows;
 int tabh;
+int ltx_tabbar = 1;
 int staty = -1;
 int ttstatus = 1;               /* STATUSBAR=YES/NO, default on */
 
@@ -293,9 +296,13 @@ void ltx_calcgrid(void)
     /* b60: 2px shorter (his eye). The label baseline is fixed at
      * gy0 + 2 + fbase, so the text does not move and the whole
      * saving comes off the bottom - which also lifts conty and
-     * gains the content a couple of pixels. */
-    tabh = fh + 2;
-    conty = gy0 + tabh + 2;
+     * gains the content a couple of pixels.
+     *
+     * cedit b2, his call: with the bar off there is no bar height
+     * and no gap under it either - the content starts at the border
+     * and takes back the whole row. */
+    tabh = ltx_tabbar ? fh + 2 : 0;
+    conty = gy0 + (ltx_tabbar ? tabh + 2 : 0);
     /* b83, his ask: the status text sits exactly ONE pixel above the
      * window border at every window size. So it is PINNED to the
      * bottom rather than riding the text grid - the sub-cell slack
@@ -324,7 +331,7 @@ int ltx_ntabs;
 void ltx_drawtabs(const char *const *labels, int n, int active)
 {
     int i, x, w, yr = gy0 + tabh, winr = xend;
-    if (rp == NULL) return;
+    if (rp == NULL || !ltx_tabbar) return;
     SetAPen(rp, pback);
     RectFill(rp, gx0, gy0, winr, yr + 1);
     if (n > LTX_MAXTABS) n = LTX_MAXTABS;
@@ -1011,6 +1018,58 @@ void busy(int on)
                               WA_PointerDelay, TRUE, TAG_DONE);
     else
         SetWindowPointer(win, TAG_DONE);
+}
+
+/* ---- requesters -------------------------------------------------- */
+
+const char *ltx_appname = "ltx";
+static struct FileRequester *freq;   /* one, so it remembers the drawer */
+
+void ltx_msg(const char *text)
+{
+    struct EasyStruct es;
+    ULONG args[1];
+    es.es_StructSize = sizeof(es);
+    es.es_Flags = 0;
+    es.es_Title = (UBYTE *)ltx_appname;
+    es.es_TextFormat = (UBYTE *)"%s";
+    es.es_GadgetFormat = (UBYTE *)"OK";
+    args[0] = (ULONG)text;
+    EasyRequestArgs(win, &es, NULL, args);
+}
+
+int ltx_askfile(const char *title, char *dest, const char *initdrawer,
+                int save)
+{
+    if (AslBase == NULL) {
+        ltx_msg("asl.library v37 not available");
+        return 0;
+    }
+    if (freq == NULL)
+        freq = AllocAslRequestTags(ASL_FileRequest,
+                   /* b73: DRAWER= seeds it; after that the
+                    * requester remembers where he last was */
+                   (initdrawer && initdrawer[0]) ? ASLFR_InitialDrawer
+                                                 : TAG_IGNORE,
+                   (ULONG)initdrawer,
+                   TAG_DONE);
+    if (freq == NULL) return 0;
+    if (!AslRequestTags(freq,
+            ASLFR_Window, (ULONG)win,
+            ASLFR_TitleText, (ULONG)title,
+            ASLFR_DoSaveMode, (ULONG)(save ? TRUE : FALSE),
+            TAG_DONE))
+        return 0;
+    strcpy(dest, (char *)freq->fr_Drawer);
+    if (freq->fr_File == NULL || freq->fr_File[0] == 0)
+        return 2;
+    AddPart((STRPTR)dest, freq->fr_File, 310);
+    return 1;
+}
+
+void ltx_freefilereq(void)
+{
+    if (freq) { FreeAslRequest(freq); freq = NULL; }
 }
 
 /* ---- b87: writing a tooltype back to the icon ------------------

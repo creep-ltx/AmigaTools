@@ -182,13 +182,125 @@ lets cedit hand the same engine a Buffer.
       has always had it; worth lifting when something actually meets
       it.
 
-## 0.1b2 — editing, and save
+## 0.1b2 — editing, and save — BUILT 2.8.26, AWAITING BOOT
 
-- [ ] Cursor movement, insert, delete, backspace, newline, join.
-- [ ] Dirty flag, title/status marker, save, save-as.
-- [ ] cdiff's `ENV:EDITOR` launch now has something to point at.
-- [ ] GATE: edit and save a real file on target, re-diff it in cdiff
-      and see exactly the change you made.
+- [x] **The edit primitives are in `edbuf.c`**, harness-proven both
+      roads before a single key was wired: `edinsch`, `eddelch`,
+      `edsplitline`, `edjoinline`, on a private `rowopen`/`rowclose`
+      that move all four arrays together or not at all. Every one
+      returns 0 only on out of memory and leaves the buffer usable.
+- [x] **Tests for what actually breaks**: every edit checked on the
+      LENGTH, the NUL *and* the text, because a `memmove` that
+      forgets the terminator renders fine and saves garbage. Insert
+      at head/middle/end, delete at head/middle/end and past the
+      end, 400 characters typed one at a time across the per-line
+      doubling boundary, split at column 0 / mid / end of line, join
+      back, join at the last line as a no-op, and `maxw` staying
+      honest across all of it.
+- [x] **The caret is complemented over the cell**, the ROM's way and
+      CCON's — it inverts whatever glyph is under it, so it reads on
+      any pen pair and erasing is the same operation again. Painted
+      inside `erow()`, so every repaint that reaches that row carries
+      it: a scroll's entering row, a refresh, a resize.
+- [x] **Minimal redraw, per the standing rule.** Typing repaints ONE
+      row. Moving the caret repaints two — the row it left and the
+      row it reached — through the chassis's `ltx_appowed`/`flushapp`
+      debt, with the damaged row held as a BUFFER index so it
+      survives a scroll in the same burst. Only a split or a join
+      escalates to `dirtyrows`, and only because every row below
+      really did move.
+- [x] `SetWindowTitles` repaints the whole title bar, so the dirty
+      marker is only written when `dirty` actually changes state —
+      otherwise a per-keystroke title update would undo the point of
+      repainting one row.
+- [x] **Keys**: cursor moves the caret (Shift = page / line ends,
+      Ctrl = word jumps, the CCON assignment); the wheel and the
+      scrollbars scroll WITHOUT moving the caret. b1's `t`/`e`/
+      `space`/`b` shortcuts are gone — in an editor `b` types a b.
+      A goal column is kept, so walking down past a short line does
+      not drag the caret to its end.
+- [x] **Save writes back what it read**: the line endings the file
+      arrived with (LF/CRLF/CR, detected at load), and no final
+      newline added to a file that had none. Otherwise the first
+      save of a CRLF file would make cdiff show every line changed.
+- [x] **Save is non-destructive**: the text goes to a sibling `.new`
+      first and only replaces the original once completely written,
+      so a failed save costs a stray file rather than a truncated
+      source. CFile's charter, same reason.
+- [x] **The save BYTES are harness-checked**, not trusted: the
+      serializer lives in `edbuf` (`bufbytes`/`bufserialize`) and the
+      suite round-trips LF/CRLF/CR, no-final-newline, blank lines,
+      a single line, an empty file, and an edited buffer keeping its
+      original endings — byte for byte, both roads. A save that
+      mangles a file is the worst bug an editor can have, so it is
+      the one thing not left to a boot test. It found one: an empty
+      document was saving as a 1-byte file; opening and saving an
+      empty file now leaves it empty.
+- [x] Quitting with unsaved changes asks first, with Cancel as the
+      safe default. Pulled forward from b4 — losing work to a stray
+      close gadget was not worth deferring.
+- [x] **No "nothing loaded" hint, and no empty state at all** (his
+      call). cdiff needs two files before it can do anything, so an
+      empty cdiff window has to say so; an empty EDITOR window is a
+      new document with the caret already in it.
+- [x] **No tab bar for a single document** (his call). One document
+      has nothing to switch between, and its name is already in the
+      title bar and the status row — so a one-tab bar would spend a
+      whole row of text saying what is said twice over. The chassis
+      gained `ltx_tabbar`: 0 means no bar height AND no gap under
+      it, with the content starting at the top border. It defaults
+      to 1, so cdiff is untouched. cedit sets it from the open
+      document count, so b4's tabs appear the moment there are two.
+- [x] Three bugs found by reading it back before deploying: typing
+      into a buffer with no file loaded indexed a NULL line table
+      (an empty document is now one empty line, always); `eflush`
+      repainted the same row twice on every keystroke; and the
+      "no file loaded" hint sat over a document being typed into.
+- [ ] **BOOT GATE:** type into a file and see one row repaint, not a
+      page. Then: caret follows on all four edges, Return/Backspace/
+      Del at line boundaries, word jumps, Tab, a save that reloads
+      identical in cdiff, and the unsaved-changes prompt.
+- [x] **MULTI-DOCUMENT, pulled forward from b4** — his Project menu
+      spec only makes sense with tabs, so b2 grew them: New (blank
+      page in a NEW tab), Open (replaces the current tab), Open New
+      (a tab of its own), Close (the active tab), Close All (leaves
+      one blank page), Save (active tab; untitled falls through to
+      Save As), Save As, Quit. Up to 16 at once; click a tab to
+      switch. `cedit a.c b.c` and a multi-icon drop both fill tabs.
+      **There is always at least one document** — closing the last
+      leaves a blank page rather than an empty window, which is the
+      same end state Close All produces.
+      The b1 design paid off exactly as intended: Buffer already
+      carried its own top, hoff, cursor and dirty flag, so this was
+      an array plus one save/restore of the chassis's single hoff -
+      not a rewrite.
+- [x] Unsaved-changes prompts: per document for Close and a
+      replacing Open, and **once for the whole set** for Close All
+      and Quit — being asked eight times running is how a user
+      learns to click through prompts without reading them.
+- [x] **Tab size 1–10 from the menu** (his ask), radio-style: in
+      GadTools that is CHECKIT plus a mutual-exclude mask naming
+      every other item at that level. `TABSIZE=` now reads the same
+      1–10 range, so menu and tooltype can always express the same
+      thing, and the pick writes back to the icon like every other
+      setting. It is the one settings change that repaints the page:
+      every line's expanded width moved, and so did the caret's
+      column.
+- [x] **The requesters lifted** — `ltx_msg` and `ltx_askfile` (with
+      a save-mode flag and one `FileRequester` kept for the life of
+      the program, so it remembers the drawer). Left behind at b0b
+      on purpose; cedit's Open and Save As are the second caller,
+      which is exactly when they move. cdiff now calls the chassis
+      versions rather than keeping its own copies.
+- [ ] Not yet: undo — which is b3, and the reason to be careful with
+      this build until it exists.
+- [ ] Still open from b4's list: a close BOX on each tab (the menu's
+      Close covers the function, the gadget does not exist yet), and
+      tab-bar overflow — with enough documents open the chassis
+      still clips the last tabs to a zero-width hit range, so they
+      cannot be reached by mouse. A document that cannot be reached
+      is the b4 problem written down at b0, and it is now reachable
+      in practice: 16 documents do not fit on PAL Hires.
 
 ## 0.1b3 — undo
 
