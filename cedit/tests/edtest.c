@@ -501,9 +501,117 @@ static void undoing(void)
     buffree(&b);
 }
 
+/* select from (ay,ax) to (cy,cx) the way a drag does */
+static void sel(Buffer *b, int ay, int ax, int cy, int cx)
+{
+    b->cy = ay; b->cx = ax;
+    ed_selstart(b);
+    b->cy = cy; b->cx = cx;
+}
+
+static void selection(void)
+{
+    Buffer b;
+    char out[256];
+    long n;
+    int y0,x0,y1,x1,st;
+
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\nthree\n", 14);
+
+    ck(!ed_selrange(&b, &y0,&x0,&y1,&x1), "no selection by default");
+    sel(&b, 0,0, 0,0);
+    ck(!ed_selrange(&b, &y0,&x0,&y1,&x1), "an empty range is not a selection");
+
+    /* within one line */
+    sel(&b, 0,1, 0,3);
+    ck(ed_selrange(&b,&y0,&x0,&y1,&x1) && y0==0&&x0==1&&y1==0&&x1==3,
+       "range within a line");
+    ck(ed_selbytes(&b) == 2, "bytes within a line");
+    n = ed_seltext(&b, out); out[n]=0;
+    ck(n==2 && !strcmp(out,"ne"), "text within a line");
+
+    /* dragged BACKWARDS - the range still comes out in order */
+    sel(&b, 0,3, 0,1);
+    ck(ed_selrange(&b,&y0,&x0,&y1,&x1) && x0==1 && x1==3,
+       "a backwards drag still reads forwards");
+    n = ed_seltext(&b, out); out[n]=0;
+    ck(!strcmp(out,"ne"), "backwards drag copies the same text");
+
+    /* across lines, LF between them */
+    sel(&b, 0,1, 2,3);
+    ck(ed_selbytes(&b) == 10, "bytes across lines");
+    n = ed_seltext(&b, out); out[n]=0;
+    ck(n==10 && !strcmp(out,"ne\ntwo\nthr"), "text across lines");
+    ck(ed_selbytes(&b) == n, "selbytes agrees with seltext");
+
+    /* whole middle line */
+    sel(&b, 1,0, 1,3);
+    n = ed_seltext(&b, out); out[n]=0;
+    ck(!strcmp(out,"two"), "a whole line");
+    buffree(&b);
+
+    /* delete within a line */
+    bufinit(&b);
+    bufsplit(&b, "abcdef\n", 7);
+    sel(&b, 0,2, 0,4);
+    ck(ed_seldelete(&b), "delete within a line");
+    ck(!strcmp(b.ln[0], "abef"), "text after the delete");
+    ck(b.cy==0 && b.cx==2, "cursor at the start of what went");
+    ck(!b.selon, "and the selection is gone");
+    ck(ed_undo(&b, &st) >= 0, "one undo");
+    ck(!strcmp(b.ln[0], "abcdef"), "ONE undo restored the whole range");
+    ck(!ed_canundo(&b), "and it was a single step");
+    buffree(&b);
+
+    /* delete across lines - the seam must close */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\nthree\n", 14);
+    sel(&b, 0,1, 2,3);
+    ck(ed_seldelete(&b), "delete across lines");
+    ck(b.n == 1, "three lines became one");
+    ck(!strcmp(b.ln[0], "oee"), "head joined to tail");
+    ck(b.cy==0 && b.cx==1, "cursor where the range started");
+    ck(ed_undo(&b, &st) >= 0, "one undo");
+    ck(st, "and it was structural");
+    ck(b.n == 3 && !strcmp(b.ln[0],"one") && !strcmp(b.ln[1],"two") &&
+       !strcmp(b.ln[2],"three"), "ONE undo restored all three lines");
+    ck(!ed_canundo(&b), "a multi-line delete is a single step");
+    buffree(&b);
+
+    /* insert multi-line text - one undo, and every ending accepted */
+    bufinit(&b);
+    bufsplit(&b, "ad\n", 3);
+    ck(ed_instext(&b, 0, 1, "b\nc", 3), "insert with an LF");
+    ck(b.n == 2 && !strcmp(b.ln[0],"ab") && !strcmp(b.ln[1],"cd"),
+       "split where the LF was");
+    ck(b.cy==1 && b.cx==1, "cursor after the inserted text");
+    ck(ed_undo(&b, &st) >= 0, "one undo");
+    ck(b.n == 1 && !strcmp(b.ln[0],"ad"), "ONE undo took the paste back");
+    buffree(&b);
+
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    ck(ed_instext(&b, 0, 0, "a\r\nb\rc", 6), "CRLF and CR accepted");
+    ck(b.n == 3 && !strcmp(b.ln[0],"a") && !strcmp(b.ln[1],"b") &&
+       !strcmp(b.ln[2],"c"), "all three endings split once each");
+    buffree(&b);
+
+    /* display column to character index, with tabs */
+    bufinit(&b);
+    bufsplit(&b, "\tab\n", 4);          /* tab, a, b */
+    ck(ed_col2x(&b, 0, 0, 8, 7) == 0, "column 0 is index 0");
+    ck(ed_col2x(&b, 0, 4, 8, 7) == 0, "inside the tab stays before it");
+    ck(ed_col2x(&b, 0, 8, 8, 7) == 1, "past the tab is index 1");
+    ck(ed_col2x(&b, 0, 9, 8, 7) == 2, "then one per character");
+    ck(ed_col2x(&b, 0, 99, 8, 7) == 3, "past the end is the end");
+    buffree(&b);
+}
+
 int main(void)
 {
     lineends();
+    selection();
     undoing();
     saving();
     eolstyle();

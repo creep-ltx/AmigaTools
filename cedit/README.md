@@ -5,7 +5,8 @@ is more than one — a single document keeps the row for text), a
 line-number gutter, border scrollbars with the system's own arrows, a
 status row, and syntax highlighting that knows **Amiga E** first.
 
-**Not finished.** This is `0.1b3` — it edits, saves and undoes. See
+**Not finished.** This is `0.1b5` — it edits, saves, undoes and talks
+to the clipboard. See
 [roadmap.md](roadmap.md) for where it is going and what is already
 done.
 
@@ -57,7 +58,18 @@ that would throw away unsaved changes asks first, with Cancel as the
 default — and Close All and Quit ask **once** for the whole set
 rather than once per document.
 
-Edit menu: `Undo` (Amiga+Z) and `Redo` (Amiga+Y). One undo takes back
+Edit menu: `Undo` (Amiga+Z), `Redo` (Amiga+Y), `Mark` (B), `Cut` (X),
+`Copy` (C), `Paste` (V).
+
+**Selecting**: drag with the mouse, or press Amiga+B to drop an
+anchor and move the caret — the range between is the selection. Esc
+drops it, and typing over it replaces it. Shift+arrows keep their
+paging and line-end jobs, which matter on a keyboard with no
+PgUp/PgDn.
+
+The clipboard is `clipboard.device` unit 0 in IFF FTXT — the same
+format the console family uses — so a copy here pastes into a `CON:`
+shell, into Ed, or into MultiView, and back again. One undo takes back
 a whole typing run, not a letter at a time — a run ends when you move
 the cursor. Undoing back to the last save marks the file unmodified
 again, and redoing away from it marks it changed.

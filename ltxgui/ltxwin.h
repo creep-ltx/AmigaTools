@@ -266,6 +266,14 @@ struct TextFont *tryfont(const char *name, int size);
  * window. */
 void busy(int on);
 
+/* ---- mouse reporting --------------------------------------------
+ * Intuition sends IDCMP_MOUSEMOVE for a window's body only while it
+ * asks to be told - so a drag that tracks the pointer has to turn
+ * this on, and OFF again on release. Left on permanently it puts a
+ * message on the port for every pixel the pointer crosses, which on
+ * an 020 is real work for nothing. */
+void ltx_reportmouse(int on);
+
 /* ---- requesters -------------------------------------------------- */
 
 /* the app's name, used as the title of every requester below. Set it

@@ -178,6 +178,7 @@ static UndoRec *urpush(Buffer *b)
     r = &b->ur[b->nur++];
     b->utop = b->nur;
     memset(r, 0, sizeof(*r));
+    r->grp = b->ugrp;
     r->cy = b->cy;
     r->cx = b->cx;
     return r;
@@ -185,6 +186,24 @@ static UndoRec *urpush(Buffer *b)
 
 void ed_break(Buffer *b)
 {
+    b->ubreak = 1;
+}
+
+/* Records made between these two undo together. Nested calls keep
+ * the outermost group, so a range delete inside a paste is still one
+ * step to the user. */
+void ed_group(Buffer *b)
+{
+    if (b->ugrp) return;                /* already in one */
+    if (++b->ugrpnext <= 0) b->ugrpnext = 1;    /* never 0 */
+    b->ugrp = b->ugrpnext;
+    b->ubreak = 1;              /* a group never merges with what
+                                 * came before it */
+}
+
+void ed_ungroup(Buffer *b)
+{
+    b->ugrp = 0;
     b->ubreak = 1;
 }
 
@@ -450,13 +469,18 @@ static int applyrec(Buffer *b, UndoRec *r, int inverse, int *structural)
 
 int ed_undo(Buffer *b, int *structural)
 {
-    UndoRec *r;
-    int line;
+    int line, st = 0, grp;
+    *structural = 0;
     if (b->utop <= 0) return -1;
-    r = &b->ur[b->utop - 1];
-    line = r->y;
-    if (!applyrec(b, r, 1, structural)) return -1;
-    b->utop--;
+    grp = b->ur[b->utop - 1].grp;
+    line = b->ur[b->utop - 1].y;
+    do {
+        UndoRec *r = &b->ur[b->utop - 1];
+        if (!applyrec(b, r, 1, &st)) break;
+        if (st) *structural = 1;
+        if (r->y < line) line = r->y;
+        b->utop--;
+    } while (grp && b->utop > 0 && b->ur[b->utop - 1].grp == grp);
     b->ubreak = 1;
     b->maxwdirty = 1;
     udirty(b);
@@ -465,17 +489,153 @@ int ed_undo(Buffer *b, int *structural)
 
 int ed_redo(Buffer *b, int *structural)
 {
-    UndoRec *r;
-    int line;
+    int line, st = 0, grp;
+    *structural = 0;
     if (b->utop >= b->nur) return -1;
-    r = &b->ur[b->utop];
-    line = r->y;
-    if (!applyrec(b, r, 0, structural)) return -1;
-    b->utop++;
+    grp = b->ur[b->utop].grp;
+    line = b->ur[b->utop].y;
+    do {
+        UndoRec *r = &b->ur[b->utop];
+        if (!applyrec(b, r, 0, &st)) break;
+        if (st) *structural = 1;
+        if (r->y < line) line = r->y;
+        b->utop++;
+    } while (grp && b->utop < b->nur && b->ur[b->utop].grp == grp);
     b->ubreak = 1;
     b->maxwdirty = 1;
     udirty(b);
     return line;
+}
+
+/* ---- selection ---------------------------------------------------- */
+
+void ed_selstart(Buffer *b)
+{
+    b->selon = 1;
+    b->say = b->cy;
+    b->sax = b->cx;
+}
+
+void ed_selclear(Buffer *b)
+{
+    b->selon = 0;
+}
+
+/* the anchor and the cursor, in document order. 0 when there is no
+ * selection or the two ends are the same place - an empty range is
+ * not a selection, and Copy on one should do nothing rather than
+ * quietly put an empty clip on the system. */
+int ed_selrange(const Buffer *b, int *y0, int *x0, int *y1, int *x1)
+{
+    int ay, ax, cy, cx;
+    if (!b->selon) return 0;
+    ay = b->say; ax = b->sax; cy = b->cy; cx = b->cx;
+    if (ay > cy || (ay == cy && ax > cx)) {     /* dragged backwards */
+        int ty = ay, tx = ax;
+        ay = cy; ax = cx; cy = ty; cx = tx;
+    }
+    if (ay == cy && ax == cx) return 0;
+    *y0 = ay; *x0 = ax; *y1 = cy; *x1 = cx;
+    return 1;
+}
+
+long ed_selbytes(const Buffer *b)
+{
+    int y0, x0, y1, x1, y;
+    long t = 0;
+    if (!ed_selrange(b, &y0, &x0, &y1, &x1)) return 0;
+    if (y0 == y1) return x1 - x0;
+    t = b->len[y0] - x0 + 1;                    /* tail plus its LF */
+    for (y = y0 + 1; y < y1; y++) t += b->len[y] + 1;
+    return t + x1;                              /* head of the last */
+}
+
+long ed_seltext(const Buffer *b, char *out)
+{
+    int y0, x0, y1, x1, y;
+    long o = 0;
+    if (!ed_selrange(b, &y0, &x0, &y1, &x1)) return 0;
+    if (y0 == y1) {
+        memcpy(out, b->ln[y0] + x0, x1 - x0);
+        return x1 - x0;
+    }
+    memcpy(out + o, b->ln[y0] + x0, b->len[y0] - x0);
+    o += b->len[y0] - x0;
+    out[o++] = '\n';
+    for (y = y0 + 1; y < y1; y++) {
+        memcpy(out + o, b->ln[y], b->len[y]);
+        o += b->len[y];
+        out[o++] = '\n';
+    }
+    memcpy(out + o, b->ln[y1], x1);
+    return o + x1;
+}
+
+/* Delete back to front so the coordinates ahead of us never move.
+ * One undo group: a selection is one thing to the user. */
+int ed_seldelete(Buffer *b)
+{
+    int y0, x0, y1, x1, y, ok = 1;
+    if (!ed_selrange(b, &y0, &x0, &y1, &x1)) return 1;
+    ed_group(b);
+    if (y0 == y1) {
+        int i;
+        for (i = 0; i < x1 - x0; i++) eddelch(b, y0, x0);
+    } else {
+        int i;
+        for (i = 0; i < x1; i++) eddelch(b, y1, 0);     /* last line */
+        for (y = y1 - 1; y > y0; y--) {                 /* whole ones */
+            while (b->len[y]) eddelch(b, y, 0);
+            ok = ok && edjoinline(b, y);                /* and the row */
+        }
+        while (b->len[y0] > x0) eddelch(b, y0, x0);     /* first line */
+        ok = ok && edjoinline(b, y0);                   /* seam closes */
+    }
+    ed_ungroup(b);
+    b->cy = y0; b->cx = x0;
+    b->selon = 0;
+    return ok;
+}
+
+int ed_instext(Buffer *b, int y, int x, const char *t, long n)
+{
+    long i;
+    int ok = 1;
+    ed_group(b);
+    for (i = 0; i < n && ok; i++) {
+        char c = t[i];
+        if (c == '\r' && i + 1 < n && t[i + 1] == '\n') continue;
+        if (c == '\n' || c == '\r') {
+            ok = edsplitline(b, y, x);
+            y++; x = 0;
+        } else {
+            ok = edinsch(b, y, x, c);
+            x++;
+        }
+    }
+    ed_ungroup(b);
+    b->cy = y; b->cx = x;
+    return ok;
+}
+
+/* a display column to a character index: walk the line expanding tab
+ * stops exactly as the painter does, and stop at the first character
+ * whose column has passed the one asked for. A click past the end of
+ * the line lands at the end of the line, which is where a caret can
+ * actually be. */
+int ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask)
+{
+    int i, o = 0;
+    if (col <= 0) return 0;
+    for (i = 0; i < b->len[y]; i++) {
+        if (b->ln[y][i] == '\t') {
+            do { o++; } while (mask ? (o & mask) : (o % tabsize));
+        } else
+            o++;
+        if (o > col) return i;
+        if (o == col) return i + 1;
+    }
+    return b->len[y];
 }
 
 /* ---- saving ------------------------------------------------------ */

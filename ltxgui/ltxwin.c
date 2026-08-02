@@ -1261,6 +1261,11 @@ void ltx_freefilereq(void)
     if (freq) { FreeAslRequest(freq); freq = NULL; }
 }
 
+void ltx_reportmouse(int on)
+{
+    if (win) ReportMouse(on ? TRUE : FALSE, win);
+}
+
 /* ---- b87: writing a tooltype back to the icon ------------------
  * NOT via PutDiskObject: that rewrites the whole file from
  * icon.library's in-memory parse, so anything the running library

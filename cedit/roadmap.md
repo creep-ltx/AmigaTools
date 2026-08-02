@@ -415,7 +415,57 @@ list is done and boot-green — the documents, the close boxes, the
 overflow arrows, the per-document prompts. See the b2 entry above,
 which carries the detail and the two edge bugs it cost.
 
-## 0.1b5 — the E lexer, behind a toggle
+## 0.1b5 — selection and the clipboard — BUILT 2.8.26, AWAITING BOOT
+
+His ask, and his call on how selection works: **mouse drag plus an
+anchor key**, with Shift+arrows left alone — their paging matters on
+a keyboard with no PgUp/PgDn, and the mouse did nothing in the text
+area, so nothing had to be rebound. It is also how CCON selects.
+
+- [x] **The clipboard is CCON's design in C**: `clipboard.device`
+      unit 0, IFF `FORM FTXT` with a `CHRS` chunk, `CMD_WRITE` then
+      `CMD_UPDATE` to commit, padded to an even length; and on read
+      the cycle is **run dry** afterwards or the clip is never
+      released. IO-request only, no DOS packets. That format is what
+      the console family shares, so a cedit copy pastes into a stock
+      `CON:`, into Ed, into MultiView — and back.
+- [x] **AmigaReferences has no clipboard section** — only a note
+      that E must open the device itself. cedit is the second user
+      after CCON, so this is now owed a page there.
+- [x] **Selection lives in `edbuf`**: an anchor plus the cursor,
+      sorted by `ed_selrange` because a drag can go backwards, and
+      an empty range is deliberately *not* a selection — Copy on one
+      beeps rather than quietly putting an empty clip on the system.
+- [x] **Undo groups**, added for this: everything between
+      `ed_group`/`ed_ungroup` undoes as ONE step, so a paste is one
+      undo and not thirty, and a range delete is one. Nested groups
+      keep the outermost, so the delete inside a paste stays part of
+      the paste.
+- [x] Range delete works back to front so the coordinates ahead of
+      it never move; `ed_instext` splits on LF, CR and CRLF alike.
+- [x] **The N-run painter finally earns its keep** — b0b widened it
+      for the lexer, and the selection is its first real user: up to
+      three runs per row (before, selected, after), each written
+      exactly once, so a selected row is still one pass and never
+      half-painted. The caret hides inside a live selection: the
+      range is the statement.
+- [x] A click lands on a PIXEL and the buffer is indexed by
+      CHARACTER, with a tab spanning many columns — so `ed_col2x`
+      walks the line's tab stops exactly as the painter does. Tested.
+- [x] Typing, Return, Backspace and Del all replace a live
+      selection, in one undo step. Dragging past the window edge
+      scrolls. Esc drops a selection; Amiga+B toggles the anchor.
+- [x] Harness ALL GREEN both roads: ranges forwards and backwards,
+      within a line and across lines, byte counts agreeing with the
+      text, single-step undo of both range delete and multi-line
+      paste, every line ending accepted on insert, and the
+      column-to-index mapping through a tab.
+- [ ] **BOOT GATE:** drag-select across lines and see the inverse
+      run follow the drag; Amiga+C then Amiga+V; a cut and one undo
+      bringing all of it back; and a copy pasting into a `CON:`
+      shell to prove the FTXT interop.
+
+## 0.1b6 — the E lexer, behind a toggle
 
 - [ ] One state byte per line (normal / in-block-comment /
       in-string). An edit re-lexes from that line until the state

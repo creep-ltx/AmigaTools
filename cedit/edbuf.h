@@ -39,6 +39,10 @@
 
 typedef struct {
     unsigned char op;
+    int  grp;                   /* 0 = on its own; otherwise every
+                                 * record sharing this id undoes as
+                                 * ONE step. A paste is one undo, not
+                                 * thirty. */
     int  y, x;
     int  n;                     /* INS: how many; DEL: strlen(text) */
     char *text;                 /* DEL only, else NULL */
@@ -78,6 +82,12 @@ typedef struct {
     int    usaved;              /* utop as of the last save, so undo
                                  * back to it clears `dirty` */
     int    uapply;              /* inside an undo: do not record */
+    int    ugrp;                /* the group being recorded, or 0 */
+    int    ugrpnext;            /* the next group id to hand out */
+    /* selection: an anchor plus the cursor. Inactive when selon is
+     * 0; the two ends may be in either order and ed_selrange sorts
+     * them, because a drag can go backwards. */
+    int    selon, say, sax;
     char   path[310];
     char   name[110];
 } Buffer;
@@ -140,6 +150,38 @@ void ed_marksaved(Buffer *b);
 
 int  ed_canundo(const Buffer *b);
 int  ed_canredo(const Buffer *b);
+
+/* everything recorded between these two undoes as one step */
+void ed_group(Buffer *b);
+void ed_ungroup(Buffer *b);
+
+/* ---- selection ---------------------------------------------------
+ * The anchor is set where a drag starts or where the mark key is
+ * pressed; the other end is always the cursor. Nothing here draws -
+ * the app renders the range with the row painter's runs. */
+
+void ed_selstart(Buffer *b);    /* anchor at the cursor, select on */
+void ed_selclear(Buffer *b);
+/* the range in document order, 0 when nothing is selected or the two
+ * ends are the same place */
+int  ed_selrange(const Buffer *b, int *y0, int *x0, int *y1, int *x1);
+
+/* how many bytes ed_seltext will write (no terminator), and the text
+ * itself, lines joined with LF */
+long ed_selbytes(const Buffer *b);
+long ed_seltext(const Buffer *b, char *out);
+
+/* delete the selection; the cursor lands at its start. One undo. */
+int  ed_seldelete(Buffer *b);
+
+/* insert text at (y,x), splitting on LF and CR. One undo. The cursor
+ * is left after the last character inserted. */
+int  ed_instext(Buffer *b, int y, int x, const char *t, long n);
+
+/* a display column (what the screen counts, tabs expanded) to a
+ * character index in line y, and back. A click lands on a column;
+ * the buffer is indexed by character. */
+int  ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask);
 
 /* ---- saving -----------------------------------------------------
  * The bytes a save produces are the one thing in an editor that must

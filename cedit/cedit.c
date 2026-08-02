@@ -21,6 +21,7 @@
 #include <exec/tasks.h>
 #include <intuition/intuition.h>
 #include <libraries/gadtools.h>
+#include <devices/clipboard.h>
 #include <workbench/startup.h>
 #include <workbench/workbench.h>
 #include <proto/exec.h>
@@ -40,7 +41,7 @@
 
 /* 'used' or -O2 strips it - and c:Version must find it */
 static const char verstag[] __attribute__((used)) =
-    "$VER: cedit 0.1b3 (2.8.26)";
+    "$VER: cedit 0.1b5 (2.8.26)";
 
 /* ---- the buffer -------------------------------------------------
  * The line table, the splitter and the width arithmetic live in
@@ -103,6 +104,140 @@ static int loadbuf(Buffer *b, const char *path)
 }
 
 #define msg(t) ltx_msg(t)
+
+/* ---- the clipboard ----------------------------------------------
+ * clipboard.device unit 0, IFF FORM FTXT with a CHRS chunk - the
+ * format the whole console family shares, so a cedit copy pastes
+ * into a stock CON:, into Ed, into MultiView, and back again. The
+ * shape is CCON's (ccon-handler.e, M7), which is boot-proven on this
+ * hardware; what is written here is that design in C.
+ *
+ * It is IO-request only - no DOS packets anywhere - and opened
+ * lazily on the first copy or paste, then kept. */
+#define CLIPMAX 65536L
+
+static struct MsgPort *clipport;
+static struct IOClipReq *clipreq;
+
+static int clipopen(void)
+{
+    if (clipreq) return 1;
+    if (clipport == NULL) clipport = CreateMsgPort();
+    if (clipport == NULL) return 0;
+    clipreq = (struct IOClipReq *)
+        CreateIORequest(clipport, sizeof(struct IOClipReq));
+    if (clipreq == NULL) return 0;
+    if (OpenDevice((STRPTR)"clipboard.device", PRIMARY_CLIP,
+                   (struct IORequest *)clipreq, 0) != 0) {
+        DeleteIORequest((struct IORequest *)clipreq);
+        clipreq = NULL;
+        return 0;
+    }
+    return 1;
+}
+
+static void clipclose(void)
+{
+    if (clipreq) {
+        CloseDevice((struct IORequest *)clipreq);
+        DeleteIORequest((struct IORequest *)clipreq);
+        clipreq = NULL;
+    }
+    if (clipport) { DeleteMsgPort(clipport); clipport = NULL; }
+}
+
+static void wrbe(UBYTE *p, ULONG v)
+{
+    p[0] = (UBYTE)(v >> 24); p[1] = (UBYTE)(v >> 16);
+    p[2] = (UBYTE)(v >> 8);  p[3] = (UBYTE)v;
+}
+
+static ULONG rdbe(const UBYTE *p)
+{
+    return ((ULONG)p[0] << 24) | ((ULONG)p[1] << 16) |
+           ((ULONG)p[2] << 8) | (ULONG)p[3];
+}
+
+/* the whole form in one write, then CMD_UPDATE to commit it - a
+ * write without the update leaves the clip unpublished */
+static int clipput(const char *text, long n)
+{
+    UBYTE *buf;
+    long pad, total;
+    int ok;
+    if (n <= 0 || !clipopen()) return 0;
+    pad = n & 1;                        /* IFF chunks are even */
+    total = 20 + n + pad;
+    buf = malloc(total);
+    if (buf == NULL) return 0;
+    wrbe(buf,      0x464F524DUL);       /* 'FORM' */
+    wrbe(buf + 4,  (ULONG)(12 + n + pad));
+    wrbe(buf + 8,  0x46545854UL);       /* 'FTXT' */
+    wrbe(buf + 12, 0x43485253UL);       /* 'CHRS' */
+    wrbe(buf + 16, (ULONG)n);
+    memcpy(buf + 20, text, n);
+    if (pad) buf[20 + n] = 0;
+    clipreq->io_Command = CMD_WRITE;
+    clipreq->io_Data = (STRPTR)buf;
+    clipreq->io_Length = total;
+    clipreq->io_Offset = 0;
+    clipreq->io_ClipID = 0;
+    DoIO((struct IORequest *)clipreq);
+    ok = (clipreq->io_Error == 0);
+    if (ok) {
+        clipreq->io_Command = CMD_UPDATE;
+        DoIO((struct IORequest *)clipreq);
+    }
+    free(buf);
+    return ok;
+}
+
+/* read unit 0 and dig the CHRS text out of the form. The read cycle
+ * MUST be run dry afterwards or the clip is never released - the
+ * clipboard.device rule CCON learned the same way. */
+static long clipget(char **out)
+{
+    UBYTE *buf, scr[64];
+    long got, o, n = 0;
+    *out = NULL;
+    if (!clipopen()) return 0;
+    buf = malloc(CLIPMAX);
+    if (buf == NULL) return 0;
+    clipreq->io_Command = CMD_READ;
+    clipreq->io_Data = (STRPTR)buf;
+    clipreq->io_Length = CLIPMAX;
+    clipreq->io_Offset = 0;
+    clipreq->io_ClipID = 0;
+    DoIO((struct IORequest *)clipreq);
+    got = (clipreq->io_Error == 0) ? clipreq->io_Actual : 0;
+    do {                                /* run it dry */
+        clipreq->io_Command = CMD_READ;
+        clipreq->io_Data = (STRPTR)scr;
+        clipreq->io_Length = sizeof(scr);
+        DoIO((struct IORequest *)clipreq);
+    } while (clipreq->io_Error == 0 && clipreq->io_Actual > 0);
+
+    if (got >= 20 && rdbe(buf) == 0x464F524DUL &&
+        rdbe(buf + 8) == 0x46545854UL) {
+        o = 12;                         /* first chunk inside FTXT */
+        while (o + 8 <= got) {
+            ULONG id = rdbe(buf + o), sz = rdbe(buf + o + 4);
+            if (id == 0x43485253UL) {   /* 'CHRS' */
+                if ((long)sz > got - (o + 8)) sz = got - (o + 8);
+                *out = malloc(sz + 1);
+                if (*out) {
+                    memcpy(*out, buf + o + 8, sz);
+                    (*out)[sz] = 0;
+                    n = sz;
+                }
+                break;
+            }
+            o += 8 + sz + (sz & 1);
+        }
+    }
+    free(buf);
+    return n;
+}
 
 /* write the buffer back, in the line endings the file arrived with.
  *
@@ -181,6 +316,11 @@ static struct NewMenu newmenu[] = {
     { NM_TITLE, (STRPTR)"Edit",         NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Undo",         (STRPTR)"Z", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Redo",         (STRPTR)"Y", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Mark",         (STRPTR)"B", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Cut",          (STRPTR)"X", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Copy",         (STRPTR)"C", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Paste",        (STRPTR)"V", 0, 0, NULL },
     { NM_TITLE, (STRPTR)"Settings",   NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Line numbers", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
@@ -312,9 +452,46 @@ static void erow(int vr)
     }
     if (gutw > 0) drawnum(gx0, y, (long)i, 3, 0);
     w = ltx_expandvis(cur->ln[i], cur->len[i], textw());
-    run.start = 0; run.pen = 1; run.bg = 0;
-    ltx_drawruns(textx(), y, ltx_vis, w, &run, 1);
-    if (i == cur->cy) drawcaret(y);
+    /* b5: the selection, and the first real use of the N-run painter
+     * that b0b widened for the lexer. Up to three runs - before the
+     * selection, the selection itself in the CFile bar colours, and
+     * after it - each written exactly once, so a selected row is
+     * still one pass of Text() calls and never half-painted. */
+    {
+        int y0, x0, y1, x1, nr = 0;
+        int s0 = -1, s1 = -1;
+        LtxRun runs[3];
+        if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
+            i >= y0 && i <= y1) {
+            /* the selected span of THIS row, in display columns */
+            int cs = (i == y0) ? explen(cur->ln[i], x0, tttab, ttmask) : 0;
+            int ce = (i == y1) ? explen(cur->ln[i], x1, tttab, ttmask)
+                               : explen(cur->ln[i], cur->len[i],
+                                        tttab, ttmask) + 1;
+            s0 = cs - hoff;
+            s1 = ce - hoff;
+            if (s0 < 0) s0 = 0;
+            if (s1 > w) s1 = w;
+        }
+        runs[nr].start = 0; runs[nr].pen = 1; runs[nr].bg = 0; nr++;
+        if (s0 >= 0 && s1 > s0) {
+            if (s0 > 0) {
+                runs[nr].start = s0; runs[nr].pen = 2; runs[nr].bg = 3;
+                nr++;
+            } else {
+                runs[0].pen = 2; runs[0].bg = 3;
+            }
+            if (s1 < w) {
+                runs[nr].start = s1; runs[nr].pen = 1; runs[nr].bg = 0;
+                nr++;
+            }
+        }
+        ltx_drawruns(textx(), y, ltx_vis, w, runs, nr);
+    }
+    (void)run;
+    /* no caret inside a live selection - the range is the statement,
+     * and a caret in the middle of it says something else */
+    if (i == cur->cy && !cur->selon) drawcaret(y);
 }
 
 static void erows(void)
@@ -654,6 +831,10 @@ static void docloseall(void);
 static void dosave(void);
 static void dosaveas(void);
 static void doundo(int redo);
+static void selpaint(void);
+static void domark(void);
+static void docopy(int cut);
+static void dopaste(void);
 static int  askquit(void);      /* and the unsaved-changes prompt */
 static void follow(void);       /* keep the caret on screen */
 
@@ -680,6 +861,10 @@ static int domenu(UWORD code)   /* 1 = quit */
         if (m == 1) {                                   /* Edit */
             if (i == 0) { doundo(0); return 0; }
             if (i == 1) { doundo(1); return 0; }
+            if (i == 3) { domark();  return 0; }
+            if (i == 4) { docopy(1); return 0; }
+            if (i == 5) { docopy(0); return 0; }
+            if (i == 6) { dopaste(); return 0; }
         }
         if (m == 2) {                                   /* Settings */
             int on = (it->Flags & CHECKED) ? 1 : 0;
@@ -755,7 +940,11 @@ static void gotoyx(int ny, int nx)
                                  * not everything since the file
                                  * opened */
     follow();
-    damage(oldcy);
+    /* with a mark down, moving the caret EXTENDS the selection - that
+     * is what the anchor is for - so the rows between both ends have
+     * changed, not just two */
+    if (cur->selon) selpaint();
+    else            damage(oldcy);
 }
 
 static void moveh(int nx)       /* a horizontal move chooses a goal */
@@ -807,11 +996,35 @@ static void marktitle(void)
     settitle();
 }
 
+/* a live selection is what the next edit replaces - the standard
+ * everywhere, and the reason Cut is rarely needed twice */
+static int eatsel(void)
+{
+    if (!cur->selon) return 0;
+    {
+        int y0, x0, y1, x1;
+        if (!ed_selrange(cur, &y0, &x0, &y1, &x1)) {
+            ed_selclear(cur);   /* an empty range is not a selection */
+            return 0;
+        }
+    }
+    ed_seldelete(cur);
+    goalx = cur->cx;
+    calcgut();
+    follow();
+    selpaint();
+    return 1;
+}
+
 static void typech(char c)
 {
-    int oldcy = cur->cy;
+    int oldcy;
+    int had = eatsel();
+    oldcy = cur->cy;
+    if (had) ed_group(cur);
     if (!edinsch(cur, cur->cy, cur->cx, c)) { oom(); return; }
     cur->cx++;
+    if (had) ed_ungroup(cur);
     goalx = cur->cx;
     follow();
     damage(oldcy);              /* one row - the b2 minimal-redraw case */
@@ -833,7 +1046,10 @@ static void structural(void)
 
 static void donewline(void)
 {
+    int had = eatsel();
+    if (had) ed_group(cur);
     if (!edsplitline(cur, cur->cy, cur->cx)) { oom(); return; }
+    if (had) ed_ungroup(cur);
     cur->cy++;
     cur->cx = 0;
     goalx = 0;
@@ -843,6 +1059,8 @@ static void donewline(void)
 
 static void dobackspace(void)
 {
+    if (eatsel()) { marktitle(); return; }  /* the selection WAS the
+                                             * thing being removed */
     if (cur->cx > 0) {
         int oldcy = cur->cy;
         eddelch(cur, cur->cy, cur->cx - 1);
@@ -867,6 +1085,7 @@ static void dobackspace(void)
 
 static void dodelete(void)
 {
+    if (eatsel()) { marktitle(); return; }
     if (cur->cx < cur->len[cur->cy]) {
         int oldcy = cur->cy;
         eddelch(cur, cur->cy, cur->cx);
@@ -1060,6 +1279,68 @@ static void doundo(int redo)
     marktitle();
 }
 
+/* the selection changes which rows are inverse, and a drag can move
+ * many at once - so this is the one interaction that repaints the
+ * content rather than a row or two. Coalescing means once per input
+ * burst, not once per mouse move. */
+static void selpaint(void)
+{
+    dirtyrows = 1;
+    dmgold = -1;
+}
+
+static void domark(void)
+{
+    if (cur->selon) ed_selclear(cur);   /* pressed twice = drop it */
+    else            ed_selstart(cur);
+    selpaint();
+}
+
+static void docopy(int cut)
+{
+    long n = ed_selbytes(cur);
+    char *t;
+    if (n <= 0) { DisplayBeep(NULL); return; }
+    t = malloc(n);
+    if (t == NULL) { oom(); return; }
+    ed_seltext(cur, t);
+    busy(1);
+    if (!clipput(t, n))
+        msg("Could not reach clipboard.device.");
+    else if (cut) {
+        if (!ed_seldelete(cur)) oom();
+        goalx = cur->cx;
+        calcgut();              /* a cut can remove lines */
+        follow();
+        marktitle();
+    }
+    busy(0);
+    free(t);
+    ed_selclear(cur);
+    selpaint();
+}
+
+static void dopaste(void)
+{
+    char *t = NULL;
+    long n;
+    busy(1);
+    n = clipget(&t);
+    busy(0);
+    if (n <= 0 || t == NULL) { DisplayBeep(NULL); free(t); return; }
+    ed_group(cur);
+    if (cur->selon) ed_seldelete(cur);  /* paste replaces a selection */
+    if (!ed_instext(cur, cur->cy, cur->cx, t, n)) oom();
+    ed_ungroup(cur);
+    free(t);
+    goalx = cur->cx;
+    ed_selclear(cur);
+    calcgut();
+    follow();
+    selpaint();
+    marktitle();
+}
+
 static void dosave(void)
 {
     if (cur->path[0] == 0) { dosaveas(); return; }   /* untitled */
@@ -1070,6 +1351,31 @@ static void dosave(void)
         ed_marksaved(cur);      /* undoing back here is 'unmodified' */
     busy(0);
     marktitle();
+}
+
+/* ---- the mouse --------------------------------------------------- */
+
+static int dragging;
+
+/* a click lands on a PIXEL; the buffer is indexed by CHARACTER, and
+ * a tab is one character across many columns. So: pixel -> row and
+ * display column, then ed_col2x walks the line's tab stops exactly
+ * as the painter does to find the character under it. */
+static void mousepos(int mx, int my, int *py, int *px)
+{
+    int row, col, y;
+    row = (my - conty) / fh;
+    if (my < conty) row = 0;
+    if (row < 0) row = 0;
+    if (row >= crows) row = crows - 1;
+    y = cur->top + row;
+    if (y >= cur->n) y = cur->n - 1;
+    if (y < 0) y = 0;
+    col = hoff + (mx - textx()) / fw;
+    if (mx < textx()) col = hoff;
+    if (col < 0) col = 0;
+    *py = y;
+    *px = ed_col2x(cur, y, col, tttab, ttmask);
 }
 
 /* ---- the event loop ---------------------------------------------- */
@@ -1213,6 +1519,48 @@ static void guimode(void)
              * from the chassis, which filled them when it drew the
              * bar - so the boxes on screen and the boxes we test are
              * the same numbers by construction. */
+            /* a drag in the text selects. The mouse did nothing here
+             * before, so nothing had to be rebound for it - which is
+             * why this was the road chosen over Shift+arrows, whose
+             * paging matters on a keyboard with no PgUp/PgDn. */
+            if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN &&
+                my >= conty && my < conty + crows * fh) {
+                int py, px;
+                mousepos(mx, my, &py, &px);
+                cur->cy = py; cur->cx = px;
+                goalx = px;
+                ed_break(cur);
+                ed_selstart(cur);       /* anchor here; empty so far */
+                dragging = 1;
+                /* Intuition reports pointer movement only while
+                 * asked - without this the drag never moved, which
+                 * is exactly what his first boot showed. Off again
+                 * on release, so an idle pointer costs nothing. */
+                ltx_reportmouse(1);
+                selpaint();
+            } else if (class == IDCMP_MOUSEMOVE && dragging) {
+                int py, px;
+                mousepos(mx, my, &py, &px);
+                if (py != cur->cy || px != cur->cx) {
+                    cur->cy = py; cur->cx = px;
+                    goalx = px;
+                    follow();           /* dragging past the edge
+                                         * scrolls, as it should */
+                    selpaint();
+                }
+            } else if (class == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
+                dragging = 0;
+                ltx_reportmouse(0);
+                /* a click that never moved is a caret placement, not
+                 * an empty selection sitting there doing nothing */
+                {
+                    int y0, x0, y1, x1;
+                    if (!ed_selrange(cur, &y0, &x0, &y1, &x1)) {
+                        ed_selclear(cur);
+                        selpaint();
+                    }
+                }
+            }
             if (class == IDCMP_MOUSEBUTTONS && code == SELECTDOWN) {
                 int t, what = ltx_tabclick(mx, my, &t);
                 if (what == LTXTAB_PICK) {
@@ -1227,7 +1575,10 @@ static void guimode(void)
                     drawtabbar();
             }
             if (class == IDCMP_VANILLAKEY) {
-                if (code == 13)                         /* Return */
+                if (code == 27) {                       /* Esc drops
+                                                         * a selection */
+                    if (cur->selon) { ed_selclear(cur); selpaint(); }
+                } else if (code == 13)                  /* Return */
                     donewline();
                 else if (code == 8)                     /* Backspace */
                     dobackspace();
@@ -1291,6 +1642,7 @@ out:
         DeleteMsgPort(appport);
         appport = NULL;
     }
+    clipclose();
     ltx_freefilereq();
     ltx_closefont();
     if (ttoollock) { UnLock(ttoollock); ttoollock = 0; }
