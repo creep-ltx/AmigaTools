@@ -871,6 +871,26 @@ a forty-line indent forty times is not an undo.
       Amiga+M on a `PROC` header's bracket. Settings > Overwrite and
       watch `OVR` appear and typing replace.
 
+### b8b — Shift+Tab, and why it did nothing (3.8.26)
+
+His report: "Shift+Tab does nothing that I can see. Amiga+U works
+and also the menu works." That second sentence is the whole
+diagnosis - the outdent was never the problem, only the key that
+was supposed to reach it.
+
+**Shift+Tab never arrives as a VANILLAKEY.** The keymap turns it
+into a multi-character string - the CSI back-tab - and
+`IDCMP_VANILLAKEY` is only sent for keys that map to exactly ONE
+character. So the handler simply never ran. The RAW key still
+fires, and **0x42 is the Tab KEY whatever the keymap makes of it**,
+so the shifted case moved there. Plain Tab stays on the VANILLAKEY
+road so it still goes through the keymap, and the VANILLAKEY arm
+now ignores the shifted case, so neither is handled twice.
+
+Worth remembering generally: **any key the keymap maps to a string
+rather than a character is invisible to VANILLAKEY.** Written up in
+AmigaReferences.
+
 ### Two "known limits" measured rather than argued (3.8.26)
 
 His screenshot of cfile.e on the A1200: **12,211 lines, widest line

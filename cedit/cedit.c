@@ -2320,16 +2320,17 @@ static void guimode(void)
                     else                            dodelete();
                 }
                 else if (code == 9) {                   /* Tab */
-                    /* b8: Shift+Tab always outdents. Plain Tab
-                     * indents only when the selection crosses a LINE
-                     * BREAK - within one line a selection is a piece
-                     * of text, and replacing it with a tab is what
-                     * was asked for. */
+                    /* PLAIN Tab only. Shift+Tab is handled in the
+                     * RAWKEY branch and never reaches here - see
+                     * there for why.
+                     *
+                     * Tab indents only when the selection crosses a
+                     * LINE BREAK: within one line a selection is a
+                     * piece of text, and replacing it with a tab is
+                     * what was asked for. */
                     int y0, x0, y1, x1;
-                    int shift = (qual & (IEQUALIFIER_LSHIFT |
-                                         IEQUALIFIER_RSHIFT)) != 0;
-                    if (shift)
-                        doindent(1);
+                    if (qual & (IEQUALIFIER_LSHIFT | IEQUALIFIER_RSHIFT))
+                        ;                       /* the RAWKEY road */
                     else if (cur->selon &&
                              ed_selrange(cur, &y0, &x0, &y1, &x1) &&
                              y1 > y0)
@@ -2363,6 +2364,20 @@ static void guimode(void)
                  * Amiga+G / Amiga+H */
                 else if (code == 0x52)                  /* F3 */
                     findstep(page ? -1 : 1);
+                /* b8b, his report - "Shift+Tab does nothing", while
+                 * Amiga+U outdented fine, so the outdent was never
+                 * the problem. Shift+Tab does not arrive as a
+                 * VANILLAKEY at all: the keymap turns it into a
+                 * multi-character string (the CSI back-tab), and
+                 * VANILLAKEY is only sent for keys that map to
+                 * exactly ONE character. The RAW key still fires,
+                 * and 0x42 is the Tab KEY whatever the keymap makes
+                 * of it. Plain Tab stays on the VANILLAKEY road so
+                 * it still goes through the keymap; this arm only
+                 * takes the shifted case, so neither is handled
+                 * twice. */
+                else if (code == 0x42 && page)          /* Shift+Tab */
+                    doindent(1);
                 else if (code == 0x4F) {                /* cursor left */
                     if (ctrl) wordjump(-1);
                     else if (page) moveh(0);
