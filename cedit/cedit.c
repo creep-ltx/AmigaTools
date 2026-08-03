@@ -1599,8 +1599,11 @@ static void findstep(int dir)
 
 /* b7b, his call with Ed 47.2 on screen beside it: ask on the status
  * row, not in a window that has to be opened and dismissed. Ed's own
- * labels, because he called them clean - "String:" to find,
- * "Search:" then "Replace:" to replace.
+ * What he liked about Ed was that it uses the window ALREADY OPEN
+ * instead of putting up another one. Not its vocabulary - "String:"
+ * is Ed's word for it, and this asks for what it actually wants:
+ * "Find:", "Find:" then "Replace with:", "Line:". The pair says
+ * which is which, which "Search:"/"Replace:" leaves to be guessed.
  *
  * With STATUSBAR=NO there is no row to borrow, and manufacturing one
  * would repaint the whole page - the exact cost this design exists to
@@ -1632,7 +1635,7 @@ static int askstr(const char *label, char *buf, int max)
 
 static void dofind(void)
 {
-    if (!askstr("String:", findstr, (int)sizeof(findstr) - 1)) return;
+    if (!askstr("Find:", findstr, (int)sizeof(findstr) - 1)) return;
     if (findstr[0] == 0) return;
     /* from the cursor, INCLUDING what is under it: a fresh Find after
      * a click should match the word clicked on */
@@ -1688,9 +1691,10 @@ static void replacestep(void)
  * abandons the whole thing. */
 static int askpair(void)
 {
-    if (!askstr("Search:", findstr, (int)sizeof(findstr) - 1)) return 0;
+    if (!askstr("Find:", findstr, (int)sizeof(findstr) - 1)) return 0;
     if (findstr[0] == 0) return 0;
-    if (!askstr("Replace:", repstr, (int)sizeof(repstr) - 1)) return 0;
+    if (!askstr("Replace with:", repstr, (int)sizeof(repstr) - 1))
+        return 0;
     return 1;
 }
 

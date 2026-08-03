@@ -657,10 +657,11 @@ Goto Line, top and bottom of file, and auto-indent on Return.
 ### b7b — the prompt row, after seeing Ed — BUILT 3.8.26
 
 He put three Ed 47.2 screenshots next to it and called them "nice and
-clean": Ed asks on its bottom line - `String:`, `Search:`, `Replace:`
-with a block caret - and never opens a window at all. His question
-was whether to insert a line above the status bar or borrow the
-status bar itself.
+clean" - Ed asks on its bottom line, with a block caret, and never
+opens a window at all. What he liked was **that it uses the window
+already open**, which is worth being precise about: I first read it
+as liking Ed's labels too, and copied those. His question was whether
+to insert a line above the status bar or borrow the status bar.
 
 - [x] **Borrow it.** Inserting a row means the grid changes, the
       content reflows and the whole page repaints, twice, to collect
@@ -669,8 +670,14 @@ status bar itself.
       back. The status text is also exactly what is not wanted while
       typing a search: the line number under the cursor is about to
       change anyway.
-- [x] `ltx_askline` in the chassis, with Ed's own labels because he
-      liked them. The caret is COMPLEMENTED over the cell, the same
+- [x] `ltx_askline` in the chassis. **Ed's mechanism, not its
+      vocabulary** - his correction, and a fair one: what he liked
+      was the use of a window that is already open, and I had gone
+      on to copy the wording too. `String:` is Ed's word for it; this
+      asks for what it actually wants - `Find:`, then `Find:` and
+      `Replace with:` for the pair, and `Line:`. The pair also says
+      which field is which, where `Search:`/`Replace:` left it to be
+      guessed. The caret is COMPLEMENTED over the cell, the same
       way the document caret is, so it reads on any palette and
       erasing it is the same operation again - no second colour
       chosen for a screen we do not own. The text scrolls sideways
