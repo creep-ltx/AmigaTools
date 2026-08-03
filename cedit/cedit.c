@@ -1647,35 +1647,49 @@ static void dofind(void)
  * buffer and one row is all that repaints. */
 static void replaceone(int y, int x, int plen)
 {
+    int rlen  = (int)strlen(repstr);
+    int oldcy = cur->cy;
+    int hadsel = cur->selon, oldsy = cur->say;
+
     if (!ed_replaceat(cur, y, x, plen, repstr)) { oom(); return; }
-    cur->cy = y;
-    cur->cx = x + (int)strlen(repstr);
-    goalx = cur->cx;
-    ed_selclear(cur);
     cur->maxwdirty = 1;
     if (cur->lexdone > y) cur->lexdone = y + 1;
     ed_lexdirty(cur, y);
+
+    /* b7d, his report: leave the caret ON what was just written, and
+     * SELECT it. The replacement is the thing to look at - jumping
+     * ahead to the next match means the one change he asked for
+     * scrolls off before he can see it, and he has to walk back up
+     * the file to check it. */
+    cur->cy = y;
+    cur->cx = x;
+    ed_selstart(cur);           /* anchor at the replacement start */
+    cur->cx = x + rlen;         /* caret at its end */
+    goalx = cur->cx;
     follow();
-    damage(y);                  /* one line changed, so one row */
+
+    /* one line changed - unless a selection was sitting on a
+     * DIFFERENT line, whose highlight has to come off too */
+    if (hadsel && oldsy != y) selpaint();
+    else                      damage(oldcy);
     marktitle();
 }
 
-/* Replace one occurrence and leave the NEXT one selected, so the key
- * can simply be pressed again to walk the file.
+/* Replace ONE occurrence per press, and stop on it.
  *
- * It REPLACES on the first press. It used to only find, on the
+ * It replaces on the first press. It used to only find, on the
  * theory that showing before destroying was safer - but he pressed
- * Replace, typed both strings, and nothing changed, which is the
- * report this fixes. Undo is what makes that safe, and undo has been
- * there since b3; a button named Replace that does not replace is
- * not caution, it is a bug.
+ * Replace, typed both strings, and nothing changed. Undo is what
+ * makes replacing safe, and undo has been there since b3; a menu
+ * item named Replace that does not replace is not caution.
  *
- * The follow-up search is QUIET. Saying "not found" straight after a
- * successful replacement reads as "the replacement failed" - and it
- * is exactly what he saw, because "from!" -> "from" consumed the
- * last match while "from" -> "from!" never ran out (a wrapped search
- * for "from" matches the "from" inside the "from!" just written).
- * Running out of matches is the END of a run, not an error. */
+ * b7d: and it does NOT advance to the next match afterwards. That
+ * was the other half of the same instinct and it was equally wrong:
+ * advancing scrolls the one change he asked for off the screen, so
+ * he has to walk back up the file to see what happened. Each press
+ * now replaces one and leaves the caret on it, selected. Pressing
+ * again walks to the next - one match per press, always looking at
+ * the thing that just changed. */
 static void replacestep(void)
 {
     int len = (int)strlen(findstr);
@@ -1696,18 +1710,30 @@ static void replacestep(void)
             y = y0; x = x0;
         }
     }
-    if (y < 0) {                /* otherwise take the next one */
-        if (!ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold, 1,
+    if (y < 0) {
+        /* otherwise the next one BELOW the cursor - and this search
+         * deliberately does NOT wrap, where Find Next does. Find only
+         * moves; this one writes. Wrapping round to the top would
+         * quietly start replacing text it had already replaced, and
+         * when the replacement contains the pattern - his own case,
+         * "from" -> "from!" - that means "from!!" on the next press.
+         * Running off the end stops instead, and says which of the
+         * two reasons it stopped for. */
+        if (!ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold, 0,
                        &fy, &fx)) {
             char t[140];
-            sprintf(t, " \"%.80s\" not found.", findstr);
-            ltx_flash(t);
+            if (ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold,
+                          1, &fy, &fx))
+                ltx_flash(" No more below the cursor.");
+            else {
+                sprintf(t, " \"%.80s\" not found.", findstr);
+                ltx_flash(t);
+            }
             return;
         }
         y = fy; x = fx;
     }
-    replaceone(y, x, len);
-    findfrom(cur->cy, cur->cx, 1, 1);   /* quiet: see above */
+    replaceone(y, x, len);      /* and stop here - see above */
 }
 
 /* the two prompts Replace and Replace All share. Esc at either one
@@ -1718,13 +1744,20 @@ static int askpair(void)
     if (findstr[0] == 0) return 0;
     if (!askstr("Replace with:", repstr, (int)sizeof(repstr) - 1))
         return 0;
+    /* identical strings would replace each match with itself and
+     * never move off it - every press a no-op that still spends an
+     * undo record. Say so instead. */
+    if (strcmp(findstr, repstr) == 0) {
+        ltx_flash(" Those are the same - nothing to change.");
+        return 0;
+    }
     return 1;
 }
 
 static void doreplace(void)
 {
     if (!askpair()) return;
-    replacestep();              /* replaces one, selects the next */
+    replacestep();              /* replaces one and stops on it */
 }
 
 static void doreplaceall(void)

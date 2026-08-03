@@ -742,6 +742,38 @@ at once, on both roads. Two faults in cedit's flow above it:
 The lesson is b29's again, and his: two observations that differ in
 one variable beat any amount of reasoning about the code.
 
+### b7d — Replace stops on what it changed — BUILT 3.8.26
+
+His report, and it is the other half of b7c's instinct: after a
+replace the caret jumped to the NEXT match, "so I have to manually
+walk up in the text to find the new 'from!'". He noticed it in one
+direction and not the other for the same reason as before -
+`from!` -> `from` ran out of matches, so nothing moved and it
+behaved the way he wanted by accident.
+
+- [x] **No advance.** Each press replaces ONE occurrence and leaves
+      the caret on it, with the replacement SELECTED so it is
+      obvious what changed. Pressing again walks to the next: one
+      match per press, always looking at the thing that just moved.
+      Advancing automatically scrolls the single change he asked for
+      off the screen, which is the opposite of useful.
+- [x] **Replace does not wrap, where Find Next does.** Find only
+      moves; replace writes. Coming round to the top would quietly
+      replace text already replaced - and when the replacement
+      CONTAINS the pattern, which is exactly his `from` -> `from!`,
+      the next press produces `from!!`. It stops at the end instead,
+      and distinguishes the two reasons: "No more below the cursor."
+      when matches exist above, the "not found" message when the
+      string is simply absent.
+- [x] **Identical strings are refused** with "Those are the same -
+      nothing to change." They would replace every match with itself
+      and never move off it, spending an undo record per press.
+
+Both faults were mine and both were the same mistake: deciding what
+he wanted to look at next instead of leaving him looking at what he
+just did.
+
+
 ## Later, not promised
 
 C and 68k asm lexers · Select All, block indent/outdent, delete
