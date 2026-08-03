@@ -661,8 +661,18 @@ static int chfold(int c, int fold)
     return c;
 }
 
+/* what counts as part of a word, for the whole-word option. Letters,
+ * digits and underscore - which is what an identifier is made of in
+ * E, in C and in 68k asm alike, so one rule covers every lexer this
+ * editor is going to grow. */
+static int iswordch(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
 static int matchat(const Buffer *b, int y, int x, const char *pat,
-                   int plen, int fold)
+                   int plen, int fold, int word)
 {
     int i;
     if (x < 0 || x + plen > b->len[y]) return 0;
@@ -671,11 +681,20 @@ static int matchat(const Buffer *b, int y, int x, const char *pat,
         int c = (unsigned char)pat[i];
         if (chfold(a, fold) != chfold(c, fold)) return 0;
     }
+    if (word) {
+        /* the ends of the line count as boundaries, so a word alone
+         * on a line still matches */
+        if (x > 0 && iswordch((unsigned char)b->ln[y][x - 1]))
+            return 0;
+        if (x + plen < b->len[y] &&
+            iswordch((unsigned char)b->ln[y][x + plen]))
+            return 0;
+    }
     return 1;
 }
 
 int ed_search(const Buffer *b, const char *pat, int fromy, int fromx,
-              int dir, int fold, int wrap, int *fy, int *fx)
+              int dir, int fold, int wrap, int word, int *fy, int *fx)
 {
     int plen = 0, i, y, x;
 
@@ -701,12 +720,12 @@ int ed_search(const Buffer *b, const char *pat, int fromy, int fromx,
         if (hi > b->len[y] - plen) hi = b->len[y] - plen;
         if (dir > 0) {
             for (x = lo; x <= hi; x++)
-                if (matchat(b, y, x, pat, plen, fold)) {
+                if (matchat(b, y, x, pat, plen, fold, word)) {
                     *fy = y; *fx = x; return 1;
                 }
         } else {
             for (x = hi; x >= lo; x--)
-                if (matchat(b, y, x, pat, plen, fold)) {
+                if (matchat(b, y, x, pat, plen, fold, word)) {
                     *fy = y; *fx = x; return 1;
                 }
         }
@@ -730,7 +749,8 @@ int ed_replaceat(Buffer *b, int y, int x, int plen, const char *rep)
     return ok;
 }
 
-int ed_replaceall(Buffer *b, const char *pat, const char *rep, int fold)
+int ed_replaceall(Buffer *b, const char *pat, const char *rep,
+                  int fold, int word)
 {
     int plen = 0, rlen = 0, n = 0, y = 0, x = 0, fy, fx;
 
@@ -741,7 +761,7 @@ int ed_replaceall(Buffer *b, const char *pat, const char *rep, int fold)
     ed_group(b);
     /* no wrap: this starts at the top and walks to the bottom once,
      * so a wrap could only take it round again over its own output */
-    while (ed_search(b, pat, y, x, 1, fold, 0, &fy, &fx)) {
+    while (ed_search(b, pat, y, x, 1, fold, 0, word, &fy, &fx)) {
         if (!ed_replaceat(b, fy, fx, plen, rep)) break;
         n++;
         /* resume PAST what was just written, never inside it */

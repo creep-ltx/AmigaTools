@@ -212,9 +212,19 @@ int  ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask);
  * again. With `wrap`, the starting line is visited a second time so
  * the half of it that was skipped is still searched - a wrap that
  * silently misses matches on its own line is worse than no wrap.
- * `fold` folds case. Returns 1, with the match START in fy and fx. */
+ * `fold` folds case.
+ *
+ * `word` requires the match to BE a word rather than sit inside one:
+ * the characters either side must not be letters, digits or
+ * underscore. Without it the search is a plain substring, so `from`
+ * is found inside `from!` (wanted) but equally inside `frommage` and
+ * `Afrom` (rarely wanted when the thing being renamed is an
+ * identifier). Both are useful, which is why it is a switch and not
+ * a decision.
+ *
+ * Returns 1, with the match START in fy and fx. */
 int  ed_search(const Buffer *b, const char *pat, int fromy, int fromx,
-               int dir, int fold, int wrap, int *fy, int *fx);
+               int dir, int fold, int wrap, int word, int *fy, int *fx);
 
 /* replace the plen characters at (y,x) with rep. One undo step. */
 int  ed_replaceat(Buffer *b, int y, int x, int plen, const char *rep);
@@ -223,7 +233,8 @@ int  ed_replaceat(Buffer *b, int y, int x, int plen, const char *rep);
  * undo 200 replacements one at a time is not an undo. Returns how
  * many were replaced. Scanning resumes AFTER each replacement, so a
  * replacement containing the pattern ("a" -> "aa") terminates. */
-int  ed_replaceall(Buffer *b, const char *pat, const char *rep, int fold);
+int  ed_replaceall(Buffer *b, const char *pat, const char *rep,
+                   int fold, int word);
 
 /* ---- auto-indent -------------------------------------------------
  * The leading whitespace of line y, stopping at `upto` characters in

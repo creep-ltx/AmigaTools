@@ -308,6 +308,12 @@ static int  tthilite = 1;       /* HIGHLIGHT=YES/NO - syntax colour */
 static char findstr[80];
 static char repstr[80];
 static int  findfold;
+static int  findword;           /* WHOLEWORD=. Off by default, because
+                                 * the thing being looked for is as
+                                 * often a fragment as an identifier -
+                                 * but renaming a variable called
+                                 * `from` without it also rewrites
+                                 * `frommage`, which is why it exists */
 static int  ttindent = 1;       /* AUTOINDENT=YES/NO - b7. Defaults ON:
                                  * this is an editor for indented
                                  * languages, and the cost of it being
@@ -409,6 +415,8 @@ static struct NewMenu newmenu[] = {
      * requester did, and case folding is a standing preference rather
      * than a per-search one anyway - so it lives here and persists */
     { NM_ITEM,  (STRPTR)"Ignore case", NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Whole words", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     /* his ask: tab size from the menu, 1-10. Radio rather than
      * toggle - exactly one is true - which in GadTools means CHECKIT
@@ -840,6 +848,7 @@ static int openmain(void)
                 else if (!strcmp(lb, "Syntax colour")) on = tthilite;
                 else if (!strcmp(lb, "Auto indent"))  on = ttindent;
                 else if (!strcmp(lb, "Ignore case"))  on = findfold;
+                else if (!strcmp(lb, "Whole words"))  on = findword;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -918,6 +927,10 @@ static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
                             tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"IGNORECASE");
         if (v) findfold = !(tteq((char *)v, "NO") ||
+                            tteq((char *)v, "OFF") ||
+                            tteq((char *)v, "FALSE"));
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"WHOLEWORD");
+        if (v) findword = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
                             tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"GUTTER");
@@ -1062,7 +1075,10 @@ static int domenu(UWORD code)   /* 1 = quit */
             } else if (i == 4) {                        /* Ignore case */
                 findfold = on;
                 (void)iconset("IGNORECASE", on ? "YES" : "NO");
-            } else if (i == 5) {                        /* Tab size */
+            } else if (i == 5) {                        /* Whole words */
+                findword = on;
+                (void)iconset("WHOLEWORD", on ? "YES" : "NO");
+            } else if (i == 6) {                        /* Tab size */
                 UWORD sub = SUBNUM(code);
                 if (sub != NOSUB) {
                     char v[8];
@@ -1570,7 +1586,8 @@ static int findfrom(int y, int x, int dir, int quiet)
 {
     int fy, fx, len = (int)strlen(findstr);
     if (len == 0) return 0;
-    if (!ed_search(cur, findstr, y, x, dir, findfold, 1, &fy, &fx)) {
+    if (!ed_search(cur, findstr, y, x, dir, findfold, 1, findword,
+                   &fy, &fx)) {
         if (!quiet) {
             /* b7b: said where he is already looking, not in a
              * requester that has to be dismissed before the next key */
@@ -1705,7 +1722,8 @@ static void replacestep(void)
         int y0, x0, y1, x1;
         if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
             y0 == y1 && x1 - x0 == len &&
-            ed_search(cur, findstr, y0, x0, 1, findfold, 0, &fy, &fx) &&
+            ed_search(cur, findstr, y0, x0, 1, findfold, 0, findword,
+                      &fy, &fx) &&
             fy == y0 && fx == x0) {
             y = y0; x = x0;
         }
@@ -1720,10 +1738,10 @@ static void replacestep(void)
          * Running off the end stops instead, and says which of the
          * two reasons it stopped for. */
         if (!ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold, 0,
-                       &fy, &fx)) {
+                       findword, &fy, &fx)) {
             char t[140];
             if (ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold,
-                          1, &fy, &fx))
+                          1, findword, &fy, &fx))
                 ltx_flash(" No more below the cursor.");
             else {
                 sprintf(t, " \"%.80s\" not found.", findstr);
@@ -1766,7 +1784,7 @@ static void doreplaceall(void)
     int n;
     if (!askpair()) return;
     busy(1);
-    n = ed_replaceall(cur, findstr, repstr, findfold);
+    n = ed_replaceall(cur, findstr, repstr, findfold, findword);
     busy(0);
     if (n == 0) {
         sprintf(t, " \"%.60s\" not found.", findstr);

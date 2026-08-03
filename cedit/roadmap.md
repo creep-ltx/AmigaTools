@@ -774,6 +774,36 @@ he wanted to look at next instead of leaving him looking at what he
 just did.
 
 
+### b7e — whole words — BUILT 3.8.26
+
+His question first: replacing `from` with `new`, would `from!`,
+`from?` and `frommage` all be hit? Run rather than reasoned about -
+the answer was five hits on
+`from from! from? frommage Afrom From`, including `Afrom`, which he
+had not even asked about, and `From` surviving because the search
+is case sensitive by default.
+
+- [x] **`Whole words`, a Settings toggle beside `Ignore case`**, with
+      `WHOLEWORD=` to match and written back to the icon the same
+      way. Off by default: a fragment is as common a thing to look
+      for as an identifier. But renaming a variable called `from`
+      without it rewrites `frommage` too, which is the whole reason.
+- [x] The rule is one boundary test in `matchat`: the characters
+      either side must not be letters, digits or underscore. That is
+      what an identifier is made of in E, in C and in 68k asm alike,
+      so **one rule serves every lexer this editor will grow**. The
+      ends of a line count as boundaries, so a word alone on a line
+      still matches.
+- [x] `from!` and `from?` still match with the switch ON - punctuation
+      is a boundary, so the word simply ends at it. Only `frommage`
+      and `Afrom` drop out. **The test asserted two and the code said
+      three, and the code was right**: I had written down my
+      assumption rather than the rule. Exactly what the harness is
+      for, and cheap to find there rather than on his machine.
+- [x] Composes with case folding: `From FROMMAGE from` folded and
+      whole-word replaces two and leaves `FROMMAGE` alone.
+
+
 ## Later, not promised
 
 C and 68k asm lexers · Select All, block indent/outdent, delete

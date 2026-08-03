@@ -517,7 +517,7 @@ static void ckfind(const char *what, Buffer *b, const char *pat,
                    int wanty, int wantx)
 {
     int fy = -1, fx = -1;
-    int got = ed_search(b, pat, fy0, fx0, dir, fold, wrap, &fy, &fx);
+    int got = ed_search(b, pat, fy0, fx0, dir, fold, wrap, 0, &fy, &fx);
     if (wanty < 0) {
         ck(!got, what);                 /* expected NOT to be found */
         return;
@@ -608,6 +608,90 @@ static void searching(void)
     buffree(&b);
 }
 
+/* his question, and the reason whole-word exists: replacing `from`
+ * with `new` in a line that also holds `from!`, `frommage` and
+ * `Afrom`. Without the switch all four are hit; with it, only the
+ * word itself. */
+static void wholeword(void)
+{
+    Buffer b;
+    int fy, fx, n;
+    const char *src = "from from! from? frommage Afrom From\n";
+    /*                 0    5     11    17       26    32       */
+
+    bufinit(&b);
+    bufsplit(&b, src, (long)strlen(src));
+
+    /* plain substring: five hits, one of them inside a longer word on
+     * the LEFT, which is the one nobody expects */
+    n = 0; fx = 0;
+    while (ed_search(&b, "from", 0, fx, 1, 0, 0, 0, &fy, &fx)) { fx++; n++; }
+    ck(n == 5, "substring search finds all five");
+
+    /* whole word: THREE, not two. `from!` and `from?` both count -
+     * punctuation is a boundary, so the word ends at it. Only
+     * `frommage` (letter after) and `Afrom` (letter before) are
+     * excluded. Getting this wrong in the test first is what proves
+     * the test is reading the real answer and not my assumption. */
+    n = 0; fx = 0;
+    while (ed_search(&b, "from", 0, fx, 1, 0, 0, 1, &fy, &fx)) { fx++; n++; }
+    ck(n == 3, "whole-word search finds the three standalone words");
+
+    ck(ed_search(&b, "from", 0, 0, 1, 0, 0, 1, &fy, &fx) &&
+       fy == 0 && fx == 0, "whole word at the start of the line");
+    ck(ed_search(&b, "from", 0, 1, 1, 0, 0, 1, &fy, &fx) &&
+       fx == 5, "a bang after is still a word boundary");
+    ck(ed_search(&b, "from", 0, 6, 1, 0, 0, 1, &fy, &fx) &&
+       fx == 11, "a question mark after is a word boundary too");
+    /* past those, only frommage (17) and Afrom (27) are left, and
+     * neither is a word */
+    ck(!ed_search(&b, "from", 0, 12, 1, 0, 0, 1, &fy, &fx),
+       "no whole word inside frommage or Afrom");
+    buffree(&b);
+
+    /* and the replacement, which is what he actually asked about */
+    bufinit(&b);
+    bufsplit(&b, src, (long)strlen(src));
+    ck(ed_replaceall(&b, "from", "new", 0, 0) == 5,
+       "substring replace hits five");
+    ck(!strcmp(b.ln[0], "new new! new? newmage Anew From"),
+       "substring replace mangles the longer words");
+    buffree(&b);
+
+    bufinit(&b);
+    bufsplit(&b, src, (long)strlen(src));
+    ck(ed_replaceall(&b, "from", "new", 0, 1) == 3,
+       "whole-word replace hits three");
+    ck(!strcmp(b.ln[0], "new new! new? frommage Afrom From"),
+       "whole-word replace leaves the longer words alone");
+    buffree(&b);
+
+    /* digits and underscore are word characters, so an identifier is
+     * one word - this is the case that matters for renaming in code */
+    bufinit(&b);
+    bufsplit(&b, "x x_1 x1 _x x.y\n", 16);
+    ck(ed_replaceall(&b, "x", "Q", 0, 1) == 2, "identifier boundaries");
+    ck(!strcmp(b.ln[0], "Q x_1 x1 _x Q.y"),
+       "underscore and digits bind, a dot does not");
+    buffree(&b);
+
+    /* a word alone on a line: both ends of the line are boundaries */
+    bufinit(&b);
+    bufsplit(&b, "from\n", 5);
+    ck(ed_search(&b, "from", 0, 0, 1, 0, 0, 1, &fy, &fx),
+       "a word alone on a line is a whole word");
+    buffree(&b);
+
+    /* whole word AND case folding together */
+    bufinit(&b);
+    bufsplit(&b, "From FROMMAGE from\n", 19);
+    ck(ed_replaceall(&b, "from", "new", 1, 1) == 2,
+       "folded whole-word replace");
+    ck(!strcmp(b.ln[0], "new FROMMAGE new"),
+       "folded whole-word leaves FROMMAGE alone");
+    buffree(&b);
+}
+
 static void replacing(void)
 {
     Buffer b;
@@ -616,7 +700,7 @@ static void replacing(void)
     /* the plain case, and the count */
     bufinit(&b);
     bufsplit(&b, "one two one\ntwo one two\n", 24);
-    n = ed_replaceall(&b, "one", "1", 0);
+    n = ed_replaceall(&b, "one", "1", 0, 0);
     ck(n == 3, "replace all counts every hit");
     ck(!strcmp(b.ln[0], "1 two 1"), "replace all, first line");
     ck(!strcmp(b.ln[1], "two 1 two"), "replace all, second line");
@@ -634,7 +718,7 @@ static void replacing(void)
      * and must not be rescanned into itself */
     bufinit(&b);
     bufsplit(&b, "a a a\n", 6);
-    n = ed_replaceall(&b, "a", "aa", 0);
+    n = ed_replaceall(&b, "a", "aa", 0, 0);
     ck(n == 3, "growing replacement replaces each hit once");
     ck(!strcmp(b.ln[0], "aa aa aa"), "growing replacement text");
     buffree(&b);
@@ -642,7 +726,7 @@ static void replacing(void)
     /* shrinking to nothing */
     bufinit(&b);
     bufsplit(&b, "xaxaxa\n", 7);
-    n = ed_replaceall(&b, "a", "", 0);
+    n = ed_replaceall(&b, "a", "", 0, 0);
     ck(n == 3, "replacing with nothing still counts");
     ck(!strcmp(b.ln[0], "xxx"), "replacing with nothing deletes");
     ck(b.len[0] == 3, "length after deletion");
@@ -652,14 +736,14 @@ static void replacing(void)
      * rather than echoing the case that was matched */
     bufinit(&b);
     bufsplit(&b, "Foo foo FOO\n", 12);
-    n = ed_replaceall(&b, "foo", "bar", 1);
+    n = ed_replaceall(&b, "foo", "bar", 1, 0);
     ck(n == 3, "folded replace hits every case");
     ck(!strcmp(b.ln[0], "bar bar bar"), "folded replace writes literally");
     buffree(&b);
 
     bufinit(&b);
     bufsplit(&b, "Foo foo FOO\n", 12);
-    n = ed_replaceall(&b, "foo", "bar", 0);
+    n = ed_replaceall(&b, "foo", "bar", 0, 0);
     ck(n == 1, "unfolded replace hits only the exact case");
     ck(!strcmp(b.ln[0], "Foo bar FOO"), "unfolded replace text");
     buffree(&b);
@@ -669,7 +753,7 @@ static void replacing(void)
      * would either loop or eat the following text. */
     bufinit(&b);
     bufsplit(&b, "come from! and from! again\n", 27);
-    n = ed_replaceall(&b, "from!", "from", 0);
+    n = ed_replaceall(&b, "from!", "from", 0, 0);
     ck(n == 2, "from! -> from replaces both");
     ck(!strcmp(b.ln[0], "come from and from again"),
        "from! -> from text");
@@ -682,12 +766,12 @@ static void replacing(void)
     bufsplit(&b, "from! from!\n", 12);
     {
         int fy, fx;
-        ck(ed_search(&b, "from!", 0, 0, 1, 0, 0, &fy, &fx) &&
+        ck(ed_search(&b, "from!", 0, 0, 1, 0, 0, 0, &fy, &fx) &&
            fy == 0 && fx == 0, "find from! at the start");
         ck(ed_replaceat(&b, 0, 0, 5, "from"), "replace the first from!");
         ck(!strcmp(b.ln[0], "from from!"), "first from! replaced");
         /* and from just past it, the second is still findable */
-        ck(ed_search(&b, "from!", 0, 4, 1, 0, 0, &fy, &fx) &&
+        ck(ed_search(&b, "from!", 0, 4, 1, 0, 0, 0, &fy, &fx) &&
            fy == 0 && fx == 5, "second from! still found");
         ck(ed_replaceat(&b, 0, 5, 5, "from"), "replace the second");
         ck(!strcmp(b.ln[0], "from from"), "both from! replaced");
@@ -698,17 +782,17 @@ static void replacing(void)
      * show up here rather than in a word */
     bufinit(&b);
     bufsplit(&b, "a!b?c.d,e\n", 10);
-    ck(ed_replaceall(&b, "!", "@", 0) == 1, "replace a bang");
+    ck(ed_replaceall(&b, "!", "@", 0, 0) == 1, "replace a bang");
     ck(!strcmp(b.ln[0], "a@b?c.d,e"), "bang replaced");
     buffree(&b);
 
     /* nothing to do */
     bufinit(&b);
     bufsplit(&b, "hello\n", 6);
-    ck(ed_replaceall(&b, "zzz", "x", 0) == 0, "no match, no replacement");
+    ck(ed_replaceall(&b, "zzz", "x", 0, 0) == 0, "no match, no replacement");
     ck(!strcmp(b.ln[0], "hello"), "no match leaves the line alone");
     ck(!ed_canundo(&b), "no match leaves nothing on the undo stack");
-    ck(ed_replaceall(&b, "", "x", 0) == 0, "empty pattern replaces nothing");
+    ck(ed_replaceall(&b, "", "x", 0, 0) == 0, "empty pattern replaces nothing");
     ck(!strcmp(b.ln[0], "hello"), "empty pattern leaves the line alone");
     buffree(&b);
 
@@ -904,6 +988,7 @@ int main(void)
 {
     lineends();
     searching();
+    wholeword();
     replacing();
     autoindent();
     selection();
