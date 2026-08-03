@@ -808,6 +808,147 @@ int ed_newline(Buffer *b, int y, int x, int autoind)
     return ok;
 }
 
+/* ---- b8: block indent, line and word deletion, brackets ---------- */
+
+int ed_indentlines(Buffer *b, int y0, int y1, const char *lead)
+{
+    int y, i, ok = 1;
+    int n = 0;
+    while (lead[n]) n++;
+    if (n == 0) return 1;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= b->n) y1 = b->n - 1;
+    ed_group(b);
+    for (y = y0; y <= y1 && ok; y++) {
+        if (b->len[y] == 0) continue;   /* no trailing whitespace */
+        for (i = 0; i < n && ok; i++)
+            ok = edinsch(b, y, i, lead[i]);
+    }
+    ed_ungroup(b);
+    return ok;
+}
+
+int ed_outdentlines(Buffer *b, int y0, int y1, int tabsize)
+{
+    int y;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= b->n) y1 = b->n - 1;
+    if (tabsize < 1) tabsize = 1;
+    ed_group(b);
+    for (y = y0; y <= y1; y++) {
+        if (b->len[y] == 0) continue;
+        if (b->ln[y][0] == '\t')
+            eddelch(b, y, 0);           /* one tab is one step */
+        else {
+            int k = 0;
+            while (k < tabsize && k < b->len[y] && b->ln[y][0] == ' ') {
+                eddelch(b, y, 0);
+                k++;
+            }
+        }
+    }
+    ed_ungroup(b);
+    return 1;
+}
+
+int ed_dellines(Buffer *b, int y0, int y1)
+{
+    int y, ok = 1;
+    if (y0 < 0) y0 = 0;
+    if (y1 >= b->n) y1 = b->n - 1;
+    if (y1 < y0) return 1;
+    ed_group(b);
+    for (y = y1; y >= y0; y--) {
+        while (b->len[y]) eddelch(b, y, 0);     /* empty the text */
+        if (b->n > 1) {
+            /* and then the ROW, by closing the seam on whichever side
+             * exists - the last line has no line after it to pull up,
+             * so it merges into the one before instead */
+            if (y + 1 < b->n) ok = ok && edjoinline(b, y);
+            else              ok = ok && edjoinline(b, y - 1);
+        }
+    }
+    ed_ungroup(b);
+    b->cy = y0 < b->n ? y0 : b->n - 1;
+    if (b->cy < 0) b->cy = 0;
+    b->cx = 0;
+    return ok;
+}
+
+/* the same character class the whole-word search uses, so "a word"
+ * means one thing in this editor */
+static int wordch(int c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+int ed_delword(Buffer *b, int y, int x, int dir, int *nx)
+{
+    int s, e, i;
+    *nx = x;
+    if (dir < 0) {
+        if (x <= 0) return 1;                   /* nothing behind */
+        e = x;
+        s = x;
+        /* whatever separates us from the word, and then the word */
+        while (s > 0 && !wordch((unsigned char)b->ln[y][s - 1])) s--;
+        while (s > 0 &&  wordch((unsigned char)b->ln[y][s - 1])) s--;
+        *nx = s;
+    } else {
+        if (x >= b->len[y]) return 1;           /* nothing ahead */
+        s = x;
+        e = x;
+        if (wordch((unsigned char)b->ln[y][e]))
+            while (e < b->len[y] && wordch((unsigned char)b->ln[y][e]))
+                e++;
+        else
+            while (e < b->len[y] &&
+                   !wordch((unsigned char)b->ln[y][e])) e++;
+        *nx = s;
+    }
+    if (e <= s) return 1;
+    ed_group(b);
+    for (i = 0; i < e - s; i++) eddelch(b, y, s);
+    ed_ungroup(b);
+    return 1;
+}
+
+int ed_matchbracket(const Buffer *b, int y, int x, int *my, int *mx)
+{
+    static const char open[]  = "([{";
+    static const char close[] = ")]}";
+    int c, i, k = -1, dir = 0;
+    char want = 0, have = 0;
+    int depth = 0;
+
+    if (y < 0 || y >= b->n || x < 0 || x >= b->len[y]) return 0;
+    c = (unsigned char)b->ln[y][x];
+    for (i = 0; i < 3; i++) {
+        if (c == open[i])  { k = i; dir =  1; want = close[i]; }
+        if (c == close[i]) { k = i; dir = -1; want = open[i];  }
+    }
+    if (k < 0) return 0;
+    have = (char)c;
+
+    while (y >= 0 && y < b->n) {
+        while (x >= 0 && x < b->len[y]) {
+            int d = (unsigned char)b->ln[y][x];
+            if (d == have) depth++;
+            else if (d == want) {
+                if (--depth == 0) { *my = y; *mx = x; return 1; }
+            }
+            x += dir;
+        }
+        y += dir;
+        if (y < 0 || y >= b->n) break;
+        x = dir > 0 ? 0 : b->len[y] - 1;
+        /* an empty line has nothing to look at, and x would be -1 on
+         * the way back - the loop above simply does not run */
+    }
+    return 0;
+}
+
 /* ---- syntax state -------------------------------------------------- */
 
 void ed_lexupto(Buffer *b, int upto)

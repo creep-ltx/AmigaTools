@@ -804,6 +804,86 @@ is case sensitive by default.
       whole-word replaces two and leaves `FROMMAGE` alone.
 
 
+## 0.1b8 — the editing block — BUILT 3.8.26, AWAITING BOOT
+
+Everything on the "everyday editing" list at once, his call. All of
+it is one undo step per action, for b5's reason: being asked to undo
+a forty-line indent forty times is not an undo.
+
+- [x] **Block indent and outdent.** Tab indents when the selection
+      crosses a LINE BREAK - within one line a selection is a piece
+      of text, and replacing it with a tab is what was asked for.
+      Shift+Tab always outdents, selection or the current line. This
+      was the item that was actively WRONG before: Tab with a
+      selection live deleted it and typed a tab.
+- [x] **Indent follows the FILE, not a house style**: if anything in
+      range is already tab-indented it uses a tab, otherwise tabsize
+      spaces, and failing that it looks at the rest of the buffer.
+      Mixing the two is how a file comes to look different in every
+      editor that opens it. Outdent takes ONE step - a tab, or up to
+      tabsize spaces, whichever is really there - and never a real
+      character.
+- [x] Blank lines are not indented. It would only manufacture
+      trailing whitespace for the next diff to complain about.
+- [x] **Select All** takes Amiga+A from Save As, which loses little:
+      Save on an untitled document already falls through to Save As,
+      so that shortcut only ever saved a keystroke on a re-name.
+- [x] **Delete Line** (Amiga+L) takes the selected lines or the
+      current one, rows included, and the buffer never drops below
+      one line. It clamps the scroll top afterwards, because Select
+      All + Delete Line can take the whole file and leave the top far
+      past the end - unlike a Backspace join, which can only ever
+      lose one row.
+- [x] **Delete Word** (Amiga+W), and **Ctrl+Backspace / Ctrl+Del**
+      for back and forward - Ctrl already means "the big version of
+      this move" on the cursor keys. Backward takes the separator and
+      then the word; forward takes the word, or the run of whitespace
+      if that is what it is standing on. It stays inside the line:
+      Backspace and Del already handle joining.
+- [x] **Match Bracket** (Amiga+M) on `()[]{}`, nesting, both
+      directions, across lines. It tries the bracket under the caret
+      and then the one just BEFORE it - typing a `)` leaves the caret
+      after it, which is exactly when you want to see what it closed.
+      It counts brackets in comments and strings too: not counting
+      them would mean running a lexer over every line it passes, and
+      the lexer only knows E, so a C file would answer differently to
+      the same key. Plain counting is at least the same rule
+      everywhere.
+- [x] **Overwrite** (Settings, `OVERWRITE=`), showing `OVR` in the
+      status row - a mode the user cannot see is a mode they will be
+      surprised by. It never overwrites a character that is not
+      there, so typing at the end of a line still extends it.
+- [x] The caret rides WITH the text on a single-line indent, and a
+      single line touched is still ONE row repainted - the standing
+      rule holds here as much as it does for typing.
+- [x] Harness ALL GREEN both roads, first run, ~90 new checks: indent
+      and outdent ranges and their single undo, blank lines skipped,
+      outdent taking only one step and never a real character;
+      deleting the first, middle, last and every line, the only line
+      being emptied rather than removed; word deletion in both
+      directions, at both ends of a line where there is nothing to
+      do, and one undo taking a whole word back; brackets nested,
+      mismatched-in-between, across blank lines, unbalanced in both
+      directions, and all three pair kinds.
+- [ ] **BOOT GATE:** select a block of E and press Tab, then
+      Shift+Tab, and see the indent match what the file already uses.
+      Amiga+A then Amiga+L on a copy. Ctrl+Backspace through a line.
+      Amiga+M on a `PROC` header's bracket. Settings > Overwrite and
+      watch `OVR` appear and typing replace.
+
+### Two "known limits" measured rather than argued (3.8.26)
+
+His screenshot of cfile.e on the A1200: **12,211 lines, widest line
+136 columns**.
+
+- **Gutter regrow** is not an open question: `calcgut` already runs
+  from `structural()`, so the gutter widens the moment a line is
+  added, and the shot shows five digits rendering correctly.
+- **`LTX_MAXCOLS` 256** is not being approached by the real corpus -
+  136 is barely half. It stays a known ceiling for a big RTG screen,
+  not something to spend a build on.
+
+
 ## Later, not promised
 
 C and 68k asm lexers · Select All, block indent/outdent, delete

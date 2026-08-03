@@ -314,6 +314,7 @@ static int  findword;           /* WHOLEWORD=. Off by default, because
                                  * but renaming a variable called
                                  * `from` without it also rewrites
                                  * `frommage`, which is why it exists */
+static int  ttover;             /* OVERWRITE=YES/NO - b8 */
 static int  ttindent = 1;       /* AUTOINDENT=YES/NO - b7. Defaults ON:
                                  * this is an editor for indented
                                  * languages, and the cost of it being
@@ -373,7 +374,11 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Close All",    NULL,        0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Save",         (STRPTR)"S", 0, 0, NULL },
-    { NM_ITEM,  (STRPTR)"Save As...",   (STRPTR)"A", 0, 0, NULL },
+    /* b8: Save As gives up Amiga+A to Select All, which is the one
+     * everybody's hands already know. It loses little: Save on an
+     * untitled document already falls through to Save As, so the
+     * shortcut only ever saved a keystroke on a re-name. */
+    { NM_ITEM,  (STRPTR)"Save As...",   NULL,        0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Quit",         (STRPTR)"Q", 0, 0, NULL },
     { NM_TITLE, (STRPTR)"Edit",         NULL,        0, 0, NULL },
@@ -384,6 +389,15 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Cut",          (STRPTR)"X", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Copy",         (STRPTR)"C", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Paste",        (STRPTR)"V", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Select All",   (STRPTR)"A", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Indent",       (STRPTR)"I", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Outdent",      (STRPTR)"U", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Delete Line",  (STRPTR)"L", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Delete Word",  (STRPTR)"W", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Match Bracket",(STRPTR)"M", 0, 0, NULL },
     /* b7. The shortcuts are what was LEFT: N is New and P would pair
      * with it naturally, but Amiga+N for New is older than this
      * program and not worth breaking for a mnemonic. So Find Next and
@@ -417,6 +431,8 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Ignore case", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Whole words", NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Overwrite", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     /* his ask: tab size from the menu, 1-10. Radio rather than
      * toggle - exactly one is true - which in GadTools means CHECKIT
@@ -711,10 +727,13 @@ static void epage(void)
  * on every position change. Both numbers here are O(1). */
 static void estatus(char *dst, int max)
 {
-    sprintf(dst, " %.20s%s L%d/%d C%d",
+    /* b8: overwrite is a MODE, and a mode the user cannot see is a
+     * mode they will be surprised by */
+    sprintf(dst, " %.20s%s L%d/%d C%d%s",
             cur->name[0] ? cur->name : "untitled",
             cur->dirty ? " *" : "",
-            cur->cy + 1, cur->n, curcol() + 1);
+            cur->cy + 1, cur->n, curcol() + 1,
+            ttover ? "  OVR" : "");
     (void)max;
 }
 
@@ -849,6 +868,7 @@ static int openmain(void)
                 else if (!strcmp(lb, "Auto indent"))  on = ttindent;
                 else if (!strcmp(lb, "Ignore case"))  on = findfold;
                 else if (!strcmp(lb, "Whole words"))  on = findword;
+                else if (!strcmp(lb, "Overwrite"))    on = ttover;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -933,6 +953,10 @@ static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
         if (v) findword = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
                             tteq((char *)v, "FALSE"));
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"OVERWRITE");
+        if (v) ttover = !(tteq((char *)v, "NO") ||
+                          tteq((char *)v, "OFF") ||
+                          tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"GUTTER");
         if (v) ttgutter = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
@@ -1006,6 +1030,11 @@ static void doreplaceall(void);
 static void replacestep(void);
 static void dogoto(void);
 static void jumpend(int dir);
+static void doselectall(void);  /* b8 */
+static void doindent(int out);
+static void dodelline(void);
+static void dodelword(int dir);
+static void dobracket(void);
 static int  askquit(void);      /* and the unsaved-changes prompt */
 static void follow(void);       /* keep the caret on screen */
 
@@ -1030,12 +1059,21 @@ static int domenu(UWORD code)   /* 1 = quit */
             if (i == 10) return askquit();
         }
         if (m == 1) {                                   /* Edit */
-            if (i == 0) { doundo(0); return 0; }
-            if (i == 1) { doundo(1); return 0; }
-            if (i == 3) { domark();  return 0; }
-            if (i == 4) { docopy(1); return 0; }
-            if (i == 5) { docopy(0); return 0; }
-            if (i == 6) { dopaste(); return 0; }
+            /* Undo(0) Redo(1) -(2) Mark(3) Cut(4) Copy(5) Paste(6)
+             * SelectAll(7) -(8) Indent(9) Outdent(10) -(11)
+             * DelLine(12) DelWord(13) -(14) Bracket(15) */
+            if (i == 0)  { doundo(0);     return 0; }
+            if (i == 1)  { doundo(1);     return 0; }
+            if (i == 3)  { domark();      return 0; }
+            if (i == 4)  { docopy(1);     return 0; }
+            if (i == 5)  { docopy(0);     return 0; }
+            if (i == 6)  { dopaste();     return 0; }
+            if (i == 7)  { doselectall(); return 0; }
+            if (i == 9)  { doindent(0);   return 0; }
+            if (i == 10) { doindent(1);   return 0; }
+            if (i == 12) { dodelline();   return 0; }
+            if (i == 13) { dodelword(1);  return 0; }
+            if (i == 15) { dobracket();   return 0; }
         }
         if (m == 2) {                                   /* Search */
             /* Find(0) Next(1) Prev(2) -(3) Replace(4) ReplaceNext(5)
@@ -1078,7 +1116,11 @@ static int domenu(UWORD code)   /* 1 = quit */
             } else if (i == 5) {                        /* Whole words */
                 findword = on;
                 (void)iconset("WHOLEWORD", on ? "YES" : "NO");
-            } else if (i == 6) {                        /* Tab size */
+            } else if (i == 6) {                        /* Overwrite */
+                ttover = on;
+                (void)iconset("OVERWRITE", on ? "YES" : "NO");
+                drawstatus();   /* the mode shows in the status row */
+            } else if (i == 7) {                        /* Tab size */
                 UWORD sub = SUBNUM(code);
                 if (sub != NOSUB) {
                     char v[8];
@@ -1216,11 +1258,22 @@ static void typech(char c)
 {
     int oldcy;
     int had = eatsel();
+    /* b8: overwrite replaces the character under the caret - but
+     * never one that is not there, so typing at the end of a line
+     * still extends it rather than doing nothing. */
+    int over = (!had && ttover && cur->cx < cur->len[cur->cy]);
+    int grp  = had || over;
     oldcy = cur->cy;
-    if (had) ed_group(cur);
-    if (!edinsch(cur, cur->cy, cur->cx, c)) { oom(); return; }
+    if (grp) ed_group(cur);     /* the delete and the insert undo as
+                                 * one keystroke, which is what it was */
+    if (over) eddelch(cur, cur->cy, cur->cx);
+    if (!edinsch(cur, cur->cy, cur->cx, c)) {
+        if (grp) ed_ungroup(cur);       /* or the group never closes */
+        oom();
+        return;
+    }
     cur->cx++;
-    if (had) ed_ungroup(cur);
+    if (grp) ed_ungroup(cur);
     goalx = cur->cx;
     ed_lexdirty(cur, cur->cy);  /* almost always one line of work */
     follow();
@@ -1830,6 +1883,159 @@ static void jumpend(int dir)
     goalx = cur->cx;
 }
 
+/* ---- b8: the editing block ---------------------------------------- */
+
+static void doselectall(void)
+{
+    cur->cy = 0;
+    cur->cx = 0;
+    ed_selstart(cur);
+    cur->cy = cur->n - 1;
+    cur->cx = cur->len[cur->n - 1];
+    goalx = cur->cx;
+    ed_break(cur);
+    follow();
+    selpaint();
+}
+
+/* the lines a block operation works on: the selected ones, or the one
+ * the caret is in. A selection ENDING at column 0 has not really
+ * reached that line - the highlight visibly stops at the line break -
+ * so it is not one of them. */
+static int blockrange(int *y0, int *y1)
+{
+    int x0, x1;
+    if (cur->selon && ed_selrange(cur, y0, &x0, y1, &x1)) {
+        if (*y1 > *y0 && x1 == 0) (*y1)--;
+        return 1;
+    }
+    *y0 = *y1 = cur->cy;
+    return 0;
+}
+
+/* Follow the FILE rather than impose a house style: if anything in
+ * the range is already tab-indented, indent with a tab; otherwise
+ * with tabsize spaces. Failing that, look at the rest of the buffer,
+ * because a range of unindented lines says nothing either way.
+ * Mixing the two is how a file comes to look different in every
+ * editor that opens it. */
+static int indentwithtab(int y0, int y1)
+{
+    int y;
+    for (y = y0; y <= y1; y++)
+        if (cur->len[y] > 0 && cur->ln[y][0] == '\t') return 1;
+    for (y = y0; y <= y1; y++)
+        if (cur->len[y] > 0 && cur->ln[y][0] == ' ')  return 0;
+    for (y = 0; y < cur->n; y++) {
+        if (cur->len[y] == 0) continue;
+        if (cur->ln[y][0] == '\t') return 1;
+        if (cur->ln[y][0] == ' ')  return 0;
+    }
+    return 0;                   /* nothing indented anywhere: spaces */
+}
+
+static void doindent(int out)
+{
+    int y0, y1, hadsel, ok;
+    int oldcy = cur->cy, oldlen;
+    hadsel = blockrange(&y0, &y1);
+    oldlen = cur->len[cur->cy];         /* to move the caret WITH the
+                                         * text, below */
+
+    if (out)
+        ok = ed_outdentlines(cur, y0, y1, tttab);
+    else {
+        char lead[12];
+        if (indentwithtab(y0, y1)) { lead[0] = '\t'; lead[1] = 0; }
+        else {
+            int k = tttab, i;
+            if (k > 10) k = 10;
+            if (k < 1)  k = 1;
+            for (i = 0; i < k; i++) lead[i] = ' ';
+            lead[k] = 0;
+        }
+        ok = ed_indentlines(cur, y0, y1, lead);
+    }
+    if (!ok) { oom(); return; }
+
+    cur->maxwdirty = 1;
+    if (cur->lexdone > y0) cur->lexdone = y0 + 1;
+    ed_lexdirty(cur, y0);
+
+    /* re-select the whole range, so pressing Tab again indents the
+     * same block instead of whatever the old columns now point at */
+    if (hadsel) {
+        cur->cy = y0;
+        cur->cx = 0;
+        ed_selstart(cur);
+        cur->cy = y1;
+        cur->cx = cur->len[y1];
+    } else {
+        /* the caret rides WITH the text: the line grew or shrank by
+         * however much went on or came off the front of it */
+        cur->cx += cur->len[cur->cy] - oldlen;
+        if (cur->cx < 0) cur->cx = 0;
+        if (cur->cx > cur->len[cur->cy]) cur->cx = cur->len[cur->cy];
+    }
+    goalx = cur->cx;
+    follow();
+    /* one line touched is still one row - the standing rule holds
+     * here as much as it does for typing */
+    if (!hadsel && y0 == y1) damage(oldcy);
+    else                     selpaint();
+    marktitle();
+}
+
+static void dodelline(void)
+{
+    int y0, y1;
+    blockrange(&y0, &y1);
+    ed_selclear(cur);
+    if (!ed_dellines(cur, y0, y1)) { oom(); return; }
+    goalx = cur->cx;
+    /* Select All then Delete Line takes the whole file, so the scroll
+     * top can be left far past the end - unlike a Backspace join,
+     * which can only ever lose one row */
+    clamptop();
+    follow();
+    structural();               /* rows went: everything below moved */
+}
+
+static void dodelword(int dir)
+{
+    int nx, oldcy = cur->cy;
+    if (cur->selon) {           /* a selection IS the thing to delete */
+        if (eatsel()) { goalx = cur->cx; follow(); selpaint();
+                        marktitle(); }
+        return;
+    }
+    if (!ed_delword(cur, cur->cy, cur->cx, dir, &nx)) { oom(); return; }
+    cur->cx = nx;
+    goalx = nx;
+    if (cur->lexdone > cur->cy) cur->lexdone = cur->cy + 1;
+    ed_lexdirty(cur, cur->cy);
+    follow();
+    damage(oldcy);              /* one line, so one row */
+    marktitle();
+}
+
+static void dobracket(void)
+{
+    int my, mx;
+    /* the bracket UNDER the caret, or failing that the one just
+     * BEFORE it - typing a ')' leaves the caret after it, which is
+     * exactly the moment you want to check what it closed */
+    if (!ed_matchbracket(cur, cur->cy, cur->cx, &my, &mx) &&
+        !(cur->cx > 0 &&
+          ed_matchbracket(cur, cur->cy, cur->cx - 1, &my, &mx))) {
+        ltx_flash(" No bracket here.");
+        return;
+    }
+    if (cur->selon) { ed_selclear(cur); selpaint(); }
+    gotoyx(my, mx);
+    goalx = cur->cx;
+}
+
 static void dosave(void)
 {
     if (cur->path[0] == 0) { dosaveas(); return; }   /* untitled */
@@ -2103,13 +2309,34 @@ static void guimode(void)
                     if (cur->selon) { ed_selclear(cur); selpaint(); }
                 } else if (code == 13)                  /* Return */
                     donewline();
-                else if (code == 8)                     /* Backspace */
-                    dobackspace();
-                else if (code == 127)                   /* Del */
-                    dodelete();
-                else if (code == 9)                     /* Tab: a real
-                                                         * tab byte */
-                    typech('\t');
+                /* b8: with Ctrl they take a WORD, matching Ctrl on
+                 * the cursor keys, where it already means "the big
+                 * version of this" */
+                else if (code == 8) {                   /* Backspace */
+                    if (qual & IEQUALIFIER_CONTROL) dodelword(-1);
+                    else                            dobackspace();
+                } else if (code == 127) {               /* Del */
+                    if (qual & IEQUALIFIER_CONTROL) dodelword(1);
+                    else                            dodelete();
+                }
+                else if (code == 9) {                   /* Tab */
+                    /* b8: Shift+Tab always outdents. Plain Tab
+                     * indents only when the selection crosses a LINE
+                     * BREAK - within one line a selection is a piece
+                     * of text, and replacing it with a tab is what
+                     * was asked for. */
+                    int y0, x0, y1, x1;
+                    int shift = (qual & (IEQUALIFIER_LSHIFT |
+                                         IEQUALIFIER_RSHIFT)) != 0;
+                    if (shift)
+                        doindent(1);
+                    else if (cur->selon &&
+                             ed_selrange(cur, &y0, &x0, &y1, &x1) &&
+                             y1 > y0)
+                        doindent(0);
+                    else
+                        typech('\t');   /* otherwise a real tab byte */
+                }
                 else if (code >= 32 && code != 127)
                     typech((char)code);
             }

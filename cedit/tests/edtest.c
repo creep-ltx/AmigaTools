@@ -885,6 +885,243 @@ static void autoindent(void)
     buffree(&b);
 }
 
+/* ---- b8: block indent, line/word deletion, brackets -------------- */
+
+static void blockindent(void)
+{
+    Buffer b;
+    int st;
+
+    /* indent a range, and ONE undo take it all back */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\nthree\nfour\n", 19);
+    ck(ed_indentlines(&b, 1, 2, "  "), "indent a range");
+    ck(!strcmp(b.ln[0], "one"),     "line above untouched");
+    ck(!strcmp(b.ln[1], "  two"),   "first indented");
+    ck(!strcmp(b.ln[2], "  three"), "second indented");
+    ck(!strcmp(b.ln[3], "four"),    "line below untouched");
+    ck(b.len[1] == 5 && b.len[2] == 7, "indent lengths");
+    ck(ed_undo(&b, &st) >= 0, "block indent undoes");
+    ck(!strcmp(b.ln[1], "two") && !strcmp(b.ln[2], "three"),
+       "one undo takes back the whole block");
+    ck(!ed_canundo(&b), "and it was a single step");
+    buffree(&b);
+
+    /* a blank line is left alone - indenting it only makes trailing
+     * whitespace */
+    bufinit(&b);
+    bufsplit(&b, "a\n\nb\n", 5);
+    ck(ed_indentlines(&b, 0, 2, "\t"), "indent across a blank line");
+    ck(!strcmp(b.ln[0], "\ta"), "first indented");
+    ck(!strcmp(b.ln[1], ""),    "blank line stays blank");
+    ck(!strcmp(b.ln[2], "\tb"), "third indented");
+    buffree(&b);
+
+    /* outdent takes off a tab, or up to tabsize spaces, and never a
+     * real character */
+    bufinit(&b);
+    bufsplit(&b, "\tone\n    two\n  three\nfour\n", 25);
+    ck(ed_outdentlines(&b, 0, 3, 4), "outdent a range");
+    ck(!strcmp(b.ln[0], "one"),   "a tab comes off whole");
+    ck(!strcmp(b.ln[1], "two"),   "four spaces come off");
+    ck(!strcmp(b.ln[2], "three"), "two spaces is all there was");
+    ck(!strcmp(b.ln[3], "four"),  "no indent, nothing taken");
+    ck(ed_undo(&b, &st) >= 0, "block outdent undoes");
+    ck(!strcmp(b.ln[0], "\tone") && !strcmp(b.ln[1], "    two"),
+       "one undo restores the whole block");
+    buffree(&b);
+
+    /* outdent takes only ONE step even when there is more */
+    bufinit(&b);
+    bufsplit(&b, "        deep\n", 13);
+    ck(ed_outdentlines(&b, 0, 0, 4), "outdent one step");
+    ck(!strcmp(b.ln[0], "    deep"), "only one step came off");
+    buffree(&b);
+}
+
+static void linedelete(void)
+{
+    Buffer b;
+    int st;
+
+    /* a line in the middle */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\nthree\n", 14);
+    ck(ed_dellines(&b, 1, 1), "delete a middle line");
+    ck(b.n == 2, "one line fewer");
+    ck(!strcmp(b.ln[0], "one") && !strcmp(b.ln[1], "three"),
+       "the right line went");
+    ck(ed_undo(&b, &st) >= 0, "line delete undoes");
+    ck(b.n == 3 && !strcmp(b.ln[1], "two"), "one undo brings it back");
+    ck(!ed_canundo(&b), "as a single step");
+    buffree(&b);
+
+    /* the LAST line, which has no line after it to pull up */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\nthree\n", 14);
+    ck(ed_dellines(&b, 2, 2), "delete the last line");
+    ck(b.n == 2, "last line gone");
+    ck(!strcmp(b.ln[1], "two"), "the one before survives whole");
+    buffree(&b);
+
+    /* the FIRST line */
+    bufinit(&b);
+    bufsplit(&b, "one\ntwo\n", 8);
+    ck(ed_dellines(&b, 0, 0), "delete the first line");
+    ck(b.n == 1 && !strcmp(b.ln[0], "two"), "first line gone");
+    buffree(&b);
+
+    /* a range */
+    bufinit(&b);
+    bufsplit(&b, "a\nb\nc\nd\ne\n", 10);
+    ck(ed_dellines(&b, 1, 3), "delete a range of lines");
+    ck(b.n == 2, "three lines gone");
+    ck(!strcmp(b.ln[0], "a") && !strcmp(b.ln[1], "e"), "the ends remain");
+    ck(ed_undo(&b, &st) >= 0, "range delete undoes");
+    ck(b.n == 5 && !strcmp(b.ln[2], "c"), "one undo restores all three");
+    buffree(&b);
+
+    /* the ONLY line: emptied, never removed - a buffer with no lines
+     * has no cursor position to be in */
+    bufinit(&b);
+    bufsplit(&b, "only\n", 5);
+    ck(ed_dellines(&b, 0, 0), "delete the only line");
+    ck(b.n == 1, "still one line");
+    ck(b.len[0] == 0 && !strcmp(b.ln[0], ""), "and it is empty");
+    buffree(&b);
+
+    /* every line at once */
+    bufinit(&b);
+    bufsplit(&b, "a\nb\nc\n", 6);
+    ck(ed_dellines(&b, 0, 2), "delete every line");
+    ck(b.n == 1 && b.len[0] == 0, "one empty line is left");
+    buffree(&b);
+}
+
+static void worddelete(void)
+{
+    Buffer b;
+    int nx, st;
+
+    bufinit(&b);
+    bufsplit(&b, "alpha beta gamma\n", 17);
+    /*             0     6    11        */
+
+    /* backward from the end of a word takes the word */
+    ck(ed_delword(&b, 0, 10, -1, &nx), "delete word back");
+    ck(!strcmp(b.ln[0], "alpha  gamma"), "the word went");
+    ck(nx == 6, "cursor at where the word began");
+    buffree(&b);
+
+    /* backward from just after a space takes the space AND the word */
+    bufinit(&b);
+    bufsplit(&b, "alpha beta gamma\n", 17);
+    ck(ed_delword(&b, 0, 11, -1, &nx), "delete word back over a space");
+    ck(!strcmp(b.ln[0], "alpha gamma"), "space and word both went");
+    ck(nx == 6, "cursor where the word began");
+    buffree(&b);
+
+    /* at column 0 there is nothing behind */
+    bufinit(&b);
+    bufsplit(&b, "alpha\n", 6);
+    ck(ed_delword(&b, 0, 0, -1, &nx), "delete word back at column 0");
+    ck(!strcmp(b.ln[0], "alpha"), "nothing happened");
+    ck(!ed_canundo(&b), "and nothing was recorded");
+    buffree(&b);
+
+    /* forward from the start of a word takes the word, not the space */
+    bufinit(&b);
+    bufsplit(&b, "alpha beta\n", 11);
+    ck(ed_delword(&b, 0, 0, 1, &nx), "delete word forward");
+    ck(!strcmp(b.ln[0], " beta"), "the word went, the space did not");
+    ck(nx == 0, "cursor stays put");
+    buffree(&b);
+
+    /* forward from a space takes the run of spaces */
+    bufinit(&b);
+    bufsplit(&b, "a   b\n", 6);
+    ck(ed_delword(&b, 0, 1, 1, &nx), "delete forward over spaces");
+    ck(!strcmp(b.ln[0], "ab"), "the whitespace run went");
+    buffree(&b);
+
+    /* at end of line there is nothing ahead */
+    bufinit(&b);
+    bufsplit(&b, "alpha\n", 6);
+    ck(ed_delword(&b, 0, 5, 1, &nx), "delete word forward at end");
+    ck(!strcmp(b.ln[0], "alpha"), "nothing happened at the end");
+    buffree(&b);
+
+    /* one undo takes a whole word back, not a letter at a time */
+    bufinit(&b);
+    bufsplit(&b, "alpha beta\n", 11);
+    ed_delword(&b, 0, 10, -1, &nx);
+    ck(ed_undo(&b, &st) >= 0, "word delete undoes");
+    ck(!strcmp(b.ln[0], "alpha beta"), "the whole word came back");
+    ck(!ed_canundo(&b), "as one step");
+    buffree(&b);
+}
+
+static void brackets(void)
+{
+    Buffer b;
+    int my, mx;
+
+    bufinit(&b);
+    bufsplit(&b, "a(b)c\n", 6);
+    ck(ed_matchbracket(&b, 0, 1, &my, &mx) && my == 0 && mx == 3,
+       "forward to the closer");
+    ck(ed_matchbracket(&b, 0, 3, &my, &mx) && my == 0 && mx == 1,
+       "backward to the opener");
+    ck(!ed_matchbracket(&b, 0, 0, &my, &mx), "not a bracket at all");
+    buffree(&b);
+
+    /* nesting, and the WRONG kind in between must not confuse it */
+    bufinit(&b);
+    bufsplit(&b, "f(g(h),[i])\n", 12);
+    ck(ed_matchbracket(&b, 0, 1, &my, &mx) && mx == 10,
+       "outer paren spans the lot");
+    ck(ed_matchbracket(&b, 0, 3, &my, &mx) && mx == 5,
+       "inner paren matches its own");
+    ck(ed_matchbracket(&b, 0, 7, &my, &mx) && mx == 9,
+       "the bracket pair inside");
+    buffree(&b);
+
+    /* across lines, both ways */
+    bufinit(&b);
+    bufsplit(&b, "PROC x(\n  a,\n  b)\n", 18);
+    ck(ed_matchbracket(&b, 0, 6, &my, &mx) && my == 2 && mx == 3,
+       "opener finds its closer three lines down");
+    ck(ed_matchbracket(&b, 2, 3, &my, &mx) && my == 0 && mx == 6,
+       "closer finds its opener back up");
+    buffree(&b);
+
+    /* unbalanced: no answer rather than a wrong one */
+    bufinit(&b);
+    bufsplit(&b, "a(b\nc\n", 6);
+    ck(!ed_matchbracket(&b, 0, 1, &my, &mx), "an unclosed opener matches nothing");
+    buffree(&b);
+    bufinit(&b);
+    bufsplit(&b, "a)b\n", 4);
+    ck(!ed_matchbracket(&b, 0, 1, &my, &mx), "a stray closer matches nothing");
+    buffree(&b);
+
+    /* blank lines on the way must not stop the walk */
+    bufinit(&b);
+    bufsplit(&b, "{\n\n\n}\n", 6);
+    ck(ed_matchbracket(&b, 0, 0, &my, &mx) && my == 3 && mx == 0,
+       "blank lines are walked over");
+    ck(ed_matchbracket(&b, 3, 0, &my, &mx) && my == 0 && mx == 0,
+       "and backwards too");
+    buffree(&b);
+
+    /* braces and square brackets, not just parens */
+    bufinit(&b);
+    bufsplit(&b, "x[0]{y}\n", 8);
+    ck(ed_matchbracket(&b, 0, 1, &my, &mx) && mx == 3, "square pair");
+    ck(ed_matchbracket(&b, 0, 4, &my, &mx) && mx == 6, "brace pair");
+    buffree(&b);
+}
+
 static void selection(void)
 {
     Buffer b;
@@ -991,6 +1228,10 @@ int main(void)
     wholeword();
     replacing();
     autoindent();
+    blockindent();
+    linedelete();
+    worddelete();
+    brackets();
     selection();
     undoing();
     saving();

@@ -249,6 +249,43 @@ int  ed_indent(const Buffer *b, int y, int upto, char *dst, int max);
  * in b->cy/b->cx. */
 int  ed_newline(Buffer *b, int y, int x, int autoind);
 
+/* ---- b8: block indent, whole-line and word deletion, brackets ----
+ * All of these are ONE undo step each, for the b5 reason: being
+ * asked to undo a block indent of forty lines forty times is not an
+ * undo. */
+
+/* put `lead` at the start of every line from y0 to y1. Lines that
+ * are EMPTY are left alone - indenting a blank line only manufactures
+ * trailing whitespace for the next diff to complain about. */
+int  ed_indentlines(Buffer *b, int y0, int y1, const char *lead);
+
+/* take one indent step off the front of every line in the range: a
+ * tab, or up to `tabsize` spaces, whichever is actually there. Lines
+ * with no leading whitespace are left alone rather than eating a
+ * real character. */
+int  ed_outdentlines(Buffer *b, int y0, int y1, int tabsize);
+
+/* delete whole lines y0..y1 inclusive, the rows included. The buffer
+ * never drops below one line - the same rule as everywhere else,
+ * because a buffer with no lines has no cursor position to be in. */
+int  ed_dellines(Buffer *b, int y0, int y1);
+
+/* delete one word from (y,x): dir < 0 back over the word behind the
+ * cursor, dir > 0 forward over the one ahead. Stays inside the line -
+ * at either end there is nothing to do, and Backspace/Del already
+ * handle joining. Returns the new cursor column in *nx. */
+int  ed_delword(Buffer *b, int y, int x, int dir, int *nx);
+
+/* the bracket matching the one at (y,x). Handles ()[]{} and nesting,
+ * scanning forward from an opener and backward from a closer.
+ *
+ * It counts brackets in COMMENTS and STRINGS too. Teaching it not to
+ * would mean running the lexer over every line it passes, and the
+ * lexer only knows E - so a C file would get a different answer to
+ * the same keypress. Plain counting is at least the same rule
+ * everywhere, and the caret lands somewhere the eye can check. */
+int  ed_matchbracket(const Buffer *b, int y, int x, int *my, int *mx);
+
 /* ---- syntax state -------------------------------------------------
  * lex[i] is the state line i STARTS in, so line i can be coloured
  * knowing only that byte. ed_lexupto brings the array up to date as
