@@ -1660,31 +1660,54 @@ static void replaceone(int y, int x, int plen)
     marktitle();
 }
 
-/* replace the match under the cursor if that is where we are, then
- * find the next. Repeating this walks the file one at a time, which
- * is the half of Replace that Replace All cannot do. */
+/* Replace one occurrence and leave the NEXT one selected, so the key
+ * can simply be pressed again to walk the file.
+ *
+ * It REPLACES on the first press. It used to only find, on the
+ * theory that showing before destroying was safer - but he pressed
+ * Replace, typed both strings, and nothing changed, which is the
+ * report this fixes. Undo is what makes that safe, and undo has been
+ * there since b3; a button named Replace that does not replace is
+ * not caution, it is a bug.
+ *
+ * The follow-up search is QUIET. Saying "not found" straight after a
+ * successful replacement reads as "the replacement failed" - and it
+ * is exactly what he saw, because "from!" -> "from" consumed the
+ * last match while "from" -> "from!" never ran out (a wrapped search
+ * for "from" matches the "from" inside the "from!" just written).
+ * Running out of matches is the END of a run, not an error. */
 static void replacestep(void)
 {
     int len = (int)strlen(findstr);
+    int fy, fx, y = -1, x = -1;
+
     if (len == 0) { doreplace(); return; }
+
+    /* sitting on a match already? Then that is the one to replace.
+     * The right SHAPE is not proof of the right TEXT - any hand-made
+     * selection of the same length would qualify - so ask the
+     * searcher whether a match really starts exactly there. */
     if (cur->selon) {
         int y0, x0, y1, x1;
         if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
-            y0 == y1 && x1 - x0 == len) {
-            /* the right SHAPE is not proof it is the right TEXT - he
-             * could have selected any other len characters by hand.
-             * Ask the searcher whether a match really starts exactly
-             * there before overwriting it. */
-            int fy, fx;
-            if (ed_search(cur, findstr, y0, x0, 1, findfold, 0,
-                          &fy, &fx) && fy == y0 && fx == x0) {
-                replaceone(y0, x0, len);
-                findfrom(cur->cy, cur->cx, 1, 0);
-                return;
-            }
+            y0 == y1 && x1 - x0 == len &&
+            ed_search(cur, findstr, y0, x0, 1, findfold, 0, &fy, &fx) &&
+            fy == y0 && fx == x0) {
+            y = y0; x = x0;
         }
     }
-    findfrom(cur->cy, cur->cx, 1, 0);   /* not on a match: just find */
+    if (y < 0) {                /* otherwise take the next one */
+        if (!ed_search(cur, findstr, cur->cy, cur->cx, 1, findfold, 1,
+                       &fy, &fx)) {
+            char t[140];
+            sprintf(t, " \"%.80s\" not found.", findstr);
+            ltx_flash(t);
+            return;
+        }
+        y = fy; x = fx;
+    }
+    replaceone(y, x, len);
+    findfrom(cur->cy, cur->cx, 1, 1);   /* quiet: see above */
 }
 
 /* the two prompts Replace and Replace All share. Esc at either one
@@ -1701,12 +1724,7 @@ static int askpair(void)
 static void doreplace(void)
 {
     if (!askpair()) return;
-    /* deliberately SHOWS the first hit before touching it: with
-     * nothing matched yet this finds and selects, and the next press
-     * (or Amiga+T) replaces it and moves on. Replacing something he
-     * has not seen, right after typing two strings, is how a wrong
-     * pattern eats a file. */
-    replacestep();
+    replacestep();              /* replaces one, selects the next */
 }
 
 static void doreplaceall(void)

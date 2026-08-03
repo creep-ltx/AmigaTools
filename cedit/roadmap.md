@@ -704,12 +704,43 @@ to insert a line above the status bar or borrow the status bar.
       page - the exact cost this design exists to avoid - so that
       case falls back to `ltx_askfields`, which cdiff still uses for
       its own Find.
-- [ ] **BOOT GATE:** Amiga+F and see `String:` in the status row with
+- [ ] **BOOT GATE:** Amiga+F and see `Find:` in the status row with
       the block caret, type, Return, and the row goes back to being
       the status row. Esc at the prompt leaves the old search string
       untouched. A search that fails says so in the row and the
-      message clears on the next key. Then Amiga+R for the
-      `Search:` / `Replace:` pair, and Replace All's count.
+      message clears on the next key. Then Amiga+R for the `Find:` /
+      `Replace with:` pair, and Replace All's count.
+
+### b7c — Replace actually replaces — BUILT 3.8.26
+
+His report: *"I could not replace 'from!' with 'from'"*, then a
+minute later *"I could replace 'from' with 'from!'"*. That second
+message is what found it - one direction working and the other not
+is a much narrower fact than "replace is broken".
+
+The buffer layer was innocent, and there is now a test saying so:
+`from!` -> `from` replaces both occurrences, one at a time and all
+at once, on both roads. Two faults in cedit's flow above it:
+
+- [x] **Replace... only FOUND on the first press.** I had built it to
+      show the hit before touching it, and wrote a comment defending
+      that as caution. It is not caution - a menu item named Replace
+      that does not replace is a bug, and undo has been the thing
+      that makes replacing safe since b3. It replaces now, and leaves
+      the NEXT match selected so the key walks the file.
+- [x] **The follow-up search shouted.** After replacing, it looked
+      for the next match and said `"from!" not found.` when there
+      wasn't one - immediately after a SUCCESSFUL replacement, which
+      reads as the replacement having failed. That is the whole
+      asymmetry: `from!` -> `from` consumed the last match, while
+      `from` -> `from!` never ran out, because a wrapped search for
+      `from` matches the `from` inside the `from!` just written.
+      Running out of matches is the end of a run, not an error, so
+      that search is quiet now. Failing to find anything to replace
+      AT ALL still says so.
+
+The lesson is b29's again, and his: two observations that differ in
+one variable beat any amount of reasoning about the code.
 
 ## Later, not promised
 

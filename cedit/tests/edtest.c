@@ -664,6 +664,44 @@ static void replacing(void)
     ck(!strcmp(b.ln[0], "Foo bar FOO"), "unfolded replace text");
     buffree(&b);
 
+    /* his case: "from!" -> "from". The replacement is a PREFIX of
+     * the pattern, so a scanner that resumed inside its own output
+     * would either loop or eat the following text. */
+    bufinit(&b);
+    bufsplit(&b, "come from! and from! again\n", 27);
+    n = ed_replaceall(&b, "from!", "from", 0);
+    ck(n == 2, "from! -> from replaces both");
+    ck(!strcmp(b.ln[0], "come from and from again"),
+       "from! -> from text");
+    ck(b.len[0] == (int)strlen(b.ln[0]), "from! -> from length");
+    buffree(&b);
+
+    /* the same pattern found and replaced ONE at a time, which is
+     * the road Replace Next walks */
+    bufinit(&b);
+    bufsplit(&b, "from! from!\n", 12);
+    {
+        int fy, fx;
+        ck(ed_search(&b, "from!", 0, 0, 1, 0, 0, &fy, &fx) &&
+           fy == 0 && fx == 0, "find from! at the start");
+        ck(ed_replaceat(&b, 0, 0, 5, "from"), "replace the first from!");
+        ck(!strcmp(b.ln[0], "from from!"), "first from! replaced");
+        /* and from just past it, the second is still findable */
+        ck(ed_search(&b, "from!", 0, 4, 1, 0, 0, &fy, &fx) &&
+           fy == 0 && fx == 5, "second from! still found");
+        ck(ed_replaceat(&b, 0, 5, 5, "from"), "replace the second");
+        ck(!strcmp(b.ln[0], "from from"), "both from! replaced");
+    }
+    buffree(&b);
+
+    /* punctuation generally, since a search that mishandled it would
+     * show up here rather than in a word */
+    bufinit(&b);
+    bufsplit(&b, "a!b?c.d,e\n", 10);
+    ck(ed_replaceall(&b, "!", "@", 0) == 1, "replace a bang");
+    ck(!strcmp(b.ln[0], "a@b?c.d,e"), "bang replaced");
+    buffree(&b);
+
     /* nothing to do */
     bufinit(&b);
     bufsplit(&b, "hello\n", 6);
