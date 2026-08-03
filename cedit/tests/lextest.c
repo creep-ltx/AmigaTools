@@ -43,9 +43,169 @@ static void language(void)
 {
     ck(lx_language("cfile.e") == LX_E, ".e is E");
     ck(lx_language("CFILE.E") == LX_E, "and so is .E");
-    ck(lx_language("cedit.c") == LX_NONE, ".c is not E yet");
     ck(lx_language("readme") == LX_NONE, "no extension, no language");
     ck(lx_language("e") == LX_NONE, "a bare 'e' is not an extension");
+    /* b9 */
+    ck(lx_language("cedit.c") == LX_C,   ".c is C");
+    ck(lx_language("elex.h") == LX_C,    ".h is C");
+    ck(lx_language("MAIN.C") == LX_C,    "and case does not matter");
+    ck(lx_language("boot.s") == LX_ASM,  ".s is assembly");
+    ck(lx_language("boot.asm") == LX_ASM, ".asm too");
+    ck(lx_language("exec.i") == LX_ASM,  ".i is an Amiga asm include");
+    ck(lx_language("notes.txt") == LX_NONE, ".txt is plain text");
+}
+
+/* ---- b9: the tables themselves -----------------------------------
+ * A binary search over an unsorted table does not fail loudly, it
+ * just misses keywords - so the sortedness is asserted rather than
+ * intended. 150 hand-written mnemonics will not stay in order on
+ * their own. */
+static int foldcmp(const char *a, const char *b, int fold)
+{
+    int i = 0;
+    for (;;) {
+        int ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (fold) {
+            if (ca >= 'A' && ca <= 'Z') ca += 32;
+            if (cb >= 'A' && cb <= 'Z') cb += 32;
+        }
+        if (ca != cb) return ca - cb;
+        if (ca == 0) return 0;
+        i++;
+    }
+}
+
+static void tables(void)
+{
+    int lang;
+    for (lang = LX_E; lang < LX_NLANG; lang++) {
+        const LxLang *L = lx_table(lang);
+        int i, ok = 1, dup = 0;
+        int fold = (L->kwcase == LXK_FOLD);
+        ck(L != 0 && L->nkw > 0, "the table has keywords");
+        for (i = 1; i < L->nkw; i++) {
+            int c = foldcmp(L->kw[i - 1], L->kw[i], fold);
+            if (c > 0) ok = 0;
+            if (c == 0) dup = 1;
+        }
+        if (!ok) printf("  (%s keyword table is NOT sorted)\n", L->name);
+        if (dup) printf("  (%s keyword table has a duplicate)\n", L->name);
+        ck(ok, "keyword table is sorted");
+        ck(!dup, "keyword table has no duplicates");
+        /* and every word in it is actually found by the search that
+         * will look for it - the sortedness check above is necessary
+         * but this is the one that matters */
+        for (i = 0; i < L->nkw; i++) {
+            LxRun r[8];
+            int n2;
+            char buf[64];
+            int kl = (int)strlen(L->kw[i]);
+            if (kl > 60) continue;
+            memcpy(buf, L->kw[i], kl);
+            buf[kl] = 0;
+            lx_line(lang, 0, buf, kl, r, 8, &n2);
+            if (!(n2 >= 1 && r[0].cls == LX_KEYWORD)) {
+                printf("  (%s: keyword \"%s\" is not found)\n",
+                       L->name, buf);
+                ck(0, "every keyword in the table is reachable");
+                break;
+            }
+        }
+    }
+}
+
+/* lex one line in a given language */
+static unsigned char lexl(int lang, unsigned char st, const char *s)
+{
+    return lx_line(lang, st, s, (int)strlen(s), runs, MAXR, &nr);
+}
+
+static void clang(void)
+{
+    lexl(LX_C, 0, "int x = 1; // trailing");
+    ck(clsat(0) == LX_KEYWORD, "int is a C keyword");
+    ck(clsat(4) == LX_TEXT, "the name is not");
+    ck(clsat(8) == LX_NUMBER, "the literal is a number");
+    ck(clsat(12) == LX_COMMENT, "// starts a comment");
+    ck(clsat(20) == LX_COMMENT, "running to end of line");
+
+    /* C block comments do NOT nest - the inner opener is just text
+     * inside the comment, and ONE close ends the whole thing */
+    ck(lexl(LX_C, 0, "/* outer /* inner") == 1, "C blocks do not nest");
+    ck(lexl(LX_C, 1, "*/ code") == 0, "and one close ends it");
+    ck(clsat(3) == LX_TEXT, "code after the close is code");
+
+    /* case matters, and whole words only */
+    lexl(LX_C, 0, "INT x;");
+    ck(clsat(0) == LX_TEXT, "INT is not int - C is case sensitive");
+    lexl(LX_C, 0, "integer = 1;");
+    ck(clsat(0) == LX_TEXT, "integer is not int");
+    lexl(LX_C, 0, "myint = 1;");
+    ck(clsat(0) == LX_TEXT, "myint is not int");
+
+    /* the preprocessor, but only where it starts the line */
+    lexl(LX_C, 0, "#include <stdio.h>");
+    ck(clsat(0) == LX_KEYWORD, "a leading # is a directive");
+    ck(clsat(9) == LX_TEXT, "what follows it is not");
+    lexl(LX_C, 0, "  #define X 1");
+    ck(clsat(2) == LX_KEYWORD, "indented directives count too");
+    lexl(LX_C, 0, "x = a #b;");
+    ck(clsat(6) == LX_TEXT, "a # in mid-line is not a directive");
+
+    /* $ and % are NOT number prefixes in C */
+    lexl(LX_C, 0, "x = a % b;");
+    ck(clsat(6) == LX_TEXT, "% is modulo in C, not a binary literal");
+
+    /* strings and char literals, and a // inside one */
+    lexl(LX_C, 0, "s = \"a // b\"; c = 'x';");
+    ck(clsat(5) == LX_STRING, "a C string");
+    ck(clsat(7) == LX_STRING, "a // inside it is not a comment");
+    ck(clsat(18) == LX_STRING, "a char literal is a string too");
+    ck(lexl(LX_C, 0, "s = \"unterminated") == 0,
+       "an unterminated C string still ends at EOL");
+}
+
+static void asmlang(void)
+{
+    lexl(LX_ASM, 0, "        move.l  d0,d1   ; comment");
+    ck(clsat(8) == LX_KEYWORD, "move is a mnemonic");
+    ck(clsat(24) == LX_COMMENT, "; starts a comment");
+
+    /* case does not matter in assembly */
+    lexl(LX_ASM, 0, "        MOVE.L  d0,d1");
+    ck(clsat(8) == LX_KEYWORD, "MOVE is the same mnemonic");
+    lexl(LX_ASM, 0, "        Move.l  d0,d1");
+    ck(clsat(8) == LX_KEYWORD, "and so is Move");
+
+    /* the size suffix is not part of the word - the identifier scan
+     * stops at the dot, so move.l still matches move */
+    lexl(LX_ASM, 0, "  moveq #1,d0");
+    ck(clsat(2) == LX_KEYWORD, "moveq without a suffix");
+
+    /* a star in COLUMN 0 is the old comment convention; anywhere
+     * else it is a multiply */
+    lexl(LX_ASM, 0, "* a whole-line comment");
+    ck(clsat(0) == LX_COMMENT, "a star in column 0 comments the line");
+    ck(clsat(15) == LX_COMMENT, "all of it");
+    lexl(LX_ASM, 0, "        move.l  #2*4,d0");
+    ck(clsat(18) == LX_TEXT, "a star mid-line is not a comment");
+
+    /* numbers in every base an assembler uses */
+    lexl(LX_ASM, 0, "        move.l  #$DFF000,a0");
+    ck(clsat(17) == LX_NUMBER, "$hex");
+    lexl(LX_ASM, 0, "        move.b  #%1010,d0");
+    ck(clsat(17) == LX_NUMBER, "%binary");
+    lexl(LX_ASM, 0, "        move.b  #@777,d0");
+    ck(clsat(17) == LX_NUMBER, "@octal");
+
+    /* labels are not mnemonics */
+    lexl(LX_ASM, 0, "loop:   dbra    d0,loop");
+    ck(clsat(0) == LX_TEXT, "a label is not a keyword");
+    ck(clsat(8) == LX_KEYWORD, "but dbra is");
+
+    /* no block comments in assembly: a slash-star is just text */
+    ck(lexl(LX_ASM, 0, "        move.l  d0,d1  /* not a comment") == 0,
+       "assembly has no block comments to leave open");
 }
 
 static void comments(void)
@@ -189,6 +349,38 @@ static int corpus(const char *path)
     return 1;
 }
 
+/* b9: the same invariants over real C - this editor's own source,
+ * which nobody wrote with a lexer in mind either. Every one of these
+ * files compiles, so the block-comment state must close at 0. */
+static int ccorpus(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    char line[4096];
+    unsigned char st = 0;
+    long nlines = 0;
+    int i, bad = 0;
+    if (f == NULL) return 0;
+    while (fgets(line, sizeof(line), f)) {
+        int n = (int)strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) n--;
+        st = lx_line(LX_C, st, line, n, runs, MAXR, &nr);
+        nlines++;
+        if (nr < 1) { bad++; continue; }
+        if (runs[0].start != 0) bad++;
+        for (i = 0; i < nr; i++) {
+            if (runs[i].start < 0 || runs[i].start > n) bad++;
+            if (runs[i].cls >= LX_NCLASS) bad++;
+            if (i && runs[i].start <= runs[i - 1].start) bad++;
+        }
+        if (st > LX_STATE_MAX) bad++;
+    }
+    fclose(f);
+    printf("  %s: %ld lines, end state %d (C)\n", path, nlines, st);
+    ck(bad == 0, "C corpus spans are well formed");
+    ck(st == 0, "C corpus ends with no comment left open");
+    return 1;
+}
+
 int main(void)
 {
     int ran = 0;
@@ -198,11 +390,21 @@ int main(void)
     keywords();
     numbers();
     shapes();
+    tables();
+    clang();
+    asmlang();
 
     ran += corpus("../cfile/cfile.e");
     ran += corpus("../ccon/ccon-handler.e");
     ran += corpus("../cfile13/cfile13.e");
     ran += corpus("../cmenu/cmenu.e");
+    /* and the C the editor itself is written in */
+    ran += ccorpus("cedit.c");
+    ran += ccorpus("edbuf.c");
+    ran += ccorpus("elex.c");
+    ran += ccorpus("../cdiff/cdiff.c");
+    ran += ccorpus("../cdiff/diff.c");
+    ran += ccorpus("../ltxgui/ltxwin.c");
     if (!ran) printf("  (no corpus files found - skipped)\n");
 
     if (fails) {

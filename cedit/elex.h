@@ -12,6 +12,29 @@
  * NEXT line starts in. After an edit the app re-lexes from the edited
  * line until that byte matches what it was before, which is almost
  * always one line. A scroll lexes only the rows that entered.
+ *
+ * ---- b9: one engine, several languages ---------------------------
+ *
+ * What a language needs turned out to be a short list - what starts a
+ * line comment, what opens and closes a block comment and whether
+ * those nest, which characters quote a string, which prefix a number,
+ * and how keywords are cased - so this became a loop over an `LxLang`
+ * table instead of three copies of itself.
+ *
+ * The tables are COMPILED IN rather than read from a drawer, and that
+ * is a decision worth writing down. The corpus harness is what makes
+ * the E lexer trustworthy: 33,735 lines of real code, asserted to
+ * come back with ordered spans and a comment state that closes at
+ * zero at end of file. A table loaded from disk at run time cannot be
+ * checked that way, and a half-edited definition would break
+ * highlighting on a machine nobody can debug from here.
+ *
+ * What this shape buys is that a loader becomes ADDITIVE: the engine
+ * already takes a table it does not own, so reading one from
+ * PROGDIR:Lexers/ later is a parser and nothing else - no change to
+ * the lexing itself, and the built-in tables stay as the fallback
+ * when a file is missing or malformed. That is the reason for doing
+ * it in this order rather than designing a file format first.
  */
 #ifndef ELEX_H
 #define ELEX_H
@@ -28,6 +51,47 @@
  * LX_TEXT span - which is exactly what a plain text file wants. */
 #define LX_NONE 0
 #define LX_E    1
+#define LX_C    2
+#define LX_ASM  3
+#define LX_NLANG 4
+
+/* how a language spells its keywords */
+#define LXK_EXACT 0     /* case sensitive, as written in the table */
+#define LXK_UPPER 1     /* must be ALL CAPS to be considered at all -
+                         * E is case sensitive and every keyword is
+                         * capitals, so matching any other way paints
+                         * a variable called `to` as a keyword */
+#define LXK_FOLD  2     /* case insensitive - 68k asm, where `move`,
+                         * `Move` and `MOVE` are one mnemonic */
+
+typedef struct {
+    const char *name;           /* shown in the Highlight menu */
+    const char *const *kw;      /* SORTED, or the binary search lies -
+                                 * and the harness checks that it is,
+                                 * because a hand-written table of 150
+                                 * mnemonics will not stay sorted by
+                                 * good intentions */
+    int         nkw;
+    int         kwcase;         /* LXK_* above */
+    const char *lc1, *lc2;      /* line-comment starters, NULL if none */
+    int         starcol0;       /* '*' in COLUMN 0 starts a comment -
+                                 * the old assembler convention, and
+                                 * column 0 only, because anywhere else
+                                 * it is a multiply */
+    const char *bo, *bc;        /* block comment open/close, or NULL */
+    int         bnest;          /* and whether those nest */
+    const char *quotes;         /* characters that quote a string */
+    const char *numpfx;         /* extra number prefixes: "$%" and so
+                                 * on. Empty for C, where '%' is
+                                 * modulo and '$' is not a number. */
+    int         hash;           /* a leading # is a preprocessor
+                                 * directive, and reads as a keyword */
+} LxLang;
+
+/* the table for a language id, or NULL for LX_NONE and anything out
+ * of range. Exposed so the harness can check the keyword tables are
+ * sorted and the app can name them in a menu. */
+const LxLang *lx_table(int lang);
 
 /* `cls` is an int and not the unsigned char it obviously wants to
  * be, and the reason is measured rather than stylistic: at -O2 on

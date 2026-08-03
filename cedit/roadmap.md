@@ -904,6 +904,91 @@ His screenshot of cfile.e on the A1200: **12,211 lines, widest line
   not something to spend a build on.
 
 
+## 0.1b9 — C and assembly, and one engine — BUILT 4.8.26, AWAITING BOOT
+
+His ask: the C and asm lexers, a Highlight menu to pick between them,
+and a question worth more than either - **should the highlights live
+in the binary or in a plugin drawer so they can be edited and added
+to?**
+
+### The answer: a staged hybrid, and this is stage one
+
+- [x] **The lexer is table-driven now.** What a language needs turned
+      out to be a short list - line-comment starters, block-comment
+      open/close and whether they NEST, string quotes, number
+      prefixes, keyword casing, and two odd corners (the assembler's
+      column-0 star, C's leading `#`). So `elex.c` became one loop
+      over an `LxLang` table instead of three copies of itself.
+- [x] **The tables are compiled IN, deliberately.** The corpus
+      harness is what makes the E lexer trustworthy - 33,735 lines of
+      real code asserted to come back well-formed with the comment
+      state closing at zero. A definition read from disk at run time
+      cannot be checked that way, and a half-edited one would break
+      highlighting on a machine nobody can debug from here.
+- [x] **But a loader is now purely ADDITIVE**, which is the point of
+      doing it in this order. The engine already takes a table it
+      does not own, so reading one from `PROGDIR:Lexers/` later is a
+      parser and nothing else: no change to the lexing, and the
+      built-in tables stay as the fallback when a file is missing or
+      malformed. Designing the file format first would have meant
+      committing to a format before knowing what the engine wanted.
+      **Measure before keeping**: three languages ship, and if a
+      fourth is ever wanted from outside, the loader is a day's work
+      against a shape that already exists.
+
+### The languages
+
+- [x] **C**: `//` and non-nesting block comments, both quote
+      characters, `#` directives only where they start the line (so a
+      stringify inside a macro body is left alone), and NO `$`/`%`
+      number prefixes - `%` is modulo in C. The language's own
+      keywords and nothing else: a list that tries to know every name
+      in every header is a list that is wrong about somebody's
+      variable.
+- [x] **68k assembly**: `;` to end of line, `*` in COLUMN 0 only
+      (anywhere else it is a multiply), no block comments, `$hex`
+      `%binary` `@octal`, and mnemonics matched CASE-INSENSITIVELY
+      because `move`, `Move` and `MOVE` are one instruction. Size
+      suffixes fall out for free - the identifier scan stops at the
+      dot, so `move.l` matches `move`.
+- [x] Extensions: `.e` `.c` `.h` `.s` `.asm` `.i`, case-insensitive.
+
+### The harness found the bug it was added for
+
+- [x] **A sortedness check on every keyword table**, because a binary
+      search over an unsorted table does not fail loudly - it just
+      misses words. It fired on the first run: the assembly table had
+      `org` after `ori`, and `org` was unreachable. 163 mnemonics
+      written by hand do not stay in order by good intentions.
+- [x] And a stronger check beside it: **every word in every table is
+      fed back through the lexer** and must come out `LX_KEYWORD`.
+      Sortedness is necessary; this is the property that matters.
+- [x] **A C corpus**, the same discipline as the E one: cedit.c,
+      edbuf.c, elex.c, cdiff.c, diff.c and ltxwin.c - **9,318 lines**
+      that all compile, so the block-comment state must close at 0,
+      and it does.
+
+### The menu
+
+- [x] **Highlight: Automatic / Amiga E / C / Assembly / Plain text**,
+      radio, and **per DOCUMENT** - a tab of E beside a tab of C is
+      the ordinary case here. Automatic follows the extension.
+- [x] The tick FOLLOWS the document when tabs are switched. A radio
+      group still showing the last tab's answer is worse than no tick
+      at all. That needs the ClearMenuStrip / SetMenuStrip dance:
+      Intuition is entitled to be reading the strip otherwise.
+- [x] An explicit choice SURVIVES a Save As - the extension does not
+      get a vote once he has said what the file is - but is cleared
+      when the tab becomes a different file.
+- [x] Settings > Syntax colour stays as the global master switch.
+      Two ways to turn colour off is one too many; noted for the
+      menu pass he has already said he wants.
+- [ ] **BOOT GATE:** open a `.c` and a `.e` in two tabs and switch
+      between them - both coloured correctly, and the Highlight tick
+      moving with the tab. Then force a `.txt` to C and see it take.
+      An asm file with `;` comments and `$DFF000`.
+
+
 ## Later, not promised
 
 C and 68k asm lexers · Select All, block indent/outdent, delete

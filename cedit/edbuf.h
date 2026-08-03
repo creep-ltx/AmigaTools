@@ -104,6 +104,11 @@ typedef struct {
      * them, because a drag can go backwards. */
     int    selon, say, sax;
     int    lang;                /* LX_E, or LX_NONE for plain text */
+    int    langset;             /* b9: 1 = the USER picked this from
+                                 * the Highlight menu, so a reload or
+                                 * a Save As must not quietly override
+                                 * it. Cleared when the document
+                                 * becomes a different file. */
     int    lexdone;             /* lines whose lex[] state is known */
     char   path[310];
     char   name[110];

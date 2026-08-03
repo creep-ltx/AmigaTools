@@ -103,6 +103,7 @@ static int loadbuf(Buffer *b, const char *path)
     strncpy(b->path, path, sizeof(b->path) - 1);
     strncpy(b->name, (char *)FilePart((STRPTR)path), sizeof(b->name) - 1);
     b->lang = lx_language(b->name);
+    b->langset = 0;             /* a new file picks its own language */
     b->lexdone = 0;
     return 1;
 }
@@ -416,6 +417,17 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Goto Line...", (STRPTR)"J", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Top of File",  NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"End of File",  NULL,        0, 0, NULL },
+    /* b9, his ask. Per DOCUMENT, not global - a tab of E and a tab of
+     * C are the ordinary case here. Radio, so exactly one is true,
+     * which in GadTools means CHECKIT plus a mutual-exclude mask
+     * naming every OTHER item at this level. No separator bar: bars
+     * are items too and would take a bit out of the mask. */
+    { NM_TITLE, (STRPTR)"Highlight",  NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Automatic",  NULL, CHECKIT, ~0x01 & 0x1F, NULL },
+    { NM_ITEM,  (STRPTR)"Amiga E",    NULL, CHECKIT, ~0x02 & 0x1F, NULL },
+    { NM_ITEM,  (STRPTR)"C",          NULL, CHECKIT, ~0x04 & 0x1F, NULL },
+    { NM_ITEM,  (STRPTR)"Assembly",   NULL, CHECKIT, ~0x08 & 0x1F, NULL },
+    { NM_ITEM,  (STRPTR)"Plain text", NULL, CHECKIT, ~0x10 & 0x1F, NULL },
     { NM_TITLE, (STRPTR)"Settings",   NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Line numbers", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
@@ -786,6 +798,10 @@ static void calcgrid(void)
  * the outgoing document's pan is stashed in its own Buffer and the
  * incoming one's restored - the single reason Buffer carries an hoff
  * field of its own. */
+static void synchilite(void);   /* b9: declared here because setdoc,
+                                 * above the Highlight code, moves the
+                                 * tick when the document changes */
+
 static void setdoc(int i)
 {
     if (i < 0 || i >= ndocs) return;
@@ -797,6 +813,7 @@ static void setdoc(int i)
     calcgrid();                 /* the gutter follows THIS line count */
     clamptop();
     settitle();
+    synchilite();               /* b9: the tick follows the document */
     shown_dirty = cur->dirty;
     epage();
 }
@@ -869,6 +886,13 @@ static int openmain(void)
                 else if (!strcmp(lb, "Ignore case"))  on = findfold;
                 else if (!strcmp(lb, "Whole words"))  on = findword;
                 else if (!strcmp(lb, "Overwrite"))    on = ttover;
+                /* b9: a fresh document follows its extension, so the
+                 * Highlight group starts on Automatic. synchilite
+                 * moves it from here on. */
+                else if (!strcmp(lb, "Automatic"))    on = 1;
+                else if (!strcmp(lb, "Amiga E") ||
+                         !strcmp(lb, "Assembly") ||
+                         !strcmp(lb, "Plain text"))   on = 0;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -1035,6 +1059,7 @@ static void doindent(int out);
 static void dodelline(void);
 static void dodelword(int dir);
 static void dobracket(void);
+static void dohilite(int item);         /* b9 */
 static int  askquit(void);      /* and the unsaved-changes prompt */
 static void follow(void);       /* keep the caret on screen */
 
@@ -1088,7 +1113,11 @@ static int domenu(UWORD code)   /* 1 = quit */
             if (i == 9)  { jumpend(-1);      return 0; }
             if (i == 10) { jumpend(1);       return 0; }
         }
-        if (m == 3) {                                   /* Settings */
+        if (m == 3) {                                   /* Highlight */
+            dohilite(i);
+            return 0;
+        }
+        if (m == 4) {                                   /* Settings */
             int on = (it->Flags & CHECKED) ? 1 : 0;
             if (i == 0) {                               /* Line numbers */
                 ttgutter = on;
@@ -1502,9 +1531,13 @@ static void dosaveas(void)
     strncpy(cur->name, (char *)FilePart((STRPTR)path),
             sizeof(cur->name) - 1);
     cur->name[sizeof(cur->name) - 1] = 0;
-    /* saving under a new name can change what the file IS */
-    cur->lang = lx_language(cur->name);
-    cur->lexdone = 0;
+    /* saving under a new name can change what the file IS - unless
+     * he has said otherwise from the Highlight menu, in which case
+     * the extension does not get a vote */
+    if (!cur->langset) {
+        cur->lang = lx_language(cur->name);
+        cur->lexdone = 0;
+    }
     if (!savebuf(cur, cur->path))
         msg("Could not write that file.");
     else
@@ -2034,6 +2067,54 @@ static void dobracket(void)
     if (cur->selon) { ed_selclear(cur); selpaint(); }
     gotoyx(my, mx);
     goalx = cur->cx;
+}
+
+/* ---- b9: the Highlight menu ---------------------------------------
+ * Item 0 is Automatic (follow the extension); 1-4 name a language
+ * outright. The choice belongs to the DOCUMENT, so switching tabs has
+ * to move the tick with it - a radio group that keeps showing the
+ * last tab's answer is worse than no tick at all. */
+#define HL_MENU 3
+
+static int hl_lang[5] = { LX_NONE, LX_E, LX_C, LX_ASM, LX_NONE };
+
+static void synchilite(void)
+{
+    int want, i;
+    if (gmenu == NULL || win == NULL) return;
+    if (!cur->langset)              want = 0;
+    else if (cur->lang == LX_E)     want = 1;
+    else if (cur->lang == LX_C)     want = 2;
+    else if (cur->lang == LX_ASM)   want = 3;
+    else                            want = 4;
+    /* the strip must be off the window before its flags are touched -
+     * Intuition is entitled to be reading it otherwise */
+    ClearMenuStrip(win);
+    for (i = 0; i < 5; i++) {
+        struct MenuItem *it =
+            ItemAddress(gmenu, FULLMENUNUM(HL_MENU, i, NOSUB));
+        if (it == NULL) continue;
+        if (i == want) it->Flags |=  CHECKED;
+        else           it->Flags &= ~CHECKED;
+    }
+    SetMenuStrip(win, gmenu);
+}
+
+static void dohilite(int item)
+{
+    if (item < 0 || item > 4) return;
+    if (item == 0) {
+        cur->langset = 0;
+        cur->lang = lx_language(cur->name);
+    } else {
+        cur->langset = 1;
+        cur->lang = hl_lang[item];
+    }
+    /* every line's state is suspect now, so throw the lot away and
+     * let the row painter lex what it actually needs */
+    cur->lexdone = 0;
+    dirtyrows = 1;
+    dmgold = -1;
 }
 
 static void dosave(void)
