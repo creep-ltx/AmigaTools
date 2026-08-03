@@ -80,6 +80,28 @@ int ltx_expandvis(const char *src, int len, int width);
 void ltx_drawruns(int x, int y, const char *vis, int width,
                   const LtxRun *runs, int nruns);
 
+/* ---- JAM1 over a surface that is already background --------------
+ * The CFile R6 trick. JAM2 lays down a background pixel for every
+ * cell as well as the glyph; JAM1 writes the glyph alone. A row the
+ * scroll blit just vacated is background by construction, so the
+ * entering rows after a scroll can be drawn glyph-only.
+ *
+ * ltx_clean is the chassis telling the app's row painter that THIS
+ * row is one of those. It is set only around the entering rows of a
+ * scroll, never for a repaint in place, where the old glyphs are
+ * still on the surface and JAM1 would leave them behind.
+ *
+ * CCON's OTHER chip-level saving, rp_Mask - keep the OR of every pen
+ * drawn and hand the blitter only those planes, measured there at
+ * 34.8ms / 17.4ms / 8.8ms for four / two / one plane - was tried
+ * here and REMOVED. ScrollRaster's fill of the vacated strip obeys
+ * rp_Mask too, so the masked-out planes of those rows were never
+ * cleared, and that is exactly the precondition JAM1 above depends
+ * on. The two optimisations are mutually exclusive in one pass, and
+ * JAM1 is the one that survived: his word for the masked build was
+ * "It's worse", and the screen showed old glyphs under new ones. */
+extern int ltx_clean;
+
 /* right-aligned 1-based line number in the gutter cells */
 /* b66: gutw digits PLUS the separator column, so this Text covers
  * the whole gutw+1 span the caller skips over - no fill needed */
@@ -272,6 +294,20 @@ void busy(int on);
  * message on the port for every pixel the pointer crosses, which on
  * an 020 is real work for nothing. */
 void ltx_reportmouse(int on);
+
+/* ---- asking for pointer news only when it is wanted --------------
+ * His question: does the window really need to know where the
+ * pointer is? Only while something is being manipulated - a drag, a
+ * held arrow, a dragged knob. The rest of the time MOUSEMOVE and
+ * INTUITICKS are messages that cost a port round trip and a pass
+ * through the event loop to be thrown away, and they arrive ten or
+ * more times a second for as long as the pointer sits over the
+ * window.
+ *
+ * So they are left OUT of the window's IDCMP set and switched on for
+ * the duration. ltx_openwin remembers the app's base set; this ORs
+ * the pointer classes onto it and takes them off again. */
+void ltx_trackpointer(int on);
 
 /* ---- requesters -------------------------------------------------- */
 

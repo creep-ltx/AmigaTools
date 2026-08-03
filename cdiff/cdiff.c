@@ -2434,8 +2434,11 @@ static int openmain(void)
                      IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                      IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
                      IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
-                     IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
-                     IDCMP_INTUITICKS;  /* b48: arrow auto-repeat */
+                     IDCMP_GADGETUP;
+    /* MOUSEMOVE and INTUITICKS are NOT asked for here (his question:
+     * does the window really need to know where the pointer is?).
+     * They are switched on by ltx_trackpointer() for the duration of
+     * a drag, a held arrow or a dragged knob, and off again. */  /* b48: arrow auto-repeat */
     if (!ltx_openwin(&spec, &scr, &dri)) return 0;
     /* b109: we asked for a font and got the system default, so it
      * was not there - do not retry it on every reopen */
@@ -2625,9 +2628,25 @@ static void guimode(void)
              * below settles it as soon as the port is empty. A lone
              * message therefore still paints in its own iteration -
              * nothing waits on a later event. */
-            defer = 1;
             ULONG csec = msg->Seconds, cmic = msg->Micros;
             ReplyMsg((struct Message *)msg);
+            /* An INTUITICKS with nothing to drive is pure noise, and
+             * it is NOT free: every message that reaches the bottom
+             * of this loop takes part in the burst accounting, and a
+             * flush that owes a repaint pays a WaitTOF - a whole
+             * frame. Intuition sends these ten times a second while
+             * the pointer is over the window, so they interleave with
+             * a held key's repeats, break the coalescing that is
+             * supposed to turn a burst into ONE paint, and buy a
+             * frame wait per interruption.
+             *
+             * That is why he saw scrolling roughly double the moment
+             * the pointer left the window. Skipped BEFORE `defer` is
+             * set, so a skipped message can never leave the flag
+             * armed - b70's bug, which cost a build. */
+            if (class == IDCMP_INTUITICKS && !arrheld && !propheld)
+                continue;
+            defer = 1;
             /* b72, straight out of AmigaReferences/intuition-
              * iconify.md: with WA_IconifyGadget set, the iconify
              * click arrives as IDCMP_CLOSEWINDOW with Code == 1 (a
@@ -2648,11 +2667,18 @@ static void guimode(void)
                  * the drag is also pumped from INTUITICKS below -
                  * two independent paths, and the pot is the single
                  * source of truth for both. */
-                if (class == IDCMP_GADGETDOWN)
+                if (class == IDCMP_GADGETDOWN) {
                     propheld = iaddr == (APTR)&vgad ? 1 :
                                iaddr == (APTR)&hgad ? 2 : 0;
-                else if (class == IDCMP_GADGETUP)
+                    /* a knob drag needs MOUSEMOVE, an arrow needs
+                     * INTUITICKS to repeat - ask for them now and
+                     * hand them back on release */
+                    ltx_trackpointer(1);
+                } else if (class == IDCMP_GADGETUP) {
                     propheld = 0;
+                    arrheld = 0;
+                    ltx_trackpointer(0);
+                }
                 if (iaddr == (APTR)&vgad) {
                     ltx_trackvert();
                 } else if (iaddr == (APTR)&hgad) {

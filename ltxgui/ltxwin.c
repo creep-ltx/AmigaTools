@@ -16,6 +16,7 @@
 #include <proto/dos.h>
 #include <proto/intuition.h>
 #include <proto/graphics.h>
+#include <graphics/gfxbase.h>
 #include <libraries/asl.h>
 #include <proto/asl.h>
 #include <proto/icon.h>
@@ -51,6 +52,7 @@ int gutw;
 int tttab = 8, ttmask = 7;
 
 char ltx_vis[LTX_MAXCOLS];
+int ltx_clean;
 
 /* ---- the row painter -------------------------------------------- */
 
@@ -84,8 +86,15 @@ int ltx_expandvis(const char *src, int len, int width)
 void ltx_drawruns(int x, int y, const char *vis, int width,
                   const LtxRun *runs, int nruns)
 {
-    int i;
+    int i, jam1 = ltx_clean;
     if (width <= 0 || nruns < 1) return;
+    /* JAM1 only when every run wants the plain background AND the
+     * surface is already that background. One coloured background -
+     * a selection, a bar - and the whole row goes back to JAM2,
+     * because JAM1 cannot paint it. */
+    for (i = 0; i < nruns; i++)
+        if (runs[i].bg != 0) jam1 = 0;
+    if (jam1) SetDrMd(rp, JAM1);
     for (i = 0; i < nruns; i++) {
         int s = runs[i].start;
         int e = (i + 1 < nruns) ? runs[i + 1].start : width;
@@ -93,10 +102,11 @@ void ltx_drawruns(int x, int y, const char *vis, int width,
         if (e > width) e = width;
         if (s >= e) continue;           /* an empty run paints nothing */
         SetAPen(rp, runs[i].pen);
-        SetBPen(rp, runs[i].bg);
+        if (!jam1) SetBPen(rp, runs[i].bg);
         Move(rp, x + s * fw, y + fbase);
         Text(rp, (STRPTR)vis + s, e - s);
     }
+    if (jam1) SetDrMd(rp, JAM2);
 }
 
 void drawnum(int x, int y, long line, int pen, int bg)
@@ -112,6 +122,7 @@ void drawnum(int x, int y, long line, int pen, int bg)
 /* ---- opening the window ----------------------------------------- */
 
 struct Screen *ltx_myscr;
+static ULONG baseidcmp;     /* what the app asked for */
 static struct TextFont *ourfont;    /* what we opened, to close */
 
 /* b73: the font is opened once and kept for the life of the program
@@ -157,6 +168,7 @@ int ltx_openwin(const LtxWinSpec *sp, struct Screen **scrp,
 
     *scrp = NULL;
     *drip = NULL;
+    baseidcmp = sp->idcmp;
     /* b78: a screen of our own when OPENSCREEN= names one. Cloned
      * from Workbench (mode, colours, and depth unless SCREENDEPTH=
      * says otherwise), published under that name so it behaves like
@@ -198,7 +210,8 @@ int ltx_openwin(const LtxWinSpec *sp, struct Screen **scrp,
         WA_Title, (ULONG)sp->title,
         WA_IconifyGadget, TRUE,   /* b72: V47 - ignored below it */
         ltx_myscr ? WA_CustomScreen : WA_PubScreen, (ULONG)scr,
-        WA_IDCMP, sp->idcmp,
+        WA_IDCMP, sp->idcmp,     /* the pointer classes are added
+                                  * on demand - ltx_trackpointer */
         WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET |
                   /* SMART: Intuition itself restores regions a
                    * requester covered - the app is BLOCKED inside
@@ -279,6 +292,8 @@ int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
     ptext = 1, pback = 0;
 
 const LtxApp *ltxapp;
+
+int inputwaiting(void);     /* defined below; scrollto asks it */
 
 void ltx_setapp(const LtxApp *a)
 {
@@ -658,6 +673,7 @@ static APTR iup, idn, ilt, irt;
 int arrowsok, arrheld;
 
 int propheld;
+static int propdriven;   /* this scroll CAME from the gadget */
 int defer;
 int dirtyall, dirtyrows, dirtyknob;
 int scrollfrom, scrollfromset;
@@ -969,6 +985,30 @@ void paintscroll(int from, int to)
      * was to remove it altogether. A setting whose only effect is to
      * make things worse is a trap, not a choice. */
     if ((d > -crows) && (d < crows)) {
+        SetBPen(rp, 0);         /* the blit fills exposed with BgPen */
+        /* NO plane mask here, and the reason is worth keeping.
+         * console.device's trick - hand the blitter only the planes
+         * the text has touched - is real and CCON measured it
+         * per-plane-linear (34.8ms, 17.4ms, 8.8ms). It was tried
+         * here and REMOVED after one boot: his screenshot showed
+         * text superimposed on text.
+         *
+         * Two reasons, both of which AmigaReferences already warns
+         * about and I applied it anyway:
+         *
+         * 1. ScrollRaster's fill of the vacated strip obeys the mask
+         *    too. Mask off a plane and those rows are only PARTLY
+         *    cleared - which destroys the very precondition the JAM1
+         *    path below depends on, so the new glyphs land on top of
+         *    the old ones' leftover bits.
+         * 2. The used-pens value starts narrow and GROWS, so early
+         *    scrolls run at a narrower mask than the pixels already
+         *    on screen need. The rule is: repaint at the old depth
+         *    first, THEN narrow. Never the other way round.
+         *
+         * It also bought nothing here: a syntax scheme spanning pens
+         * 0-7 leaves no planes to skip. It belongs in a program whose
+         * text really does live in one or two pens. */
         ScrollRaster(rp, 0, d * fh,
                      gx0, conty,
                      gx0 + viscols * fw - 1,
@@ -988,6 +1028,9 @@ void paintscroll(int from, int to)
          * reaches LAST; for an upward scroll they sit at the top,
          * already moved by the time we draw. */
         WaitBlit();
+        /* the rows the blit just vacated are background by
+         * construction, so they can be drawn glyph-only (JAM1) */
+        ltx_clean = 1;
         if (d > 0) {            /* moved up: new rows at the bottom */
             for (vr = crows - d; vr < crows; vr++)
                 ltxapp->paintrow(vr);
@@ -995,8 +1038,10 @@ void paintscroll(int from, int to)
             for (vr = 0; vr < -d; vr++)
                 ltxapp->paintrow(vr);
         }
-    } else
+        ltx_clean = 0;
+    } else {
         ltxapp->paintrows();    /* too far to blit: full rows */
+    }
 }
 
 void scrollto(int target)
@@ -1017,6 +1062,67 @@ void scrollto(int target)
          * actually on screen - every later one would report a top
          * that was never painted. Hence "if not already set". */
         if (!scrollfromset) { scrollfrom = from; scrollfromset = 1; }
+        else {
+            /* ...and never let a burst accumulate past what a BLIT
+             * can do. Coalescing a free-spinning wheel into one
+             * 30-row jump lands outside the blit's reach, so the
+             * cheap path is skipped and the whole page is repainted
+             * row by row, every row lexed. Coalescing was meant to
+             * make scrolling cheaper and was quietly making it
+             * dearer - his counters read F74 b104, the blit count
+             * frozen while the repaints climbed.
+             *
+             * Settle the accumulation SO FAR - up to `from`, the top
+             * before this step, a distance already known to be
+             * inside the blit's range - and start a fresh one here.
+             * Checking after adding this step was the mistake: by
+             * then the total is already too big to blit, whatever
+             * threshold it is compared against. */
+            /* A SMALL cap, and this is the lesson his screenshots
+             * taught: "always blit" was the wrong target. A blit of
+             * 27 rows in a 30-row window still leaves 27 rows to
+             * paint, which is barely cheaper than repainting the
+             * page - and his camera caught exactly that, half drawn,
+             * bottom third still blank. The flash was never the
+             * repaint PATH, it was painting a lot of rows at once,
+             * which is precisely what coalescing produces.
+             *
+             * So the burst settles every few rows instead. Each
+             * paint is a blit plus a handful of entering rows, fast
+             * enough to finish inside a frame, and the motion reads
+             * as continuous. It is also why Annotate looks smooth:
+             * it never coalesces at all, and moves three rows at a
+             * time. */
+            /* ADAPTIVE, because a fixed cap can only be right for
+             * one of the two cases. His find: with a backlog the
+             * scrolling carries on after the wheel stops - forty
+             * small paints still owed - which is precisely the
+             * "read out of a buffer" lag he disliked in Annotate,
+             * and it was this cap that introduced it.
+             *
+             * So: while we are KEEPING UP (nothing else queued) take
+             * small steps, because that is what reads as smooth.
+             * The moment there is input waiting we are behind, and a
+             * bigger step per paint is the only way to catch up -
+             * still inside the blit's reach, so it stays cheap.
+             * Coalescing does what it was always for again: when the
+             * machine cannot keep pace, it drops intermediate
+             * positions rather than owing them. */
+            int lim = inputwaiting() ? crows - 1 : crows / 4;
+            int d2 = target - scrollfrom;
+            if (lim < 3) lim = 3;
+            if (d2 <= -lim || d2 >= lim) {
+                /* defer OFF across the paint, or the app's own row
+                 * painters see it set and draw nothing - the blit
+                 * would move the picture and leave the entering rows
+                 * blank. His screenshot caught exactly that. */
+                int od = defer;
+                defer = 0;
+                paintscroll(scrollfrom, from);
+                defer = od;
+                scrollfrom = from;
+            }
+        }
         return;
     }
     paintscroll(from, target);
@@ -1052,6 +1158,7 @@ void ltx_trackvert(void)
 {
     long total, vis = crows;
     if (ltxapp == NULL) return;
+    propdriven = 1;
     total = ltxapp->rowcount();
     if (total > vis)
         scrollto((int)(((ULONG)vpi.VertPot * (total - vis)
@@ -1062,6 +1169,7 @@ void ltx_trackhoriz(void)
 {
     int ht;
     if (ltxapp == NULL) return;
+    propdriven = 1;
     ht = ltxapp->colcount();
     if (ht > viscols)
         sethoff((int)(((ULONG)hpi.HorizPot * (ht - viscols)
@@ -1111,28 +1219,34 @@ void flushpaint(void)
      * the drop had painted into a deferred debt nobody settled. */
     defer = 0;
     if (!owed && !dirtyknob) return;
-    /* b95: start the repaint just after the beam has passed, so as
-     * much of it as possible lands inside one frame. This does NOT
-     * cure the tearing he chased for six builds - a 25-row repaint
-     * outlasts a 20ms PAL frame, so the beam still catches it - but
-     * it makes the seam land in a consistent place instead of
-     * wandering, which the eye tolerates far better. Coalescing
-     * already limits us to one repaint per input burst, so the wait
-     * costs at most one frame per burst.
+    /* b95 waited for the beam here so that the tearing seam landed
+     * in a consistent place rather than wandering - and it was cheap
+     * because coalescing meant ONE repaint per input burst.
      *
-     * The tearing is NOT a bug in this program: it is what a
-     * single-buffered display does. His tests proved it - it clears
-     * the instant scrolling stops, it is identical on a stock A1200
-     * PAL Hires with no RTG, and it is indifferent to whether we use
-     * ScrollWindowRaster, ScrollRaster, or no blit at all. */
-    WaitTOF();
+     * That assumption is gone. Settling the burst every few rows, so
+     * the motion reads as continuous, means many small paints per
+     * burst - and a frame wait on each caps throughput at 50 paints a
+     * second no matter how little work each one is.
+     *
+     * So the wait now applies only to the big repaints, where the
+     * seam is worth placing and one frame is a small share of the
+     * cost. An incremental scroll - a blit plus a handful of entering
+     * rows - goes straight through.
+     *
+     * CygnusEd settles this by example: his screenshot of a fast
+     * free-spin there shows lines visibly squashed together, i.e. it
+     * does not wait at all, and he describes the result as "so quick
+     * it's barely noticeable". Tearing during motion is not a
+     * rendering bug - it is what a single-buffered display does. */
+    if (dirtyall || dirtyrows) WaitTOF();
     if (dirtyall)
         ltxapp->pageall();              /* tabs and every row */
     else if (dirtyrows)
         ltxapp->paintrows();            /* every row's text moved */
     else {
-        if (scrollfromset)
+        if (scrollfromset) {
             paintscroll(scrollfrom, *ltxapp->toprow());
+        }
         if (ltx_appowed)
             ltxapp->flushapp();
     }
@@ -1142,8 +1256,20 @@ void flushpaint(void)
     drawstatus();       /* b82: position changed, so this did too */
     /* b64: NOT while a knob is held - Intuition is rendering that
      * knob as it tracks the mouse, and NewModifyProp would stamp
-     * our own idea of the position back over the drag. */
-    if (!propheld) updscrollers();
+     * our own idea of the position back over the drag.
+     *
+     * ...and not when the scroll CAME from the gadget either, which
+     * b64 did not cover because a drag holds the button down and a
+     * click does not. Clicking the container pages the view: Intuition
+     * moves the knob itself, reports it, and releases in the same
+     * breath - so `propheld` is already clear by the time the paint
+     * settles, and stamping our own idea of the position back over
+     * Intuition's is a fight. His find: click the track slowly and it
+     * pages; click it fast and the knob twitches up and down while
+     * the text stays put. Intuition owns that knob until the click is
+     * finished with. */
+    if (!propheld && !propdriven) updscrollers();
+    propdriven = 0;
 }
 
 /* ---- fonts ------------------------------------------------------ */
@@ -1259,6 +1385,13 @@ void ltx_freefilereq(void)
 void ltx_reportmouse(int on)
 {
     if (win) ReportMouse(on ? TRUE : FALSE, win);
+}
+
+void ltx_trackpointer(int on)
+{
+    if (win == NULL) return;
+    ModifyIDCMP(win, on ? (baseidcmp | IDCMP_MOUSEMOVE | IDCMP_INTUITICKS)
+                        : baseidcmp);
 }
 
 /* ---- b87: writing a tooltype back to the icon ------------------

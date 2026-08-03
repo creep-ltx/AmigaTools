@@ -543,6 +543,22 @@ The reason cedit exists rather than being another editor.
       measurement that was promised at b0: scroll a long `.e` file
       with Syntax colour on and off and see whether the difference is
       felt on the 020 — if it is, the default changes.
+- [x] **The scrolling campaign is CLOSED, and the probe counters are
+      out** — the status row is `name L/n C` again, and `pb_*` is
+      gone from both the chassis and cedit. His telemetry shots on
+      cfile13.e say the inversion we wanted actually happened: full
+      repaints `F8`/`F12`/`F23` against blits `b55`/`b71`/`b87`, so
+      the blit path now carries the ordinary case and the whole-page
+      repaint is the exception it was always meant to be.
+      **One thing stays unexplained on purpose:** scrolling is still
+      quicker with the pointer OUTSIDE the window. Ruled out along
+      the way — message traffic (MOUSEMOVE and INTUITICKS were taken
+      out of IDCMP entirely and the gap survived), the paint path,
+      and the coalescing cap. The remaining suspect is the pointer
+      sprite over the region being blitted, which is DMA we do not
+      own. His call, and the right one: it is a difference in feel
+      now rather than a slideshow, and the next hour is worth more
+      spent on find than on the last 20%.
 
 ## Later, not promised
 

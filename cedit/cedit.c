@@ -60,6 +60,7 @@ static const char verstag[] __attribute__((used)) =
  * a blank untitled page rather than an empty window, which is also
  * exactly what Close All does - one end state, not two. */
 #define MAXDOCS 16
+
 static Buffer docs[MAXDOCS];
 static int ndocs = 1;
 static int curdoc;
@@ -664,11 +665,10 @@ static void epage(void)
  * on every position change. Both numbers here are O(1). */
 static void estatus(char *dst, int max)
 {
-    sprintf(dst, " %.40s%s  line %d/%d  col %d%s",
+    sprintf(dst, " %.20s%s L%d/%d C%d",
             cur->name[0] ? cur->name : "untitled",
             cur->dirty ? " *" : "",
-            cur->cy + 1, cur->n, curcol() + 1,
-            ed_canundo(cur) ? "" : "  [no undo]");
+            cur->cy + 1, cur->n, curcol() + 1);
     (void)max;
 }
 
@@ -776,8 +776,11 @@ static int openmain(void)
                      IDCMP_RAWKEY | IDCMP_REFRESHWINDOW |
                      IDCMP_MENUPICK | IDCMP_MOUSEBUTTONS |
                      IDCMP_NEWSIZE | IDCMP_GADGETDOWN |
-                     IDCMP_GADGETUP | IDCMP_MOUSEMOVE |
-                     IDCMP_INTUITICKS;
+                     IDCMP_GADGETUP;
+    /* MOUSEMOVE and INTUITICKS are NOT asked for here (his question:
+     * does the window really need to know where the pointer is?).
+     * They are switched on by ltx_trackpointer() for the duration of
+     * a drag, a held arrow or a dragged knob, and off again. */
     if (!ltx_openwin(&spec, &scr, &dri)) return 0;
     if (ttfont[0] && font == GfxBase->DefaultFont) ttfont[0] = 0;
     if (GadToolsBase) {
@@ -1470,6 +1473,7 @@ static void dosave(void)
 
 static int dragging;
 
+
 /* a click lands on a PIXEL; the buffer is indexed by CHARACTER, and
  * a tab is one character across many columns. So: pixel -> row and
  * display column, then ed_col2x walks the line's tab stops exactly
@@ -1553,19 +1557,42 @@ static void guimode(void)
              * and flushpaint below settles it as soon as the port is
              * empty, so a lone message still paints in its own
              * iteration and a burst paints once. */
-            defer = 1;
             ReplyMsg((struct Message *)msg);
+            /* An INTUITICKS with nothing to drive is pure noise, and
+             * it is NOT free: every message that reaches the bottom
+             * of this loop takes part in the burst accounting, and a
+             * flush that owes a repaint pays a WaitTOF - a whole
+             * frame. Intuition sends these ten times a second while
+             * the pointer is over the window, so they interleave with
+             * a held key's repeats, break the coalescing that is
+             * supposed to turn a burst into ONE paint, and buy a
+             * frame wait per interruption.
+             *
+             * That is why he saw scrolling roughly double the moment
+             * the pointer left the window. Skipped BEFORE `defer` is
+             * set, so a skipped message can never leave the flag
+             * armed - b70's bug, which cost a build. */
+            if (class == IDCMP_INTUITICKS && !arrheld && !propheld)
+                continue;
+            defer = 1;
 
             if (class == IDCMP_CLOSEWINDOW)
                 done = askquit();
             if (class == IDCMP_GADGETDOWN ||
                 class == IDCMP_GADGETUP ||
                 class == IDCMP_MOUSEMOVE) {
-                if (class == IDCMP_GADGETDOWN)
+                if (class == IDCMP_GADGETDOWN) {
                     propheld = iaddr == (APTR)&vgad ? 1 :
                                iaddr == (APTR)&hgad ? 2 : 0;
-                else if (class == IDCMP_GADGETUP)
+                    /* a knob drag needs MOUSEMOVE, an arrow needs
+                     * INTUITICKS to repeat - ask for them now and
+                     * hand them back on release */
+                    ltx_trackpointer(1);
+                } else if (class == IDCMP_GADGETUP) {
                     propheld = 0;
+                    arrheld = 0;
+                    ltx_trackpointer(0);
+                }
                 if (iaddr == (APTR)&vgad) {
                     ltx_trackvert();
                 } else if (iaddr == (APTR)&hgad) {
@@ -1650,6 +1677,7 @@ static void guimode(void)
                  * is exactly what his first boot showed. Off again
                  * on release, so an idle pointer costs nothing. */
                 ltx_reportmouse(1);
+                ltx_trackpointer(1);    /* the drag wants MOUSEMOVE */
                 selpaint();
             } else if (class == IDCMP_MOUSEMOVE && dragging) {
                 int py, px;
@@ -1664,6 +1692,7 @@ static void guimode(void)
             } else if (class == IDCMP_MOUSEBUTTONS && code == SELECTUP) {
                 dragging = 0;
                 ltx_reportmouse(0);
+                ltx_trackpointer(0);
                 /* a click that never moved is a caret placement, not
                  * an empty selection sitting there doing nothing */
                 {
