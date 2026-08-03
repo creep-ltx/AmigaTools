@@ -654,6 +654,56 @@ Goto Line, top and bottom of file, and auto-indent on Return.
       `PUBSCREEN=` or `OPENSCREEN=` set - that is the one thing the
       harness cannot see, and it is where cdiff's b76 bug lived.
 
+### b7b — the prompt row, after seeing Ed — BUILT 3.8.26
+
+He put three Ed 47.2 screenshots next to it and called them "nice and
+clean": Ed asks on its bottom line - `String:`, `Search:`, `Replace:`
+with a block caret - and never opens a window at all. His question
+was whether to insert a line above the status bar or borrow the
+status bar itself.
+
+- [x] **Borrow it.** Inserting a row means the grid changes, the
+      content reflows and the whole page repaints, twice, to collect
+      one short string - and the standing rule is that only what
+      changed gets redrawn. Borrowing paints ONE row and paints it
+      back. The status text is also exactly what is not wanted while
+      typing a search: the line number under the cursor is about to
+      change anyway.
+- [x] `ltx_askline` in the chassis, with Ed's own labels because he
+      liked them. The caret is COMPLEMENTED over the cell, the same
+      way the document caret is, so it reads on any palette and
+      erasing it is the same operation again - no second colour
+      chosen for a screen we do not own. The text scrolls sideways
+      when it outgrows the row, including on entry, so a long
+      previous answer does not open with its caret off the end.
+- [x] **`ltx_flash`** - "not found", "12 occurrences replaced" - in
+      the status row until the next key, instead of a requester that
+      has to be dismissed before typing can continue. That is the
+      whole reason this is cheaper than what b7 shipped this morning.
+- [x] **The prompt owns the message port while it is up**, so a
+      resize during one never reaches the app's loop. The chassis
+      re-measures its half and sets `ltx_tookresize`; cedit settles
+      the rest in `askstr`, in one place, because the gutter width is
+      the app's and it follows viscols. Found by reading it back, not
+      by a boot.
+- [x] **Case folding moved to Settings** (`IGNORECASE=`, default NO):
+      a one-line prompt has no room for the checkbox the requester
+      had, and it is a standing preference rather than a per-search
+      one anyway. Replace splits into **Replace...** (walks one at a
+      time) and **Replace All...**, which is what the button row used
+      to do.
+- [x] **The requester is NOT deleted.** With `STATUSBAR=NO` there is
+      no row to borrow, and manufacturing one would repaint the whole
+      page - the exact cost this design exists to avoid - so that
+      case falls back to `ltx_askfields`, which cdiff still uses for
+      its own Find.
+- [ ] **BOOT GATE:** Amiga+F and see `String:` in the status row with
+      the block caret, type, Return, and the row goes back to being
+      the status row. Esc at the prompt leaves the old search string
+      untouched. A search that fails says so in the row and the
+      message clears on the next key. Then Amiga+R for the
+      `Search:` / `Replace:` pair, and Replace All's count.
+
 ## Later, not promised
 
 C and 68k asm lexers · Select All, block indent/outdent, delete

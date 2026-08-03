@@ -289,6 +289,9 @@ int tabh;
 int ltx_tabbar = 1;
 int staty = -1;
 int ttstatus = 1;               /* STATUSBAR=YES/NO, default on */
+static char flashmsg[160];      /* b7b: transient status text */
+static int  prompting;          /* the status row is on loan */
+static int  sawresize;          /* a NEWSIZE the prompt swallowed */
 
 int pshine = 2, pshadow = 1, pfill = 3, pfilltext = 2,
     ptext = 1, pback = 0;
@@ -621,6 +624,7 @@ void drawstatus(void)
     char pc[16];
 
     if (win == NULL || staty < 0 || rp == NULL || ltxapp == NULL) return;
+    if (prompting) return;      /* the row is on loan to ltx_askline */
     w = viscols;
     if (w > (int)sizeof(sb) - 1) w = sizeof(sb) - 1;
     if (w < 1) return;
@@ -631,7 +635,14 @@ void drawstatus(void)
         ? (int)(((long)*ltxapp->toprow() * 100 + max / 2) / max) : 100;
 
     sb[0] = 0;
-    ltxapp->statustext(sb, (int)sizeof(sb) - 1);
+    /* b7b: a flash message stands in for the app's own text until the
+     * next key clears it - "not found" said where he is already
+     * looking, instead of a requester to dismiss */
+    if (flashmsg[0]) {
+        strncpy(sb, flashmsg, sizeof(sb) - 1);
+        sb[sizeof(sb) - 1] = 0;
+    } else
+        ltxapp->statustext(sb, (int)sizeof(sb) - 1);
 
     len = strlen(sb);
     if (len > w) len = w;
@@ -655,6 +666,176 @@ void drawstatus(void)
     SetBPen(rp, 0);
     Move(rp, gx0, staty + fbase);
     Text(rp, (STRPTR)sb, w);
+}
+
+/* ---- b7b: the prompt row ------------------------------------------
+ * Ed 47.2's bottom line, in our status row. See ltxwin.h for why a
+ * row on loan beats a window that has to be opened and dismissed. */
+
+int ltx_haveprompt(void)
+{
+    return win != NULL && rp != NULL && staty >= 0;
+}
+
+void ltx_flash(const char *text)
+{
+    strncpy(flashmsg, text ? text : "", sizeof(flashmsg) - 1);
+    flashmsg[sizeof(flashmsg) - 1] = 0;
+    drawstatus();
+}
+
+int ltx_flashing(void) { return flashmsg[0] != 0; }
+
+void ltx_flashclear(void)
+{
+    if (flashmsg[0] == 0) return;
+    flashmsg[0] = 0;
+    drawstatus();
+}
+
+/* the label, then as much of the text as fits, then the block caret.
+ * The caret is COMPLEMENTED over the cell exactly as the document's
+ * is - it reads on any pen pair, and erasing it is the same
+ * operation again, so no second colour has to be chosen for a
+ * palette we do not own. */
+static void drawprompt(const char *label, const char *buf, int pos,
+                       int off)
+{
+    char sb[320];
+    int w = viscols, ll, n, i, cx;
+
+    if (!ltx_haveprompt()) return;
+    if (w > (int)sizeof(sb) - 1) w = (int)sizeof(sb) - 1;
+    if (w < 1) return;
+
+    ll = (int)strlen(label);
+    if (ll > w) ll = w;
+    memcpy(sb, label, ll);
+    n = ll;
+    for (i = off; buf[i] && n < w; i++) sb[n++] = buf[i];
+    for (i = n; i < w; i++) sb[i] = ' ';
+    sb[w] = 0;
+
+    if (staty - 2 >= conty) {           /* the same rule as the status
+                                         * row, so nothing jumps */
+        SetAPen(rp, pshine);
+        Move(rp, gx0, staty - 2);
+        Draw(rp, xend, staty - 2);
+    }
+    SetAPen(rp, 1);
+    SetBPen(rp, 0);
+    Move(rp, gx0, staty + fbase);
+    Text(rp, (STRPTR)sb, w);
+
+    cx = ll + (pos - off);
+    if (cx >= 0 && cx < w) {
+        SetDrMd(rp, COMPLEMENT);
+        RectFill(rp, gx0 + cx * fw, staty,
+                     gx0 + cx * fw + fw - 1, staty + fh - 1);
+        SetDrMd(rp, JAM2);
+    }
+}
+
+int ltx_askline(const char *label, char *buf, int max)
+{
+    char work[320];
+    struct IntuiMessage *m;
+    int pos, off = 0, done = 0, ok = 0, ll, room;
+
+    if (!ltx_haveprompt()) return 0;
+    if (max > (int)sizeof(work) - 1) max = (int)sizeof(work) - 1;
+    strncpy(work, buf, max);
+    work[max] = 0;
+    pos = (int)strlen(work);            /* start at the end of what
+                                         * was there, ready to extend */
+    ll = (int)strlen(label);
+    room = viscols - ll - 1;
+    if (room < 1) room = 1;
+
+    flashmsg[0] = 0;
+    prompting = 1;
+    /* the previous answer may be longer than the row: start scrolled
+     * so the caret is visible, not off the right-hand end */
+    if (pos > off + room) off = pos - room;
+    drawprompt(label, work, pos, off);
+
+    while (!done) {
+        WaitPort(win->UserPort);
+        while ((m = (struct IntuiMessage *)GetMsg(win->UserPort))) {
+            ULONG cls  = m->Class;
+            UWORD cod  = m->Code;
+            UWORD qual = m->Qualifier;
+            ReplyMsg((struct Message *)m);
+            if (cls == IDCMP_CLOSEWINDOW) { done = 1; }
+            else if (cls == IDCMP_NEWSIZE) {
+                /* the prompt owns the port while it is up, so this
+                 * message never reaches the app's loop. Re-measure
+                 * enough that the row we are drawing into is still
+                 * the right one, and remember it: the APP's grid has
+                 * parts the chassis cannot recompute (cedit's gutter
+                 * width follows viscols), so it settles the rest when
+                 * ltx_tookresize tells it to. */
+                if (gadsok) RefreshWindowFrame(win);
+                ltx_calcgrid();
+                sawresize = 1;
+                if (ltxapp) ltxapp->pageall();
+            }
+            else if (cls == IDCMP_REFRESHWINDOW) {
+                /* b64's rule holds here too: paint inside
+                 * Begin/EndRefresh or the damage is cleared with
+                 * nothing in it */
+                BeginRefresh(win);
+                if (ltxapp) ltxapp->pageall();
+                EndRefresh(win, TRUE);
+            }
+            else if (cls == IDCMP_VANILLAKEY) {
+                int len = (int)strlen(work);
+                if (cod == 13)      { ok = 1; done = 1; }
+                else if (cod == 27) { done = 1; }
+                else if (cod == 8) {            /* Backspace */
+                    if (pos > 0) {
+                        memmove(work + pos - 1, work + pos,
+                                len - pos + 1);
+                        pos--;
+                    }
+                } else if (cod == 127) {        /* Del */
+                    if (pos < len)
+                        memmove(work + pos, work + pos + 1, len - pos);
+                } else if (cod >= 32 && cod < 127 && len < max) {
+                    memmove(work + pos + 1, work + pos, len - pos + 1);
+                    work[pos++] = (char)cod;
+                }
+            }
+            else if (cls == IDCMP_RAWKEY) {
+                int len = (int)strlen(work);
+                int page = (qual & (IEQUALIFIER_LSHIFT |
+                                    IEQUALIFIER_RSHIFT)) != 0;
+                if (cod == 0x4F)                /* left, Shift = start */
+                    pos = page ? 0 : (pos > 0 ? pos - 1 : 0);
+                else if (cod == 0x4E)           /* right, Shift = end */
+                    pos = page ? len : (pos < len ? pos + 1 : len);
+            }
+            if (!done) {
+                /* keep the caret in view on a long line */
+                if (pos < off) off = pos;
+                if (pos > off + room) off = pos - room;
+                if (off < 0) off = 0;
+                drawprompt(label, work, pos, off);
+            }
+        }
+    }
+
+    prompting = 0;
+    if (ok) { strncpy(buf, work, max); buf[max] = 0; }
+    drawstatus();               /* hand the row back */
+    return ok;
+}
+
+int ltx_tookresize(void)
+{
+    int r = sawresize;
+    sawresize = 0;
+    return r;
 }
 
 /* ---- the border scrollers --------------------------------------- */

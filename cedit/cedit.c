@@ -299,6 +299,15 @@ static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 static int  ttgutter = 1;       /* GUTTER=YES/NO - line numbers */
 static char ttdrawer[310];      /* DRAWER= - where the requester starts */
 static int  tthilite = 1;       /* HIGHLIGHT=YES/NO - syntax colour */
+/* b7: the search strings are the PROGRAM's, not the document's -
+ * finding a word in one tab and pressing Find Next in another looks
+ * for the same word, which is what anyone switching tabs mid-hunt
+ * expects. findfold is IGNORECASE=, off by default: E is case
+ * sensitive and its keywords are upper case, so a code search that
+ * ignored case would be wrong more often than right. */
+static char findstr[80];
+static char repstr[80];
+static int  findfold;
 static int  ttindent = 1;       /* AUTOINDENT=YES/NO - b7. Defaults ON:
                                  * this is an editor for indented
                                  * languages, and the cost of it being
@@ -382,6 +391,7 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Replace...",   (STRPTR)"R", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Replace Next", (STRPTR)"T", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Replace All...", NULL,      0, 0, NULL },
     { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Goto Line...", (STRPTR)"J", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Top of File",  NULL,        0, 0, NULL },
@@ -394,6 +404,11 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Syntax colour", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Auto indent", NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
+    /* b7b: the prompt row has no room for a checkbox the way the old
+     * requester did, and case folding is a standing preference rather
+     * than a per-search one anyway - so it lives here and persists */
+    { NM_ITEM,  (STRPTR)"Ignore case", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     /* his ask: tab size from the menu, 1-10. Radio rather than
      * toggle - exactly one is true - which in GadTools means CHECKIT
@@ -824,6 +839,7 @@ static int openmain(void)
                 else if (!strcmp(lb, "Status bar"))   on = ttstatus;
                 else if (!strcmp(lb, "Syntax colour")) on = tthilite;
                 else if (!strcmp(lb, "Auto indent"))  on = ttindent;
+                else if (!strcmp(lb, "Ignore case"))  on = findfold;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -900,6 +916,10 @@ static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
         if (v) ttindent = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
                             tteq((char *)v, "FALSE"));
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"IGNORECASE");
+        if (v) findfold = !(tteq((char *)v, "NO") ||
+                            tteq((char *)v, "OFF") ||
+                            tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"GUTTER");
         if (v) ttgutter = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
@@ -969,6 +989,7 @@ static void dopaste(void);
 static void dofind(void);       /* b7 */
 static void findstep(int dir);
 static void doreplace(void);
+static void doreplaceall(void);
 static void replacestep(void);
 static void dogoto(void);
 static void jumpend(int dir);
@@ -1005,15 +1026,16 @@ static int domenu(UWORD code)   /* 1 = quit */
         }
         if (m == 2) {                                   /* Search */
             /* Find(0) Next(1) Prev(2) -(3) Replace(4) ReplaceNext(5)
-             * -(6) Goto(7) Top(8) End(9) */
-            if (i == 0) { dofind();          return 0; }
-            if (i == 1) { findstep(1);       return 0; }
-            if (i == 2) { findstep(-1);      return 0; }
-            if (i == 4) { doreplace();       return 0; }
-            if (i == 5) { replacestep();     return 0; }
-            if (i == 7) { dogoto();          return 0; }
-            if (i == 8) { jumpend(-1);       return 0; }
-            if (i == 9) { jumpend(1);        return 0; }
+             * ReplaceAll(6) -(7) Goto(8) Top(9) End(10) */
+            if (i == 0)  { dofind();         return 0; }
+            if (i == 1)  { findstep(1);      return 0; }
+            if (i == 2)  { findstep(-1);     return 0; }
+            if (i == 4)  { doreplace();      return 0; }
+            if (i == 5)  { replacestep();    return 0; }
+            if (i == 6)  { doreplaceall();   return 0; }
+            if (i == 8)  { dogoto();         return 0; }
+            if (i == 9)  { jumpend(-1);      return 0; }
+            if (i == 10) { jumpend(1);       return 0; }
         }
         if (m == 3) {                                   /* Settings */
             int on = (it->Flags & CHECKED) ? 1 : 0;
@@ -1037,7 +1059,10 @@ static int domenu(UWORD code)   /* 1 = quit */
                 (void)iconset("AUTOINDENT", on ? "YES" : "NO");
                 /* nothing on screen changed - it only affects the
                  * NEXT Return */
-            } else if (i == 4) {                        /* Tab size */
+            } else if (i == 4) {                        /* Ignore case */
+                findfold = on;
+                (void)iconset("IGNORECASE", on ? "YES" : "NO");
+            } else if (i == 5) {                        /* Tab size */
                 UWORD sub = SUBNUM(code);
                 if (sub != NOSUB) {
                     char v[8];
@@ -1517,14 +1542,6 @@ static void dopaste(void)
  * same word, which is what every editor does and what anyone
  * switching tabs mid-hunt expects. */
 
-static char findstr[80];
-static char repstr[80];
-static int  findfold;           /* case folding, off by default: E is
-                                 * case sensitive and its keywords are
-                                 * upper case, so a code search that
-                                 * ignored case would be wrong more
-                                 * often than right */
-
 /* put the match on screen and SELECT it. The selection is the
  * feedback - the anchor at the start and the cursor at the end - and
  * it costs nothing, because b5 already paints a selected run.
@@ -1555,9 +1572,11 @@ static int findfrom(int y, int x, int dir, int quiet)
     if (len == 0) return 0;
     if (!ed_search(cur, findstr, y, x, dir, findfold, 1, &fy, &fx)) {
         if (!quiet) {
+            /* b7b: said where he is already looking, not in a
+             * requester that has to be dismissed before the next key */
             char t[140];
-            sprintf(t, "\"%.80s\" not found.", findstr);
-            msg(t);
+            sprintf(t, " \"%.80s\" not found.", findstr);
+            ltx_flash(t);
         }
         return 0;
     }
@@ -1578,15 +1597,42 @@ static void findstep(int dir)
     }
 }
 
+/* b7b, his call with Ed 47.2 on screen beside it: ask on the status
+ * row, not in a window that has to be opened and dismissed. Ed's own
+ * labels, because he called them clean - "String:" to find,
+ * "Search:" then "Replace:" to replace.
+ *
+ * With STATUSBAR=NO there is no row to borrow, and manufacturing one
+ * would repaint the whole page - the exact cost this design exists to
+ * avoid - so that case falls back to the b7 requester. */
+static int askstr(const char *label, char *buf, int max)
+{
+    LtxField f[1];
+    static const char *btn[1] = { "OK" };
+    char title[40];
+    int r;
+    if (ltx_haveprompt())
+        r = ltx_askline(label, buf, max);
+    else {
+        sprintf(title, "cedit: %.24s", label);
+        f[0].label = label; f[0].buf = buf;
+        f[0].max = max;     f[0].flag = NULL;
+        r = ltx_askfields(title, f, 1, btn, 1);
+    }
+    /* the prompt owned the port, so a resize during it never reached
+     * the event loop. The chassis re-measured its half; the gutter
+     * width is ours, and it follows viscols. */
+    if (ltx_tookresize()) {
+        calcgrid();
+        clamptop();
+        dirtyall = 1;
+    }
+    return r;
+}
+
 static void dofind(void)
 {
-    LtxField f[2];
-    static const char *btn[1] = { "Find" };
-    f[0].label = "Find:";      f[0].buf = findstr;
-    f[0].max   = (int)sizeof(findstr) - 1;  f[0].flag = NULL;
-    f[1].label = "Ignore case:"; f[1].buf = NULL;
-    f[1].max   = 0;            f[1].flag = &findfold;
-    if (!ltx_askfields("cedit: Find", f, 2, btn, 1)) return;
+    if (!askstr("String:", findstr, (int)sizeof(findstr) - 1)) return;
     if (findstr[0] == 0) return;
     /* from the cursor, INCLUDING what is under it: a fresh Find after
      * a click should match the word clicked on */
@@ -1638,63 +1684,61 @@ static void replacestep(void)
     findfrom(cur->cy, cur->cx, 1, 0);   /* not on a match: just find */
 }
 
+/* the two prompts Replace and Replace All share. Esc at either one
+ * abandons the whole thing. */
+static int askpair(void)
+{
+    if (!askstr("Search:", findstr, (int)sizeof(findstr) - 1)) return 0;
+    if (findstr[0] == 0) return 0;
+    if (!askstr("Replace:", repstr, (int)sizeof(repstr) - 1)) return 0;
+    return 1;
+}
+
 static void doreplace(void)
 {
-    LtxField f[3];
-    static const char *btn[2] = { "Replace", "All" };
-    int r;
-    f[0].label = "Find:";        f[0].buf = findstr;
-    f[0].max   = (int)sizeof(findstr) - 1;  f[0].flag = NULL;
-    f[1].label = "Replace:";     f[1].buf = repstr;
-    f[1].max   = (int)sizeof(repstr) - 1;   f[1].flag = NULL;
-    f[2].label = "Ignore case:"; f[2].buf = NULL;
-    f[2].max   = 0;              f[2].flag = &findfold;
-    r = ltx_askfields("cedit: Replace", f, 3, btn, 2);
-    if (r == 0 || findstr[0] == 0) return;
-    /* "Replace" walks one at a time, and deliberately SHOWS the first
-     * hit before touching it: with nothing matched yet this finds and
-     * selects, and the next press (or Amiga+T) replaces it and moves
-     * on. Replacing something he has not seen yet, on the first press
-     * of a button he has just typed two strings into, is how a wrong
+    if (!askpair()) return;
+    /* deliberately SHOWS the first hit before touching it: with
+     * nothing matched yet this finds and selects, and the next press
+     * (or Amiga+T) replaces it and moves on. Replacing something he
+     * has not seen, right after typing two strings, is how a wrong
      * pattern eats a file. */
-    if (r == 1) { replacestep(); return; }
-    {                                           /* all of them */
-        char t[80];
-        int n;
-        busy(1);
-        n = ed_replaceall(cur, findstr, repstr, findfold);
-        busy(0);
-        if (n == 0) {
-            sprintf(t, "\"%.60s\" not found.", findstr);
-            msg(t);
-            return;
-        }
-        /* the whole file may have changed under it, and the cursor
-         * moved to the last replacement */
-        ed_selclear(cur);
-        cur->maxwdirty = 1;
-        cur->lexdone = 0;
-        ed_lexdirty(cur, 0);
-        goalx = cur->cx;
-        follow();
-        dirtyrows = 1;
-        dmgold = -1;
-        marktitle();
-        sprintf(t, "%d occurrence%s replaced.", n, n == 1 ? "" : "s");
-        msg(t);
+    replacestep();
+}
+
+static void doreplaceall(void)
+{
+    char t[100];
+    int n;
+    if (!askpair()) return;
+    busy(1);
+    n = ed_replaceall(cur, findstr, repstr, findfold);
+    busy(0);
+    if (n == 0) {
+        sprintf(t, " \"%.60s\" not found.", findstr);
+        ltx_flash(t);
+        return;
     }
+    /* the whole file may have changed under it, and the cursor moved
+     * to the last replacement */
+    ed_selclear(cur);
+    cur->maxwdirty = 1;
+    cur->lexdone = 0;
+    ed_lexdirty(cur, 0);
+    goalx = cur->cx;
+    follow();
+    dirtyrows = 1;
+    dmgold = -1;
+    marktitle();
+    sprintf(t, " %d occurrence%s replaced.", n, n == 1 ? "" : "s");
+    ltx_flash(t);
 }
 
 static void dogoto(void)
 {
-    LtxField f[1];
-    static const char *btn[1] = { "Go" };
     char num[12];
     int n;
     sprintf(num, "%d", cur->cy + 1);            /* where we are now */
-    f[0].label = "Line:"; f[0].buf = num;
-    f[0].max   = (int)sizeof(num) - 1; f[0].flag = NULL;
-    if (!ltx_askfields("cedit: Goto Line", f, 1, btn, 1)) return;
+    if (!askstr("Line:", num, (int)sizeof(num) - 1)) return;
     n = atoi(num);
     if (n < 1) n = 1;
     if (n > cur->n) n = cur->n;                 /* clamped, not refused */
@@ -1972,6 +2016,14 @@ static void guimode(void)
                 } else if (what == LTXTAB_SCROLL)
                     drawtabbar();
             }
+            /* b7b: a flash message ("not found", "12 replaced") sits
+             * in the status row until the next key, which is what
+             * makes it cheaper than a requester - nothing has to be
+             * dismissed before typing can continue. */
+            if ((class == IDCMP_VANILLAKEY || class == IDCMP_RAWKEY ||
+                 class == IDCMP_MOUSEBUTTONS ||
+                 class == IDCMP_MENUPICK) && ltx_flashing())
+                ltx_flashclear();
             if (class == IDCMP_VANILLAKEY) {
                 if (code == 27) {                       /* Esc drops
                                                          * a selection */

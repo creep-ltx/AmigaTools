@@ -341,6 +341,42 @@ typedef struct {
 int ltx_askfields(const char *title, LtxField *f, int nf,
                   const char **buttons, int nb);
 
+/* ---- b7b: the prompt row, Ed's way ------------------------------
+ * His call, with Ed 47.2 on screen beside it: a whole window that
+ * has to be opened, centred, dragged out of the way and closed, to
+ * collect one short string, is a lot of furniture for a keystroke.
+ * Ed asks on its bottom line and gets out of the way.
+ *
+ * So the prompt takes over the STATUS ROW rather than inserting a
+ * line of its own. Nothing reflows, nothing scrolls, the page does
+ * not repaint - one row is painted and painted back. And the status
+ * text is precisely what is not wanted while typing a search: the
+ * line number under the cursor is about to change anyway.
+ *
+ * `buf` arrives holding the previous answer and is left untouched
+ * unless the prompt is accepted. Returns 1 on Return, 0 on Esc or
+ * the close gadget.
+ *
+ * With STATUSBAR=NO there is no row to borrow, and rather than
+ * relayout the page to manufacture one - which WOULD repaint
+ * everything, the thing this design exists to avoid - the caller
+ * falls back to ltx_askfields. Hence ltx_haveprompt. */
+int  ltx_haveprompt(void);
+int  ltx_askline(const char *label, char *buf, int max);
+
+/* The prompt owns the window's message port while it is up, so a
+ * resize during one never reaches the app's own loop. The chassis
+ * re-measures its half; this says whether the app must settle the
+ * rest (cedit's gutter width follows viscols). Reading it clears it. */
+int  ltx_tookresize(void);
+
+/* a transient message in the status row - "not found", "12 replaced"
+ * - instead of a requester that has to be dismissed before the next
+ * keystroke. Cleared by the next key the app sees. */
+void ltx_flash(const char *text);
+void ltx_flashclear(void);
+int  ltx_flashing(void);
+
 /* the app's name, used as the title of every requester below. Set it
  * once at startup; "ltx" until then. */
 extern const char *ltx_appname;
