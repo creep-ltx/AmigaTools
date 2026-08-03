@@ -991,6 +991,11 @@ to?**
 
 ## Later, not promised
 
+**The forward list now lives in [TODO.md](TODO.md)** — the compiler
+bench, save fidelity, Revert, the `+N` argument, iconify, ARexx, the
+menu pass, and what has been closed. This section stays only as the
+one-line summary it always was.
+
 C and 68k asm lexers · Select All, block indent/outdent, delete
 line and delete word · an ARexx port, so CFile can hand it a file
 and cdiff can be told to compare what was just saved · running EC
