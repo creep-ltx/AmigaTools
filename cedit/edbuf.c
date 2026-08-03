@@ -196,7 +196,7 @@ void ed_break(Buffer *b)
  * step to the user. */
 void ed_group(Buffer *b)
 {
-    if (b->ugrp) return;                /* already in one */
+    if (b->ugrpdepth++ > 0) return;     /* already in one */
     if (++b->ugrpnext <= 0) b->ugrpnext = 1;    /* never 0 */
     b->ugrp = b->ugrpnext;
     b->ubreak = 1;              /* a group never merges with what
@@ -205,6 +205,11 @@ void ed_group(Buffer *b)
 
 void ed_ungroup(Buffer *b)
 {
+    /* only the OUTERMOST close ends the group - an inner one used to
+     * end the outer, dropping the rest of it into separate undo
+     * steps. See ugrpdepth in edbuf.h. */
+    if (b->ugrpdepth > 0 && --b->ugrpdepth > 0) return;
+    b->ugrpdepth = 0;
     b->ugrp = 0;
     b->ubreak = 1;
 }
@@ -638,6 +643,149 @@ int ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask)
         if (o == col) return i + 1;
     }
     return b->len[y];
+}
+
+/* ---- search -------------------------------------------------------
+ * b7. Plain substring, no patterns: what a code editor is asked for
+ * a hundred times a day is a literal, and a regexp engine is a
+ * separate program's worth of surface to get wrong.
+ *
+ * Every read of a line byte goes through an int local before it is
+ * compared. That is not superstition - it is the b6 rule, written
+ * after -O2 on m68k mis-compiled a narrow compare that printed
+ * correctly one statement earlier. */
+
+static int chfold(int c, int fold)
+{
+    if (fold && c >= 'a' && c <= 'z') return c - 'a' + 'A';
+    return c;
+}
+
+static int matchat(const Buffer *b, int y, int x, const char *pat,
+                   int plen, int fold)
+{
+    int i;
+    if (x < 0 || x + plen > b->len[y]) return 0;
+    for (i = 0; i < plen; i++) {
+        int a = (unsigned char)b->ln[y][x + i];
+        int c = (unsigned char)pat[i];
+        if (chfold(a, fold) != chfold(c, fold)) return 0;
+    }
+    return 1;
+}
+
+int ed_search(const Buffer *b, const char *pat, int fromy, int fromx,
+              int dir, int fold, int wrap, int *fy, int *fx)
+{
+    int plen = 0, i, y, x;
+
+    while (pat[plen]) plen++;
+    if (plen == 0 || b->n < 1) return 0;
+    if (fromy < 0) fromy = 0;
+    if (fromy >= b->n) fromy = b->n - 1;
+
+    /* n lines, plus the starting line ONE more time so a wrap covers
+     * the half of it the first visit skipped */
+    y = fromy;
+    for (i = 0; i <= b->n; i++) {
+        int lo = 0, hi = b->len[y] - plen;
+        if (i == 0) {
+            if (dir > 0) lo = fromx;
+            else         hi = fromx - 1;    /* strictly before */
+        } else if (i == b->n) {             /* the wrapped revisit */
+            if (!wrap) break;
+            if (dir > 0) hi = fromx - 1;
+            else         lo = fromx;
+        }
+        if (lo < 0) lo = 0;
+        if (hi > b->len[y] - plen) hi = b->len[y] - plen;
+        if (dir > 0) {
+            for (x = lo; x <= hi; x++)
+                if (matchat(b, y, x, pat, plen, fold)) {
+                    *fy = y; *fx = x; return 1;
+                }
+        } else {
+            for (x = hi; x >= lo; x--)
+                if (matchat(b, y, x, pat, plen, fold)) {
+                    *fy = y; *fx = x; return 1;
+                }
+        }
+        if (i == b->n) break;
+        if (dir > 0) {
+            if (++y >= b->n) { if (!wrap) break; y = 0; }
+        } else {
+            if (--y < 0)     { if (!wrap) break; y = b->n - 1; }
+        }
+    }
+    return 0;
+}
+
+int ed_replaceat(Buffer *b, int y, int x, int plen, const char *rep)
+{
+    int i, ok = 1;
+    ed_group(b);
+    for (i = 0; i < plen; i++) eddelch(b, y, x);
+    for (i = 0; rep[i] && ok; i++) ok = edinsch(b, y, x + i, rep[i]);
+    ed_ungroup(b);
+    return ok;
+}
+
+int ed_replaceall(Buffer *b, const char *pat, const char *rep, int fold)
+{
+    int plen = 0, rlen = 0, n = 0, y = 0, x = 0, fy, fx;
+
+    while (pat[plen]) plen++;
+    while (rep[rlen]) rlen++;
+    if (plen == 0) return 0;
+
+    ed_group(b);
+    /* no wrap: this starts at the top and walks to the bottom once,
+     * so a wrap could only take it round again over its own output */
+    while (ed_search(b, pat, y, x, 1, fold, 0, &fy, &fx)) {
+        if (!ed_replaceat(b, fy, fx, plen, rep)) break;
+        n++;
+        /* resume PAST what was just written, never inside it */
+        y = fy;
+        x = fx + rlen;
+    }
+    ed_ungroup(b);
+    if (n) { b->cy = y; b->cx = x; }
+    return n;
+}
+
+/* ---- auto-indent -------------------------------------------------- */
+
+int ed_indent(const Buffer *b, int y, int upto, char *dst, int max)
+{
+    int i, n = 0, lim = b->len[y];
+    if (upto >= 0 && upto < lim) lim = upto;
+    for (i = 0; i < lim && n < max; i++) {
+        int c = (unsigned char)b->ln[y][i];
+        if (c != ' ' && c != '\t') break;
+        dst[n++] = (char)c;
+    }
+    dst[n] = 0;
+    return n;
+}
+
+int ed_newline(Buffer *b, int y, int x, int autoind)
+{
+    char ind[128];
+    int ni = 0, i, ok;
+
+    /* measured BEFORE the split, while line y still holds the text,
+     * and clamped to x so Return inside the indent copies only what
+     * the cursor actually stood after */
+    if (autoind) ni = ed_indent(b, y, x, ind, (int)sizeof(ind) - 1);
+
+    ed_group(b);
+    ok = edsplitline(b, y, x);
+    for (i = 0; i < ni && ok; i++) ok = edinsch(b, y + 1, i, ind[i]);
+    ed_ungroup(b);
+
+    b->cy = y + 1;
+    b->cx = ok ? ni : 0;
+    return ok;
 }
 
 /* ---- syntax state -------------------------------------------------- */

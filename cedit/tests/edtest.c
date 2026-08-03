@@ -509,6 +509,260 @@ static void sel(Buffer *b, int ay, int ax, int cy, int cx)
     b->cy = cy; b->cx = cx;
 }
 
+/* ---- b7: search, replace, auto-indent ---------------------------- */
+
+/* one find, spelled out, so a failure names the case */
+static void ckfind(const char *what, Buffer *b, const char *pat,
+                   int fy0, int fx0, int dir, int fold, int wrap,
+                   int wanty, int wantx)
+{
+    int fy = -1, fx = -1;
+    int got = ed_search(b, pat, fy0, fx0, dir, fold, wrap, &fy, &fx);
+    if (wanty < 0) {
+        ck(!got, what);                 /* expected NOT to be found */
+        return;
+    }
+    ck(got && fy == wanty && fx == wantx, what);
+    if (!quiet && got && (fy != wanty || fx != wantx))
+        printf("  (%s: got %d,%d wanted %d,%d)\n", what, fy, fx,
+               wanty, wantx);
+}
+
+static void searching(void)
+{
+    Buffer b;
+
+    bufinit(&b);
+    /*        0123456789 */
+    bufsplit(&b, "alpha beta\nbeta gamma\nBETA delta\n", 33);
+
+    /* forward starts AT the position given, so a match already under
+     * the cursor is found again - that is what makes a fresh Find
+     * from a click work */
+    ckfind("forward from the top", &b, "beta", 0,0, 1,0,0,  0,6);
+    ckfind("forward from the match itself", &b, "beta", 0,6, 1,0,0, 0,6);
+    /* ...and one past it walks on, which is Find Next */
+    ckfind("find next steps off the match", &b, "beta", 0,7, 1,0,0, 1,0);
+
+    /* backward starts strictly BEFORE, so Find Previous never
+     * re-finds what it is standing on */
+    ckfind("backward from the match itself", &b, "beta", 1,0, -1,0,0,
+           0,6);
+    ckfind("backward finds the nearest before", &b, "beta", 1,4, -1,0,0,
+           1,0);
+
+    /* case */
+    ckfind("case sensitive misses BETA", &b, "BETA", 0,0, 1,0,0, 2,0);
+    ckfind("folded finds the first regardless", &b, "BETA", 0,0, 1,1,0,
+           0,6);
+    ckfind("folded backward", &b, "beta", 2,4, -1,1,0, 2,0);
+
+    /* no wrap stops at the end; wrap comes round */
+    ckfind("no wrap past the last match", &b, "alpha", 1,0, 1,0,0,
+           -1,0);
+    ckfind("wrap comes round to the top", &b, "alpha", 1,0, 1,0,1, 0,0);
+    ckfind("wrap backward comes round to the end", &b, "delta", 0,0,
+           -1,0,1, 2,5);
+
+    /* the case the wrapped revisit exists for: the only other match
+     * is EARLIER ON THE SAME LINE as the start. A wrap that visits
+     * each line once misses this one entirely. */
+    ckfind("wrap re-searches the start line", &b, "alpha", 0,6, 1,0,1,
+           0,0);
+    ckfind("wrap re-searches the start line backward", &b, "gamma",
+           1,0, -1,0,1, 1,5);
+
+    /* absent, empty, and a pattern longer than the line */
+    ckfind("absent pattern", &b, "zeta", 0,0, 1,0,1, -1,0);
+    ckfind("empty pattern finds nothing", &b, "", 0,0, 1,0,1, -1,0);
+    ckfind("pattern longer than any line", &b,
+           "alpha beta gamma delta epsilon", 0,0, 1,0,1, -1,0);
+
+    /* a match at the very end of a line, and at the very start */
+    ckfind("match at end of line", &b, "gamma", 0,0, 1,0,0, 1,5);
+    ckfind("match at start of line", &b, "beta", 0,10, 1,0,0, 1,0);
+    buffree(&b);
+
+    /* overlapping occurrences: "aa" in "aaaa" starts at 0 and 2 when
+     * walked the way Find Next walks it */
+    bufinit(&b);
+    bufsplit(&b, "aaaa\n", 5);
+    ckfind("overlap: first", &b, "aa", 0,0, 1,0,0, 0,0);
+    ckfind("overlap: next from one past", &b, "aa", 0,1, 1,0,0, 0,1);
+    ckfind("overlap: last possible start", &b, "aa", 0,2, 1,0,0, 0,2);
+    ckfind("overlap: none past the end", &b, "aa", 0,3, 1,0,0, -1,0);
+    buffree(&b);
+
+    /* a one-line buffer wrapping onto itself must still terminate */
+    bufinit(&b);
+    bufsplit(&b, "solo\n", 5);
+    ckfind("single line, wrap forward", &b, "solo", 0,2, 1,0,1, 0,0);
+    ckfind("single line, wrap backward", &b, "solo", 0,0, -1,0,1, 0,0);
+    ckfind("single line, absent, wrap", &b, "nope", 0,0, 1,0,1, -1,0);
+    buffree(&b);
+
+    /* an empty document has one empty line and must not read off it */
+    bufinit(&b);
+    bufsplit(&b, "", 0);
+    ckfind("empty document", &b, "x", 0,0, 1,0,1, -1,0);
+    buffree(&b);
+}
+
+static void replacing(void)
+{
+    Buffer b;
+    int st, n;
+
+    /* the plain case, and the count */
+    bufinit(&b);
+    bufsplit(&b, "one two one\ntwo one two\n", 24);
+    n = ed_replaceall(&b, "one", "1", 0);
+    ck(n == 3, "replace all counts every hit");
+    ck(!strcmp(b.ln[0], "1 two 1"), "replace all, first line");
+    ck(!strcmp(b.ln[1], "two 1 two"), "replace all, second line");
+    ck(b.len[0] == (int)strlen(b.ln[0]), "length tracks the text");
+    ck(b.len[1] == (int)strlen(b.ln[1]), "length tracks the text (2)");
+
+    /* ONE undo takes all three back - the whole point of the group */
+    ck(ed_undo(&b, &st) >= 0, "replace all is undoable");
+    ck(!strcmp(b.ln[0], "one two one") && !strcmp(b.ln[1], "two one two"),
+       "one undo takes back every replacement");
+    ck(!ed_canundo(&b), "and there was only the one step");
+    buffree(&b);
+
+    /* growing: a replacement CONTAINING the pattern must terminate
+     * and must not be rescanned into itself */
+    bufinit(&b);
+    bufsplit(&b, "a a a\n", 6);
+    n = ed_replaceall(&b, "a", "aa", 0);
+    ck(n == 3, "growing replacement replaces each hit once");
+    ck(!strcmp(b.ln[0], "aa aa aa"), "growing replacement text");
+    buffree(&b);
+
+    /* shrinking to nothing */
+    bufinit(&b);
+    bufsplit(&b, "xaxaxa\n", 7);
+    n = ed_replaceall(&b, "a", "", 0);
+    ck(n == 3, "replacing with nothing still counts");
+    ck(!strcmp(b.ln[0], "xxx"), "replacing with nothing deletes");
+    ck(b.len[0] == 3, "length after deletion");
+    buffree(&b);
+
+    /* case folding, and that the REPLACEMENT is written literally
+     * rather than echoing the case that was matched */
+    bufinit(&b);
+    bufsplit(&b, "Foo foo FOO\n", 12);
+    n = ed_replaceall(&b, "foo", "bar", 1);
+    ck(n == 3, "folded replace hits every case");
+    ck(!strcmp(b.ln[0], "bar bar bar"), "folded replace writes literally");
+    buffree(&b);
+
+    bufinit(&b);
+    bufsplit(&b, "Foo foo FOO\n", 12);
+    n = ed_replaceall(&b, "foo", "bar", 0);
+    ck(n == 1, "unfolded replace hits only the exact case");
+    ck(!strcmp(b.ln[0], "Foo bar FOO"), "unfolded replace text");
+    buffree(&b);
+
+    /* nothing to do */
+    bufinit(&b);
+    bufsplit(&b, "hello\n", 6);
+    ck(ed_replaceall(&b, "zzz", "x", 0) == 0, "no match, no replacement");
+    ck(!strcmp(b.ln[0], "hello"), "no match leaves the line alone");
+    ck(!ed_canundo(&b), "no match leaves nothing on the undo stack");
+    ck(ed_replaceall(&b, "", "x", 0) == 0, "empty pattern replaces nothing");
+    ck(!strcmp(b.ln[0], "hello"), "empty pattern leaves the line alone");
+    buffree(&b);
+
+    /* one replacement in the middle, by hand, with its own undo */
+    bufinit(&b);
+    bufsplit(&b, "abcdef\n", 7);
+    ck(ed_replaceat(&b, 0, 2, 2, "XYZ"), "replace at a position");
+    ck(!strcmp(b.ln[0], "abXYZef"), "replace at a position, text");
+    ck(ed_undo(&b, &st) >= 0, "single replace undoes");
+    ck(!strcmp(b.ln[0], "abcdef"), "single replace undoes fully");
+    buffree(&b);
+}
+
+static void autoindent(void)
+{
+    Buffer b;
+    char ind[64];
+    int st;
+
+    bufinit(&b);
+    bufsplit(&b, "    four\n\tone tab\nnone\n        \n", 33);
+
+    ck(ed_indent(&b, 0, -1, ind, 63) == 4 && !strcmp(ind, "    "),
+       "indent of spaces");
+    ck(ed_indent(&b, 1, -1, ind, 63) == 1 && !strcmp(ind, "\t"),
+       "indent of a tab");
+    ck(ed_indent(&b, 2, -1, ind, 63) == 0 && !strcmp(ind, ""),
+       "no indent");
+    /* a line that is ALL whitespace is all indent */
+    ck(ed_indent(&b, 3, -1, ind, 63) == 8, "an all-blank line is all indent");
+    /* clamped to the cursor */
+    ck(ed_indent(&b, 0, 2, ind, 63) == 2 && !strcmp(ind, "  "),
+       "indent clamped to the cursor");
+    ck(ed_indent(&b, 0, 0, ind, 63) == 0, "clamped to column 0 is nothing");
+    buffree(&b);
+
+    /* Return at the end of an indented line */
+    bufinit(&b);
+    bufsplit(&b, "    body\nnext\n", 14);
+    ck(ed_newline(&b, 0, 8, 1), "newline with auto-indent");
+    ck(b.n == 3, "newline added a line");
+    ck(!strcmp(b.ln[0], "    body"), "the original line is untouched");
+    ck(!strcmp(b.ln[1], "    "), "the new line carries the indent");
+    ck(b.cy == 1 && b.cx == 4, "the cursor lands after the indent");
+    /* ONE undo, not one per indent character */
+    ck(ed_undo(&b, &st) >= 0, "auto-indent newline undoes");
+    ck(b.n == 2 && !strcmp(b.ln[0], "    body"),
+       "one undo takes back the split AND the indent");
+    ck(!ed_canundo(&b), "and it was a single step");
+    buffree(&b);
+
+    /* Return in the MIDDLE of an indented line: the tail moves down
+     * and gets the indent in front of it */
+    bufinit(&b);
+    bufsplit(&b, "\t\tab cd\n", 8);
+    /* "\t\tab cd" split at 5 leaves the space on the head */
+    ck(ed_newline(&b, 0, 5, 1), "newline mid-line");
+    ck(!strcmp(b.ln[0], "\t\tab "), "the head keeps its indent");
+    ck(!strcmp(b.ln[1], "\t\tcd"), "the tail is indented to match");
+    ck(b.cy == 1 && b.cx == 2, "cursor after the copied indent");
+    buffree(&b);
+
+    /* Return INSIDE the leading whitespace copies only what was
+     * before the cursor - not indent that was never typed */
+    bufinit(&b);
+    bufsplit(&b, "        deep\n", 13);
+    ck(ed_newline(&b, 0, 3, 1), "newline inside the indent");
+    ck(!strcmp(b.ln[0], "   "), "the head is what was before the cursor");
+    ck(!strcmp(b.ln[1], "        deep"),
+       "the tail keeps its own leading space, not doubled");
+    ck(b.cy == 1 && b.cx == 3, "cursor after the three copied");
+    buffree(&b);
+
+    /* switched off, it is exactly the old behaviour */
+    bufinit(&b);
+    bufsplit(&b, "    body\n", 9);
+    ck(ed_newline(&b, 0, 8, 0), "newline without auto-indent");
+    ck(!strcmp(b.ln[1], "") && b.cx == 0,
+       "no auto-indent means column 0");
+    buffree(&b);
+
+    /* Return at column 0 of an indented line indents NOTHING, because
+     * nothing was before the cursor */
+    bufinit(&b);
+    bufsplit(&b, "    body\n", 9);
+    ck(ed_newline(&b, 0, 0, 1), "newline at column 0");
+    ck(!strcmp(b.ln[0], "") && !strcmp(b.ln[1], "    body"),
+       "column 0 pushes the line down unchanged");
+    ck(b.cy == 1 && b.cx == 0, "cursor at the start of the pushed line");
+    buffree(&b);
+}
+
 static void selection(void)
 {
     Buffer b;
@@ -611,6 +865,9 @@ static void selection(void)
 int main(void)
 {
     lineends();
+    searching();
+    replacing();
+    autoindent();
     selection();
     undoing();
     saving();

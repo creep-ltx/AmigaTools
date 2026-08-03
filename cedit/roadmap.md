@@ -560,13 +560,110 @@ The reason cedit exists rather than being another editor.
       now rather than a slideshow, and the next hour is worth more
       spent on find than on the last 20%.
 
+## 0.1b7 — find, replace, and the jumps — BUILT 3.8.26, AWAITING BOOT
+
+His ask, in one beta because the three are independent and each is
+boot-testable on its own: Find / Find Next / Find Previous, Replace,
+Goto Line, top and bottom of file, and auto-indent on Return.
+
+- [x] **The searcher is in `edbuf`**, harness-proven both roads before
+      a key was wired. `ed_search` takes a direction, a fold flag and
+      a wrap flag; forward starts AT the position given and backward
+      strictly BEFORE it, which is exactly what makes Find Next and
+      Find Previous step OFF a match already under the cursor instead
+      of finding it again forever.
+- [x] **A pattern never spans a line break**, because it comes from a
+      string gadget which cannot hold one. That single fact is what
+      keeps the whole feature small: every match lies inside one line,
+      so a replacement is a delete and an insert at one place, never a
+      structural change, and one row repaints.
+- [x] **The wrap re-searches the line it started on.** Visiting each
+      line once misses a match earlier on the starting line, and a
+      wrap that silently skips matches is worse than no wrap at all.
+      There is a test for exactly that case in both directions.
+- [x] **The match is SELECTED, not just scrolled to** — the anchor at
+      its start, the cursor at its end. It costs nothing because b5
+      already paints a selected run, and it removes the need for any
+      "current match" state: Find Next searches from the cursor (the
+      END of the last match) and Find Previous from the anchor (its
+      START), so neither can re-find where it stands.
+- [x] **A REAL undo bug came out of this, and it was not new.**
+      `ed_group` always refused to re-enter, but `ed_ungroup` cleared
+      unconditionally - so a nested group ended the OUTER one and the
+      rest of it fell out into separate undo steps. Nothing had ever
+      nested until replace-all called a grouped `ed_replaceat` inside
+      its own group, and it broke on the first run of the new test.
+      Grouping is a depth count now. Found by the harness, in the
+      first minute, exactly where that discipline is supposed to pay.
+- [x] **Replace All is ONE undo step** and reports its count. Scanning
+      resumes PAST each replacement, so "a" -> "aa" terminates instead
+      of eating itself; there is a test for the growing case, the
+      shrinking case and replacing with nothing.
+- [x] **Replace shows before it destroys.** The first press finds and
+      selects; the next replaces it and moves on. And before
+      overwriting a selection it asks the searcher whether a match
+      really starts exactly there - the right SHAPE is not proof of
+      the right TEXT, and any hand-made selection of the same length
+      would otherwise have been overwritten.
+- [x] **`ltx_askfields` - the form requester, lifted into the
+      chassis.** cdiff has had a one-field Find box since its b67;
+      cedit's Replace wants two fields and a toggle and Goto wants
+      one, which is the second caller that means LIFT rather than
+      copy. N labelled fields (string or checkbox), a row of buttons
+      and a Cancel it adds itself; values written back only on an
+      accept, so a cancel cannot half-edit the caller's strings.
+      **cdiff's `askfind` is now four lines of "what to ask for"** -
+      about 100 lines of gadtools deleted from it - and the two tools
+      cannot drift apart on requester behaviour again.
+      Its VisualInfo is made and freed HERE rather than borrowed from
+      the app: b76 already found that a VisualInfo is screen-specific
+      and using the app's on a window opened elsewhere is wrong.
+- [x] **Auto-indent copies the indent of the line you left**, clamped
+      to what was actually BEFORE the cursor - so Return pressed in
+      the middle of the leading whitespace does not manufacture indent
+      that was never typed. The split and the indent are one undo
+      step: one Return, one Amiga+Z. `AUTOINDENT=` plus a Settings
+      toggle, defaulting ON, because this is an editor for indented
+      languages and the cost of it being wrong is one Backspace.
+- [x] **Ctrl+Up / Ctrl+Down are the ends of the file.** Ctrl already
+      means "the big version of this move" on left/right, where it is
+      a word jump, so the pair reads the same way.
+- [x] **The shortcuts are what was left.** N is New and P would have
+      paired with it, but Amiga+N for New is older than this program
+      and not worth breaking for a mnemonic - so Find Next and Find
+      Previous take G and H, adjacent under one finger, with **F3 and
+      Shift+F3** wired as well because that is the muscle memory
+      actually in people's hands. F = Find, R = Replace, T = Replace
+      Next, J = Goto Line.
+- [x] Harness ALL GREEN both roads, and the coverage is the awkward
+      cases rather than the happy one: forward from the match itself,
+      backward never re-finding it, both wrap directions including the
+      start-line revisit, overlapping matches ("aa" in "aaaa"), a
+      single-line buffer wrapping onto itself, an empty document, a
+      pattern longer than any line, the empty pattern, case folding in
+      both directions, and every auto-indent shape including Return at
+      column 0 and inside the whitespace.
+- [ ] **BOOT GATE:** Amiga+F for a word in a long `.e` file and see it
+      selected and scrolled to; F3 walks forward, Shift+F3 back, and
+      both wrap with the "not found" requester only when it really is
+      absent. Then Replace on something harmless, Replace All with the
+      count, one Amiga+Z taking ALL of it back. Amiga+J to a line
+      number, Ctrl+Up and Ctrl+Down. And Return inside indented E code
+      landing under the previous line's first character.
+- [ ] Watch for: the requester opening on the right screen with
+      `PUBSCREEN=` or `OPENSCREEN=` set - that is the one thing the
+      harness cannot see, and it is where cdiff's b76 bug lived.
+
 ## Later, not promised
 
-ASL open/save wired to the menus · find and replace (cdiff's find
-is already lifted) · C and 68k asm lexers · block select and
-indent · an ARexx port, so CFile can hand it a file and cdiff can
-be told to compare what was just saved · Kickstart 1.3 is not even
-a question here — the chassis is V36+ throughout.
+C and 68k asm lexers · Select All, block indent/outdent, delete
+line and delete word · an ARexx port, so CFile can hand it a file
+and cdiff can be told to compare what was just saved · running EC
+on the buffer and landing the caret on the error line, which is the
+one thing no other editor does for E · Revert · a `+N` start-at-line
+argument, the `ENV:EDITOR` convention · a `.bak` on save ·
+Kickstart 1.3 is not even a question here — the chassis is V36+
+throughout.
 
 ## Open questions
 

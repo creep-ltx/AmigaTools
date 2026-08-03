@@ -89,6 +89,16 @@ typedef struct {
     int    uapply;              /* inside an undo: do not record */
     int    ugrp;                /* the group being recorded, or 0 */
     int    ugrpnext;            /* the next group id to hand out */
+    int    ugrpdepth;           /* b7: grouping NESTS. ed_group always
+                                 * refused to re-enter, but ed_ungroup
+                                 * used to clear unconditionally - so
+                                 * an inner group ended the outer one
+                                 * and the rest of it fell out into
+                                 * separate undo steps. Nothing nested
+                                 * until replace-all called a grouped
+                                 * ed_replaceat inside its own group,
+                                 * and then it broke at once. Only the
+                                 * outermost ungroup closes. */
     /* selection: an anchor plus the cursor. Inactive when selon is
      * 0; the two ends may be in either order and ed_selrange sorts
      * them, because a drag can go backwards. */
@@ -189,6 +199,44 @@ int  ed_instext(Buffer *b, int y, int x, const char *t, long n);
  * character index in line y, and back. A click lands on a column;
  * the buffer is indexed by character. */
 int  ed_col2x(const Buffer *b, int y, int col, int tabsize, int mask);
+
+/* ---- search ------------------------------------------------------
+ * b7. A pattern never spans a line break: it comes from a string
+ * gadget, which cannot hold one. That single fact is what keeps this
+ * simple - every match lies inside one line, so a replacement is a
+ * delete and an insert at one place and never a structural change.
+ *
+ * Forward starts AT (fromy,fromx) and backward starts strictly
+ * BEFORE it, which is what makes Find Next and Find Previous walk
+ * off a match already sitting under the cursor instead of finding it
+ * again. With `wrap`, the starting line is visited a second time so
+ * the half of it that was skipped is still searched - a wrap that
+ * silently misses matches on its own line is worse than no wrap.
+ * `fold` folds case. Returns 1, with the match START in fy and fx. */
+int  ed_search(const Buffer *b, const char *pat, int fromy, int fromx,
+               int dir, int fold, int wrap, int *fy, int *fx);
+
+/* replace the plen characters at (y,x) with rep. One undo step. */
+int  ed_replaceat(Buffer *b, int y, int x, int plen, const char *rep);
+
+/* every occurrence, from the top, as ONE undo step - being asked to
+ * undo 200 replacements one at a time is not an undo. Returns how
+ * many were replaced. Scanning resumes AFTER each replacement, so a
+ * replacement containing the pattern ("a" -> "aa") terminates. */
+int  ed_replaceall(Buffer *b, const char *pat, const char *rep, int fold);
+
+/* ---- auto-indent -------------------------------------------------
+ * The leading whitespace of line y, stopping at `upto` characters in
+ * (-1 = the whole line). `dst` must hold max+1 bytes. */
+int  ed_indent(const Buffer *b, int y, int upto, char *dst, int max);
+
+/* Return: split at (y,x), and with `autoind` give the new line the
+ * indent of the one it came from - clamped to what was actually
+ * BEFORE the cursor, so Return pressed inside the leading whitespace
+ * does not manufacture indent that was never there. One undo step:
+ * one Return, one Amiga+Z. The cursor lands after the copied indent
+ * in b->cy/b->cx. */
+int  ed_newline(Buffer *b, int y, int x, int autoind);
 
 /* ---- syntax state -------------------------------------------------
  * lex[i] is the state line i STARTS in, so line i can be coloured

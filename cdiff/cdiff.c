@@ -1887,110 +1887,24 @@ static void dropped(struct AppMessage *am)
     }
 }
 
-/* b67: the Find requester - a real gadtools STRING_KIND, not a
+/* b67: the Find requester - a real gadtools string gadget, not a
  * hand-rolled line editor (his standing instruction: use the OS's
- * own). Reuses the VisualInfo the menus already hold. Enter accepts,
- * Esc or the close gadget cancels. Returns 1 when findstr changed
- * into something searchable. */
+ * own). Enter accepts, Esc or the close gadget cancels. Returns 1
+ * when findstr changed into something searchable. */
 static int askfind(void)
 {
-    struct Screen *scr;
-    struct Window *w;
-    struct Gadget *glist = NULL, *sg;
-    struct NewGadget ng;
-    struct IntuiMessage *m;
-    int done = 0, ok = 0, ww, wh;
-
-    if (!GadToolsBase || !gvi) {
-        ltx_msg("gadtools.library is not available - no Find requester");
-        return 0;
-    }
-    if (CreateContext(&glist) == NULL) return 0;
-    /* b76: the screen the MAIN window is on, not the default one.
-     * With PUBSCREEN= set those differ, and this requester would
-     * have opened on Workbench while cdiff sat on another screen.
-     * Worse than cosmetic here: gvi (VisualInfo) is built from the
-     * main window's screen, and GadTools VisualInfo is
-     * screen-specific - using it on a window opened elsewhere is
-     * simply wrong. No lock needed: our own window holds the screen
-     * open. */
-    scr = win ? win->WScreen : LockPubScreen(NULL);
-    if (scr == NULL) { FreeGadgets(glist); return 0; }
-
-    ww = 44 * fw + 6 * fw + 40;
-    wh = scr->WBorTop + scr->Font->ta_YSize + 1 + fh + 26;
-    memset(&ng, 0, sizeof(ng));
-    ng.ng_LeftEdge   = 6 * fw + 16;
-    ng.ng_TopEdge    = scr->WBorTop + scr->Font->ta_YSize + 1 + 8;
-    ng.ng_Width      = 44 * fw;
-    ng.ng_Height     = fh + 6;
-    ng.ng_GadgetText = (STRPTR)"Find:";
-    ng.ng_TextAttr   = scr->Font;
-    ng.ng_GadgetID   = 1;
-    ng.ng_Flags      = PLACETEXT_LEFT;
-    ng.ng_VisualInfo = gvi;
-    sg = CreateGadget(STRING_KIND, glist, &ng,
-                      GTST_String, (ULONG)findstr,
-                      GTST_MaxChars, (ULONG)(sizeof(findstr) - 1),
-                      TAG_DONE);
-    if (sg == NULL) {
-        if (!win) UnlockPubScreen(NULL, scr);
-        FreeGadgets(glist);
-        return 0;
-    }
-    w = OpenWindowTags(NULL,
-        WA_Left, (scr->Width - ww) / 2,
-        WA_Top, (scr->Height - wh) / 3,
-        WA_Width, ww,
-        WA_Height, wh,
-        WA_Title, (ULONG)"cdiff: Find",
-        WA_PubScreen, (ULONG)scr,
-        WA_Gadgets, (ULONG)glist,
-        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
-                  IDCMP_REFRESHWINDOW | IDCMP_GADGETUP |
-                  IDCMP_ACTIVEWINDOW,
-        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
-                  WFLG_ACTIVATE | WFLG_SMART_REFRESH | WFLG_RMBTRAP,
-        TAG_DONE);
-    if (!win) UnlockPubScreen(NULL, scr);   /* only what we locked */
-    if (w == NULL) { FreeGadgets(glist); return 0; }
-    GT_RefreshWindow(w, NULL);
-    ActivateGadget(sg, w, NULL);
-
-    while (!done) {
-        WaitPort(w->UserPort);
-        /* GT_GetIMsg/GT_ReplyIMsg are REQUIRED once real gadtools
-         * gadgets exist in a window - plain GetMsg is only safe for
-         * its menus (the lesson b30 wrote down the hard way) */
-        while ((m = GT_GetIMsg(w->UserPort))) {
-            ULONG cls = m->Class;
-            UWORD cod = m->Code;
-            APTR  iad = m->IAddress;
-            GT_ReplyIMsg(m);
-            if (cls == IDCMP_CLOSEWINDOW) done = 1;
-            else if (cls == IDCMP_GADGETUP && iad == (APTR)sg) {
-                ok = 1;                 /* Enter in the string gadget */
-                done = 1;
-            } else if (cls == IDCMP_VANILLAKEY) {
-                if (cod == 27) done = 1;            /* Esc cancels */
-                else if (cod == 13) { ok = 1; done = 1; }
-            } else if (cls == IDCMP_REFRESHWINDOW) {
-                GT_BeginRefresh(w);
-                GT_EndRefresh(w, TRUE);
-            }
-        }
-    }
-    if (ok) {
-        struct StringInfo *si = (struct StringInfo *)sg->SpecialInfo;
-        if (si && si->Buffer) {
-            strncpy(findstr, (char *)si->Buffer, sizeof(findstr) - 1);
-            findstr[sizeof(findstr) - 1] = 0;
-        } else
-            ok = 0;
-    }
-    CloseWindow(w);
-    FreeGadgets(glist);
-    return ok && findstr[0];
+    /* b67's own requester lifted into the chassis at cedit b7, where
+     * a two-field Replace box wanted the same machinery. What was
+     * ~100 lines of gadtools here is the four lines that say WHAT to
+     * ask for; the how belongs to ltxwin now, and cedit uses it too. */
+    LtxField f[1];
+    static const char *btn[1] = { "Find" };
+    f[0].label = "Find:";
+    f[0].buf   = findstr;
+    f[0].max   = (int)sizeof(findstr) - 1;
+    f[0].flag  = NULL;
+    if (!ltx_askfields("cdiff: Find", f, 1, btn, 1)) return 0;
+    return findstr[0] != 0;
 }
 
 /* a menu open picked new file(s): rediff if the pair is complete */

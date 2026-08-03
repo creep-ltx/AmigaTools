@@ -311,6 +311,36 @@ void ltx_trackpointer(int on);
 
 /* ---- requesters -------------------------------------------------- */
 
+/* b7: a small form requester - N labelled fields and a row of
+ * buttons. cdiff has had a one-field version since its b67 (the Find
+ * box); cedit's Replace wants two fields and a toggle and Goto Line
+ * wants one, which is the second caller that says LIFT rather than
+ * copy. cdiff's askfind is now a call to this.
+ *
+ * A field is a string gadget when `buf` is set and a checkbox when
+ * `flag` is - exactly one of the two. Real gadtools gadgets, not a
+ * hand-rolled line editor: his standing instruction is to use the
+ * OS's own, and a string gadget is where the OS keeps undo, the
+ * clipboard shortcuts and the keymap. */
+#define LTX_MAXFIELDS 6
+#define LTX_MAXBUTTONS 3
+
+typedef struct {
+    const char *label;
+    char       *buf;            /* string field: where the text goes */
+    int         max;            /* and its capacity, minus the NUL */
+    int        *flag;           /* checkbox field instead, 0/1 */
+} LtxField;
+
+/* Returns 0 when cancelled - the close gadget, Esc, or the Cancel
+ * button this adds on the right for you - otherwise 1..nb saying
+ * WHICH affirmative button was used. Return in a string gadget is
+ * button 1, the leftmost, which is why that one should be the
+ * ordinary answer. Field values are written back only on an accept,
+ * so a cancel cannot half-edit the caller's strings. */
+int ltx_askfields(const char *title, LtxField *f, int nf,
+                  const char **buttons, int nb);
+
 /* the app's name, used as the title of every requester below. Set it
  * once at startup; "ltx" until then. */
 extern const char *ltx_appname;

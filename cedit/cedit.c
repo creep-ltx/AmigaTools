@@ -299,6 +299,10 @@ static int  ttleft = -1, tttop = -1, ttwidth = -1, ttheight = -1;
 static int  ttgutter = 1;       /* GUTTER=YES/NO - line numbers */
 static char ttdrawer[310];      /* DRAWER= - where the requester starts */
 static int  tthilite = 1;       /* HIGHLIGHT=YES/NO - syntax colour */
+static int  ttindent = 1;       /* AUTOINDENT=YES/NO - b7. Defaults ON:
+                                 * this is an editor for indented
+                                 * languages, and the cost of it being
+                                 * wrong is one Backspace. */
 
 /* ---- syntax colours ----------------------------------------------
  * On a plain 4-colour Workbench there are three usable pens and one
@@ -365,12 +369,31 @@ static struct NewMenu newmenu[] = {
     { NM_ITEM,  (STRPTR)"Cut",          (STRPTR)"X", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Copy",         (STRPTR)"C", 0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Paste",        (STRPTR)"V", 0, 0, NULL },
+    /* b7. The shortcuts are what was LEFT: N is New and P would pair
+     * with it naturally, but Amiga+N for New is older than this
+     * program and not worth breaking for a mnemonic. So Find Next and
+     * Find Previous take G and H - adjacent under the same finger -
+     * and F3 / Shift+F3 are wired as well, which is the muscle memory
+     * that actually gets used. */
+    { NM_TITLE, (STRPTR)"Search",       NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find...",      (STRPTR)"F", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find Next",    (STRPTR)"G", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Find Previous",(STRPTR)"H", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Replace...",   (STRPTR)"R", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Replace Next", (STRPTR)"T", 0, 0, NULL },
+    { NM_ITEM,  NM_BARLABEL,            NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Goto Line...", (STRPTR)"J", 0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Top of File",  NULL,        0, 0, NULL },
+    { NM_ITEM,  (STRPTR)"End of File",  NULL,        0, 0, NULL },
     { NM_TITLE, (STRPTR)"Settings",   NULL,        0, 0, NULL },
     { NM_ITEM,  (STRPTR)"Line numbers", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Status bar", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     { NM_ITEM,  (STRPTR)"Syntax colour", NULL,
+      CHECKIT | MENUTOGGLE, 0, NULL },
+    { NM_ITEM,  (STRPTR)"Auto indent", NULL,
       CHECKIT | MENUTOGGLE, 0, NULL },
     /* his ask: tab size from the menu, 1-10. Radio rather than
      * toggle - exactly one is true - which in GadTools means CHECKIT
@@ -800,6 +823,7 @@ static int openmain(void)
                 else if (!strcmp(lb, "Line numbers")) on = ttgutter;
                 else if (!strcmp(lb, "Status bar"))   on = ttstatus;
                 else if (!strcmp(lb, "Syntax colour")) on = tthilite;
+                else if (!strcmp(lb, "Auto indent"))  on = ttindent;
                 else continue;
                 if (on) newmenu[mi].nm_Flags |= CHECKED;
                 else    newmenu[mi].nm_Flags &= ~CHECKED;
@@ -872,6 +896,10 @@ static int readtooltypes(struct WBStartup *wbs, char fpaths[][310])
         if (v) tthilite = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
                             tteq((char *)v, "FALSE"));
+        v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"AUTOINDENT");
+        if (v) ttindent = !(tteq((char *)v, "NO") ||
+                            tteq((char *)v, "OFF") ||
+                            tteq((char *)v, "FALSE"));
         v = FindToolType((CONST_STRPTR *)tt, (STRPTR)"GUTTER");
         if (v) ttgutter = !(tteq((char *)v, "NO") ||
                             tteq((char *)v, "OFF") ||
@@ -938,6 +966,12 @@ static void selpaint(void);
 static void domark(void);
 static void docopy(int cut);
 static void dopaste(void);
+static void dofind(void);       /* b7 */
+static void findstep(int dir);
+static void doreplace(void);
+static void replacestep(void);
+static void dogoto(void);
+static void jumpend(int dir);
 static int  askquit(void);      /* and the unsaved-changes prompt */
 static void follow(void);       /* keep the caret on screen */
 
@@ -969,7 +1003,19 @@ static int domenu(UWORD code)   /* 1 = quit */
             if (i == 5) { docopy(0); return 0; }
             if (i == 6) { dopaste(); return 0; }
         }
-        if (m == 2) {                                   /* Settings */
+        if (m == 2) {                                   /* Search */
+            /* Find(0) Next(1) Prev(2) -(3) Replace(4) ReplaceNext(5)
+             * -(6) Goto(7) Top(8) End(9) */
+            if (i == 0) { dofind();          return 0; }
+            if (i == 1) { findstep(1);       return 0; }
+            if (i == 2) { findstep(-1);      return 0; }
+            if (i == 4) { doreplace();       return 0; }
+            if (i == 5) { replacestep();     return 0; }
+            if (i == 7) { dogoto();          return 0; }
+            if (i == 8) { jumpend(-1);       return 0; }
+            if (i == 9) { jumpend(1);        return 0; }
+        }
+        if (m == 3) {                                   /* Settings */
             int on = (it->Flags & CHECKED) ? 1 : 0;
             if (i == 0) {                               /* Line numbers */
                 ttgutter = on;
@@ -986,7 +1032,12 @@ static int domenu(UWORD code)   /* 1 = quit */
                 tthilite = on;
                 (void)iconset("HIGHLIGHT", on ? "YES" : "NO");
                 epage();
-            } else if (i == 3) {                        /* Tab size */
+            } else if (i == 3) {                        /* Auto indent */
+                ttindent = on;
+                (void)iconset("AUTOINDENT", on ? "YES" : "NO");
+                /* nothing on screen changed - it only affects the
+                 * NEXT Return */
+            } else if (i == 4) {                        /* Tab size */
                 UWORD sub = SUBNUM(code);
                 if (sub != NOSUB) {
                     char v[8];
@@ -1155,13 +1206,16 @@ static void structural(void)
 
 static void donewline(void)
 {
+    /* b7: the split and the indent it copies are ONE undo step, and
+     * so is the selection this replaced - one Return, one Amiga+Z.
+     * The grouping nests now (edbuf ugrpdepth), which is what makes
+     * the outer group here survive ed_newline's own. */
     int had = eatsel();
     if (had) ed_group(cur);
-    if (!edsplitline(cur, cur->cy, cur->cx)) { oom(); return; }
+    if (!ed_newline(cur, cur->cy, cur->cx, ttindent)) { oom(); return; }
     if (had) ed_ungroup(cur);
-    cur->cy++;
-    cur->cx = 0;
-    goalx = 0;
+    goalx = cur->cx;            /* ed_newline left the cursor after
+                                 * the copied indent, not at column 0 */
     follow();
     structural();
 }
@@ -1457,6 +1511,208 @@ static void dopaste(void)
     marktitle();
 }
 
+/* ---- b7: find, replace, goto -------------------------------------
+ * The search strings are the PROGRAM's, not the document's: finding
+ * a word in one tab and pressing Find Next in another looks for the
+ * same word, which is what every editor does and what anyone
+ * switching tabs mid-hunt expects. */
+
+static char findstr[80];
+static char repstr[80];
+static int  findfold;           /* case folding, off by default: E is
+                                 * case sensitive and its keywords are
+                                 * upper case, so a code search that
+                                 * ignored case would be wrong more
+                                 * often than right */
+
+/* put the match on screen and SELECT it. The selection is the
+ * feedback - the anchor at the start and the cursor at the end - and
+ * it costs nothing, because b5 already paints a selected run.
+ *
+ * It also makes the walk work without extra state: Find Next searches
+ * forward from the cursor, which is the END of the last match, and
+ * Find Previous searches back from the anchor, which is its START.
+ * Neither can re-find what it is standing on. */
+static void showmatch(int y, int x, int len)
+{
+    cur->cy = y;
+    cur->cx = x;
+    ed_selstart(cur);           /* anchor at the match start */
+    cur->cx = x + len;          /* and the cursor at its end */
+    goalx = cur->cx;
+    ed_break(cur);
+    follow();
+    selpaint();
+}
+
+/* one step in `dir`, from wherever the last match left us. Wraps, and
+ * says so rather than silently starting over - a search that quietly
+ * wrapped is how you read the same match twice and think there are
+ * two. */
+static int findfrom(int y, int x, int dir, int quiet)
+{
+    int fy, fx, len = (int)strlen(findstr);
+    if (len == 0) return 0;
+    if (!ed_search(cur, findstr, y, x, dir, findfold, 1, &fy, &fx)) {
+        if (!quiet) {
+            char t[140];
+            sprintf(t, "\"%.80s\" not found.", findstr);
+            msg(t);
+        }
+        return 0;
+    }
+    showmatch(fy, fx, len);
+    return 1;
+}
+
+static void findstep(int dir)
+{
+    if (findstr[0] == 0) { dofind(); return; }
+    if (dir > 0) findfrom(cur->cy, cur->cx, 1, 0);
+    else {
+        /* back from the START of the current match when there is one,
+         * otherwise from the cursor */
+        int y = cur->selon ? cur->say : cur->cy;
+        int x = cur->selon ? cur->sax : cur->cx;
+        findfrom(y, x, -1, 0);
+    }
+}
+
+static void dofind(void)
+{
+    LtxField f[2];
+    static const char *btn[1] = { "Find" };
+    f[0].label = "Find:";      f[0].buf = findstr;
+    f[0].max   = (int)sizeof(findstr) - 1;  f[0].flag = NULL;
+    f[1].label = "Ignore case:"; f[1].buf = NULL;
+    f[1].max   = 0;            f[1].flag = &findfold;
+    if (!ltx_askfields("cedit: Find", f, 2, btn, 1)) return;
+    if (findstr[0] == 0) return;
+    /* from the cursor, INCLUDING what is under it: a fresh Find after
+     * a click should match the word clicked on */
+    findfrom(cur->cy, cur->cx, 1, 0);
+}
+
+/* the edit half. A replacement is always inside one line - a string
+ * gadget cannot hold a line break - so this never restructures the
+ * buffer and one row is all that repaints. */
+static void replaceone(int y, int x, int plen)
+{
+    if (!ed_replaceat(cur, y, x, plen, repstr)) { oom(); return; }
+    cur->cy = y;
+    cur->cx = x + (int)strlen(repstr);
+    goalx = cur->cx;
+    ed_selclear(cur);
+    cur->maxwdirty = 1;
+    if (cur->lexdone > y) cur->lexdone = y + 1;
+    ed_lexdirty(cur, y);
+    follow();
+    damage(y);                  /* one line changed, so one row */
+    marktitle();
+}
+
+/* replace the match under the cursor if that is where we are, then
+ * find the next. Repeating this walks the file one at a time, which
+ * is the half of Replace that Replace All cannot do. */
+static void replacestep(void)
+{
+    int len = (int)strlen(findstr);
+    if (len == 0) { doreplace(); return; }
+    if (cur->selon) {
+        int y0, x0, y1, x1;
+        if (ed_selrange(cur, &y0, &x0, &y1, &x1) &&
+            y0 == y1 && x1 - x0 == len) {
+            /* the right SHAPE is not proof it is the right TEXT - he
+             * could have selected any other len characters by hand.
+             * Ask the searcher whether a match really starts exactly
+             * there before overwriting it. */
+            int fy, fx;
+            if (ed_search(cur, findstr, y0, x0, 1, findfold, 0,
+                          &fy, &fx) && fy == y0 && fx == x0) {
+                replaceone(y0, x0, len);
+                findfrom(cur->cy, cur->cx, 1, 0);
+                return;
+            }
+        }
+    }
+    findfrom(cur->cy, cur->cx, 1, 0);   /* not on a match: just find */
+}
+
+static void doreplace(void)
+{
+    LtxField f[3];
+    static const char *btn[2] = { "Replace", "All" };
+    int r;
+    f[0].label = "Find:";        f[0].buf = findstr;
+    f[0].max   = (int)sizeof(findstr) - 1;  f[0].flag = NULL;
+    f[1].label = "Replace:";     f[1].buf = repstr;
+    f[1].max   = (int)sizeof(repstr) - 1;   f[1].flag = NULL;
+    f[2].label = "Ignore case:"; f[2].buf = NULL;
+    f[2].max   = 0;              f[2].flag = &findfold;
+    r = ltx_askfields("cedit: Replace", f, 3, btn, 2);
+    if (r == 0 || findstr[0] == 0) return;
+    /* "Replace" walks one at a time, and deliberately SHOWS the first
+     * hit before touching it: with nothing matched yet this finds and
+     * selects, and the next press (or Amiga+T) replaces it and moves
+     * on. Replacing something he has not seen yet, on the first press
+     * of a button he has just typed two strings into, is how a wrong
+     * pattern eats a file. */
+    if (r == 1) { replacestep(); return; }
+    {                                           /* all of them */
+        char t[80];
+        int n;
+        busy(1);
+        n = ed_replaceall(cur, findstr, repstr, findfold);
+        busy(0);
+        if (n == 0) {
+            sprintf(t, "\"%.60s\" not found.", findstr);
+            msg(t);
+            return;
+        }
+        /* the whole file may have changed under it, and the cursor
+         * moved to the last replacement */
+        ed_selclear(cur);
+        cur->maxwdirty = 1;
+        cur->lexdone = 0;
+        ed_lexdirty(cur, 0);
+        goalx = cur->cx;
+        follow();
+        dirtyrows = 1;
+        dmgold = -1;
+        marktitle();
+        sprintf(t, "%d occurrence%s replaced.", n, n == 1 ? "" : "s");
+        msg(t);
+    }
+}
+
+static void dogoto(void)
+{
+    LtxField f[1];
+    static const char *btn[1] = { "Go" };
+    char num[12];
+    int n;
+    sprintf(num, "%d", cur->cy + 1);            /* where we are now */
+    f[0].label = "Line:"; f[0].buf = num;
+    f[0].max   = (int)sizeof(num) - 1; f[0].flag = NULL;
+    if (!ltx_askfields("cedit: Goto Line", f, 1, btn, 1)) return;
+    n = atoi(num);
+    if (n < 1) n = 1;
+    if (n > cur->n) n = cur->n;                 /* clamped, not refused */
+    ed_selclear(cur);
+    selpaint();
+    gotoyx(n - 1, 0);
+    goalx = 0;
+}
+
+/* -1 = top of file, +1 = end of it */
+static void jumpend(int dir)
+{
+    if (cur->selon) { ed_selclear(cur); selpaint(); }
+    if (dir < 0) gotoyx(0, 0);
+    else         gotoyx(cur->n - 1, cur->len[cur->n - 1]);
+    goalx = cur->cx;
+}
+
 static void dosave(void)
 {
     if (cur->path[0] == 0) { dosaveas(); return; }   /* untitled */
@@ -1739,10 +1995,22 @@ static void guimode(void)
                 /* Shift = page / line ends, Ctrl = word jumps - the
                  * CCON line editor's assignment, so the two programs
                  * do not disagree about the same keys. */
-                if (code == 0x4C)                       /* cursor up */
-                    movev(cur->cy - (page ? crows : 1));
-                else if (code == 0x4D)                  /* cursor down */
-                    movev(cur->cy + (page ? crows : 1));
+                /* b7: Ctrl+up/down are the ends of the FILE. Ctrl
+                 * already means "the big version of this move" on
+                 * left/right, where it is a word jump, so the pair
+                 * reads the same way here. */
+                if (code == 0x4C) {                     /* cursor up */
+                    if (ctrl) jumpend(-1);
+                    else movev(cur->cy - (page ? crows : 1));
+                } else if (code == 0x4D) {              /* cursor down */
+                    if (ctrl) jumpend(1);
+                    else movev(cur->cy + (page ? crows : 1));
+                }
+                /* b7: F3 and Shift+F3 - the muscle memory that is
+                 * actually in people's hands, alongside the menu's
+                 * Amiga+G / Amiga+H */
+                else if (code == 0x52)                  /* F3 */
+                    findstep(page ? -1 : 1);
                 else if (code == 0x4F) {                /* cursor left */
                     if (ctrl) wordjump(-1);
                     else if (page) moveh(0);

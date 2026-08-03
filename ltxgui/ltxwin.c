@@ -19,6 +19,8 @@
 #include <graphics/gfxbase.h>
 #include <libraries/asl.h>
 #include <proto/asl.h>
+#include <libraries/gadtools.h>       /* b7: the form requester */
+#include <proto/gadtools.h>
 #include <proto/icon.h>
 #include <proto/diskfont.h>
 #include <stdio.h>
@@ -1380,6 +1382,196 @@ int ltx_askfile(const char *title, char *dest, const char *initdrawer,
 void ltx_freefilereq(void)
 {
     if (freq) { FreeAslRequest(freq); freq = NULL; }
+}
+
+/* ---- b7: the form requester --------------------------------------
+ * Lifted out of cdiff's b67 askfind and widened to N fields, because
+ * cedit's Replace needs two and a toggle. The VisualInfo is made and
+ * freed HERE rather than borrowed from the app: GadTools VisualInfo
+ * is screen-specific, and b76 already found that using the app's on
+ * a window opened somewhere else is simply wrong. Making our own
+ * from the screen we are about to open on cannot get that wrong. */
+int ltx_askfields(const char *title, LtxField *f, int nf,
+                  const char **buttons, int nb)
+{
+    struct Screen *scr;
+    struct Window *w = NULL;
+    struct Gadget *glist = NULL, *g;
+    struct Gadget *fg[LTX_MAXFIELDS];
+    struct NewGadget ng;
+    struct IntuiMessage *m;
+    APTR vi = NULL;
+    int bw[LTX_MAXBUTTONS];
+    int done = 0, res = 0, i, lw = 0, fieldw = 0;
+    int ww, wh, gx, gy, rowh, btnh, btny, bx, btotal;
+
+    if (nf < 1 || nf > LTX_MAXFIELDS) return 0;
+    if (nb < 1 || nb > LTX_MAXBUTTONS) return 0;
+    if (GadToolsBase == NULL) {
+        ltx_msg("gadtools.library is not available");
+        return 0;
+    }
+    /* the screen the MAIN window is on, not the default one - with
+     * PUBSCREEN= those differ (cdiff b76). Our own window holds it
+     * open, so only a fallback lock needs releasing. */
+    scr = win ? win->WScreen : LockPubScreen(NULL);
+    if (scr == NULL) return 0;
+    vi = GetVisualInfo(scr, TAG_DONE);
+    if (vi == NULL) {
+        if (!win) UnlockPubScreen(NULL, scr);
+        return 0;
+    }
+    if (CreateContext(&glist) == NULL) {
+        FreeVisualInfo(vi);
+        if (!win) UnlockPubScreen(NULL, scr);
+        return 0;
+    }
+
+    /* the label column is as wide as the widest label, so the fields
+     * line up under each other instead of stepping */
+    for (i = 0; i < nf; i++) {
+        int n = (int)strlen(f[i].label);
+        if (n > lw) lw = n;
+        if (f[i].buf && f[i].max > fieldw) fieldw = f[i].max;
+    }
+    if (fieldw > 44) fieldw = 44;       /* a 310-char path would open
+                                         * a requester wider than PAL */
+    if (fieldw < 20) fieldw = 20;
+
+    rowh = fh + 10;
+    btnh = fh + 6;
+    gx   = (lw + 1) * fw + 16;
+    gy   = scr->WBorTop + scr->Font->ta_YSize + 1 + 8;
+    ww   = gx + fieldw * fw + 16;
+
+    for (i = 0, btotal = 0; i < nb; i++) {
+        bw[i] = ((int)strlen(buttons[i]) + 4) * fw;
+        btotal += bw[i] + 8;
+    }
+    btotal += (6 + 4) * fw + 8;         /* and the Cancel we add */
+    if (btotal + 16 > ww) ww = btotal + 16;
+
+    btny = gy + nf * rowh + 6;
+    wh   = btny + btnh + 10;
+
+    memset(&ng, 0, sizeof(ng));
+    ng.ng_TextAttr   = scr->Font;
+    ng.ng_VisualInfo = vi;
+
+    for (i = 0; i < nf; i++) {
+        ng.ng_LeftEdge   = gx;
+        ng.ng_TopEdge    = gy + i * rowh;
+        ng.ng_Height     = fh + 6;
+        ng.ng_GadgetText = (STRPTR)f[i].label;
+        ng.ng_GadgetID   = (UWORD)(i + 1);
+        ng.ng_Flags      = PLACETEXT_LEFT;
+        if (f[i].buf) {
+            ng.ng_Width = fieldw * fw;
+            fg[i] = CreateGadget(STRING_KIND, glist, &ng,
+                                 GTST_String, (ULONG)f[i].buf,
+                                 GTST_MaxChars, (ULONG)f[i].max,
+                                 TAG_DONE);
+        } else {
+            ng.ng_Width = 26;
+            fg[i] = CreateGadget(CHECKBOX_KIND, glist, &ng,
+                                 GTCB_Checked,
+                                 (ULONG)(*f[i].flag ? TRUE : FALSE),
+                                 TAG_DONE);
+        }
+        if (fg[i] == NULL) goto bail;
+    }
+
+    /* affirmative buttons from the left, Cancel hard right - the
+     * ordinary answer under the hand that is already there */
+    bx = 16;
+    for (i = 0; i < nb; i++) {
+        ng.ng_LeftEdge   = bx;
+        ng.ng_TopEdge    = btny;
+        ng.ng_Width      = bw[i];
+        ng.ng_Height     = btnh;
+        ng.ng_GadgetText = (STRPTR)buttons[i];
+        ng.ng_GadgetID   = (UWORD)(100 + i);
+        ng.ng_Flags      = PLACETEXT_IN;
+        g = CreateGadget(BUTTON_KIND, glist, &ng, TAG_DONE);
+        if (g == NULL) goto bail;
+        bx += bw[i] + 8;
+    }
+    ng.ng_LeftEdge   = ww - (6 + 4) * fw - 16;
+    ng.ng_TopEdge    = btny;
+    ng.ng_Width      = (6 + 4) * fw;
+    ng.ng_Height     = btnh;
+    ng.ng_GadgetText = (STRPTR)"Cancel";
+    ng.ng_GadgetID   = 200;
+    ng.ng_Flags      = PLACETEXT_IN;
+    if (CreateGadget(BUTTON_KIND, glist, &ng, TAG_DONE) == NULL)
+        goto bail;
+
+    w = OpenWindowTags(NULL,
+        WA_Left, (scr->Width - ww) / 2,
+        WA_Top, (scr->Height - wh) / 3,
+        WA_Width, ww,
+        WA_Height, wh,
+        WA_Title, (ULONG)title,
+        WA_PubScreen, (ULONG)scr,
+        WA_Gadgets, (ULONG)glist,
+        WA_IDCMP, IDCMP_CLOSEWINDOW | IDCMP_VANILLAKEY |
+                  IDCMP_REFRESHWINDOW | IDCMP_GADGETUP,
+        WA_Flags, WFLG_DRAGBAR | WFLG_DEPTHGADGET | WFLG_CLOSEGADGET |
+                  WFLG_ACTIVATE | WFLG_SMART_REFRESH | WFLG_RMBTRAP,
+        TAG_DONE);
+    if (w == NULL) goto bail;
+    GT_RefreshWindow(w, NULL);
+    for (i = 0; i < nf; i++)
+        if (f[i].buf) { ActivateGadget(fg[i], w, NULL); break; }
+
+    while (!done) {
+        WaitPort(w->UserPort);
+        /* GT_GetIMsg/GT_ReplyIMsg are REQUIRED once real gadtools
+         * gadgets exist in a window - plain GetMsg is only safe for
+         * its menus (cdiff b30 wrote that down the hard way) */
+        while ((m = GT_GetIMsg(w->UserPort))) {
+            ULONG cls = m->Class;
+            UWORD cod = m->Code;
+            APTR  iad = m->IAddress;
+            GT_ReplyIMsg(m);
+            if (cls == IDCMP_CLOSEWINDOW) { res = 0; done = 1; }
+            else if (cls == IDCMP_GADGETUP) {
+                UWORD id = ((struct Gadget *)iad)->GadgetID;
+                if (id == 200)      { res = 0; done = 1; }
+                else if (id >= 100) { res = id - 100 + 1; done = 1; }
+                else                { res = 1; done = 1; }  /* Enter */
+            } else if (cls == IDCMP_VANILLAKEY) {
+                if (cod == 27)      { res = 0; done = 1; }
+                else if (cod == 13) { res = 1; done = 1; }
+            } else if (cls == IDCMP_REFRESHWINDOW) {
+                GT_BeginRefresh(w);
+                GT_EndRefresh(w, TRUE);
+            }
+        }
+    }
+
+    /* written back only on an accept, so Cancel cannot half-edit the
+     * caller's strings */
+    if (res) {
+        for (i = 0; i < nf; i++) {
+            if (f[i].buf) {
+                struct StringInfo *si =
+                    (struct StringInfo *)fg[i]->SpecialInfo;
+                if (si && si->Buffer) {
+                    strncpy(f[i].buf, (char *)si->Buffer, f[i].max);
+                    f[i].buf[f[i].max] = 0;
+                }
+            } else
+                *f[i].flag = (fg[i]->Flags & SELECTED) ? 1 : 0;
+        }
+    }
+
+bail:
+    if (w) CloseWindow(w);
+    FreeGadgets(glist);
+    FreeVisualInfo(vi);
+    if (!win) UnlockPubScreen(NULL, scr);
+    return res;
 }
 
 void ltx_reportmouse(int on)
