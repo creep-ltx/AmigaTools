@@ -225,6 +225,15 @@ OBJECT console
   hpos                          -> Theme B: the ring itself (ghist/
                                 -> ghtotal) is process-shared now;
                                 -> only the walk position stays here
+  hover                         -> v1.2.7: the ghver horder was built
+                                -> against; -1 = never built
+  horder[200]:ARRAY OF INT      -> = HISTMAX (OBJECT arrays want a
+                                -> literal, like wq/rdq above): ring
+                                -> slots in THIS console's walk order
+                                -> - own commits newest-first, then
+                                -> everyone else's newest-first. 400
+                                -> bytes, even, LONGs after stay
+                                -> aligned
   -> cooked input plumbing
   inqh, inqt                    -> head/tail of the inq ring below
   cesc                          -> CSI parser state (survives split
@@ -436,6 +445,18 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> browse the same shared ring independently.
     ghist[HISTMAX]:ARRAY OF LONG, -> the ring: E-string ptrs
     ghtotal=0,                  -> running count (Mod HISTMAX for slot)
+    -> v1.2.7 (Timm's mail, 4.8.26): WHO committed each entry - the
+    -> console ptr, or NIL for lines loaded from disk (or whose
+    -> console closed). The ring itself stays shared and persists
+    -> exactly as before; ownership only orders each console's WALK
+    -> (own commits first, then everyone else's - historder). After
+    -> a reboot every entry loads NIL-owned, so the walk degrades to
+    -> exactly the old shared order - the "in-memory list never
+    -> survives a restart" property costs nothing extra.
+    ghcon[HISTMAX]:ARRAY OF LONG,
+    ghver=0,                    -> bumped on ANY ring/owner mutation;
+                                -> each console caches its walk order
+                                -> against it (hover)
     ghistloaded=FALSE,           -> disk load attempted once
     -> audit P5: L:ccon-history is APPENDED to per commit now, not
     -> rewritten whole each Enter. This tracks the file's line count so
@@ -676,6 +697,9 @@ PROC main()
   -> exists yet at this point in main() for it to scratch through)
   FOR tmp := 0 TO HISTMAX - 1
     ghist[tmp] := String(LINEMAX)
+    ghcon[tmp] := NIL           -> E globals start as garbage; a junk
+                                -> owner would claim entries for a
+                                -> console that never existed
   ENDFOR
 
   -> E2e: the printable-class table - exactly render()'s old predicate,
@@ -1098,6 +1122,9 @@ PROC coninit(c:PTR TO console)
   c.sello := -1                 -> no standing highlight
   c.selhi := -1
   c.hpos := -1                  -> not walking the history
+  c.hover := -1                 -> v1.2.7: no walk order built yet
+                                -> (ghver starts at 0 and only grows,
+                                -> so -1 can never falsely match)
   c.tcsel := -1                 -> no completion pick
   c.deffg := 1
   c.curfg := 1
@@ -1294,6 +1321,14 @@ PROC conclose(c:PTR TO console)
     IF e.con = c THEN e.con := NIL
     n := n + 1
   ENDWHILE
+  -> v1.2.7: scrub this console's history owner tags too - same
+  -> reason as the ring scrub above: a LATER console can land on
+  -> the same heap address and would inherit these entries as "its
+  -> own" history. NIL-owned = foreign to everyone, like disk lines.
+  FOR n := 0 TO HISTMAX - 1
+    IF ghcon[n] = c THEN ghcon[n] := NIL
+  ENDFOR
+  ghver++                       -> surviving consoles re-derive order
   condispose(c)
   curcon := conlist
   rearmtimer()                  -> another console's waiters may be
@@ -6497,10 +6532,14 @@ ENDPROC
 
 -> newest match at index >= from whose line CONTAINS the fragment;
 -> TRUE = found (ebuf/cpos/sridx updated), FALSE = kept as it was
--> audit2 P3: same treatment as sgfind - one seed Mod (histslot) then a
--> hand-stepped slot, and RETURN at the first hit from `from` onward
--> instead of a `got = FALSE` guard iterating the rest. Runs per
--> keystroke while Ctrl+R search is open.
+-> audit2 P3: RETURN at the first hit from `from` onward instead of a
+-> `got = FALSE` guard iterating the rest. Runs per keystroke while
+-> Ctrl+R search is open. v1.2.7: iterates curcon.horder, so the
+-> search hits THIS console's own commits before other windows' -
+-> sridx is a walk position in that order now, still stepped +1 by
+-> srnext exactly as before. FOR with from > avail-1 runs zero times
+-> (E semantics vamos-verified, todo.md), so horder is never indexed
+-> out of range.
 PROC srfind(from)
   DEF avail, idx, h:PTR TO CHAR, fl, hl, i, j, ok, f:PTR TO CHAR, slot
   fl := StrLen(curcon.srbuf)
@@ -6508,9 +6547,17 @@ PROC srfind(from)
   f := curcon.srbuf
   avail := Min(ghtotal, HISTMAX)
   IF from < 0 THEN from := 0
-  slot := histslot(from)               -> seed at the starting index
+  historder()
   FOR idx := from TO avail - 1
-    h := ghist[slot]
+    slot := curcon.horder[idx]  -> LOAD-BEARING hoist (b2, boot-proven):
+    h := ghist[slot]            -> ghist[curcon.horder[idx]] MISCOMPILES
+                                -> here in E-VO 3.9.4 - b1 read the ring
+                                -> unordered on the box. An extracted
+                                -> probe (tests/hordertest.e) does NOT
+                                -> reproduce it, plain or LARGE - the
+                                -> bug is context-dependent (register
+                                -> pressure in a big proc is the going
+                                -> theory). Do not fold this back.
     hl := StrLen(h)
     i := 0
     WHILE i <= (hl - fl)
@@ -6529,8 +6576,6 @@ PROC srfind(from)
       ENDIF
       i++
     ENDWHILE
-    slot := slot - 1
-    IF slot < 0 THEN slot := HISTMAX - 1
   ENDFOR
 ENDPROC FALSE
 
@@ -6773,11 +6818,12 @@ ENDPROC curcon.ovgrey   -> the uncapped overlay grey (32+ colours,
 -> newest history entry strictly longer than ebuf that ebuf
 -> prefixes, case-folded; result in curcon.sghost
 -> audit2 P3: this runs from drawedit() on EVERY keystroke at line-end.
--> Two costs removed: the per-entry Mod (a DIVS on a non-power-of-two
--> HISTMAX) is now ONE seed Mod (histslot) plus a hand-stepped slot
--> walking oldest by one per iteration; and the loop RETURNs at the
--> first (newest) hit instead of running all `avail` entries with a
--> now-useless `sghost = NIL` guard inside it.
+-> The loop RETURNs at the first hit instead of running all `avail`
+-> entries with a now-useless `sghost = NIL` guard inside it.
+-> v1.2.7: "first" walks curcon.horder now, so the ghost offers this
+-> console's own commands before another window's - the per-entry
+-> cost is an INT read (no Mod, no step-and-wrap), and historder()
+-> itself is one compare per keystroke while the ring is unchanged.
 PROC sgfind()
   DEF l, avail, idx, h:PTR TO CHAR, i, ok, s:PTR TO CHAR, slot
   curcon.sghost := NIL
@@ -6785,9 +6831,10 @@ PROC sgfind()
   l := StrLen(curcon.ebuf)
   IF l = 0 THEN RETURN
   avail := Min(ghtotal, HISTMAX)
-  slot := histslot(0)                  -> newest live slot
+  historder()
   FOR idx := 0 TO avail - 1
-    h := ghist[slot]
+    slot := curcon.horder[idx]  -> LOAD-BEARING hoist - see srfind:
+    h := ghist[slot]            -> the nested read miscompiles in situ
     IF StrLen(h) > l
       ok := TRUE
       FOR i := 0 TO l - 1
@@ -6798,10 +6845,10 @@ PROC sgfind()
         RETURN                         -> first match wins, stop walking
       ENDIF
     ENDIF
-    slot := slot - 1                   -> one step older, manual wrap -
-    IF slot < 0 THEN slot := HISTMAX - 1  -> no DIVS in the hot loop
   ENDFOR
 ENDPROC
+-> (the b2 htele title-bar telemetry lived here - stripped in b3
+-> once the boot confirmed the hoist above was the actual fix)
 
 -> accept the whole suggestion (Right/Shift+Right at line end)
 PROC sgall()
@@ -6847,6 +6894,50 @@ ENDPROC
 -> negative-Mod guru class - so that one caller guards the seed and the
 -> hand-stepped wrap keeps every in-loop slot in [0, HISTMAX) anyway.
 PROC histslot(idx) IS Mod(ghtotal - 1 - idx, HISTMAX)
+
+-> v1.2.7 (Timm's mail): the order THIS console's history reads in -
+-> its OWN commits first (newest first), then everyone else's (newest
+-> first), as ring slots in curcon.horder. Every consumer (the
+-> Up/Down walk, Ctrl+R's srfind, the ghost's sgfind) iterates this
+-> array instead of hand-stepping the raw ring, so "logical index"
+-> uniformly means "walk position" now - and the per-entry cost even
+-> drops: an INT read replaces the step-and-wrap. Rebuilt lazily,
+-> only when ghver says the ring or an owner changed since this
+-> console last looked: two passes of pointer-compares over at most
+-> HISTMAX entries, one seed Mod each (the audit2 P3 rule). A
+-> mid-walk rebuild can shift positions under hpos/sridx when SOME
+-> OTHER console commits between two keypresses - the same class of
+-> shift move-to-end already caused mid-walk before this, accepted
+-> then and now: the walk lands somewhere valid, never off the array.
+-> Harness: tests/histdeduptest.e section G proves the ordering on
+-> data (owner tags, retag-on-dup, the NIL disk case, wrap).
+PROC historder()
+  DEF avail, idx, slot, n
+  IF curcon.hover = ghver THEN RETURN
+  avail := Min(ghtotal, HISTMAX)
+  n := 0
+  IF avail > 0
+    slot := histslot(0)
+    FOR idx := 0 TO avail - 1
+      IF ghcon[slot] = curcon
+        curcon.horder[n] := slot
+        n++
+      ENDIF
+      slot := slot - 1
+      IF slot < 0 THEN slot := HISTMAX - 1
+    ENDFOR
+    slot := histslot(0)
+    FOR idx := 0 TO avail - 1
+      IF ghcon[slot] <> curcon
+        curcon.horder[n] := slot
+        n++
+      ENDIF
+      slot := slot - 1
+      IF slot < 0 THEN slot := HISTMAX - 1
+    ENDFOR
+  ENDIF
+  curcon.hover := ghver
+ENDPROC
 
 -> does the history entry at ring slot `slot` start with pfx,
 -> case-folded? an empty pfx matches everything - the plain,
@@ -6989,7 +7080,7 @@ PROC dovanilla(code, qual)
       -> new line rather than rewriting the whole ring each Enter, and
       -> only when histremember actually added it (not a dedup'd
       -> repeat), so the file tracks the ring.
-      IF histremember(curcon.ebuf) THEN histpersist(curcon.ebuf)
+      IF histremember(curcon.ebuf, curcon) THEN histpersist(curcon.ebuf)
     ENDIF
     StrCopy(curcon.ebuf, '')
     curcon.cpos := 0
@@ -7302,19 +7393,19 @@ PROC dorawkey(code, qual)
     -> was already captured.
     avail := ghtotal
     IF avail > HISTMAX THEN avail := HISTMAX
+    historder()                 -> v1.2.7: own commits walk first
     IF curcon.hpos = -1 THEN StrCopy(curcon.stash, curcon.ebuf)  -> the half-typed line / filter
     idx := curcon.hpos + 1
-    -> audit2 P3: hand-step the ring slot with idx (older = slot-1) so
-    -> histmatches pays no per-entry DIVS. E's AND does NOT short-
-    -> circuit, so histmatches(slot) is evaluated even on the iteration
-    -> where idx has reached avail - seed a valid in-range slot there
-    -> (0) rather than histslot(avail), which would be Mod(-1,...) when
-    -> the ring is not yet full; its result is discarded anyway.
-    slot := IF idx < avail THEN histslot(idx) ELSE 0
+    -> v1.2.7: idx walks curcon.horder now (own entries, then the
+    -> other windows' - "older" = the next walk position). E's AND
+    -> does NOT short-circuit, so histmatches(slot) is evaluated even
+    -> on the iteration where idx has reached avail - keep feeding it
+    -> a valid in-range slot there (0); its result is discarded, the
+    -> idx bound decides.
+    slot := IF idx < avail THEN curcon.horder[idx] ELSE 0
     WHILE (idx < avail) AND (histmatches(slot, curcon.stash) = FALSE)
       idx++
-      slot := slot - 1
-      IF slot < 0 THEN slot := HISTMAX - 1
+      slot := IF idx < avail THEN curcon.horder[idx] ELSE 0
     ENDWHILE
     IF idx < avail
       curcon.hpos := idx
@@ -7324,15 +7415,15 @@ PROC dorawkey(code, qual)
     ENDIF
   ELSEIF code = RK_DOWN
     IF curcon.hpos >= 0
+      historder()               -> v1.2.7: same order the Up walk used
       idx := curcon.hpos - 1
-      -> newer = slot+1; histslot(-1) is Mod(ghtotal,HISTMAX), in range
-      -> and non-negative, so the seed is safe at idx = -1 (the "back to
-      -> the half-typed line" boundary) - no guard needed this side.
-      slot := histslot(idx)
+      -> newer = the previous walk position; idx = -1 is the "back to
+      -> the half-typed line" boundary - guard the horder read there
+      -> (E's non-short-circuit AND, same rule as the Up side)
+      slot := IF idx >= 0 THEN curcon.horder[idx] ELSE 0
       WHILE (idx >= 0) AND (histmatches(slot, curcon.stash) = FALSE)
         idx--
-        slot := slot + 1
-        IF slot >= HISTMAX THEN slot := 0
+        slot := IF idx >= 0 THEN curcon.horder[idx] ELSE 0
       ENDWHILE
       curcon.hpos := idx
       IF curcon.hpos = -1
@@ -7862,19 +7953,39 @@ ENDPROC
 -> accumulated dups (the append path cannot rewrite an old line)
 -> loads back DEDUPED regardless, and a trim/close rewrites it clean.
 -> Harness: tests/histdeduptest.e (six cases incl. dedup across a
--> wrapped ring) - keep the ring math there identical to this.
+-> wrapped ring, plus section G for v1.2.7 owners) - keep the ring
+-> math there identical to this.
+-> v1.2.7: `owner` is the committing console (NIL from loadhistfile),
+-> recorded in ghcon so historder can put a console's own commands
+-> first in ITS walk. Single-owner rule: last committer wins - if two
+-> shells run the same line, it files under the most recent one and
+-> the other reaches it in the foreign segment. Accepted simplification.
 -> audit P5: returns TRUE when the line landed at the newest position
 -> (a genuinely new command, OR one moved there), FALSE when it was
 -> empty or ALREADY the newest. The commit path gates the file append
 -> on this: append the new copy (a move leaves a harmless older dup in
 -> the file, cleaned on the next load or trim), skip when nothing moved.
-PROC histremember(s:PTR TO CHAR)
+PROC histremember(s:PTR TO CHAR, owner)
   DEF avail, i, slot, found
   IF StrLen(s) = 0 THEN RETURN FALSE
   avail := Min(ghtotal, HISTMAX)
-  -> already the newest? nothing changes (the old consecutive-dup case)
+  -> already the newest? the RING does not change (the old
+  -> consecutive-dup case) - but the OWNER can: v1.2.7, this console
+  -> just typed the line, so its walk should file it under "own"
+  -> regardless of which console committed it last. No bump when the
+  -> owner already matches - Up/Up/Up on the same line must not
+  -> invalidate every console's cached order for nothing.
   IF avail > 0
-    IF StrCmp(ghist[Mod(ghtotal - 1, HISTMAX)], s) THEN RETURN FALSE
+    slot := Mod(ghtotal - 1, HISTMAX)
+    IF StrCmp(ghist[slot], s)
+      IF owner
+        IF ghcon[slot] <> owner
+          ghcon[slot] := owner
+          ghver++
+        ENDIF
+      ENDIF
+      RETURN FALSE
+    ENDIF
   ENDIF
   -> does an OLDER copy exist? find its logical index (0 = oldest ..
   -> avail-1 = newest; the newest was just handled, so scan to avail-2)
@@ -7897,11 +8008,15 @@ PROC histremember(s:PTR TO CHAR)
     FOR i := found TO avail - 2
       StrCopy(ghist[Mod(ghtotal - avail + i, HISTMAX)],
               ghist[Mod(ghtotal - avail + i + 1, HISTMAX)])
-    ENDFOR
+      ghcon[Mod(ghtotal - avail + i, HISTMAX)] :=       -> v1.2.7: the
+        ghcon[Mod(ghtotal - avail + i + 1, HISTMAX)]    -> owners ride
+    ENDFOR                                              -> the shift
     ghtotal := ghtotal - 1
   ENDIF
   StrCopy(ghist[Mod(ghtotal, HISTMAX)], s)
+  ghcon[Mod(ghtotal, HISTMAX)] := owner
   ghtotal := ghtotal + 1
+  ghver++                       -> every cached walk order is stale
 ENDPROC TRUE
 
 -> read L:ccon-history (oldest line first) into the shared ring. A
@@ -7942,7 +8057,7 @@ PROC loadhistfile()
       IF c = 10
         line[lp] := 0
         IF lp > 0
-          histremember(line)
+          histremember(line, NIL)  -> v1.2.7: disk lines own no console
           histfilelines := histfilelines + 1
         ENDIF
         lp := 0
@@ -7955,7 +8070,7 @@ PROC loadhistfile()
   ENDWHILE
   IF lp > 0
     line[lp] := 0
-    histremember(line)
+    histremember(line, NIL)
     histfilelines := histfilelines + 1
   ENDIF
   fscall(fsp, ACTION_END, id, 0, 0)
@@ -8544,4 +8659,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.6 (28.7.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.7b3 (5.8.26) CCON: LTX console handler', 0

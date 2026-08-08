@@ -4710,6 +4710,158 @@ NOT done (his call, the remaining ladder): tag ccon-1.2.6, GH
 release, .lha from his staging ~/Documents/Releases/CCon/ (+ his
 Aminet readme).
 
+## 1.2.7b1 — per-shell history order (5.8.26): Timm's mail, answered with owner tags
+
+Timm's ask by mail (4.8.26): the shared cross-window history feels
+wrong next to bash — he'd expect one history per shell, but the
+shared ring HAS saved him typing, so the agreed design (his "Yes,
+perfect") is a LAYERING, not a split: scrolling/searching shows
+your own shell's commands first, and past them you fall through to
+everything else. Nothing changes about how history is saved or
+protected; after a reboot the per-shell layer is empty and you see
+the full shared history from the start, same as now. His other
+idea — a history FILE per shell, merged into a global — rejected
+in the same mail for the file-management/cleanup mess it implies.
+
+The implementation is NOT the literal "second in-memory list" of
+the mail: a copy-list would fight the ring's move-to-end dedup
+(your own `ls` would show twice, once local once shared, or need
+its own dedup against the ring). Instead the ring stays the single
+store and each entry gets an OWNER tag — `ghcon[HISTMAX]` beside
+`ghist`, the committing console's ptr, NIL for disk-loaded lines —
+and each console derives its own WALK ORDER from the tags
+(`historder`: own commits newest-first, then everyone else's
+newest-first, as ring slots in `curcon.horder`). Every consumer
+now iterates that order instead of hand-stepping the raw ring: the
+Up/Down walk, Ctrl+R's srfind, the ghost's sgfind. The per-entry
+cost went DOWN (an INT read replaces step-and-wrap; audit2 P3's
+DIVS rule kept — one seed Mod per rebuild pass). The order is
+cached per console against a global mutation counter `ghver`
+(bumped on any ring/owner change; `hover` is the console's cached
+stamp), so the steady-state cost per keystroke is one compare.
+
+The persistence tier is untouched by design — histremember's ring
+math is byte-identical, histpersist/loadhistfile/savehistfile
+unchanged, L:ccon-history stays one shared file appended per
+Enter. The mail's reboot property falls out for free: loaded lines
+are NIL-owned, foreign to every console.
+
+Decisions inside the shape:
+- **Retag on consecutive dup**: shell B re-typing the ring's
+  newest line still returns FALSE (no ring change, no file append)
+  but the OWNER moves to B — B just typed it, B's walk should file
+  it under "own". No ghver bump when the owner already matches
+  (Up/Enter on your own last command must not invalidate every
+  console's cached order).
+- **Single-owner rule, last committer wins**: two shells running
+  the same line file it under the most recent one; the other
+  reaches it in the foreign segment. Accepted simplification —
+  the command is never lost, only ordered as foreign.
+- **conclose scrubs its tags to NIL** (same reason as the ihring
+  scrub beside it: a later console can land on the same heap
+  address and would inherit foreign history as "its own").
+- **Mid-walk rebuild** when another console commits between two
+  keypresses can shift positions under hpos/sridx — the same
+  class of shift move-to-end already caused, accepted then and
+  now: the walk lands somewhere valid, never off the array.
+- `horder[200]:ARRAY OF INT` spelled literally in the OBJECT
+  (= HISTMAX; E wants a literal there, the wq/rdq rule), 400
+  bytes per console, even, LONGs after stay aligned. `ghcon`
+  NILed in the alloc loop — E globals start as garbage.
+
+Harness first (the histdeduptest discipline): tests/histdeduptest.e
+grew section G — G1 interleaved shells each walk their own first,
+G2 disk (NIL) lines foreign to everyone, G3 retag-on-dup with the
+ghver bump/no-bump checks, G4 move-to-end carries the NEW owner,
+G5 order across a wrapped ring with mixed owners. All 12 sections
+green under vamos (A–F prove the ring math unchanged). Handler
+compiled clean (LARGE), `$VER: ccon-handler 1.2.7b1 (5.8.26)`
+verified inside the built hunk, staged to Dump:Code/
+ccon-handler-1.2.7b1 (byte-compared) for the emulator-side Copy
+to L:.
+
+**Boot test (pending, needs a reboot — the running handler keeps
+its seglist):** two CCON shells side by side; type distinct
+commands in each; Up in each walks its OWN commands first, then
+the other window's; Ctrl+R finds own matches before foreign;
+ghost suggests own first; close one window, reopen — the new
+window sees everything as foreign (no inherited "own" from the
+dead console's heap address); reboot — history intact from
+L:ccon-history, all of it foreign in every window (the old
+behaviour exactly). Then the Timm test binary goes out by mail.
+
+## 1.2.7b2 — the telemetry build (5.8.26): his boot said no prio; three probes cleared the code
+
+Boot findings (5.8.26, b1): "up/down works great; ghosting pulls
+from both consoles directly with no prio as far as I can tell,
+same with Ctrl+R." His L:ccon-history (read straight out of the
+laptop's AmigaOS.hdf with xdftool — his whole test session is in
+it, paired probe commands like `"command 4-1"`/`"command 4-2"`)
+shows he built a properly discriminating test — so the searches
+really are unordered. And the walk's "works great" is likely the
+NATURAL-TEST ILLUSION: he committed in alternation (A,B,B,A,A,B,
+A,B), so whichever window he pressed Up in had just committed —
+and under the OLD order your own commands ARE the globally
+newest. Working theory: NOTHING is ordered at runtime; only the
+searches could show it.
+
+Three probes cleared everything provable on Linux first:
+- tests/hordertest.e — INT member array in an OBJECT: write
+  stride, field-after intact, hoisted read (walk shape), nested
+  read `ghist[con.horder[idx]]` (search shape), nested-as-
+  argument. ALL AGREE, plain and LARGE. Miscompile theory dead.
+- incprobe (scratch) — `++` shapes: globals fine (plain and
+  LARGE); **`obj.field++` is BROKEN in E-VO 3.9.4 — stores 0**
+  (the amiga-e-language.md "suspect" is now proven; not used by
+  the v1.2.7 code, which ++'s only globals and locals).
+- histremember token-diffed handler-vs-harness: IDENTICAL. The
+  installed L:ccon-handler byte-compared against the repo build:
+  SAME BINARY. He ran the right code.
+
+So the logic is proven and the binary is right — the divergence
+is runtime STATE (ghcon tags, ghver/hover cache, or curcon at
+commit vs read). b2 paints exactly that state into the title bar
+(htele, temporary, stripped before b3) on every ghost recompute
+and Up step: `[G a<avail> o<own-tags> i<match-idx> own|FOR
+v<hover>/<ghver>]`. One glance splits the three failure classes:
+o=0 = owners never land (commit side); o>0 with FOR at i0 =
+order built but not applied (read side); v unequal after a
+rebuild = the cache never invalidates. Searches also hoist the
+member read into the walk's shape now (belt/braces; vamos clears
+the nested read but the hoist costs nothing).
+
+Deployed Dump:Code/ccon-handler-1.2.7b2 (byte-verified). His
+one-round script: shell 1 `echo one-a`, shell 2 `echo one-b`,
+back in shell 1 type `ec` and read the title; then Up in shell 1
+(own-first = `echo one-a`; old order = `echo one-b` — THE walk
+discriminator the b1 test lacked). Report both titles.
+
+**Boot findings (5.8.26, b2): "seems to work much better."** The
+b1→b2 delta had exactly one functional change — the hoist — so
+the b1 bug was E-VO 3.9.4 miscompiling the NESTED member-array
+read `ghist[curcon.horder[idx]]` IN SITU, in the big procs, while
+the extracted probe (hordertest.e, same shapes, plain and LARGE)
+compiles it correctly. Context-dependent codegen — register
+pressure is the going theory, the same family as the `{}`
+off-by-24 trap. Recorded in AmigaReferences/amiga-e-language.md;
+the hoists in srfind/sgfind carry LOAD-BEARING comments so nobody
+folds them back.
+
+## 1.2.7b3 — the clean build (5.8.26): telemetry stripped, the hoist stays
+
+htele and its two call sites removed (a tombstone comment marks
+the spot); the srfind/sgfind hoists — the actual fix — stay.
+Logic otherwise identical to the boot-good b2. Compile clean
+(LARGE), histdeduptest all green, `$VER 1.2.7b3` verified in the
+hunk, deployed Dump:Code/ccon-handler-1.2.7b3 (byte-verified).
+
+**Boot test (pending):** quick regression of the b2 wins (ghost/
+Ctrl+R/Up own-first in both windows), plus the two b1 checklist
+items never yet run: close one window and reopen (the reopened
+window sees everything as foreign — the conclose scrub), and a
+reboot (all history loads foreign, old behaviour exactly). Boot-
+green b3 = the binary for Timm.
+
 ## Design notes
 
 ## Design notes
