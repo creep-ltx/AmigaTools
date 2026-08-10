@@ -52,7 +52,13 @@
 
 MODULE 'dos/dos', 'dos/dosextens', 'dos/dosasl'
 
-CONST BUFSIZE=32768, PATHLEN=512, MAXARGS=32, NAMELEN=110
+-> 0.1.3: BUFSIZE 32768 -> 131072. Measured on exFAT over USB
+-> (PiStorm32): libdiskio routes requests of 64K or less through its
+-> per-512-byte-sector block cache - 0.7 MB/s, against 22 MB/s for
+-> reads big enough to bypass it. 128K also matches that stick's
+-> cluster size, and no filesystem is slower with the bigger chunk;
+-> the price is one 128K buffer, still allocated only on first use.
+CONST BUFSIZE=131072, PATHLEN=512, MAXARGS=32, NAMELEN=110
 
 OBJECT snode                       -> skipped-file list
   next:PTR TO snode
@@ -152,7 +158,7 @@ EXCEPT DO
 ENDPROC
 
 PROC usage()
-  WriteF('cp 0.1.2 -- Unix-style copy\n')
+  WriteF('cp 0.1.3 -- Unix-style copy\n')
   WriteF('usage: cp [-fr] FROM ... TO\n')
   WriteF('  -f  force: replace an existing target file\n')
   WriteF('  -r  copy directories recursively\n')
@@ -658,4 +664,4 @@ PROC addskip(srcpath:PTR TO CHAR)
   skipcount := skipcount+1
 ENDPROC
 
-version: CHAR '$VER: cp 0.1.2 (27.7.26) E build',0
+version: CHAR '$VER: cp 0.1.3 (10.8.26) E build',0
