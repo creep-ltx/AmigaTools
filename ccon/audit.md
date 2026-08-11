@@ -769,3 +769,132 @@ hardening (F1), plus four comment corrections — two of them in
 comments this very campaign wrote (F2, F6): documentation written
 at speed rots at speed. F1's one-line-per-site fix and the comment
 repairs ship as **1.2.6b9**; F4/F5 are recorded behaviour, kept.
+
+---
+
+# Audit7 — the 1.2.7 config campaign (11.8.26, vs 1.2.7b15 @2317ddd)
+
+An author pass over b4–b15: the palette work (b4–b7), the config
+file and its keys (b8–b9), device completion (b10), the resize
+repaint fix (b11), the menu's arrow walk and Esc-abort (b12–b13),
+the grounding directives and TITLE= (b14), and ICON= (b15).
+
+Every finding below was traced in the source and, where it is a
+defect, fixed and proven — F1 in the harness, F2 by inspection —
+shipped as **1.2.7b16**.
+
+## Findings
+
+**F1 — a grounding directive at field 4 lost the title AND grounded
+nothing.** *(defect, b14 regression, fixed)*
+
+b14 matches `DEFAULTS` and `CONFIG` in `parseopt` deliberately: the
+f=0 shortcut only switches a spec to options-only when the first
+field names a real option, so without a match `CCON:DEFAULTS/LINES384`
+would read `LINES384` as a window Y. But `parsecon`'s field 4 uses
+that same return the other way round — `IF parseopt(tok) = FALSE THEN
+StrCopy(wtitlebase, torig)` — so a *matched* token is not a title.
+
+And the pre-scan deliberately skips fields 1–4, precisely so a window
+called `DEFAULTS` is not silently grounded. Net effect: the token did
+nothing at all. `newshell "CCON:0/18/640/130/DEFAULTS"` produced a
+window titled `CCON:` — neither grounded nor titled, the name simply
+dropped. Titles of `DEFAULTS`, or anything beginning `CONFIG`
+(`Configuration`), were legal before b14.
+
+This also made a line in b15's boot checklist untrue as written; it
+had been ticked with the batch without being exercised.
+
+Fix: `cfgisdirective()`, the same question with no side effects, and
+field 4 asks it before deciding. `IF cfgisdirective(tok) OR
+(parseopt(tok) = FALSE) THEN` title. The f=0 shortcut is untouched.
+Harness section R, 7 checks including the pure-predicate property
+that it grounds and selects nothing.
+
+**F2 — the arrow walk out-ranked a live content search.** *(defensive,
+fixed)*
+
+b12's intercept sits above both the close-on-any-key block and
+`dorawkey`'s `sbsrch` arrow handling, so with both live the menu
+would eat arrows the search owns — the exact hazard the C9 note
+warns about.
+
+Not reachable today: `sbenter()` needs `viewoff > 0`, and every way
+of scrolling back (plain arrows now walk the menu, Ctrl/Shift arrows
+and the wheel all pass through the close block first) closes the
+menu before the view moves. But that is an invariant proved three
+procs away and one edit from being false. `AND (curcon.sbsrch =
+FALSE)` on the intercept costs one term and removes the dependency.
+
+**F3 — `iconload` adds a blocking point at iconify time.** *(recorded
+behaviour, no change)*
+
+`iconload` does `CreateNewProc` + `Wait(fhsig)`, blocking the whole
+handler process — every CCON window it serves — until the helper
+signals. Same shape as `fontload`, but `fontload` blocks during
+`openwin` where a window is being built anyway, while this blocks
+inside the event drain on a gadget click. Bounded by the same thing
+that bounds `fontload`: one filesystem round trip, and audit2 P6's
+no-timeout note already covers a wedged volume. Once per console, and
+only for a console that both sets `ICON=` and is iconified.
+
+**F4 — `tcadd`'s `dev` arm re-sets bit 0.** *(cosmetic, no change)*
+
+`IF dev THEN p[0] := p[0] OR 5` sets bits 0 and 2, while `isdir`
+above has already set bit 0 for the only caller that passes `dev`.
+Harmless and idempotent, and the OR-5 is what makes the flag correct
+if a future caller ever passes `dev` without `isdir`. Left as is,
+noted so the redundancy reads as deliberate.
+
+## Verified clean
+
+- **The ICON= lifetime**, the one that could have crashed.
+  `killhandler` closes `iconbase` *before* anything would call
+  `FreeDiskObject`, which would be a use-after-close — except
+  `ACTION_DIE` refuses while `conlist <> NIL`, so every console has
+  already been through `conclose` → `condispose` → `FreeDiskObject`
+  by the time the library closes. Sound by construction, and the
+  construction is load-bearing: if `ACTION_DIE` ever stopped refusing
+  a busy device, this becomes both a leak and a bad call.
+- **b11's `tcdrop` in `doresize`.** Everything between it and the
+  full clear+redraw is state assignment and model-only work
+  (`clearsel` state, `dropeditmirror`, `gridcalc`); nothing needs the
+  menu rows painted. The pixels are owed by the redraw regardless.
+- **`loadcfgfile`'s allocation.** All four exits `Dispose(fh)` or
+  never allocated; `tcfreelock()` on both paths that took a lock.
+  Runs per open now rather than once per handler life, so a leak
+  here would have compounded per window.
+- **Stack.** `parsecon` (~200) → `loadcfgfile` (buf 256 + line 260)
+  → `cfgsect` → `cfgapply` (tok 84) → `parseopt` (tok2 84) peaks
+  around 1 KB of the 10000-byte E stack. `tcresolve`'s ~350 is
+  returned before the read loop, and `cfgpre` returns before
+  `loadcfgfile` is called, so neither is additive. Well under
+  `savehistfile`'s ~2.5 KB, which still owns the mountlist's
+  StackSize note.
+- **`tcstem` before first use.** `String(416)` from `coninit` is a
+  valid empty E-string, and the Esc path is reachable only while
+  `tcactive`, which is only set after the snapshot is taken.
+- **`tcgridmove` arithmetic.** `tcmcols < 1` guarded before the only
+  `Mod`/`Div`; `tcshown - 1 - c` cannot go negative because
+  `c = Mod(n, tcmcols)` with `n < tcshown`. Both proven in harness
+  section M, including the 0- and 1-entry grids.
+- **`cfgapply`'s ICON copy.** Bounded at 102 into a 104 array with
+  room for the terminator.
+
+## Verdict
+
+The config campaign held up better than the palette campaign that
+preceded it, and for a structural reason: `parseopt` stayed the
+single place an option is applied, so the file and the open string
+could not drift, and the whole precedence rule reduced to the order
+of three calls. Almost everything the audit could have found there
+was found by the harness first — 153 checks over nineteen procs
+extracted verbatim.
+
+Both real findings are at the seams, again, and both in the same
+place: where a NEW keyword meets the field-4 title rule (F1) or an
+EXISTING key-consumption order (F2). That is the third campaign in a
+row where the seams were the whole story, which is an argument for
+looking there first next time rather than last.
+
+**Audit7 closed**, F1 and F2 fixed as 1.2.7b16, cfgtest 153/153.

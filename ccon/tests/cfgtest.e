@@ -373,6 +373,17 @@ PROC cfgrefuse(tok:PTR TO CHAR)
   IF StrCmp(t, 'DEFAULTS') THEN RETURN TRUE
 ENDPROC StrCmp(t, 'CONFIG', 6)
 
+PROC cfgisdirective(tok:PTR TO CHAR)
+  DEF t[12]:ARRAY OF CHAR, i
+  FOR i := 0 TO 11 DO t[i] := 0
+  i := 0
+  WHILE tok[i] AND (i < 8)
+    t[i] := tcfold(tok[i])
+    i++
+  ENDWHILE
+  IF StrCmp(t, 'DEFAULTS') THEN RETURN TRUE
+ENDPROC StrCmp(t, 'CONFIG', 6)
+
 PROC cfgdirective(tok:PTR TO CHAR)
   DEF t[84]:ARRAY OF CHAR, i, v, c
   i := 0
@@ -1189,6 +1200,26 @@ PROC main()
   ground()
   feed(['LINES=300'], 1, 'DEFAULT')
   checks('absent means the baked-in icon', cc.piconpath, '')
+
+  WriteF('--- R: audit7 F1 - a directive at field 4 is a TITLE ---\n')
+  -> b14 matched DEFAULTS and CONFIG in parseopt so parsecon's f=0
+  -> shortcut would fire on them. At FIELD 4 that was the worst of
+  -> both: the pre-scan deliberately skips field 4, so the window was
+  -> neither grounded NOR titled and just lost its name. The pure
+  -> predicate below is what field 4 asks instead.
+  checkn('DEFAULTS is one', cfgisdirective('DEFAULTS'), TRUE)
+  checkn('CONFIG=tall is one', cfgisdirective('CONFIG=tall'), TRUE)
+  checkn('Configuration is one too (the prefix, as SCREEN does)',
+         cfgisdirective('Configuration'), TRUE)
+  checkn('an ordinary title is not', cfgisdirective('Build'), FALSE)
+  checkn('nor is an ordinary option', cfgisdirective('LINES=200'), FALSE)
+  -> and it must not disturb the grounding state, which is the whole
+  -> reason it exists apart from cfgdirective
+  ground()
+  cfgisdirective('DEFAULTS')
+  checkn('the predicate grounds nothing', cc.pcfgdef, FALSE)
+  cfgisdirective('CONFIG=tall')
+  checks('and selects nothing', cc.pcfgsect, '')
 
   WriteF('\n')
   IF fails = 0

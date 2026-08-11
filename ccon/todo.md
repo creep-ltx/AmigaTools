@@ -5695,3 +5695,47 @@ fonts are the path that must not have moved.
 - Debugging: no WriteF after the handshake (the no-DOS rule; E's
   lazy stdout would try to open a console). If logging is needed,
   render into the window or blink the screen.
+
+## 1.2.7b16 — audit7's two findings (11.8.26)
+
+An author pass over b4–b15 before the release, his rule that fixes
+get audited before they ship. Full record in `audit.md`, Audit7
+section: two defects, one recorded behaviour, one cosmetic, and
+seven things verified clean.
+
+**F1, a b14 regression.** A grounding directive at field 4 lost the
+title AND grounded nothing. `parseopt` matches `DEFAULTS`/`CONFIG`
+on purpose so parsecon's f=0 shortcut fires on them — but field 4
+reads that same return the other way round (`IF parseopt(tok) =
+FALSE THEN` title), and the pre-scan deliberately skips field 4 so
+a window named DEFAULTS is not silently grounded. Net: the token did
+nothing at all and the name was dropped. `cfgisdirective()` is the
+same question without side effects, and field 4 asks it first.
+
+It also made one line of b15's own boot checklist untrue as written
+— ticked with the batch without being exercised. Worth remembering
+that a checklist item is only as good as the run.
+
+**F2, defensive.** b12's arrow intercept sat above `dorawkey`'s
+`sbsrch` arrow handling, so with both live the menu would eat arrows
+the content search owns. Not reachable today — every route to
+`viewoff > 0` closes the menu first — but that is an invariant
+proved three procs away. One extra term removes the dependency.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 153/153 green**
+(section R new for F1, including the property that the predicate
+grounds and selects nothing; nineteen procs verbatim, re-diffed),
+`$VER 1.2.7b16 (11.8.26)` verified in the hunk, staged
+L:ccon-handler-1.2.7b16 (byte-compared, .bak = b15).
+
+**Boot test (pending, REBOOT FIRST):**
+- [ ] `newshell "CCON:0/18/640/130/DEFAULTS"` → a window **titled**
+      DEFAULTS, config still applied (F1, the case that was wrong)
+- [ ] `newshell "CCON:0/18/640/130/Configuration"` → titled
+      Configuration
+- [ ] `newshell CCON:DEFAULTS` still grounds to built-ins (field 0,
+      which must NOT have changed)
+- [ ] `newshell "CCON:0/18/640/130/Build/CONFIG=tall"` still selects
+      the section from the options field
+- [ ] Ctrl+R scrollback search still consumes its own arrows, and
+      the Tab menu still walks with plain arrows (F2, both sides)

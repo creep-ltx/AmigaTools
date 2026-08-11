@@ -2406,7 +2406,18 @@ PROC parsecon(bname)
           torig[v] := tok[v]
         ENDFOR
         torig[tl] := 0
-        IF parseopt(tok) = FALSE THEN StrCopy(curcon.wtitlebase, torig)
+        -> audit7 F1 (1.2.7b16): the two grounding directives are
+        -> matched by parseopt on purpose, so the f=0 shortcut fires
+        -> on them - but at FIELD 4 they are a title, and the
+        -> pre-scan deliberately skipped this field so that a window
+        -> called DEFAULTS is not silently grounded. Without this,
+        -> b14 got the worst of both: parseopt swallowed the token,
+        -> so the window was neither grounded NOR titled, and simply
+        -> lost the name its caller asked for. Titles named DEFAULTS
+        -> or beginning CONFIG were legal before b14 and are again.
+        IF cfgisdirective(tok) OR (parseopt(tok) = FALSE)
+          StrCopy(curcon.wtitlebase, torig)
+        ENDIF
       ENDIF
     ELSE
       parseopt(tok)
@@ -7696,7 +7707,15 @@ PROC dorawkey(code, qual)
   -> scrollback walk, Shift+Up/Down is the page walk, and
   -> Right/Shift+Right/Ctrl+Right accept a ghost - none of those
   -> should quietly change meaning because a menu happens to be up.
-  IF curcon.tcactive AND (curcon.rawmode = FALSE)
+  -> audit7 F2: sbsrch excluded DEFENSIVELY. A live content search
+  -> consumes arrows itself further down (the C9 note), and this
+  -> intercept sits above it. The two cannot both be live today -
+  -> reaching sbenter() needs viewoff > 0, and every way of scrolling
+  -> back closes the menu first - but that is an invariant proved
+  -> three procs away, and one edit from being false. One term here
+  -> costs nothing and removes the dependency.
+  IF curcon.tcactive AND (curcon.rawmode = FALSE) AND
+     (curcon.sbsrch = FALSE)
     IF (qual AND (IEQUALIFIER_CONTROL OR IEQUALIFIER_LSHIFT OR
                   IEQUALIFIER_RSHIFT)) = 0
       IF (code = RK_UP) OR (code = RK_DOWN) OR (code = RK_LEFT) OR
@@ -8667,6 +8686,19 @@ ENDPROC insect
 -> everything else stays plain last-wins.
 -> Folded into a COPY - the caller's token must reach parsecon with
 -> its case intact.
+-> audit7 F1: the same question with NO side effects, because
+-> parsecon's field 4 has to ask it without grounding anything.
+PROC cfgisdirective(tok:PTR TO CHAR)
+  DEF t[12]:ARRAY OF CHAR, i
+  FOR i := 0 TO 11 DO t[i] := 0
+  i := 0
+  WHILE tok[i] AND (i < 8)
+    t[i] := tcfold(tok[i])
+    i++
+  ENDWHILE
+  IF StrCmp(t, 'DEFAULTS') THEN RETURN TRUE
+ENDPROC StrCmp(t, 'CONFIG', 6)
+
 PROC cfgdirective(tok:PTR TO CHAR)
   DEF t[84]:ARRAY OF CHAR, i, v, c
   i := 0
@@ -9633,4 +9665,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.7b15 (11.8.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.7b16 (11.8.26) CCON: LTX console handler', 0
