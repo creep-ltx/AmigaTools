@@ -173,10 +173,6 @@ HISTORY
       resizing away a standing selection stays inside the new
       window
 
-    - A sixth audit - new for this release - reviewed the fix
-      campaign itself before shipping: two independent review
-      passes; one pre-existing gap in the fullscreen-snapshot
-      accounting was found and closed with it
 
   1.2.5
     - Ghost text and completion-menu colours now show on 32+
@@ -206,6 +202,7 @@ HISTORY
       skipped wrongly at three line-editor corners; first-mount
       renders ran on uninitialized dirty-marks (cosmetic)
 
+
   1.2.4
     - The tuning release: on a real accelerated A1200 the whole
       benchmark suite runs five times faster than stock CON: and
@@ -217,6 +214,7 @@ HISTORY
       program waits for a key. Command output is there before you
       see it draw; Ed scrolls like butter. All in Amiga E, no
       assembler, still one source file
+
 
   1.2.3
     - Plane-masked rendering: text draws and scrolls only the
