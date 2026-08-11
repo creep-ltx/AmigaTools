@@ -5740,3 +5740,24 @@ item is the case F1 had actually broken.
       the section from the options field
 - [x] Ctrl+R scrollback search still consumes its own arrows, and
       the Tab menu still walks with plain arrows (F2, both sides)
+
+
+## 1.2.7 — the clean build (11.8.26)
+
+`$VER: ccon-handler 1.2.7 (11.8.26)`, logic identical to b16 (the
+only change is the version string itself — b16 is what was
+boot-verified, "All green").
+
+Built LARGE, baseline warnings only, version confirmed in the hunk.
+Every Linux harness green as a final gate: **cfgtest 153/153**,
+histdeduptest, hidpentest. Deployed to `L:ccon-handler`, staged as
+`L:ccon-handler-1.2.7`, `.bak` = b16. `Devs/CCON-mountlist` and
+`L:ccon.cfg-example` refreshed to the release copies.
+
+**Before the archive goes out:**
+- [ ] one boot on the clean build — it is the binary that ships, and
+      it has not been run once
+- [ ] `version L:ccon-handler full` reports 1.2.7, not a beta
+
+**The release ladder from here:** tag `ccon-1.2.7` (done), then the
+`.lha` from his staging, the GH release, and Aminet at his pace.
