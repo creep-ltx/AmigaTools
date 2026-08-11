@@ -180,7 +180,7 @@ the real prompt comes back from the scrollback model:
 - **Can replace CON:/RAW: system-wide**, KingCON style — dismount
   the stock devices, mount CCON: under their names instead, and
   every console the OS opens becomes a CCON: window. Experimental;
-  see `ccon.doc` section 15.
+  see `ccon.doc` section 16.
 - Swedish (and other) dead-key composition survives raw mode.
 
 ## Try it

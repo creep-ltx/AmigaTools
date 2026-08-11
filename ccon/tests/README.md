@@ -235,3 +235,64 @@ These are fed to the console byte for byte - the escape sequences and
 the bare carriage returns are the test - so they are marked `binary`
 in `.gitattributes` and must not be "tidied up" by anything that
 rewrites line endings.
+
+
+## hidpentest.e - runs on Linux
+
+Carries `hidscan()` verbatim - the palette scan that picks the
+completion menu's hidden-class pen - and runs it over seven real
+palettes, including all three of the screens the bug was reported on.
+
+```
+ecompile hidpentest.e hidpentest
+vamos hidpentest
+```
+
+Written for 1.2.7b6. Fixed pens 8 and 12 looked wrong on a
+CyberGraphX screen, wrong again on a dark terminal palette, and wrong
+a third time on the no-startup-sequence boot shell, where the nearest
+pen to the midpoint between background and text *is* the directory
+blue - so hidden entries and directories rendered identically.
+ObtainBestPen cannot express "not this colour"; a scan can.
+
+Section D is the one worth keeping: a V39 colormap for a 2-plane
+screen still carries 32 entries, and the ones past `1<<depth` hold
+sprite colours - pointer red among them. Unclamped, that red wins the
+scan. The section proves both halves, the bug and the clamp.
+
+## cfgtest.e - runs on Linux
+
+The 1.2.7 config campaign, 153 checks over **nineteen procs copied
+verbatim** from the handler. A build step diffs them byte-for-byte
+against `ccon-handler.e`, so a drift between the harness and the real
+code is a failure rather than a silent lie.
+
+```
+ecompile cfgtest.e cfgtest
+vamos cfgtest
+```
+
+What it covers, by section:
+
+- **A-D** the config file itself: a flat section-less file, the `=`
+  forms, comments and trimming, `[name]` sections, `[DEFAULT]`
+  layering, and the rule that lines before the first header belong
+  to `[DEFAULT]`
+- **E-H** the twelve inverses, the refusal of `WINDOW0x` from a
+  file, `FONT=name/size` (including that `.font` stays legal inside
+  the value, which is why the separator could not be a `.`), and
+  precedence end to end
+- **I-K** geometry as edges - `RIGHT`/`BOTTOM` exclusive, `-1` as
+  fill, and the audit3 C2 sequence: fold, simulate hidewin's
+  snapshot, fold again, assert nothing moved - plus the colour pins
+  and the pen-0 refusals
+- **L-M** the completion candidate flags and suffixes, and the menu
+  grid walk, including the short last row that must not invent an
+  entry it does not have
+- **N-R** the grounding directives, where the pre-scan will *not*
+  look (field 4 is the title), the two rest-of-line keys, and
+  audit7 F1
+
+Only the file *read* stays boot-tested - it is the same no-DOS
+FINDINPUT/READ/END plumbing `loadhistfile` has used since v1.1.
+Everything the harness covers is the logic on top of it.
