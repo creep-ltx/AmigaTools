@@ -104,11 +104,16 @@
   Optionally, for defaults you would rather not retype on every open
   string - preferred colours, scrollback depth, font, window size:
 
-    copy ccon.cfg L:
+    copy L/ccon.cfg-example L:ccon.cfg
 
-  It ships with every key in it and every key commented out, so
-  copying it changes nothing until you uncomment a line. Section 6
-  explains it. CCON: works perfectly well without one.
+  Note the rename: the handler reads L:ccon.cfg, and the archive
+  carries the example under a name it ignores, so copying the whole
+  L drawer over an existing install can never overwrite a config you
+  have already written.
+
+  The example has every key in it and every key commented out, so
+  installing it changes nothing until you uncomment a line. Section
+  6 explains it. CCON: works perfectly well without one.
 
   Try it:
 
@@ -322,8 +327,11 @@
 
   The file is optional and there is no harm in not having one - a
   missing file is not an error, and CCON: opens exactly as it always
-  did. An example with every key in it, commented out, ships as
-  ccon.cfg in the archive; copy it to L: and uncomment what you want.
+  did. An example with every key in it, commented out, ships in the
+  archive as L/ccon.cfg-example; copy that to L:ccon.cfg and
+  uncomment what you want. Under its shipped name the handler
+  ignores it, so unpacking an upgrade over an existing install
+  cannot overwrite a config you have already written.
 
   It lives in L: because that is where the handler itself is loaded
   from, so it is the one place that cannot be missing when CCON: runs
@@ -1007,9 +1015,11 @@
                          this - one file, four device stanzas
                          (the last two experimental, section 16),
                          same shape KingCON's own mountlist uses
-  ccon.cfg               optional defaults, copy to L: - every key
-                         with its default, all commented out
-                         (section 6)
+  L/ccon.cfg-example     optional defaults - every key with its
+                         default, all commented out. Copy it to
+                         L:ccon.cfg to use it (section 6); under
+                         its own name the handler ignores it, so
+                         it can never overwrite your own
   ccon.readme            short-form readme
   ccon.doc               this manual
 
