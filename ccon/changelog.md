@@ -7,7 +7,102 @@ mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
 Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
-1.2.4, 1.2.5 and 1.2.6 are released and tagged.
+1.2.4, 1.2.5, 1.2.6 and 1.2.7 are released and tagged.
+
+---
+
+## [1.2.7] — 2026-08-11 (tag `ccon-1.2.7`)
+
+The configuration release. CCON: gains a defaults file, so the
+options you always want no longer have to be retyped on every open
+string — and, along the way, the completion menu learned to reach
+device names and to be walked with the arrow keys. Thirteen beta
+builds (1.2.7b4–b16), every one boot-verified before the next, with
+a seventh source audit over the campaign before release.
+
+### Added
+- **A defaults file, `L:ccon.cfg`.** Optional — a missing file is
+  not an error and changes nothing. Every option that works on an
+  open string works in it, under one rule: **built-in default <
+  `L:ccon.cfg` < the open string**, so the file sets what you
+  usually want and any single window can still say otherwise. It
+  ships with every key in it and every key commented out, so
+  copying it in changes nothing until you uncomment a line.
+  Comments with `;` or `#`, `KEY=value` a line, unknown keys
+  ignored so an older handler can read a newer file. Read once per
+  window as it opens, so edits take effect on the next window with
+  no reboot. (1.2.7b8)
+- **Named sections.** `[DEFAULT]` is what every window gets;
+  `[name]` sections state only their differences and are selected
+  per window with `CONFIG=name`, or skipped entirely with
+  `DEFAULTS` for a script that cannot know what is in somebody
+  else's config. Anything written before the first `[name]` belongs
+  to `[DEFAULT]`, so a flat file with no sections is perfectly
+  valid. (1.2.7b8, selectable in b14)
+- **The window's edges as options** — `LEFT` `TOP` `RIGHT` `BOTTOM`,
+  where the number *is* the edge rather than a size, and `-1` fills
+  to the screen. (1.2.7b9)
+- **Colour roles you can pin** — `TEXT` (a clearer name for `PEN`),
+  and `DIRS`, `HIDDEN` and `GHOST` for the completion menu and the
+  grey ghost. Left unset they are still derived from your screen's
+  own palette, which is nearly always the better answer. (1.2.7b9)
+- **`TITLE=` and `ICON=`**, config-file only, because their values
+  contain spaces and slashes an open string cannot carry. `ICON=`
+  gives an iconified window your own AppIcon instead of the one
+  built into the handler; it is read on the first iconify only, and
+  a path that cannot be loaded falls back to the built-in icon in
+  silence. (1.2.7b14, b15)
+- **Tab completes device names.** `du<Tab>` reaches `DUMP:`.
+  Devices, volumes and assigns all appear, complete with their
+  colon and no trailing space, and are merged with what the current
+  directory offers rather than replacing it. (1.2.7b10)
+- **The completion menu walks.** Left and Right by one entry, Up
+  and Down by a row, wrapping within the column. Esc now **aborts**:
+  the word goes back to what it was when the menu opened, so
+  walking a long menu costs nothing. Ctrl and Shift arrows keep
+  their usual scrollback meanings. (1.2.7b12, b13)
+- **Every switch can be spoken both ways** — `BORDER`, `DRAG`,
+  `DEPTH`, `SIZE`, `NOBACKDROP`, `ACTIVE`, `NOWAIT`, `NOAUTO`,
+  `NOPASTEEXEC`, `NOWBPENS`, `NOSCREEN`, `NOFONT`. Without them a
+  setting made for every window in the config file could not be
+  taken back by one window's open string, and the precedence rule
+  would have been a claim rather than a fact. (1.2.7b8)
+
+### Fixed
+- **Menu colours that survive your palette** (1.2.7b4–b7) — fixed
+  pens looked wrong on a CyberGraphX screen, wrong again on a dark
+  terminal palette, and wrong a third time on the boot shell.
+  Directory and hidden-entry colours are now taken from the screen:
+  the fill-pen role from its DrawInfo, and a palette scan for a pen
+  that stays readable against the background while still reading as
+  dimmer than the text. A colormap quirk fell out of it — a 2-plane
+  screen still carries 32 colour entries, the ones past the visible
+  depth holding sprite colours, pointer red among them — so the
+  scan is clamped to the pens the screen can actually display.
+- **Resizing with the completion menu open no longer wrecks the
+  window frame** (1.2.7b11). Closing the menu repaints the rows it
+  covered, and that repaint ran at the OLD grid into an
+  already-resized window, throwing menu pixels across the new
+  border and sizing gadget where the final redraw never reaches.
+- **`PEN=` and `SCREEN=` were being dropped in silence** (1.2.7b8).
+  Both lacked the `=` handling `LINES` and `FONT` always had. It
+  had never shown, because a shell eats an unquoted `=` from a
+  command line anyway — the config file is the first place the
+  spelling is reachable at all.
+- **The seventh audit** (1.2.7b16): a window whose *title* was
+  `DEFAULTS`, or began `CONFIG`, lost its title and set nothing —
+  the two grounding keywords were being consumed in the field that
+  holds the title. Titles were legal there before and are again.
+  Plus one defensive fix keeping the menu's arrow walk from
+  out-ranking a live Ctrl+R content search.
+
+### Notes
+- Beta ladder 1.2.7b4–b16, boot-verified per build; the audit trail
+  (Audit7) lives in `audit.md`.
+- `tests/cfgtest.e` is new: 153 checks over nineteen procs copied
+  verbatim from the handler and diffed against it, covering the
+  config parser, the geometry arithmetic, the menu walk and the
+  completion flags.
 
 ---
 

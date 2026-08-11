@@ -10,37 +10,21 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.6.** Every milestone boot-verified on AmigaOS 3.2 —
-and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.6 is **the
-wishlist release** — the three features an amiga-news.de reader
-asked for after 1.2.5, plus the project's deepest hardening pass: a
-**real iconify gadget** in the title bar (the native V47.4+ one —
-click to park to the AppIcon, the same trip RightAmiga+I always
-made), a **complement-mode cursor** drawn the way the ROM's own
-console draws it (takes its colour from what's under it on any
-screen depth, with the stock checkerboard ghost on inactive
-windows), and **drag and drop** — any Workbench icon dropped on a
-CCON window becomes its full quoted path at the cursor, in the
-shell's edit line or straight into a fullscreen program like Ed. A
-fifth source audit closed every finding before release, and — a
-first here — a sixth audit reviewed the fixes themselves. Before
-it: 1.2.5 was **the Ed-and-deep-screens release** — deep-screen
-ghost text and menu colours, Shift+Backspace/Del spellings, the
-V47 close-gadget protocol, and the mid-Ed resize made safe. 1.2.4
-was **the tuning release** — on a real accelerated Amiga the whole
-benchmark suite runs **five times faster than stock `CON:`** (see
-**Speed**, below),
-building on 1.2.3's plane-masked rendering (the trick read out of
-the 3.2 ROM's own console.device), 1.2.2's model-first engine (at
-most one scroll blit per write, accept-then-render buffering), and
-the change that mattered most on real silicon: **it never scrolls a
-blank screen.** Before them: 1.2.1 applied a third read of the
-source (two memory-corruption fixes among nine); 1.2 brought
-**iconify** to a Workbench icon (RightAmiga+I) and clean full-screen
-page flips; 1.1 brought per-window FONT and soft styles, an
-alternate-screen contract for Ed/More, shared persistent history,
-safe multi-line paste, scrollback content search, and the
-KingCON-style `CON:`/`RAW:` takeover.
+**Status: 1.2.7.** Every milestone boot-verified on AmigaOS 3.2 —
+and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.7 is **the
+configuration release**: a defaults file, `L:ccon.cfg`, so the
+options you always want no longer have to be retyped on every open
+string. It is entirely optional — a missing file is not an error —
+and it introduced no second parser and no second vocabulary, because
+every key in it *is* an open-string option, under one rule:
+**built-in default < `L:ccon.cfg` < the open string**. Named
+`[sections]` give a window a profile (`CONFIG=tall`), `TITLE=` and
+`ICON=` set the window's name and its own AppIcon, and the file can
+pin the colours CCON: otherwise derives from your screen. Alongside
+it the completion menu learned two things: **device names complete**
+(`du<Tab>` reaches `DUMP:`), and the menu can be **walked with the
+arrow keys**, with Esc aborting cleanly instead of leaving whatever
+you last stepped past in the line.
 
 ## Speed
 

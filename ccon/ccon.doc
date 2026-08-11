@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.6
+                               CCON: 1.2.7
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -11,20 +11,21 @@
     3. Installation
     4. Opening windows: the name syntax
     5. The options, one by one
-    6. The line editor
-    7. Autosuggestions (the grey ghost)
-    8. Tab completion
-    9. Ctrl+R history search
-   10. Scrollback
-   11. Copy, paste and drag and drop
-   12. Raw mode and CRAW:
-   13. Running fullscreen programs (Ed, More)
-   14. Iconify
-   15. Replacing the system console (experimental)
-   16. How it works, briefly
-   17. Known limitations
-   18. Building from source
-   19. Files
+    6. The config file: L:ccon.cfg
+    7. The line editor
+    8. Autosuggestions (the grey ghost)
+    9. Tab completion
+   10. Ctrl+R history search
+   11. Scrollback
+   12. Copy, paste and drag and drop
+   13. Raw mode and CRAW:
+   14. Running fullscreen programs (Ed, More)
+   15. Iconify
+   16. Replacing the system console (experimental)
+   17. How it works, briefly
+   18. Known limitations
+   19. Building from source
+   20. Files
 
 
 1. WHAT CCON: IS
@@ -69,7 +70,7 @@
       running a whole clipboard's worth of commands
     - a raw twin device, CRAW:, for RAW:-style uses
     - can even replace CON:/RAW: system-wide, KingCON style
-      (experimental - section 15)
+      (experimental - section 16)
 
 
 2. REQUIREMENTS
@@ -99,6 +100,15 @@
     Mount CRAW: FROM DEVS:CCON-mountlist
 
   Add the two Mount lines to S:User-Startup to make them permanent.
+
+  Optionally, for defaults you would rather not retype on every open
+  string - preferred colours, scrollback depth, font, window size:
+
+    copy ccon.cfg L:
+
+  It ships with every key in it and every key commented out, so
+  copying it changes nothing until you uncomment a line. Section 6
+  explains it. CCON: works perfectly well without one.
 
   Try it:
 
@@ -182,7 +192,20 @@
   INACTIVE   Do not activate the window on open.
   PASTEEXEC  RAMIGA-V pastes the old way in this window: every LF
              in the clip runs its line immediately, no queueing.
-             See section 11.
+             See section 12.
+
+  Every switch above can also be spoken the other way round, so that
+  anything set for all windows in L:ccon.cfg (section 6) can still be
+  taken back by one window's open string:
+
+  BORDER     DRAG        DEPTH       SIZE        NOBACKDROP
+  ACTIVE     NOWAIT      NOAUTO      NOPASTEEXEC NOWBPENS
+  NOSCREEN   Back to the default public screen.
+  NOFONT     Back to the Font Prefs default.
+
+  NOWAIT undoes WAIT only. WAIT switches the close gadget on because
+  something has to end the window, and NOWAIT leaves the gadget where
+  it found it.
 
   WINDOW0xADDR
              Render into an EXISTING window at that address instead
@@ -197,7 +220,7 @@
              30-33 from programs are then treated as WORKBENCH pen
              numbers and retargeted at the theme (C:Ed hardcodes
              WB pens; without this it would render in ANSI red).
-             See section 16 for the full colour story.
+             See section 17 for the full colour story.
 
   FONTname/size
              Open the window in this font, loading it from disk if
@@ -210,21 +233,72 @@
   LINESn     How many lines of scrollback THIS window keeps
              (default 512, floor 100, ceiling 5000). Raise it for
              a deep transcript, lower it on a tight machine - see
-             section 17 for the cost per line.
+             section 18 for the cost per line.
              The ring is always kept a little larger than the
              window is tall, so on a very tall window a small
              LINESn is quietly raised to fit: a window with more
              text rows than the ring holds would have nowhere to
              scroll back to.
 
+  LEFT=n     The window's edges, as an alternative to the positional
+  TOP=n      x/y/w/h fields. RIGHT and BOTTOM are EDGES, not sizes:
+  RIGHT=n    the window spans LEFT..RIGHT across and TOP..BOTTOM
+  BOTTOM=n   down, so width = RIGHT - LEFT. Nothing has to be
+             written as 639 - the edge is the edge.
+
+             RIGHT=-1 or BOTTOM=-1 fills to the screen edge from
+             wherever LEFT or TOP put the window, which is the only
+             spelling that means "fill" regardless of the other
+             edge. A right edge left of LEFT clamps to the smallest
+             window CCON: will open, 160x60.
+
+             These are mostly for L:ccon.cfg (section 6), where
+             naming an edge reads better than counting pixels.
+
+  TEXTn      The default text pen, 1-15 - the same setting as PENn
+             under a clearer name. PENn is not going away.
+
+  DIRSn      The colours the Tab completion menu (section 9) uses
+  HIDDENn    for directories, for hidden and .info entries, and for
+  GHOSTn     the grey ghost (section 8) respectively. Range 1-255.
+
+             Left unset - which is nearly always right - CCON: takes
+             these FROM YOUR SCREEN: directories follow the screen's
+             own fill-pen role, and the other two are chosen by
+             scanning the palette for a pen that stays readable
+             against the background while still reading as dimmer
+             than the text. Fixed numbers looked wrong on a
+             CyberGraphX screen, wrong again on a dark terminal
+             palette and wrong a third time on the boot shell, which
+             is why they are derived at all. Pin one only if you know
+             your palette and dislike what the screen chose.
+
+             Pen 0 is refused on all four. The window is cleared in
+             pen 0, so text drawn in it is not dim, it is gone.
+
+  CONFIG=name
+             Open this window on section [name] of L:ccon.cfg,
+             layered over [DEFAULT]. See section 6.
+
+  DEFAULTS   Ignore L:ccon.cfg entirely and open on the built-in
+             defaults. What a script uses when it cannot know what
+             is in somebody else's config.
+
   Not implemented: SMART, SIMPLE, ALT. (Iconify is a key - RightAmiga+I,
-  section 14 - not an open option.)
+  section 15 - not an open option.)
+
+  Set in L:ccon.cfg only: TITLE= and ICON= (section 6). Their values
+  contain spaces and slashes, which an open string cannot carry.
 
   A WARNING WORTH BOLD: the AmigaDOS shell eats an unquoted '='
   from ANY command line before CCON: ever sees it - so a FONT or
   LINES option MUST be written without one (FONTtopaz/8, LINES200),
   or the whole open string quoted. `FONT=topaz/8` silently truncates
   to `FONT` and does nothing; this is a shell fact, not a CCON: bug.
+
+  It applies to a COMMAND LINE only. Inside L:ccon.cfg no shell is
+  involved, so the readable `KEY=value` form is the natural one
+  there and this warning does not apply.
 
   A keyword as the very FIRST field switches the whole open string
   to options-only, with default position and size - so a plain
@@ -240,7 +314,131 @@
     NewShell CCON:0/0/640/200/My-Window/FONTtopaz/8
 
 
-6. THE LINE EDITOR
+6. THE CONFIG FILE: L:CCON.CFG
+--------------------------------------------------------------------------
+
+  Everything in section 5 can be typed on every open string. If you
+  would rather set it once, put it in L:ccon.cfg.
+
+  The file is optional and there is no harm in not having one - a
+  missing file is not an error, and CCON: opens exactly as it always
+  did. An example with every key in it, commented out, ships as
+  ccon.cfg in the archive; copy it to L: and uncomment what you want.
+
+  It lives in L: because that is where the handler itself is loaded
+  from, so it is the one place that cannot be missing when CCON: runs
+  - which matters if you have mounted CCON: as the system CON:, where
+  a window can be wanted before S:User-Startup has assigned anything.
+
+  WHO WINS
+
+  Three layers, and the later one always wins:
+
+      built-in default  <  L:ccon.cfg  <  the open string
+
+  So the file sets what you usually want, and any single window can
+  still say otherwise. `newshell CCON:PEN7` gets pen 7 whatever the
+  file says.
+
+  THE SYNTAX
+
+      ; or #        a comment, to the end of the line
+      KEY=value     one per line
+      [name]        starts a section (see below)
+
+  Blank lines are ignored. A key CCON: does not recognise is ignored
+  too, which is what lets an older handler read a newer file without
+  complaining.
+
+  Because a comment runs to the end of the line, ';' and '#' cannot
+  appear inside a value.
+
+  The simplest possible config is two lines and needs no sections at
+  all:
+
+      LINES=2000
+      PEN=7
+
+  WHICH KEYS
+
+  Every option in section 5, spelled the same way. The file may also
+  use the `KEY=value` form for options where the shell would eat the
+  '=' on a command line, so `PEN=7` and `LINES=2000` work here even
+  though a shell needs `PEN7` and `LINES2000`.
+
+  Two keys exist ONLY in this file, because their values cannot
+  survive an open string:
+
+  TITLE=     The window title. An open string sets this with its
+             fourth field; in here it takes the whole rest of the
+             line, so it may contain spaces and slashes.
+
+  ICON=      The AppIcon shown while the window is iconified
+             (section 15). Write the path WITHOUT ".info" - that is
+             added for you, the way Workbench does it. A path
+             contains slashes, which is the other reason this cannot
+             be an open-string option.
+
+             Left out, CCON: uses the icon built into the handler,
+             which needs no file and no disk access at all. The icon
+             is read on the first iconify only, so a window you never
+             iconify never touches it, and a path that cannot be
+             loaded falls back to the built-in icon in silence.
+
+  One option is refused in the file: WINDOW0xADDR. It names a window
+  that already exists, and an address written in a file points at a
+  window that died with the last reboot.
+
+  SECTIONS
+
+  A section is a named set of overrides on top of [DEFAULT]. It
+  states only its differences:
+
+      [DEFAULT]
+      LINES=2000
+      PEN=7
+      FONT=topaz/8
+
+      [tall]
+      BOTTOM=-1
+      LINES=4000
+      TITLE=Build
+
+  [DEFAULT] is what every window gets. Anything written before the
+  first [name] belongs to it, which is why a file with no sections
+  works. A section runs until the next [name] or the end of the file;
+  there is nothing to close.
+
+  Ask for one by name on the open string:
+
+      newshell CCON:CONFIGtall           [DEFAULT], then [tall]
+      newshell "CCON:CONFIG=tall"        the same, quoted
+
+  and to ignore the file altogether:
+
+      newshell CCON:DEFAULTS             the built-in defaults only
+
+  DEFAULTS is what a script uses when it cannot know what is in
+  somebody else's config and wants a known window.
+
+  Name either one in the FIRST field of the open string or among the
+  options at the end - not in the fourth field, which is the title. A
+  window really titled "DEFAULTS" is titled, not reset.
+
+  A name that is not in the file simply leaves [DEFAULT] standing.
+  CONFIG= and DEFAULTS are open-string only; in the file they are
+  ignored, since a section selecting another section would be a loop
+  waiting to happen.
+
+  WHEN IT IS READ
+
+  Once per window, as the window opens. Editing the file therefore
+  takes effect on the next window you open - no reboot, and no need
+  to unmount anything, even though the running handler keeps its code
+  in memory.
+
+
+7. THE LINE EDITOR
 --------------------------------------------------------------------------
 
   Cooked mode - the shell prompt - is edited by the console:
@@ -281,7 +479,7 @@
   borrowed window's session.
 
 
-7. AUTOSUGGESTIONS (THE GREY GHOST)
+8. AUTOSUGGESTIONS (THE GREY GHOST)
 --------------------------------------------------------------------------
 
   As you type, CCON: looks for the newest history entry that begins
@@ -307,7 +505,7 @@
   (below), ghost or no ghost. Ghosts are a Right-family thing only.
 
 
-8. TAB COMPLETION
+9. TAB COMPLETION
 --------------------------------------------------------------------------
 
   Tab completes the word at the cursor as a filename:
@@ -321,24 +519,46 @@
 
     Tab          cycle forward
     Shift+Tab    cycle backwards
+    Left/Right   move one entry
+    Up/Down      move a whole row, wrapping within the column
     Return       accept the highlighted candidate and close; the
                  line stays put, so a second Return runs it
-    Esc          close the menu, line unchanged
-    any other    close the menu, then act normally
+    Esc          abort: the word goes back to what it was when the
+                 menu opened, so walking the menu costs nothing
+    any other    close the menu, keeping the pick, then act normally
+
+  The candidate is written into the line as you move, so the line
+  always shows what Return would accept. Esc takes it back out
+  again; what Tab had already completed before the menu opened - the
+  common prefix - stays, since that was Tab's work and not the
+  menu's.
+
+  Arrow keys walk the menu only when they carry no qualifier. Ctrl
+  and Shift arrows keep their usual meanings (scrollback by line and
+  by page, section 11) and close the menu first.
 
   Menu colours mirror the ls scheme: directories blue, hidden-class
-  entries (h-bit or .info) grey.
+  entries (h-bit or .info) grey. Those two, and the ghost, can be
+  pinned to pen numbers in L:ccon.cfg with DIRS, HIDDEN and GHOST
+  (section 6) - though the colours CCON: derives from your screen
+  are usually the better answer.
 
   Relative words complete in the current directory of the shell
   that is reading the window; words with ':' resolve through
   assigns, volumes and devices.
 
+  DEVICE NAMES complete too, as long as the word has no '/' or ':'
+  in it yet - so `du<Tab>` reaches `DUMP:`. Devices, volumes and
+  assigns all appear; they complete with their colon and no trailing
+  space, so you can type straight on into the path, and they are
+  MERGED with what the current directory offers rather than
+  replacing it - a word that could be either shows both in one menu.
+
   Limits, by design: no quoted words, one menu page (80 candidates;
-  a beep means there are more), no volume-name completion for a
-  bare word.
+  a beep means there are more).
 
 
-9. CTRL+R HISTORY SEARCH
+10. CTRL+R HISTORY SEARCH
 --------------------------------------------------------------------------
 
   Ctrl+R searches your history incrementally, the bash way. The
@@ -361,10 +581,10 @@
   it from the scrollback model, pixel for pixel.
 
   Ctrl+R means something else once you are SCROLLED BACK - see
-  "Searching scrollback" in section 10.
+  "Searching scrollback" in section 11.
 
 
-10. SCROLLBACK
+11. SCROLLBACK
 --------------------------------------------------------------------------
 
   Every window remembers 512 lines by default (LINESn asks for
@@ -377,7 +597,7 @@
   "All modes" means raw mode too - a raw client that just streams
   output (CRAW:, or anything that never takes the screen over) is
   scrolled back exactly like a cooked window. Ed and More are the
-  exception: they run on the ALTERNATE SCREEN (section 13) for
+  exception: they run on the ALTERNATE SCREEN (section 14) for
   essentially their whole session, and scrolling is refused there,
   xterm manners - there is nothing to scroll TO until they exit and
   your transcript comes back. Raw programs never see the scroll
@@ -426,7 +646,7 @@
   stays put until you scroll, search again, or return to live.
 
 
-11. COPY, PASTE AND DRAG AND DROP
+12. COPY, PASTE AND DRAG AND DROP
 --------------------------------------------------------------------------
 
   Selecting:
@@ -497,7 +717,7 @@
     keystroke would.
 
 
-12. RAW MODE AND CRAW:
+13. RAW MODE AND CRAW:
 --------------------------------------------------------------------------
 
   Programs switch a CCON: stream between cooked and raw with the
@@ -505,7 +725,7 @@
   themselves. In raw mode every key becomes bytes for the program
   (arrows and F-keys as CSI sequences, Ctrl+C as a plain byte 3),
   and the console shows the classic block cursor - complement-
-  drawn like the editor's cursor (section 6), with the same
+  drawn like the editor's cursor (section 7), with the same
   checkerboard ghost when the window is inactive.
 
   CRAW: is the same handler mounted a second time with a startup
@@ -518,7 +738,7 @@
   as its own handler process.
 
 
-13. RUNNING FULLSCREEN PROGRAMS (ED, MORE)
+14. RUNNING FULLSCREEN PROGRAMS (ED, MORE)
 --------------------------------------------------------------------------
 
   Ed and More work as they do on stock CON:, including the parts
@@ -565,7 +785,7 @@
   screen (More mid-page), where scrolling is refused, xterm manners.
 
 
-14. ICONIFY
+15. ICONIFY
 --------------------------------------------------------------------------
 
   Press RIGHT-AMIGA + I in any CCON: window and it vanishes to an
@@ -596,7 +816,7 @@
   program alike.
 
 
-15. REPLACING THE SYSTEM CONSOLE (EXPERIMENTAL)
+16. REPLACING THE SYSTEM CONSOLE (EXPERIMENTAL)
 --------------------------------------------------------------------------
 
   CCON:'s own mountlist also carries CON: and RAW: stanzas,
@@ -639,7 +859,7 @@
   it for good if you have not made it permanent yet.
 
 
-16. HOW IT WORKS, BRIEFLY
+17. HOW IT WORKS, BRIEFLY
 --------------------------------------------------------------------------
 
   CCON: is a DOS packet handler written in Amiga E. A few of its
@@ -726,7 +946,7 @@
   apply per window.
 
 
-17. KNOWN LIMITATIONS
+18. KNOWN LIMITATIONS
 --------------------------------------------------------------------------
 
   - The scrollback model costs about 120K per window at 80 columns
@@ -741,7 +961,7 @@
   - Pasting into a raw fullscreen program (Ed) is capped at about
     2000 bytes per paste; the window beeps if the rest was
     dropped. Cooked-mode pasting has no such limit - it queues
-    line by line (section 11).
+    line by line (section 12).
   - CSI K under a coloured background erases to black.
   - Completion: no quoted words, one menu page, no volume-name
     completion for a bare word.
@@ -756,7 +976,7 @@
     model.) Lifting the cap for text colours means widening the
     model - planned, 1.3-scale.
   - Resizing while a fullscreen program is showing a page is safe
-    (see section 13), but a program that does not watch for resize
+    (see section 14), but a program that does not watch for resize
     reports - More does not; Ed does - will not know to repaint:
     the window shows your transcript until its next repaint (in
     More, any paging key).
@@ -765,7 +985,7 @@
     block the window until that filesystem answers.
 
 
-18. BUILDING FROM SOURCE
+19. BUILDING FROM SOURCE
 --------------------------------------------------------------------------
 
   The prebuilt binary is included; nothing needs compiling. To
@@ -779,16 +999,25 @@
   verified by disassembling the compiler's generated startup code.
 
 
-19. FILES
+20. FILES
 --------------------------------------------------------------------------
 
   L/ccon-handler         the handler
   DEVS/CCON-mountlist    Mount CCON:, CRAW:, CON: or RAW: FROM
                          this - one file, four device stanzas
-                         (the last two experimental, section 15),
+                         (the last two experimental, section 16),
                          same shape KingCON's own mountlist uses
+  ccon.cfg               optional defaults, copy to L: - every key
+                         with its default, all commented out
+                         (section 6)
   ccon.readme            short-form readme
   ccon.doc               this manual
+
+  Written by CCON: itself, in L:, as it runs:
+
+  L/ccon-history         the shared command history, so a new
+                         window opens knowing what you typed in
+                         the last one. Delete it to forget.
 
 ==========================================================================
   CCON: is part of the LTX AmigaTools collection.
