@@ -5654,27 +5654,32 @@ b15), `$VER 1.2.7b15 (11.8.26)` verified in the hunk, staged
 L:ccon-handler-1.2.7b15 (byte-compared, .bak = b14). `ccon.cfg`
 documents all four new keys.
 
-**Boot test (pending, REBOOT FIRST):**
-- [ ] `TITLE=My Build Shell` in `[DEFAULT]` → new windows carry it,
+**Boot test: GREEN 11.8.26** — b14 and b15 both, his verdicts: "I
+have tested the different config names and all is working", then "I
+tested Title, Icon and font. All green." The FONT check carries as
+much weight as ICON here: b15 turned fonthelper into diskhelper with
+a mode flag, so fonts and icons now share one helper process, and
+fonts are the path that must not have moved.
+- [x] `TITLE=My Build Shell` in `[DEFAULT]` → new windows carry it,
       spaces and all; a `TITLE=Work/Build` keeps its slash
-- [ ] an open string's fourth field still wins over it
-- [ ] add a `[tall]` section, then `newshell CCON:CONFIGtall` →
+- [x] an open string's fourth field still wins over it
+- [x] add a `[tall]` section, then `newshell CCON:CONFIGtall` →
       `[DEFAULT]` first, `[tall]` over it (check a key set only in
       DEFAULT survives, and one set in both takes tall's)
-- [ ] `newshell CCON:DEFAULTS` → the built-ins, config ignored
+- [x] `newshell CCON:DEFAULTS` → the built-ins, config ignored
       entirely, whatever is in the file
-- [ ] a CONFIG= naming a section that does not exist → `[DEFAULT]`
+- [x] a CONFIG= naming a section that does not exist → `[DEFAULT]`
       still applies, no beep, no error
-- [ ] **the title slot:** `newshell "CCON:0/18/640/130/DEFAULTS"` →
+- [x] **the title slot:** `newshell "CCON:0/18/640/130/DEFAULTS"` →
       a window TITLED "DEFAULTS", not a grounded one
-- [ ] `ICON=SYS:Prefs/CCon` (or any real .info) → iconify, and the
+- [x] `ICON=SYS:Prefs/CCon` (or any real .info) → iconify, and the
       desktop shows THAT icon; double-click restores as before
-- [ ] a deliberately wrong `ICON=` path → iconify still works and
+- [x] a deliberately wrong `ICON=` path → iconify still works and
       shows the built-in icon, no requester, no hang
-- [ ] no `ICON=` line at all → the built-in icon, exactly as b14
-- [ ] iconify twice in one window → the second raises the icon
+- [x] no `ICON=` line at all → the built-in icon, exactly as b14
+- [x] iconify twice in one window → the second raises the icon
       without reloading it
-- [ ] FONT= still loads a disk font (the helper now dispatches on a
+- [x] FONT= still loads a disk font (the helper now dispatches on a
       mode flag; fonts are the path that must not have moved)
 
 ## Design notes
