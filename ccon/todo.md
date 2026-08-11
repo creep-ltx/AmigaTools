@@ -5728,14 +5728,15 @@ grounds and selects nothing; nineteen procs verbatim, re-diffed),
 `$VER 1.2.7b16 (11.8.26)` verified in the hunk, staged
 L:ccon-handler-1.2.7b16 (byte-compared, .bak = b15).
 
-**Boot test (pending, REBOOT FIRST):**
-- [ ] `newshell "CCON:0/18/640/130/DEFAULTS"` → a window **titled**
+**Boot test: GREEN 11.8.26** — his verdict: "All green." The first
+item is the case F1 had actually broken.
+- [x] `newshell "CCON:0/18/640/130/DEFAULTS"` → a window **titled**
       DEFAULTS, config still applied (F1, the case that was wrong)
-- [ ] `newshell "CCON:0/18/640/130/Configuration"` → titled
+- [x] `newshell "CCON:0/18/640/130/Configuration"` → titled
       Configuration
-- [ ] `newshell CCON:DEFAULTS` still grounds to built-ins (field 0,
+- [x] `newshell CCON:DEFAULTS` still grounds to built-ins (field 0,
       which must NOT have changed)
-- [ ] `newshell "CCON:0/18/640/130/Build/CONFIG=tall"` still selects
+- [x] `newshell "CCON:0/18/640/130/Build/CONFIG=tall"` still selects
       the section from the options field
-- [ ] Ctrl+R scrollback search still consumes its own arrows, and
+- [x] Ctrl+R scrollback search still consumes its own arrows, and
       the Tab menu still walks with plain arrows (F2, both sides)

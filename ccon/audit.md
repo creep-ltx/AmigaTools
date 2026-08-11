@@ -897,4 +897,7 @@ EXISTING key-consumption order (F2). That is the third campaign in a
 row where the seams were the whole story, which is an argument for
 looking there first next time rather than last.
 
-**Audit7 closed**, F1 and F2 fixed as 1.2.7b16, cfgtest 153/153.
+**Audit7 closed**, F1 and F2 fixed as 1.2.7b16, cfgtest 153/153,
+**boot-verified 11.8.26** ("All green") — including the field-4 title
+case F1 had broken, which is the one the b15 checklist had ticked
+without exercising.
