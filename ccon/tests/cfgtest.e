@@ -35,7 +35,10 @@ OBJECT con
   pbackdrop, pinactive, pasteexec, wbpens, deffg, fwptr, plines,
   pfontsize, pfontexp,
   pwx, pwy, pww, pwh, pwr, pwb,
-  pdirs, phid, pghost,
+  pdirs, phid, pghost, pcfgdef,
+  pcfgsect[40]:ARRAY OF CHAR,
+  wtitlebase:PTR TO CHAR,
+  piconpath[104]:ARRAY OF CHAR,
   drifill, ovhid, ovgrey, can16,
   anstab[8]:ARRAY OF LONG,
   tcc[80]:ARRAY OF LONG,
@@ -285,6 +288,16 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF (v >= 1) AND (v <= 255) THEN curcon.pghost := v ELSE matched := FALSE
+  -> 1.2.7b14: both were read by cfgpre BEFORE any of this ran, so
+  -> there is nothing to do here. They are matched all the same, for
+  -> two reasons: parsecon's f=0 shortcut only switches the whole
+  -> spec to options-only when the first field names a REAL option
+  -> (CCON:DEFAULTS/LINES384 would otherwise parse LINES384 as a
+  -> window Y), and an unmatched token at field 4 becomes the title.
+  ELSEIF StrCmp(tok, 'DEFAULTS')
+    matched := TRUE
+  ELSEIF StrCmp(tok, 'CONFIG', 6)
+    matched := TRUE
   ELSEIF StrCmp(tok, 'NOFONT')
     curcon.pfontname[0] := 0       -> back to the Font Prefs default
     curcon.pfontsize := 0
@@ -352,10 +365,119 @@ PROC cfgrefuse(tok:PTR TO CHAR)
     t[i] := tcfold(tok[i])
     i++
   ENDWHILE
-ENDPROC StrCmp(t, 'WINDOW0X', 8)
+  IF StrCmp(t, 'WINDOW0X', 8) THEN RETURN TRUE
+  -> 1.2.7b14: the two grounding directives are open-string only.
+  -> CONFIG inside the file would let a section select another
+  -> section - chaining, and loops with it - and DEFAULTS inside the
+  -> file is a contradiction: the file IS the defaults.
+  IF StrCmp(t, 'DEFAULTS') THEN RETURN TRUE
+ENDPROC StrCmp(t, 'CONFIG', 6)
+
+PROC cfgdirective(tok:PTR TO CHAR)
+  DEF t[84]:ARRAY OF CHAR, i, v, c
+  i := 0
+  WHILE tok[i] AND (i < 80)
+    t[i] := tcfold(tok[i])
+    i++
+  ENDWHILE
+  t[i] := 0
+  IF StrCmp(t, 'DEFAULTS')
+    curcon.pcfgdef := TRUE
+    RETURN TRUE
+  ENDIF
+  IF StrCmp(t, 'CONFIG', 6) = FALSE THEN RETURN FALSE
+  v := 6
+  IF t[v] = "=" THEN v := 7
+  c := 0
+  WHILE t[v] AND (c < 38)
+    curcon.pcfgsect[c] := t[v]   -> kept folded: sections match blind
+    c++
+    v++
+  ENDWHILE
+  curcon.pcfgsect[c] := 0
+  IF c = 0 THEN RETURN FALSE     -> a bare CONFIG names nothing, and
+ENDPROC TRUE                     -> fails closed like SCREEN does
+
+PROC cfgpre(bname)
+  DEF s:PTR TO CHAR, l, i, f, tl, tok[84]:ARRAY OF CHAR, optmode=FALSE
+  curcon.pcfgdef := FALSE
+  curcon.pcfgsect[0] := 0
+  IF bname = 0 THEN RETURN
+  s := Shl(bname, 2)
+  l := s[0]
+  i := 1
+  WHILE (i <= l) AND (s[i] <> ":")
+    i++
+  ENDWHILE
+  IF i > l THEN RETURN
+  i++
+  f := 0
+  WHILE i <= l
+    tl := 0
+    WHILE (i <= l) AND (s[i] <> "/")
+      IF tl < 80
+        tok[tl] := s[i]
+        tl++
+      ENDIF
+      i++
+    ENDWHILE
+    i++
+    tok[tl] := 0
+    IF optmode OR (f = 0) OR (f >= 5)
+      IF cfgdirective(tok) AND (f = 0) THEN optmode := TRUE
+    ENDIF
+    f++
+  ENDWHILE
+ENDPROC
+
+PROC cfgrest(line:PTR TO CHAR, key:PTR TO CHAR, kl)
+  DEF i, t[12]:ARRAY OF CHAR
+  IF kl > 10 THEN RETURN -1
+  FOR i := 0 TO 11 DO t[i] := 0
+  i := 0
+  WHILE (i < kl) AND line[i]
+    t[i] := tcfold(line[i])
+    i++
+  ENDWHILE
+  IF StrCmp(t, key, kl) = FALSE THEN RETURN -1
+  IF line[kl] <> "=" THEN RETURN -1
+  i := kl + 1
+  WHILE (line[i] = " ") OR (line[i] = 9) DO i++
+ENDPROC i
 
 PROC cfgapply(line:PTR TO CHAR)
   DEF i, tl, tok[84]:ARRAY OF CHAR
+  -> 1.2.7b14: TITLE= takes the REST OF THE LINE, verbatim - no '/'
+  -> split, no whitespace split - so a title may contain both. The
+  -> one key that opts out of the token rules, because a title is
+  -> prose and not a value. Its case survives because nothing has
+  -> folded this line: cfgsect only folds inside the brackets of a
+  -> section header, and parseopt folds a copy of its own token.
+  -> Bounded by wtitlebase being String(84) - E's StrCopy will not
+  -> write past an E-string's maxlen, so a long title truncates.
+  -> An open string keeps using positional field 4 for this; a
+  -> field-4 title cannot hold a '/' anyway, which is the whole
+  -> reason TITLE= is a file key.
+  i := cfgrest(line, 'TITLE', 5)
+  IF i >= 0
+    StrCopy(curcon.wtitlebase, line + i)
+    RETURN
+  ENDIF
+  -> 1.2.7b15: ICON= is the other rest-of-line key, for a harder
+  -> reason than TITLE's - a path CONTAINS '/', and every other value
+  -> here is split on it. Written WITHOUT ".info": GetDiskObject
+  -> appends that itself.
+  i := cfgrest(line, 'ICON', 4)
+  IF i >= 0
+    tl := 0
+    WHILE line[i] AND (tl < 102)
+      curcon.piconpath[tl] := line[i]
+      tl++
+      i++
+    ENDWHILE
+    curcon.piconpath[tl] := 0
+    RETURN
+  ENDIF
   i := 0
   WHILE line[i]
     WHILE (line[i] = " ") OR (line[i] = 9) OR (line[i] = "/") DO i++
@@ -555,6 +677,10 @@ PROC ground()
   cc.pdirs := -1
   cc.phid := -1
   cc.pghost := -1
+  cc.pcfgdef := FALSE
+  cc.pcfgsect[0] := 0
+  StrCopy(cc.wtitlebase, 'CCON:')
+  cc.piconpath[0] := 0
   -> not parsecon's to ground - openwin derives these from the screen;
   -> the tests set them where a derived value is what's under test
   cc.drifill := -1
@@ -591,16 +717,27 @@ PROC opt(s:PTR TO CHAR)
 ENDPROC parseopt(b)
 
 -> the flag byte tcadd packed for candidate i
+-> a BSTR (length byte, then chars) in a long-aligned buffer, which
+-> is what an open string arrives as
+PROC mkbstr(buf:PTR TO CHAR, t:PTR TO CHAR)
+  DEF l
+  l := StrLen(t)
+  buf[0] := l
+  CopyMem(t, buf + 1, l)
+ENDPROC Shr(buf, 2)
+
 PROC flagof(i)
   DEF p:PTR TO CHAR
   p := cc.tcc[i]
 ENDPROC p[0]
 
 PROC main()
+  DEF bb[40]:ARRAY OF LONG
   fails := 0
   tests := 0
   curcon := cc
   cc.tcpool := New(TCPOOLSZ)
+  cc.wtitlebase := String(84)
   WriteF('cfgtest - the b8 L:ccon.cfg reader\n\n')
 
   WriteF('--- A: a flat file, no sections at all ---\n')
@@ -948,6 +1085,110 @@ PROC main()
   checkn('one entry: Down stays', tcgridmove(RK_DOWN), 0)
   checkn('one entry: Up stays', tcgridmove(RK_UP), 0)
   checkn('one entry: Right stays', tcgridmove(RK_RIGHT), 0)
+
+  WriteF('--- N: the grounding directives ---\n')
+  -> DEFAULTS and CONFIG= decide what the window starts FROM, so they
+  -> are read by a pre-scan before any option is applied - otherwise
+  -> a CONFIG= named last would overwrite the options typed before it
+  ground()
+  checkn('DEFAULTS is a directive', cfgdirective('DEFAULTS'), TRUE)
+  checkn('and sets the skip', cc.pcfgdef, TRUE)
+  ground()
+  checkn('CONFIG=name', cfgdirective('CONFIG=tall'), TRUE)
+  checks('the section, folded', cc.pcfgsect, 'TALL')
+  ground()
+  checkn('CONFIGname, the shell-safe form', cfgdirective('CONFIGtall'), TRUE)
+  checks('same section', cc.pcfgsect, 'TALL')
+  ground()
+  checkn('a bare CONFIG names nothing', cfgdirective('CONFIG'), FALSE)
+  checkn('an ordinary option is not a directive',
+         cfgdirective('LINES=200'), FALSE)
+  -> both are refused INSIDE the file: CONFIG there would let a
+  -> section select another section, and DEFAULTS there is a
+  -> contradiction - the file IS the defaults
+  checkn('CONFIG refused in the file', cfgrefuse('CONFIG=tall'), TRUE)
+  checkn('DEFAULTS refused in the file', cfgrefuse('DEFAULTS'), TRUE)
+  checkn('an ordinary key is not refused', cfgrefuse('LINES=200'), FALSE)
+
+  WriteF('--- O: the pre-scan, and where it will not look ---\n')
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:CONFIG=tall'))
+  checks('field 0 is scanned (the no-geometry shortcut)',
+         cc.pcfgsect, 'TALL')
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:DEFAULTS'))
+  checkn('DEFAULTS at field 0', cc.pcfgdef, TRUE)
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:DEFAULTS/CONFIG=tall'))
+  checkn('both, after a field-0 directive', cc.pcfgdef, TRUE)
+  checks('and the section with it', cc.pcfgsect, 'TALL')
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:0/18/640/130/Build/CONFIG=tall'))
+  checks('field 5 is scanned', cc.pcfgsect, 'TALL')
+  -> THE safety case: field 4 is the TITLE. A window legitimately
+  -> titled "CONFIG=tall" or "DEFAULTS" must not ground itself.
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:0/18/640/130/CONFIG=tall'))
+  checks('field 4 is the title, NOT scanned', cc.pcfgsect, '')
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:0/18/640/130/DEFAULTS'))
+  checkn('a window titled DEFAULTS does not ground itself',
+         cc.pcfgdef, FALSE)
+  ground()
+  cfgpre(mkbstr(bb, 'CCON:'))
+  checks('a bare spec finds nothing', cc.pcfgsect, '')
+  ground()
+  cfgpre(0)
+  checkn('no spec at all is safe', cc.pcfgdef, FALSE)
+
+  WriteF('--- P: TITLE= takes the rest of the line ---\n')
+  ground()
+  checkn('the offset past TITLE=', cfgrest('TITLE=Build', 'TITLE', 5), 6)
+  checkn('case-blind', cfgrest('title=x', 'TITLE', 5), 6)
+  checkn('the = is required', cfgrest('TITLE Build', 'TITLE', 5), -1)
+  checkn('not every key', cfgrest('LINES=200', 'TITLE', 5), -1)
+  -> the whole point: no token split, so spaces AND slashes survive
+  ground()
+  feed(['TITLE=My Build Shell'], 1, 'DEFAULT')
+  checks('spaces survive', cc.wtitlebase, 'My Build Shell')
+  ground()
+  feed(['TITLE=Work/Build'], 1, 'DEFAULT')
+  checks('a slash survives', cc.wtitlebase, 'Work/Build')
+  ground()
+  feed(['TITLE=   Padded'], 1, 'DEFAULT')
+  checks('leading blanks trimmed', cc.wtitlebase, 'Padded')
+  -> and it does not disturb the ordinary keys around it
+  ground()
+  feed(['LINES=300', 'TITLE=Build', 'PEN=7'], 3, 'DEFAULT')
+  checks('title landed', cc.wtitlebase, 'Build')
+  checkn('the key before it', cc.plines, 300)
+  checkn('the key after it', cc.deffg, 7)
+
+  WriteF('--- Q: ICON=, the other rest-of-line key ---\n')
+  -> a path CONTAINS '/', and every other value in the file is split
+  -> on it - which is the whole reason ICON cannot be a token
+  ground()
+  feed(['ICON=SYS:Prefs/CCon'], 1, 'DEFAULT')
+  checks('a path with slashes survives whole', cc.piconpath,
+         'SYS:Prefs/CCon')
+  ground()
+  feed(['ICON=Work:My Icons/Shell'], 1, 'DEFAULT')
+  checks('spaces survive too', cc.piconpath, 'Work:My Icons/Shell')
+  ground()
+  feed(['ICON=  DH0:icons/ccon  '], 1, 'DEFAULT')
+  checks('blanks trimmed both ends', cc.piconpath, 'DH0:icons/ccon')
+  ground()
+  checkn('the = is required here too', cfgrest('ICON x', 'ICON', 4), -1)
+  -> and it leaves the ordinary keys around it alone
+  ground()
+  feed(['LINES=300', 'ICON=SYS:Prefs/CCon', 'PEN=7'], 3, 'DEFAULT')
+  checks('the icon landed', cc.piconpath, 'SYS:Prefs/CCon')
+  checkn('the key before it', cc.plines, 300)
+  checkn('the key after it', cc.deffg, 7)
+  -> no ICON line at all: nothing set, so the baked-in icon stands
+  ground()
+  feed(['LINES=300'], 1, 'DEFAULT')
+  checks('absent means the baked-in icon', cc.piconpath, '')
 
   WriteF('\n')
   IF fails = 0

@@ -73,7 +73,11 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        -> (bicondo), so no icon.library. AddAppIcon/RemoveAppIcon are exec.
        -> 1.2.6b3: 'workbench/startup' = the wbarg OBJECT (lock+name
        -> pairs inside a drop's AppMessage arglist)
-       'wb','workbench/workbench','workbench/startup'
+       -> 1.2.7b15: 'workbench/icon' = icon.library (GetDiskObject /
+       -> FreeDiskObject) + iconbase, for ICON=. Opened lazily by the
+       -> HELPER process, never at init: an AppIcon most windows will
+       -> never raise must not cost every mount a library open.
+       'wb','workbench/workbench','workbench/startup','icon'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -373,6 +377,18 @@ OBJECT console
   tcws, tcwend                  -> the word being completed, in ebuf
   tcstem                        -> 1.2.7b13: that word as it stood when
                                 -> the menu opened, so Esc can abort
+  -> 1.2.7b14: what the open string's PRE-SCAN found. Grounding
+  -> directives, read before any option is applied - see cfgpre.
+  pcfgdef                       -> DEFAULTS: ignore L:ccon.cfg entirely
+  pcfgsect[40]:ARRAY OF CHAR    -> CONFIG=<name>: the section, folded
+  -> 1.2.7b15: ICON=<path>, the AppIcon this window raises when
+  -> iconified. Loaded LAZILY at the first iconify and cached, not at
+  -> open: most windows are never iconified and must not pay a helper
+  -> process for one. icontried makes a failure stick, so a bad path
+  -> costs one attempt and not one per iconify.
+  piconpath[104]:ARRAY OF CHAR
+  myicon:PTR TO diskobject
+  icontried
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
@@ -519,10 +535,18 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> so the no-DOS rule stays whole); the handler sleeps on fhsig
     fhok=FALSE,                 -> the plumbing came up at init
     fhstub=NIL:PTR TO CHAR,     -> poked machine code: the NP_Entry
-    fhgd[2]:ARRAY OF LONG,      -> stub and its [A4][{fonthelper}]
+    fhgd[2]:ARRAY OF LONG,      -> stub and its [A4][{diskhelper}]
     fhcapa4=0,                  -> glue vector (the gluestub pattern)
     fhsigbit=-1, fhsig=0,
     fhtask=NIL,
+    -> 1.2.7b15: the SAME throwaway process now runs two errands, so
+    -> there is one stub, one signal and one glue block rather than a
+    -> second copy of all three. Serialised by construction: every
+    -> caller blocks on Wait(fhsig) before returning, so the mode can
+    -> never be read by the wrong errand.
+    fhmode=0,                   -> 0 = load a font, 1 = load an icon
+    fhpath=NIL:PTR TO CHAR,     -> ICON=: the request, in
+    fhdo=NIL:PTR TO diskobject, -> and what came back
     fhta=NIL:PTR TO textattr,   -> the request: in
     fhfont=NIL,                 -> the result: out
     -> v1.2 ICONIFY: AppIcon plumbing. iconobj is the DiskObject every
@@ -834,7 +858,7 @@ PROC main()
     fhsig := Shl(1, fhsigbit)
     MOVE.L A4,fhcapa4
     fhgd[0] := fhcapa4
-    fhgd[1] := {fonthelper}
+    fhgd[1] := {diskhelper}
     wp := fhstub
     wp[0] := $48E7              -> MOVEM.L D2-D7/A2-A6,-(A7)
     wp[1] := $3F3E
@@ -1057,12 +1081,20 @@ PROC killhandler()
     keymapbase := NIL
   ENDIF
   -> audit3 C7: diskfont.library was opened (by the fontload HELPER process,
-  -> fonthelper() - the no-DOS escape) and never closed anywhere, so any
+  -> diskhelper() - the no-DOS escape) and never closed anywhere, so any
   -> handler that had ever served a FONT option left its OpenCnt permanently
   -> raised and the library could never be expunged. The only outlier in an
   -> otherwise complete teardown. Safe here by construction: fontload()
   -> blocks on Wait(fhsig) until the helper has signalled, so no helper can
   -> still be inside OpenDiskFont when main()'s loop falls out to us.
+  -> 1.2.7b15: icon.library, opened by the same helper and closed on
+  -> the same reasoning as diskfont just below - every iconload()
+  -> blocks until its helper has signalled, so none can still be
+  -> inside GetDiskObject when we get here.
+  IF iconbase
+    CloseLibrary(iconbase)
+    iconbase := NIL
+  ENDIF
   IF diskfontbase
     CloseLibrary(diskfontbase)
     diskfontbase := NIL
@@ -1171,6 +1203,8 @@ PROC coninit(c:PTR TO console)
   c.tcstem := String(416)   -> 1.2.7b13: the word as the menu found it
   c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
   c.wob := New(WOBSZ)           -> S5: NIL survivable too - synchronous writes
+  c.myicon := NIL               -> 1.2.7b15: no ICON= loaded yet
+  c.icontried := FALSE
   c.mpens := 0                  -> 1.2.3: masked rendering - defaults
   c.mmask := $FF                -> stay FULL until gridcalc probes the
   c.mfloor := $FF               -> real bitmap and seeds the pens
@@ -1306,6 +1340,13 @@ PROC condispose(c:PTR TO console)
   IF c.tctmp THEN Dispose(c.tctmp)
   IF c.tctail THEN Dispose(c.tctail)
   IF c.tcstem THEN Dispose(c.tcstem)
+  -> 1.2.7b15: the loaded AppIcon. Only ever non-NIL when iconload
+  -> succeeded, which means icon.library is open - and FreeDiskObject
+  -> only frees memory, sends no packets, so it is safe from here.
+  IF c.myicon
+    FreeDiskObject(c.myicon)
+    c.myicon := NIL
+  ENDIF
   IF c.tcpool THEN Dispose(c.tcpool)
   IF c.srbuf THEN Dispose(c.srbuf)
   IF c.srstash THEN Dispose(c.srstash)
@@ -2156,6 +2197,16 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF (v >= 1) AND (v <= 255) THEN curcon.pghost := v ELSE matched := FALSE
+  -> 1.2.7b14: both were read by cfgpre BEFORE any of this ran, so
+  -> there is nothing to do here. They are matched all the same, for
+  -> two reasons: parsecon's f=0 shortcut only switches the whole
+  -> spec to options-only when the first field names a REAL option
+  -> (CCON:DEFAULTS/LINES384 would otherwise parse LINES384 as a
+  -> window Y), and an unmatched token at field 4 becomes the title.
+  ELSEIF StrCmp(tok, 'DEFAULTS')
+    matched := TRUE
+  ELSEIF StrCmp(tok, 'CONFIG', 6)
+    matched := TRUE
   ELSEIF StrCmp(tok, 'NOFONT')
     curcon.pfontname[0] := 0       -> back to the Font Prefs default
     curcon.pfontsize := 0
@@ -2245,6 +2296,7 @@ PROC parsecon(bname)
   curcon.pfontexp := FALSE
   curcon.pwr := -2                     -> 1.2.7b9: RIGHT/BOTTOM never
   curcon.pwb := -2                     -> given (-1 is a real answer)
+  curcon.piconpath[0] := 0             -> 1.2.7b15: ICON= per open
   curcon.pdirs := -1                   -> 1.2.7b9: colour roles keep
   curcon.phid := -1                    -> deriving until pinned (pen 0
   curcon.pghost := -1                  -> is a real answer here)
@@ -2254,7 +2306,18 @@ PROC parsecon(bname)
   -> IS that ordering, and nothing else enforces it. Deliberately
   -> ahead of the bname=0 early-out too: a bare CCON: with no spec at
   -> all is exactly the case the file exists to serve.
-  loadcfgfile('DEFAULT')
+  -> 1.2.7b14: the pre-scan reads the grounding directives out of the
+  -> open string BEFORE the file is touched, so they are positionally
+  -> independent while every other token stays last-wins.
+  cfgpre(bname)
+  IF curcon.pcfgdef = FALSE
+    loadcfgfile('DEFAULT')
+    -> a section LAYERS on [DEFAULT]: a profile states only its
+    -> differences and does not have to restate the palette to change
+    -> the geometry. A name that is not in the file simply leaves
+    -> [DEFAULT] standing - the house rule for everything else here.
+    IF curcon.pcfgsect[0] THEN loadcfgfile(curcon.pcfgsect)
+  ENDIF
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -2482,18 +2545,30 @@ ENDPROC
 -> works on them the same as on a ROM font.
 
 -> runs ON THE HELPER process (A4 restored by the poked stub)
-PROC fonthelper()
+PROC diskhelper()
   DEF p:PTR TO process
   p := FindTask(NIL)
-  p.windowptr := -1             -> no "please insert volume" boxes
-  IF diskfontbase = NIL THEN diskfontbase := OpenLibrary('diskfont.library', 36)
-  IF diskfontbase THEN fhfont := OpenDiskFont(fhta)
+  p.windowptr := -1             -> no "please insert volume" boxes,
+                                -> and no requester for a missing icon
+  IF fhmode = 1
+    -> 1.2.7b15: ICON=. GetDiskObject reads a file, so it belongs out
+    -> here with OpenDiskFont and for the same reason. It appends
+    -> ".info" itself, which is why the config key is written without
+    -> one. iconbase is opened HERE, on first use, and closed by
+    -> killhandler - the audit3 C7 shape diskfont already wears.
+    IF iconbase = NIL THEN iconbase := OpenLibrary('icon.library', 36)
+    IF iconbase THEN fhdo := GetDiskObject(fhpath)
+  ELSE
+    IF diskfontbase = NIL THEN diskfontbase := OpenLibrary('diskfont.library', 36)
+    IF diskfontbase THEN fhfont := OpenDiskFont(fhta)
+  ENDIF
   Signal(fhtask, fhsig)         -> ALWAYS - the handler is waiting
 ENDPROC
 
 PROC fontload(ta:PTR TO textattr)
   DEF f=NIL
   IF fhok
+    fhmode := 0                 -> 1.2.7b15: which errand
     fhta := ta
     fhfont := NIL
     SetSignal(0, fhsig)         -> no stale wakeups
@@ -2514,6 +2589,38 @@ PROC fontload(ta:PTR TO textattr)
   -> no helper (or no diskfont.library): loaded fonts still resolve
   IF f = NIL THEN f := OpenFont(ta)
 ENDPROC f
+
+-> 1.2.7b15: ICON=<path>, his original ask - the AppIcon an iconified
+-> window shows. The handler has always used a BAKED-IN icon (bicondo,
+-> his 55x23x3, built in code) precisely so there was no file to read
+-> and no icon.library to open; this is the opt-out for someone who
+-> wants their own. Same throwaway-process escape fonts use, and for
+-> the same reason: GetDiskObject reads a file.
+-> NIL back - no helper, no icon.library, no such file, a corrupt one
+-> - is not an error anywhere. The caller falls to the baked-in icon,
+-> which is exactly what it would have used before this existed.
+PROC iconload(path:PTR TO CHAR)
+  DEF d=NIL
+  IF fhok = FALSE THEN RETURN NIL
+  fhmode := 1
+  fhpath := path
+  fhdo := NIL
+  SetSignal(0, fhsig)           -> no stale wakeups
+  IF CreateNewProc([NP_ENTRY, fhstub,
+                    NP_NAME, 'ccon-iconload',
+                    NP_STACKSIZE, 16384,
+                    NP_COPYVARS, FALSE,
+                    NP_CURRENTDIR, 0,
+                    NP_INPUT, 0,
+                    NP_OUTPUT, 0,
+                    NP_CLOSEINPUT, FALSE,
+                    NP_CLOSEOUTPUT, FALSE,
+                    TAG_DONE, NIL])
+    Wait(fhsig)
+    d := fhdo
+  ENDIF
+  fhmode := 0                   -> back to the common errand
+ENDPROC d
 
 -> ---------- v1.2 ICONIFY: AppIcon plumbing ----------
 -> The AppIcon is BAKED IN (bicondo, built at handler init) - no file, no
@@ -2806,7 +2913,17 @@ PROC doiconify()
   IF curcon.appicon THEN RETURN         -> already iconified
   flushout(curcon)              -> S5: nothing buffered survives hidewin
   IF wbensure() = FALSE THEN RETURN
-  curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0, iconobj, NIL)
+  -> 1.2.7b15: ICON=. The first iconify for this console loads it; a
+  -> failure sticks (icontried), so a bad path costs one attempt and
+  -> not one per iconify. The DiskObject must outlive the AppIcon, so
+  -> it is freed at console teardown, never at RemoveAppIcon.
+  IF curcon.piconpath[0] AND (curcon.icontried = FALSE)
+    curcon.icontried := TRUE
+    curcon.myicon := iconload(curcon.piconpath)
+  ENDIF
+  curcon.appicon := AddAppIconA(0, curcon, 'CCON', wbport, 0,
+                                IF curcon.myicon THEN curcon.myicon ELSE iconobj,
+                                NIL)
   IF curcon.appicon THEN hidewin()      -> only vanish if the icon really went up
 ENDPROC
 
@@ -8409,7 +8526,13 @@ PROC cfgrefuse(tok:PTR TO CHAR)
     t[i] := tcfold(tok[i])
     i++
   ENDWHILE
-ENDPROC StrCmp(t, 'WINDOW0X', 8)
+  IF StrCmp(t, 'WINDOW0X', 8) THEN RETURN TRUE
+  -> 1.2.7b14: the two grounding directives are open-string only.
+  -> CONFIG inside the file would let a section select another
+  -> section - chaining, and loops with it - and DEFAULTS inside the
+  -> file is a contradiction: the file IS the defaults.
+  IF StrCmp(t, 'DEFAULTS') THEN RETURN TRUE
+ENDPROC StrCmp(t, 'CONFIG', 6)
 
 -> apply one settings line: split it and hand each token to parseopt.
 -> Values split on '/' as well as whitespace, exactly as parsecon
@@ -8418,8 +8541,60 @@ ENDPROC StrCmp(t, 'WINDOW0X', 8)
 -> handshake already expects. One split rule, one applier, one
 -> vocabulary; ".font" stays legal inside the value because the only
 -> character with meaning here is '/'.
+-> 1.2.7b14: does this line open with "<key>=" ? Returns the offset
+-> of the value, or -1. For the keys whose value is the REST OF THE
+-> LINE rather than a token - TITLE, and 1.2.7b15's ICON.
+-> The '=' is REQUIRED: these values are prose and paths, so there is
+-> no bare form to confuse them with, and demanding the sign keeps
+-> the test unambiguous.
+PROC cfgrest(line:PTR TO CHAR, key:PTR TO CHAR, kl)
+  DEF i, t[12]:ARRAY OF CHAR
+  IF kl > 10 THEN RETURN -1
+  FOR i := 0 TO 11 DO t[i] := 0
+  i := 0
+  WHILE (i < kl) AND line[i]
+    t[i] := tcfold(line[i])
+    i++
+  ENDWHILE
+  IF StrCmp(t, key, kl) = FALSE THEN RETURN -1
+  IF line[kl] <> "=" THEN RETURN -1
+  i := kl + 1
+  WHILE (line[i] = " ") OR (line[i] = 9) DO i++
+ENDPROC i
+
 PROC cfgapply(line:PTR TO CHAR)
   DEF i, tl, tok[84]:ARRAY OF CHAR
+  -> 1.2.7b14: TITLE= takes the REST OF THE LINE, verbatim - no '/'
+  -> split, no whitespace split - so a title may contain both. The
+  -> one key that opts out of the token rules, because a title is
+  -> prose and not a value. Its case survives because nothing has
+  -> folded this line: cfgsect only folds inside the brackets of a
+  -> section header, and parseopt folds a copy of its own token.
+  -> Bounded by wtitlebase being String(84) - E's StrCopy will not
+  -> write past an E-string's maxlen, so a long title truncates.
+  -> An open string keeps using positional field 4 for this; a
+  -> field-4 title cannot hold a '/' anyway, which is the whole
+  -> reason TITLE= is a file key.
+  i := cfgrest(line, 'TITLE', 5)
+  IF i >= 0
+    StrCopy(curcon.wtitlebase, line + i)
+    RETURN
+  ENDIF
+  -> 1.2.7b15: ICON= is the other rest-of-line key, for a harder
+  -> reason than TITLE's - a path CONTAINS '/', and every other value
+  -> here is split on it. Written WITHOUT ".info": GetDiskObject
+  -> appends that itself.
+  i := cfgrest(line, 'ICON', 4)
+  IF i >= 0
+    tl := 0
+    WHILE line[i] AND (tl < 102)
+      curcon.piconpath[tl] := line[i]
+      tl++
+      i++
+    ENDWHILE
+    curcon.piconpath[tl] := 0
+    RETURN
+  ENDIF
   i := 0
   WHILE line[i]
     WHILE (line[i] = " ") OR (line[i] = 9) OR (line[i] = "/") DO i++
@@ -8482,6 +8657,83 @@ PROC cfgsect(line:PTR TO CHAR, sect:PTR TO CHAR, insect)
   ENDIF
   IF insect THEN cfgapply(line + j)
 ENDPROC insect
+
+-> 1.2.7b14: is this token a GROUNDING directive? DEFAULTS and
+-> CONFIG=<name> decide what the window starts FROM, so unlike every
+-> other option they cannot be applied in token order: a CONFIG=
+-> named at the end of an open string would overwrite the options
+-> typed before it, which is precisely backwards from "the open
+-> string outranks the file". cfgpre settles the baseline first and
+-> everything else stays plain last-wins.
+-> Folded into a COPY - the caller's token must reach parsecon with
+-> its case intact.
+PROC cfgdirective(tok:PTR TO CHAR)
+  DEF t[84]:ARRAY OF CHAR, i, v, c
+  i := 0
+  WHILE tok[i] AND (i < 80)
+    t[i] := tcfold(tok[i])
+    i++
+  ENDWHILE
+  t[i] := 0
+  IF StrCmp(t, 'DEFAULTS')
+    curcon.pcfgdef := TRUE
+    RETURN TRUE
+  ENDIF
+  IF StrCmp(t, 'CONFIG', 6) = FALSE THEN RETURN FALSE
+  v := 6
+  IF t[v] = "=" THEN v := 7
+  c := 0
+  WHILE t[v] AND (c < 38)
+    curcon.pcfgsect[c] := t[v]   -> kept folded: sections match blind
+    c++
+    v++
+  ENDWHILE
+  curcon.pcfgsect[c] := 0
+  IF c = 0 THEN RETURN FALSE     -> a bare CONFIG names nothing, and
+ENDPROC TRUE                     -> fails closed like SCREEN does
+
+-> walk the open string looking ONLY for those two, before parsecon
+-> parses anything. Deliberately narrow about where it looks:
+->   field 0      - parsecon's own shortcut lets a keyword sit there
+->                  with no geometry at all (CCON:DEFAULTS)
+->   fields 5+    - the options fields
+->   everything after a directive AT field 0 - so
+->                  CCON:DEFAULTS/CONFIG=tall reads both
+-> Fields 1-4 are skipped on purpose. Those are y/w/h and the TITLE,
+-> and a window legitimately titled "DEFAULTS" must not silently
+-> ground itself. The documented rule is therefore: name a grounding
+-> directive first, or in the options fields.
+PROC cfgpre(bname)
+  DEF s:PTR TO CHAR, l, i, f, tl, tok[84]:ARRAY OF CHAR, optmode=FALSE
+  curcon.pcfgdef := FALSE
+  curcon.pcfgsect[0] := 0
+  IF bname = 0 THEN RETURN
+  s := Shl(bname, 2)
+  l := s[0]
+  i := 1
+  WHILE (i <= l) AND (s[i] <> ":")
+    i++
+  ENDWHILE
+  IF i > l THEN RETURN
+  i++
+  f := 0
+  WHILE i <= l
+    tl := 0
+    WHILE (i <= l) AND (s[i] <> "/")
+      IF tl < 80
+        tok[tl] := s[i]
+        tl++
+      ENDIF
+      i++
+    ENDWHILE
+    i++
+    tok[tl] := 0
+    IF optmode OR (f = 0) OR (f >= 5)
+      IF cfgdirective(tok) AND (f = 0) THEN optmode := TRUE
+    ENDIF
+    f++
+  ENDWHILE
+ENDPROC
 
 PROC loadcfgfile(sect:PTR TO CHAR)
   DEF fh:PTR TO filehandle, res, fsp:PTR TO mp, id, i, n,
@@ -9381,4 +9633,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.7b13 (11.8.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.7b15 (11.8.26) CCON: LTX console handler', 0

@@ -5564,6 +5564,119 @@ verified in the hunk, staged L:ccon-handler-1.2.7b13 (byte-compared,
 - [x] any other key still closes the menu and keeps the pick (that
       path is deliberately unchanged)
 
+## 1.2.7b14 — the sections become selectable, and TITLE= (11.8.26)
+
+`CONFIG=<name>` and `DEFAULTS`, the two things b8's sections were
+waiting for, plus the title key.
+
+**Both are GROUNDING directives**, which is why they get a pre-scan
+(`cfgpre`) instead of being applied in token order. A `CONFIG=` named
+at the *end* of an open string would otherwise overwrite the options
+typed before it — precisely backwards from "the open string outranks
+the file". One extra walk of the spec settles the baseline first and
+everything else stays plain last-wins.
+
+**Where the pre-scan will not look.** Field 0 (parsecon's own
+shortcut lets a keyword sit there with no geometry at all), fields
+5+, and everything after a directive at field 0 — but **not fields
+1-4**. Those are y/w/h and the TITLE, and a window legitimately
+titled "DEFAULTS" must not silently ground itself. Harness section O
+tests exactly that: `CCON:0/18/640/130/CONFIG=tall` leaves the
+section unset. The documented rule is therefore: name a directive
+first, or in the options fields.
+
+`parseopt` matches both as no-ops, for two reasons that are easy to
+miss: the f=0 shortcut only switches a spec to options-only when the
+first field names a REAL option (so `CCON:DEFAULTS/LINES384` would
+otherwise read LINES384 as a window Y), and an unmatched token at
+field 4 becomes the title.
+
+**A section LAYERS on `[DEFAULT]`** — two `loadcfgfile` calls, so a
+profile states only its differences. A name that is not in the file
+leaves `[DEFAULT]` standing, the house rule for everything else.
+Both are refused *inside* the file (`cfgrefuse`): CONFIG there would
+let a section select another section — chaining, and loops with it —
+and DEFAULTS in the file it belongs to is a contradiction.
+
+**`TITLE=` takes the rest of the line**, no `/` split and no
+whitespace split, because a title is prose rather than a value. Its
+case survives because nothing has folded that line — `cfgsect` only
+folds inside a header's brackets and `parseopt` folds a copy.
+Bounded by `wtitlebase` being String(84), so a long title truncates
+rather than overflows. Open strings keep using positional field 4;
+a field-4 title cannot hold a '/' anyway, which is the whole reason
+this is a file key.
+
+cfgtest **138/138**.
+
+## 1.2.7b15 — ICON=, the last of his original three (11.8.26)
+
+His opening ask on 11.8.26 was "preferred colors, buffer size and
+preferred .info". This is the .info.
+
+The AppIcon has always been BAKED INTO the binary — `bicondo`, his
+55x23x3, built in code — specifically so there was no file to read
+and no icon.library to open. `ICON=<path>` is the opt-out for
+someone who wants their own, and everything about it is arranged so
+that not using it costs nothing:
+
+- **icon.library is opened lazily**, by the helper, on first use —
+  never at init. A mount that never raises an AppIcon never opens it.
+- **Loaded at the first iconify**, not at open. Most windows are
+  never iconified and must not pay a helper process for one.
+- **A failure sticks** (`icontried`), so a bad path costs one attempt
+  and not one per iconify, and falls back to the baked-in icon
+  silently — which is exactly what it would have used anyway.
+
+**One helper process, two errands.** `GetDiskObject` reads a file,
+so it needs the same no-DOS escape `OpenDiskFont` has used since
+v1.1b2. Rather than a second stub, a second signal and a second glue
+block, `fonthelper` became `diskhelper` and dispatches on a mode
+flag. Serialised by construction: every caller blocks on
+`Wait(fhsig)` before returning, so the mode can never be read by the
+wrong errand.
+
+**`ICON=` is the second rest-of-line key**, for a harder reason than
+TITLE's — a path *contains* `/`, and every other value in the file is
+split on it. `cfgtitle` generalised to `cfgrest(line, key, kl)` and
+now serves both. Written without ".info": GetDiskObject appends that
+itself, the way Workbench does.
+
+Lifetime: the DiskObject must outlive the AppIcon, so `FreeDiskObject`
+runs at console teardown and never at RemoveAppIcon. `iconbase` is
+closed in killhandler on the same reasoning audit3 C7 wrote for
+diskfont — every `iconload` blocks until its helper has signalled, so
+none can still be inside GetDiskObject at shutdown.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 146/146 green**
+(eighteen procs verbatim, re-diffed; sections N/O/P/Q new for b14 and
+b15), `$VER 1.2.7b15 (11.8.26)` verified in the hunk, staged
+L:ccon-handler-1.2.7b15 (byte-compared, .bak = b14). `ccon.cfg`
+documents all four new keys.
+
+**Boot test (pending, REBOOT FIRST):**
+- [ ] `TITLE=My Build Shell` in `[DEFAULT]` → new windows carry it,
+      spaces and all; a `TITLE=Work/Build` keeps its slash
+- [ ] an open string's fourth field still wins over it
+- [ ] add a `[tall]` section, then `newshell CCON:CONFIGtall` →
+      `[DEFAULT]` first, `[tall]` over it (check a key set only in
+      DEFAULT survives, and one set in both takes tall's)
+- [ ] `newshell CCON:DEFAULTS` → the built-ins, config ignored
+      entirely, whatever is in the file
+- [ ] a CONFIG= naming a section that does not exist → `[DEFAULT]`
+      still applies, no beep, no error
+- [ ] **the title slot:** `newshell "CCON:0/18/640/130/DEFAULTS"` →
+      a window TITLED "DEFAULTS", not a grounded one
+- [ ] `ICON=SYS:Prefs/CCon` (or any real .info) → iconify, and the
+      desktop shows THAT icon; double-click restores as before
+- [ ] a deliberately wrong `ICON=` path → iconify still works and
+      shows the built-in icon, no requester, no hang
+- [ ] no `ICON=` line at all → the built-in icon, exactly as b14
+- [ ] iconify twice in one window → the second raises the icon
+      without reloading it
+- [ ] FONT= still loads a disk font (the helper now dispatches on a
+      mode flag; fonts are the path that must not have moved)
+
 ## Design notes
 
 ## Design notes
