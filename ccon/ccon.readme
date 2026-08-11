@@ -36,13 +36,14 @@ FEATURES
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0xADDR, NOBORDER, ...) per window
 
-  - Set your defaults once, in L:ccon.cfg: colours, scrollback
-    depth, font, window edges, title, even the AppIcon an
-    iconified window shows. Optional - without one nothing
-    changes - and it needs no vocabulary of its own, because
-    every key in it is an ordinary open-string option; an open
-    string always outranks it. Named [sections] give a window a
-    profile: newshell CCON:CONFIGtall
+  - Your defaults in a file: L:ccon.cfg carries the colours,
+    scrollback depth, font, window edges, title and even the
+    AppIcon you would otherwise retype on every open string -
+    optional, and without one nothing changes at all; it needs
+    no vocabulary of its own, since every key in it is an
+    ordinary open-string option and an open string always
+    outranks the file; named [sections] give a window a profile
+    to ask for by name - newshell CCON:CONFIGtall
 
   - Hosts real AmigaShells: NewShell CCON:
 
@@ -73,7 +74,11 @@ FEATURES
     the ghost (and the menu's blue/grey) shows on any screen depth,
     32+ colours and RTG included
 
-  - zsh-style Tab completion with a cycling candidate menu
+  - zsh-style Tab completion with a candidate menu you can walk
+    with the arrow keys as well as cycle - Esc backs out and
+    leaves the word exactly as it was; device, volume and assign
+    names complete too, so du<Tab> reaches DUMP:, offered
+    alongside what the directory holds rather than instead of it
 
   - bash-style Ctrl+R incremental history search - the prompt
     becomes an inverse (search: ...) banner and is restored
@@ -152,33 +157,38 @@ LIMITATIONS
 HISTORY
 
   1.2.7
-    - Defaults in a file, L:ccon.cfg - the options you always
-      want, set once instead of on every open string. Optional,
-      and a missing one is not an error. Every key in it is an
-      ordinary open-string option, so there is nothing new to
-      learn, and the order of authority is simply: built-in
-      default, then the file, then the open string
+    - Defaults in a file: L:ccon.cfg holds the options you would
+      otherwise retype on every open string - colours, scrollback
+      depth, font, where the window opens. Optional, and a
+      missing one is not an error. Nothing new to learn either:
+      every key in it is an ordinary open-string option, and the
+      order of authority is simply the built-in default, then
+      the file, then the open string
 
-    - Named [sections] in that file: a profile a window can ask
-      for by name (CONFIG=tall), stating only its differences,
-      or DEFAULTS to ignore the file entirely
+    - Named [sections] in that file: a profile a window asks for
+      by name - newshell CCON:CONFIGtall - stating only what it
+      changes, or DEFAULTS to ignore the file altogether
 
-    - TITLE= and ICON= - a window's name, and its own AppIcon
+    - TITLE= and ICON=: the window's name, and its own AppIcon
       while iconified instead of the one built into the handler
 
-    - Tab completes device names: du<Tab> reaches DUMP:. Devices,
-      volumes and assigns, shown alongside what the directory
-      offers rather than instead of it
+    - Tab completes device names: du<Tab> reaches DUMP:, with
+      volumes and assigns alongside, offered together with what
+      the current directory holds rather than instead of it
 
-    - The completion menu walks with the arrow keys, and Esc now
-      aborts cleanly - the word goes back to what it was when the
-      menu opened, so trying candidates costs nothing
+    - The completion menu walks with the arrow keys, and Esc
+      backs out of it cleanly - the word returns to what it was
+      when the menu opened, so trying candidates costs nothing
 
     - Menu colours are taken from your screen's own palette
-      instead of fixed pen numbers, which looked wrong on
+      instead of fixed pen numbers, which read wrong on
       CyberGraphX, wrong again on a dark terminal palette and
-      wrong a third time on the boot shell; they can still be
-      pinned by hand in the config file if you prefer
+      wrong a third time on the boot shell; pin them by hand in
+      the config file if you would rather
+
+    - Resizing a window with the completion menu open no longer
+      leaves the frame damaged behind it
+
 
   1.2.6
     - A real iconify gadget in the title bar - the native V47.4+
