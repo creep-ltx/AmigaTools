@@ -82,6 +82,10 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> zero-margin was already exercised, tested
                         -> territory, not new ground
       LINEMAX=400,      -> longest editable input line
+      CFGMAX=256,       -> v1.2.7b8: longest L:ccon.cfg line. Generous
+                        -> for KEY=value - the one value that can run
+                        -> long is a TITLE, and wtitlebase is
+                        -> String(84) anyway
       HISTMAX=200,      -> shared prompt history ring, entries (v1.1
                         -> Theme B: ONE ring per process now, not per
                         -> window, so this can be generous - 200 *
@@ -301,13 +305,37 @@ OBJECT console
   cursgr                        -> an explicit 3x is in effect
   anstab[8]:ARRAY OF LONG       -> foreign screens: ObtainBestPen picks
   anscm                         -> the colormap they came from
-  ovgrey, ovblue                -> overlay pens (ghost grey, menu blue):
-                                -> pixels-only, never in the attr plane,
-                                -> so no nibble cap - a 32-colour or RTG
-                                -> screen hands back pens >15 and these
-                                -> two are the one place that is fine
+  ovgrey, ovhid                 -> overlay pens (ghost grey; 1.2.7b5 the
+                                -> menu's hidden-class grey): pixels-only,
+                                -> never in the attr plane, so no nibble
+                                -> cap - a 32-colour or RTG screen hands
+                                -> back pens >15 and these are the one
+                                -> place that is fine
+  drifill                       -> 1.2.7b4: the screen's FILLPEN from
+                                -> DrawInfo (menu dirs) - the pen role
+                                -> Palette Prefs edits, so it reads on
+                                -> the user's OWN palette by definition;
+                                -> -1/0 = none usable (Timm's CGX report:
+                                -> an absolute-RGB ObtainBestPen colour
+                                -> can land invisible on a foreign
+                                -> palette; a prefs ROLE cannot)
   -> per-open window spec (M5c/M9), parsed from the open name
   pwx, pwy, pww, pwh
+  -> 1.2.7b9: RIGHT=/BOTTOM= as EXCLUSIVE edges (his call: the window
+  -> spans LEFT..RIGHT and TOP..BOTTOM, so width = RIGHT - LEFT and
+  -> nobody writes 639). Kept RAW until openwin folds them into pww/pwh,
+  -> because "fill" needs a screen to measure and parse time has
+  -> none. -2 = never given; -1 = fill; anything else is the edge.
+  pwr, pwb
+  -> 1.2.7b9: config pins for the three DERIVED colour roles. -1 =
+  -> not pinned, keep deriving (DrawInfo's FILLPEN role for dirs, the
+  -> b6 palette scan for hidden and the ghost). Consulted at the
+  -> POINT OF USE in menupen/ghostpen rather than written into
+  -> drifill/ovhid/ovgrey: those two are OBTAINED pens with a
+  -> ReleasePen lifecycle at hidewin and closewin, and a pinned
+  -> number was never obtained - storing one there would hand a
+  -> ReleasePen to a pen belonging to somebody else.
+  pdirs, phid, pghost
   waitmode, closegad
   fwptr                         -> WINDOW0xADDR: borrow this window
   fwin, oldidcmp                -> borrowed-window bookkeeping
@@ -343,6 +371,8 @@ OBJECT console
   tcpu, tcn, tcmore
   tcactive, tcsel               -> the menu: open?, highlighted index
   tcws, tcwend                  -> the word being completed, in ebuf
+  tcstem                        -> 1.2.7b13: that word as it stood when
+                                -> the menu opened, so Esc can abort
   tcmrows, tcmcols, tcmcolw, tcshown
   tctmp:PTR TO CHAR             -> completion scratch (E-string)
   tctail:PTR TO CHAR            -> line tail during word replacement
@@ -1138,6 +1168,7 @@ PROC coninit(c:PTR TO console)
   c.wtitlebase := String(84)
   c.tctmp := String(416)
   c.tctail := String(404)
+  c.tcstem := String(416)   -> 1.2.7b13: the word as the menu found it
   c.tcpool := New(TCPOOLSZ)     -> NIL is survivable: dotab declines
   c.wob := New(WOBSZ)           -> S5: NIL survivable too - synchronous writes
   c.mpens := 0                  -> 1.2.3: masked rendering - defaults
@@ -1150,6 +1181,7 @@ PROC coninit(c:PTR TO console)
   c.pastehintrow := -1
   IF (c.ebuf = NIL) OR (c.stash = NIL) OR (c.wtitle = NIL) OR
      (c.wtitlebase = NIL) OR (c.tctmp = NIL) OR (c.tctail = NIL) OR
+     (c.tcstem = NIL) OR
      (c.srbuf = NIL) OR (c.srstash = NIL)
     RETURN FALSE
   ENDIF
@@ -1273,6 +1305,7 @@ PROC condispose(c:PTR TO console)
   IF c.wtitlebase THEN Dispose(c.wtitlebase)
   IF c.tctmp THEN Dispose(c.tctmp)
   IF c.tctail THEN Dispose(c.tctail)
+  IF c.tcstem THEN Dispose(c.tcstem)
   IF c.tcpool THEN Dispose(c.tcpool)
   IF c.srbuf THEN Dispose(c.srbuf)
   IF c.srstash THEN Dispose(c.srstash)
@@ -1923,24 +1956,52 @@ PROC parseopt(tok:PTR TO CHAR)
   ELSEIF StrCmp(tok, 'WAIT')
     curcon.waitmode := TRUE
     curcon.closegad := TRUE        -> WAIT needs the gadget to end
+  -> ---- 1.2.7b8: the inverses ----
+  -> Every boolean below needs a way to be spoken BOTH ways, because
+  -> L:ccon.cfg can now set any of them for every window on the
+  -> system and the rule is that a runtime open string outranks the
+  -> file. Without these, a config that says NOBORDER could not be
+  -> overridden by any open string in existence - the precedence
+  -> would be a claim, not a fact. CLOSE/NOCLOSE was the only pair
+  -> that already existed.
+  -> NOWAIT clears waitmode ONLY: WAIT forces the close gadget on
+  -> because it needs one to end, but that is a forcing, not part of
+  -> what WAIT means - taking the gadget away here would be a second,
+  -> unasked-for change.
+  ELSEIF StrCmp(tok, 'NOWAIT')
+    curcon.waitmode := FALSE
   ELSEIF StrCmp(tok, 'CLOSE')
     curcon.closegad := TRUE
   ELSEIF StrCmp(tok, 'NOCLOSE')
     curcon.closegad := FALSE
   ELSEIF StrCmp(tok, 'AUTO')
     curcon.pauto := TRUE           -> the window waits for first I/O
+  ELSEIF StrCmp(tok, 'NOAUTO')
+    curcon.pauto := FALSE
   ELSEIF StrCmp(tok, 'NOBORDER')
     curcon.pnoborder := TRUE
+  ELSEIF StrCmp(tok, 'BORDER')
+    curcon.pnoborder := FALSE
   ELSEIF StrCmp(tok, 'NODRAG')
     curcon.pnodrag := TRUE
+  ELSEIF StrCmp(tok, 'DRAG')
+    curcon.pnodrag := FALSE
   ELSEIF StrCmp(tok, 'NODEPTH')
     curcon.pnodepth := TRUE
+  ELSEIF StrCmp(tok, 'DEPTH')
+    curcon.pnodepth := FALSE
   ELSEIF StrCmp(tok, 'NOSIZE')
     curcon.pnosize := TRUE
+  ELSEIF StrCmp(tok, 'SIZE')
+    curcon.pnosize := FALSE
   ELSEIF StrCmp(tok, 'BACKDROP')
     curcon.pbackdrop := TRUE
+  ELSEIF StrCmp(tok, 'NOBACKDROP')
+    curcon.pbackdrop := FALSE
   ELSEIF StrCmp(tok, 'INACTIVE')
     curcon.pinactive := TRUE
+  ELSEIF StrCmp(tok, 'ACTIVE')
+    curcon.pinactive := FALSE
   ELSEIF StrCmp(tok, 'PASTEEXEC')
     -> Theme B: opt this WHOLE window back into the 1.0/pre-safety
     -> behaviour - every RAMIGA-V runs each pasted line as it lands,
@@ -1948,6 +2009,15 @@ PROC parseopt(tok:PTR TO CHAR)
     -> without this option; this is for someone who wants that to
     -> just always be how the window behaves.
     curcon.pasteexec := TRUE
+  ELSEIF StrCmp(tok, 'NOPASTEEXEC')
+    curcon.pasteexec := FALSE
+  -> the exact-match inverses sit BEFORE their prefix-matched
+  -> positives. Not needed today (StrCmp(tok,'SCREEN',6) cannot match
+  -> "NOSCREE" and StrCmp(tok,'FONT',4) cannot match "NOFO"), but a
+  -> prefix rule that grows a character later would silently start
+  -> eating its own inverse, and that failure is invisible.
+  ELSEIF StrCmp(tok, 'NOSCREEN')
+    curcon.pscrname[0] := 0        -> back to the default public screen
   ELSEIF StrCmp(tok, 'SCREEN', 6)
     -> SCREENname, stock syntax: open on that public screen
     -> (name taken case-preserved from the raw token). A bare
@@ -1956,7 +2026,8 @@ PROC parseopt(tok:PTR TO CHAR)
     -> merely STARTS with a keyword must fall through to being
     -> a title, not a silently-broken option.
     v := 6
-    c := 0
+    IF tok2[v] = "=" THEN v := 7    -> 1.2.7b8: the '=' form, as
+    c := 0                          -> LINES/FONT already had
     WHILE tok2[v] AND (c < 63)
       curcon.pscrname[c] := tok2[v]
       c++
@@ -1974,10 +2045,21 @@ PROC parseopt(tok:PTR TO CHAR)
     -> instead: 30->0, 31->deffg, 32->15, 33->12. Bold forms
     -> (1;3x - the ls scheme) and backgrounds are untouched.
     curcon.wbpens := TRUE
+  ELSEIF StrCmp(tok, 'NOWBPENS')
+    curcon.wbpens := FALSE
   ELSEIF StrCmp(tok, 'PEN', 3)
     -> PENn: the default text pen (CTerm sends PEN7 with its
     -> ANSI palette, where pen 1 is ANSI red)
-    v := tcnum(tok + 3)
+    -> 1.2.7b8: the '=' skip LINES and FONT have always had. An open
+    -> string cannot carry an unquoted '=' (the shell eats it, see the
+    -> warning in parsecon's notes), but L:ccon.cfg is KEY=value
+    -> throughout - and without this, PEN=7 handed tcnum the string
+    -> "=7", got -1 back, and was dropped without a sound.
+    -> PEN=0 stays refused by the range test below: text drawn in the
+    -> background colour is a window that looks broken.
+    v := 3
+    IF tok[v] = "=" THEN v := 4
+    v := tcnum(tok + v)
     IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v ELSE matched := FALSE
   ELSEIF StrCmp(tok, 'WINDOW0X', 8)
     v := 0
@@ -2001,6 +2083,83 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
+  -> ---- 1.2.7b9: geometry as EDGES, for the config file ----
+  -> LEFT/TOP are pwx/pwy under a name; RIGHT/BOTTOM are the edges,
+  -> folded into pww/pwh by openwin once there is a screen to measure.
+  -> Each checks the literal "-1" BEFORE tcnum, exactly as parsecon's
+  -> positional width/height do: tcnum has no minus support and its -1
+  -> return already means "invalid, leave the default", so without
+  -> this the two meanings collide and FILL reads as DO NOTHING.
+  ELSEIF StrCmp(tok, 'LEFT', 4)
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    v := tcnum(tok + v)
+    IF v >= 0 THEN curcon.pwx := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'TOP', 3)
+    v := 3
+    IF tok[v] = "=" THEN v := 4
+    v := tcnum(tok + v)
+    IF v >= 0 THEN curcon.pwy := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'RIGHT', 5)
+    v := 5
+    IF tok[v] = "=" THEN v := 6
+    IF StrCmp(tok + v, '-1')
+      curcon.pwr := -1             -> fill to the screen edge
+    ELSE
+      v := tcnum(tok + v)
+      IF v >= 0 THEN curcon.pwr := v ELSE matched := FALSE
+    ENDIF
+  ELSEIF StrCmp(tok, 'BOTTOM', 6)
+    v := 6
+    IF tok[v] = "=" THEN v := 7
+    IF StrCmp(tok + v, '-1')
+      curcon.pwb := -1
+    ELSE
+      v := tcnum(tok + v)
+      IF v >= 0 THEN curcon.pwb := v ELSE matched := FALSE
+    ENDIF
+  -> ---- 1.2.7b9: the colour roles ----
+  -> TEXT= is PEN= under the name the config file wants; PEN stays
+  -> forever, CTerm sends PEN7 on its frame handoff and it has been
+  -> documented since v1.1.
+  ELSEIF StrCmp(tok, 'TEXT', 4)
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    v := tcnum(tok + v)
+    IF (v >= 1) AND (v <= 15) THEN curcon.deffg := v ELSE matched := FALSE
+  -> DIRS/HIDDEN/GHOST pin what b4-b7 derive from the screen. NOT
+  -> nibble-capped like the text pen: these never enter the attr
+  -> plane, they are chrome drawn straight to the RastPort (ovgrey is
+  -> explicitly "UNCAPPED - a pixels-only user"), so 0..255.
+  -> 0 is refused for the same reason PEN=0 is: the window's own
+  -> clear is SetAPen(0) + RectFill, so pen 0 IS the background and
+  -> an entry drawn in it is not dim, it is gone. The DERIVED path
+  -> already says as much - menupen tests drifill > 0 and falls
+  -> through to deffg when the fill role resolves to pen 0.
+  -> A pin is an OVERRIDE, and worth knowing what it overrides: the
+  -> derivation exists because hardcoded pens 8/12 broke on Timm's
+  -> CGX, on CTerm ("yellow = no thank you") and on the boot screen.
+  -> Someone pinning a number is opting back into that failure mode
+  -> for a palette they know. Absent = keep scanning.
+  ELSEIF StrCmp(tok, 'DIRS', 4)
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    v := tcnum(tok + v)
+    IF (v >= 1) AND (v <= 255) THEN curcon.pdirs := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'HIDDEN', 6)
+    v := 6
+    IF tok[v] = "=" THEN v := 7
+    v := tcnum(tok + v)
+    IF (v >= 1) AND (v <= 255) THEN curcon.phid := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'GHOST', 5)
+    v := 5
+    IF tok[v] = "=" THEN v := 6
+    v := tcnum(tok + v)
+    IF (v >= 1) AND (v <= 255) THEN curcon.pghost := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'NOFONT')
+    curcon.pfontname[0] := 0       -> back to the Font Prefs default
+    curcon.pfontsize := 0
+    curcon.pfontexp := FALSE       -> already cleared above; explicit
   ELSEIF StrCmp(tok, 'FONT', 4)
     -> v1.1: FONTname/size - name case-preserved from the raw
     -> token; ".font" is appended in openwin when missing
@@ -2018,6 +2177,43 @@ PROC parseopt(tok:PTR TO CHAR)
     matched := FALSE
   ENDIF
 ENDPROC matched
+
+-> 1.2.7b9: fold RIGHT/BOTTOM into width/height. Called from openwin
+-> AHEAD of the screen lock, so a RIGHT=-1 becomes a pww=-1 and gets
+-> the identical "fill" treatment WIDTH=-1 has had since 19.7.26 -
+-> one resolution path, not two.
+-> The edges are EXCLUSIVE (his call, 11.8.26): the window spans
+-> LEFT..RIGHT and TOP..BOTTOM, so width = RIGHT - LEFT and nobody
+-> writes 639. What "fills the screen" means therefore depends on
+-> LEFT: RIGHT=640 fills a 640-wide screen only from LEFT=0, and
+-> from LEFT=100 it is a 540-wide window. -1 is the spelling that
+-> means fill REGARDLESS of where LEFT put us. A RIGHT left of LEFT
+-> yields a negative width and lands on openwin's existing 160/60
+-> floors - the old safety, not a new one.
+-> CLEARED to -2 once folded, and that is not tidiness. audit3 C2
+-> made hidewin snapshot the LIVE geometry into pwx/pwy/pww/pwh so a
+-> restore rebuilds the window the user actually shaped; a pwr
+-> surviving that would recompute pww from a stale edge against the
+-> NEW pwx and silently undo the snapshot. Folding is once, by
+-> construction - the second call is a no-op.
+PROC edgefold()
+  IF curcon.pwr <> -2
+    IF curcon.pwr = -1
+      curcon.pww := -1
+    ELSE
+      curcon.pww := curcon.pwr - curcon.pwx
+    ENDIF
+    curcon.pwr := -2
+  ENDIF
+  IF curcon.pwb <> -2
+    IF curcon.pwb = -1
+      curcon.pwh := -1
+    ELSE
+      curcon.pwh := curcon.pwb - curcon.pwy
+    ENDIF
+    curcon.pwb := -2
+  ENDIF
+ENDPROC
 
 PROC parsecon(bname)
   DEF s:PTR TO CHAR, l, i, f, tl, v, c, optmode=FALSE,
@@ -2047,6 +2243,18 @@ PROC parsecon(bname)
   curcon.pfontname[0] := 0             -> open like everything else
   curcon.pfontsize := 0
   curcon.pfontexp := FALSE
+  curcon.pwr := -2                     -> 1.2.7b9: RIGHT/BOTTOM never
+  curcon.pwb := -2                     -> given (-1 is a real answer)
+  curcon.pdirs := -1                   -> 1.2.7b9: colour roles keep
+  curcon.phid := -1                    -> deriving until pinned (pen 0
+  curcon.pghost := -1                  -> is a real answer here)
+  -> 1.2.7b8: the defaults file lands BETWEEN the built-ins grounded
+  -> above and the open string parsed below - the precedence rule
+  ->     built-in  <  L:ccon.cfg  <  the open string
+  -> IS that ordering, and nothing else enforces it. Deliberately
+  -> ahead of the bname=0 early-out too: a bare CCON: with no spec at
+  -> all is exactly the case the file exists to serve.
+  loadcfgfile('DEFAULT')
   IF bname = 0 THEN RETURN
   s := Shl(bname, 2)            -> a BSTR: length byte, then chars
   l := s[0]
@@ -2621,9 +2829,9 @@ PROC hidewin()
       curcon.anstab[i] := -1
     ENDFOR
     IF curcon.ovgrey >= 0 THEN ReleasePen(curcon.anscm, curcon.ovgrey)
-    IF curcon.ovblue >= 0 THEN ReleasePen(curcon.anscm, curcon.ovblue)
+    IF curcon.ovhid >= 0 THEN ReleasePen(curcon.anscm, curcon.ovhid)
     curcon.ovgrey := -1
-    curcon.ovblue := -1
+    curcon.ovhid := -1
     curcon.anscm := NIL
   ENDIF
   -> audit3 C2: SNAPSHOT the live geometry before the window goes. pwx/pwy/
@@ -2658,7 +2866,8 @@ ENDPROC
 -> kept, so they are reused, not reloaded/reallocated). setidcmp fixes idc.
 PROC reopenwin()
   DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
-      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR
+      pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
+      dri:PTR TO drawinfo
   IF curcon.win THEN RETURN
   idc := IDCMP_CLOSEWINDOW
   IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
@@ -2697,38 +2906,59 @@ PROC reopenwin()
   ENDIF
   curcon.anscm := NIL
   curcon.ovgrey := -1
-  curcon.ovblue := -1
+  curcon.ovhid := -1
+  curcon.drifill := -1
   FOR i := 0 TO 7
     curcon.anstab[i] := -1
   ENDFOR
-  IF curcon.wbpens = FALSE
-    pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
-    pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
-    pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
-    scrn := curcon.win.wscreen
-    IF scrn
-      curcon.anscm := scrn.viewport.colormap
-      IF curcon.anscm
-        FOR i := 0 TO 7
-          v := ObtainBestPenA(curcon.anscm, Mul(pr[i], $11111111),
-                 Mul(pg[i], $11111111), Mul(pb[i], $11111111), NIL)
-          IF v > 15
-            ReleasePen(curcon.anscm, v)
-            v := -1
-          ENDIF
-          curcon.anstab[i] := v
-        ENDFOR
-        -> the overlay pens ride the same colormap UNCAPPED: the
-        -> ghost and the menu are pixels-only (drawn and erased at
-        -> full depth, never stored in the model), so the nibble
-        -> rule above does not apply and pen 200 serves them as
-        -> well as pen 8 - what brings suggestions to 32+ colours
-        curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
-               Mul($5, $11111111), Mul($5, $11111111), NIL)
-        curcon.ovblue := ObtainBestPenA(curcon.anscm, Mul($8, $11111111),
-               Mul($8, $11111111), Mul($F, $11111111), NIL)
-      ENDIF
+  -> 1.2.7b7: the MENU pens (drifill/ovhid) are computed on EVERY
+  -> screen now, WBPENS included - the completion menu is our own
+  -> UI overlay, not client ANSI output, so the two-colour-worlds
+  -> rule does not bind it (his CTerm verdict on fixed pen 12:
+  -> "yellow = no thank you"). Only the anstab translation tier
+  -> stays wbpens-gated - that one really is about client SGRs.
+  scrn := curcon.win.wscreen
+  IF scrn
+    curcon.anscm := scrn.viewport.colormap
+    IF (curcon.wbpens = FALSE) AND (curcon.anscm <> NIL)
+      pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
+      pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
+      pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
+      FOR i := 0 TO 7
+        v := ObtainBestPenA(curcon.anscm, Mul(pr[i], $11111111),
+               Mul(pg[i], $11111111), Mul(pb[i], $11111111), NIL)
+        IF v > 15
+          ReleasePen(curcon.anscm, v)
+          v := -1
+        ENDIF
+        curcon.anstab[i] := v
+      ENDFOR
+      -> the overlay pen rides the same colormap UNCAPPED: the
+      -> ghost is pixels-only (drawn and erased at full depth,
+      -> never stored in the model), so the nibble rule above
+      -> does not apply and pen 200 serves it as well as pen 8 -
+      -> what brings suggestions to 32+ colours
+      curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
+             Mul($5, $11111111), Mul($5, $11111111), NIL)
     ENDIF
+    -> 1.2.7b4 (Timm's CGX palette report): the menu's dir colour
+    -> is a Palette Prefs ROLE now, not an absolute RGB - the
+    -> screen's FILLPEN from DrawInfo (stock 4-colour WB: pen 3,
+    -> the classic blue our old fallback hardcoded; his screen:
+    -> whatever HE made his title bars). A role the user already
+    -> configured cannot land invisible against their background
+    -> the way ObtainBestPen's fixed $8888FF could. Copied out and
+    -> freed on the spot - DrawInfo pens belong to the screen, no
+    -> release lifecycle of ours (the ovblue ObtainBestPen this
+    -> replaces is gone WITH its two ReleasePens).
+    dri := GetScreenDrawInfo(scrn)
+    IF dri
+      IF dri.numpens > FILLPEN THEN curcon.drifill := dri.pens[FILLPEN]
+      FreeScreenDrawInfo(scrn, dri)
+    ENDIF
+    -> 1.2.7b6: AFTER drifill on purpose - the scan needs the dir
+    -> colour to dodge it (the boot-screen collision)
+    curcon.ovhid := hidpen(curcon.anscm)
   ENDIF
   gridcalc()
   -> audit3 C2, the belt. The pw* snapshot in hidewin() means the restored
@@ -2786,6 +3016,7 @@ ENDPROC
 PROC openwin()
   DEF ta:textattr, i, idc, scrn:PTR TO screen, v,     -> audit2 B9: a
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
+      dri:PTR TO drawinfo,
       pubscr:PTR TO screen, fname[48]:ARRAY OF CHAR, fl, ok,
       gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn
   curcon.fwin := FALSE
@@ -2824,6 +3055,8 @@ PROC openwin()
     -> is the one the window actually opens on - no re-resolving
     -> "the default screen" a second time and risking a different
     -> answer between the two calls.
+    edgefold()                  -> 1.2.7b9: RIGHT/BOTTOM -> pww/pwh,
+                                -> ahead of the screen lock below
     pubscr := NIL
     IF curcon.pscrname[0]
       pubscr := LockPubScreen(curcon.pscrname)
@@ -3038,38 +3271,49 @@ PROC openwin()
   -> released on the spot; -1 falls back to the default pen.
   curcon.anscm := NIL
   curcon.ovgrey := -1
-  curcon.ovblue := -1
+  curcon.ovhid := -1
+  curcon.drifill := -1
   FOR i := 0 TO 7
     curcon.anstab[i] := -1             -> E global arrays start as garbage
   ENDFOR
-  IF curcon.wbpens = FALSE
-    -> the bright half of the CTerm palette, one nibble per gun
-    pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
-    pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
-    pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
-    scrn := curcon.win.wscreen
-    IF scrn
-      curcon.anscm := scrn.viewport.colormap
-      IF curcon.anscm
-        FOR i := 0 TO 7
-          v := ObtainBestPenA(curcon.anscm,
-                 Mul(pr[i], $11111111),
-                 Mul(pg[i], $11111111),
-                 Mul(pb[i], $11111111), NIL)
-          IF v > 15
-            ReleasePen(curcon.anscm, v)
-            v := -1
-          ENDIF
-          curcon.anstab[i] := v
-        ENDFOR
-        -> overlay pens, UNCAPPED - pixels-only users (ghost, menu),
-        -> see openwin: the nibble rule is a model rule, not theirs
-        curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
-               Mul($5, $11111111), Mul($5, $11111111), NIL)
-        curcon.ovblue := ObtainBestPenA(curcon.anscm, Mul($8, $11111111),
-               Mul($8, $11111111), Mul($F, $11111111), NIL)
-      ENDIF
+  -> 1.2.7b7: menu pens on EVERY screen, WBPENS included - the menu
+  -> is our UI, not client ANSI (see reopenwin); only anstab stays
+  -> wbpens-gated
+  scrn := curcon.win.wscreen
+  IF scrn
+    curcon.anscm := scrn.viewport.colormap
+    IF (curcon.wbpens = FALSE) AND (curcon.anscm <> NIL)
+      -> the bright half of the CTerm palette, one nibble per gun
+      pr := [$5, $F, $5, $F, $8, $F, $5, $F]:CHAR
+      pg := [$5, $5, $F, $F, $8, $5, $F, $F]:CHAR
+      pb := [$5, $5, $5, $5, $F, $F, $F, $F]:CHAR
+      FOR i := 0 TO 7
+        v := ObtainBestPenA(curcon.anscm,
+               Mul(pr[i], $11111111),
+               Mul(pg[i], $11111111),
+               Mul(pb[i], $11111111), NIL)
+        IF v > 15
+          ReleasePen(curcon.anscm, v)
+          v := -1
+        ENDIF
+        curcon.anstab[i] := v
+      ENDFOR
+      -> overlay pen, UNCAPPED - a pixels-only user (the ghost):
+      -> the nibble rule is a model rule, not its
+      curcon.ovgrey := ObtainBestPenA(curcon.anscm, Mul($5, $11111111),
+             Mul($5, $11111111), Mul($5, $11111111), NIL)
     ENDIF
+    -> 1.2.7b4: menu dir colour = the screen's FILLPEN role from
+    -> DrawInfo (see reopenwin for the why) - copy, free, no
+    -> release lifecycle
+    dri := GetScreenDrawInfo(scrn)
+    IF dri
+      IF dri.numpens > FILLPEN THEN curcon.drifill := dri.pens[FILLPEN]
+      FreeScreenDrawInfo(scrn, dri)
+    ENDIF
+    -> 1.2.7b6: AFTER drifill on purpose - the scan needs the dir
+    -> colour to dodge it (the boot-screen collision)
+    curcon.ovhid := hidpen(curcon.anscm)
   ENDIF
   curcon.curfg := curcon.deffg
   curcon.curbg := 0
@@ -3180,9 +3424,9 @@ PROC closewin()
       curcon.anstab[i] := -1
     ENDFOR
     IF curcon.ovgrey >= 0 THEN ReleasePen(curcon.anscm, curcon.ovgrey)
-    IF curcon.ovblue >= 0 THEN ReleasePen(curcon.anscm, curcon.ovblue)
+    IF curcon.ovhid >= 0 THEN ReleasePen(curcon.anscm, curcon.ovhid)
     curcon.ovgrey := -1
-    curcon.ovblue := -1
+    curcon.ovhid := -1
     curcon.anscm := NIL
   ENDIF
   IF curcon.appwin              -> 1.2.6b3: owned windows only ever set
@@ -3484,7 +3728,24 @@ PROC doresize()
                                 -> would reflow the CLIENT's page into
                                 -> history (the exact b7 wound)
   ENDIF
-  tcclose()                     -> restores rows at the OLD geometry
+  -> 1.2.7b11, HIS SCREENSHOTS (11.8.26): state-only, the third time
+  -> this exact lesson has been learned in this proc. tcclose() paints
+  -> - drawmodelrow per menu row - and by the time doresize reaches it
+  -> the window is ALREADY the new size, so those rows land at the OLD
+  -> grid's width and row pitch: menu pixels thrown across the new
+  -> window's border and sizing gadget, which the final inner RectFill
+  -> below never reaches and so never heals. Resize with the Tab menu
+  -> open and the debris lands in a different place for every drag
+  -> direction (his 2/3/4 shots: top-right, bottom-right, right
+  -> column). BOTH its neighbours here already carry this fix -
+  -> altpop's paint half above (b8: "overdrew the resized window's
+  -> border"), dropeditmirror below (1.2b10: "wiping the sizing
+  -> gadget") - and clearsel just after (audit5 A5). tcclose was the
+  -> one survivor. The model under the menu was never modified, so
+  -> dropping the paint loses nothing: the full clear+redraw at the
+  -> bottom repaints it at the NEW grid. tcclose() itself is unchanged
+  -> for its seven other callers, none of which resize anything.
+  tcdrop()
   -> audit5 A5: state-only - clearsel()'s repaint runs at the OLD grid
   -> full-width into the already-resized window, overpainting border
   -> pixels the final heal (inner RectFill) never touches: the b8
@@ -6810,6 +7071,7 @@ ENDPROC
 -> this screen, so no suggestions are shown at all (a ghost in the
 -> default pen would read as typed text - worse than nothing)
 PROC ghostpen()
+  IF curcon.pghost >= 0 THEN RETURN curcon.pghost   -> 1.2.7b9 pin
   IF curcon.wbpens AND curcon.can16 THEN RETURN 8
   IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
 ENDPROC curcon.ovgrey   -> the uncapped overlay grey (32+ colours,
@@ -7055,7 +7317,18 @@ PROC dovanilla(code, qual)
       tcclose()   -> Enter ACCEPTS the selection and closes the menu;
       RETURN      -> the line stays put for a second Enter (zsh style)
     ELSEIF code = 27
-      tcclose()   -> Esc closes the menu, the line survives
+      -> 1.2.7b13, his ask: Esc ABORTS. tcpick inserts each candidate
+      -> into the line as you walk, so leaving the menu the quiet way
+      -> used to leave whatever happened to be highlighted behind -
+      -> "the line survives" was true of the line, not of the word.
+      -> Now the word goes back to the stem and Esc costs nothing.
+      -> Enter is the other half of his ask and needs no code at all:
+      -> the pick is ALREADY in the line, so confirming it is exactly
+      -> closing the menu and leaving it there.
+      -> Close first, then restore: tcclose repaints the rows the menu
+      -> covered, drawedit paints the edit line last and on top.
+      tcclose()
+      IF tcreplace(curcon.tcstem, StrLen(curcon.tcstem)) THEN drawedit()
       RETURN
     ENDIF
     tcclose()     -> any other key closes it, then acts normally
@@ -7298,6 +7571,25 @@ PROC dorawkey(code, qual)
   -> Esc WIPE it - dovanilla saw tcactive already FALSE. Latent
   -> since M6 put every key through this proc; the IDCMP path
   -> delivered Return as VANILLAKEY only and never showed it.
+  -> 1.2.7b12, his ask: with the menu open, a PLAIN arrow walks it
+  -> instead of closing it - Left/Right by one entry, Up/Down by a
+  -> row. Ahead of the close block below, which would otherwise treat
+  -> an arrow as "any other key". QUALIFIED arrows are deliberately
+  -> left alone and still close the menu first: Ctrl+Up/Down is the
+  -> scrollback walk, Shift+Up/Down is the page walk, and
+  -> Right/Shift+Right/Ctrl+Right accept a ghost - none of those
+  -> should quietly change meaning because a menu happens to be up.
+  IF curcon.tcactive AND (curcon.rawmode = FALSE)
+    IF (qual AND (IEQUALIFIER_CONTROL OR IEQUALIFIER_LSHIFT OR
+                  IEQUALIFIER_RSHIFT)) = 0
+      IF (code = RK_UP) OR (code = RK_DOWN) OR (code = RK_LEFT) OR
+         (code = RK_RIGHT)
+        idx := tcgridmove(code)
+        IF idx >= 0 THEN tcpick(idx)
+        RETURN TRUE
+      ENDIF
+    ENDIF
+  ENDIF
   IF curcon.tcactive
     IF ((code AND $80) = 0) AND ((code < $60) OR (code > $67)) AND
        (code <> $44) AND (code <> $43) AND (code <> $45)
@@ -8077,6 +8369,167 @@ PROC loadhistfile()
   Dispose(fh)
 ENDPROC
 
+-> ---------- v1.2.7b8: L:ccon.cfg, the defaults file ----------
+-> Read with the SAME no-DOS plumbing loadhistfile uses (hand-rolled
+-> FINDINPUT/READ/END through fscall/tcresolve) and the same house
+-> rule for a missing one: not an error, just no defaults. It lives
+-> in L: beside ccon-handler and ccon-history because L: is the one
+-> assign that cannot be missing when we run - the handler was loaded
+-> from it - which matters for the takeover CON: mount, where a
+-> window can be wanted before S:User-Startup has assigned anything.
+->
+-> Read once per OPEN, not once per handler life. A running handler
+-> keeps its seglist, so a once-ever read would mean rebooting the
+-> machine to try a different pen; the cost is FINDINPUT + a couple
+-> of READs + END against a window open, which already costs an
+-> Intuition window and a font.
+->
+-> NO template storage: parsecon grounds every p* field to its
+-> built-in, THEN replays this file through parseopt, THEN parses the
+-> open string. parseopt therefore stays the single place any option
+-> is ever applied - the file and the open string CANNOT drift into
+-> two vocabularies, and the whole precedence rule is the order of
+-> three pieces of code rather than a table to keep in sync.
+->
+-> Stack: buf[256] + line[CFGMAX] under parsecon, then tcresolve's
+-> own ~350 - about 150 bytes deeper than the loadhistfile path at
+-> the same open, and far under the ~2.5KB peak the mountlist's
+-> StackSize note is written against (savehistfile still owns that).
+
+-> tokens the FILE is not allowed to carry. WINDOW0x is a live
+-> window pointer - CTerm's frame handoff - so a stored one names a
+-> window that died with the last boot, and every console on the
+-> system would try to borrow that corpse. Open string only, where
+-> the pointer is fresh by construction.
+PROC cfgrefuse(tok:PTR TO CHAR)
+  DEF t[12]:ARRAY OF CHAR, i
+  FOR i := 0 TO 11 DO t[i] := 0
+  i := 0
+  WHILE (i < 8) AND tok[i]
+    t[i] := tcfold(tok[i])
+    i++
+  ENDWHILE
+ENDPROC StrCmp(t, 'WINDOW0X', 8)
+
+-> apply one settings line: split it and hand each token to parseopt.
+-> Values split on '/' as well as whitespace, exactly as parsecon
+-> splits the open string's fields - so FONT=topaz/8 arrives as the
+-> same two tokens ("FONT=topaz", "8") the FONT branch's pfontexp
+-> handshake already expects. One split rule, one applier, one
+-> vocabulary; ".font" stays legal inside the value because the only
+-> character with meaning here is '/'.
+PROC cfgapply(line:PTR TO CHAR)
+  DEF i, tl, tok[84]:ARRAY OF CHAR
+  i := 0
+  WHILE line[i]
+    WHILE (line[i] = " ") OR (line[i] = 9) OR (line[i] = "/") DO i++
+    tl := 0
+    WHILE line[i] AND (line[i] <> " ") AND (line[i] <> 9) AND
+          (line[i] <> "/")
+      IF tl < 80
+        tok[tl] := line[i]
+        tl++
+      ENDIF
+      i++
+    ENDWHILE
+    tok[tl] := 0
+    IF tl > 0
+      IF cfgrefuse(tok) = FALSE THEN parseopt(tok)
+    ENDIF
+  ENDWHILE
+  -> a FONT with no size must not swallow the first bare number on
+  -> the NEXT line: name/size is a within-line contract, and parseopt
+  -> only clears the flag when it sees another token at all
+  curcon.pfontexp := FALSE
+ENDPROC
+
+-> one physical line -> the new "are we inside the wanted section?"
+-> state. Comments (';' or '#') run to end of line and come off
+-> FIRST, so the rule is identical everywhere in the file; the price
+-> is that neither character can appear inside a value, which is
+-> cheap and explainable. '[name]' opens a section and it runs to the
+-> next '[' or EOF - no END to forget, no name to mistype twice, and
+-> an unterminated section is not expressible.
+-> Section names fold to upper case; `sect` arrives already folded.
+PROC cfgsect(line:PTR TO CHAR, sect:PTR TO CHAR, insect)
+  DEF i, j, n
+  i := 0
+  WHILE line[i] AND (line[i] <> ";") AND (line[i] <> "#") DO i++
+  line[i] := 0
+  WHILE (i > 0) AND ((line[i - 1] = " ") OR (line[i - 1] = 9))
+    i--
+    line[i] := 0
+  ENDWHILE
+  j := 0
+  WHILE (line[j] = " ") OR (line[j] = 9) DO j++
+  IF line[j] = 0 THEN RETURN insect      -> blank/comment: no change
+  IF line[j] = "["
+    j++
+    n := j
+    WHILE line[n] AND (line[n] <> "]") DO n++
+    line[n] := 0                         -> a missing ']' just ends
+    WHILE (line[j] = " ") OR (line[j] = 9) DO j++
+    WHILE (n > j) AND ((line[n - 1] = " ") OR (line[n - 1] = 9))
+      n--
+      line[n] := 0
+    ENDWHILE
+    i := j
+    WHILE line[i]
+      line[i] := tcfold(line[i])
+      i++
+    ENDWHILE
+    RETURN StrCmp(line + j, sect)
+  ENDIF
+  IF insect THEN cfgapply(line + j)
+ENDPROC insect
+
+PROC loadcfgfile(sect:PTR TO CHAR)
+  DEF fh:PTR TO filehandle, res, fsp:PTR TO mp, id, i, n,
+      buf[256]:ARRAY OF CHAR, line[CFGMAX + 4]:ARRAY OF CHAR,
+      lp, c, insect
+  IF tcresolve('L:') = FALSE THEN RETURN
+  fsp := curcon.fsdirport
+  fh := New(SIZEOF filehandle)
+  IF fh = NIL
+    tcfreelock()
+    RETURN
+  ENDIF
+  res := fscall(fsp, ACTION_FINDINPUT, Shr(fh, 2), curcon.fsdirlock,
+                tcbstr('ccon.cfg'))
+  tcfreelock()
+  IF res = 0
+    Dispose(fh)
+    RETURN                      -> no config file: the built-ins stand
+  ENDIF
+  id := fh.args
+  lp := 0
+  -> "anything before the first header belongs to [DEFAULT]" - which
+  -> is what makes a flat, section-less file valid. Someone who only
+  -> wants a deeper buffer never has to learn that sections exist.
+  insect := StrCmp(sect, 'DEFAULT')
+  n := fscall(fsp, ACTION_READ, id, buf, 255)
+  WHILE n > 0
+    FOR i := 0 TO n - 1
+      c := buf[i]
+      IF c = 10
+        line[lp] := 0
+        insect := cfgsect(line, sect, insect)
+        lp := 0
+      ELSEIF (c <> 13) AND (lp < CFGMAX - 1)
+        line[lp] := c           -> CR dropped: a config edited on a PC
+        lp++                    -> must not leave "\r" on every value
+      ENDIF
+    ENDFOR
+    n := fscall(fsp, ACTION_READ, id, buf, 255)
+  ENDWHILE
+  IF lp > 0                     -> a last line with no newline
+    line[lp] := 0
+    insect := cfgsect(line, sect, insect)
+  ENDIF
+  fscall(fsp, ACTION_END, id, 0, 0)
+  Dispose(fh)
+ENDPROC
+
 -> write the shared ring to L:ccon-history, oldest entry first (the
 -> conventional shell-history order). Called after EVERY committed
 -> command now (a reset before any window closes must not cost the
@@ -8210,7 +8663,25 @@ ENDPROC FALSE
 
 -> append one candidate to the pool - the packing tcscanone and
 -> tcscancmd both need, factored out once there were two sources
-PROC tcadd(name:PTR TO CHAR, isdir, hidden)
+-> the flag byte: bit 0 = "there is more to type" (a directory, and
+-> 1.2.7b10 a device too - both suppress the trailing space), bit 1 =
+-> hidden class, bit 2 = a DEVICE, whose separator is ':' not '/'.
+-> Devices set bits 0 AND 2 on purpose: bit 0 keeps every existing
+-> reader - the menu width, the dir colour, the no-space rule -
+-> working untouched, and bit 2 only changes which character follows.
+-> 1.2.7b10: the character that follows a completed candidate, from
+-> that flag byte. ':' ends a device (DUMP:), '/' ends a directory,
+-> and a plain file gets the closing space. The first two both mean
+-> "there is more to type", which is exactly why neither is a space.
+-> One proc, three callers - the menu's drawn suffix, the cycling
+-> pick and the single-match completion had no business each
+-> spelling this out for themselves.
+PROC tcsuffix(f)
+  IF f AND 4 THEN RETURN ":"
+  IF f AND 1 THEN RETURN "/"
+ENDPROC " "
+
+PROC tcadd(name:PTR TO CHAR, isdir, hidden, dev)
   DEF l, p:PTR TO CHAR
   IF tchas(name) THEN RETURN
   l := StrLen(name)
@@ -8221,6 +8692,7 @@ PROC tcadd(name:PTR TO CHAR, isdir, hidden)
   p := curcon.tcpool + curcon.tcpu
   p[0] := IF isdir THEN 1 ELSE 0
   IF hidden THEN p[0] := p[0] OR 2
+  IF dev THEN p[0] := p[0] OR 5
   CopyMem(name, p + 1, l + 1)
   curcon.tcc[curcon.tcn] := p
   curcon.tcn := curcon.tcn + 1
@@ -8241,13 +8713,50 @@ PROC tcscanone(port:PTR TO mp, lock, pfx:PTR TO CHAR, plen)
     l := StrLen(nbuf)
     IF l > 0
       IF (plen = 0) OR tcpref(nbuf, pfx, plen)
-        tcadd(nbuf, fsfib.direntrytype > 0, tchidname(nbuf, l, fsfib.protection))
+        tcadd(nbuf, fsfib.direntrytype > 0, tchidname(nbuf, l, fsfib.protection),
+              FALSE)
       ENDIF
     ENDIF
   ENDWHILE
 ENDPROC
 
 -> scan the resolved directory for names starting with the prefix
+-> 1.2.7b10: device, volume and assign names as candidates, so
+-> `du<Tab>` reaches DUMP: and not just the current directory.
+-> LockDosList/NextDosEntry walk the DOS list under its own lock and
+-> send no packets, so they are safe from the handler process - the
+-> no-DOS rule is about DoPkt on OUR pr_MsgPort, and tcresolve has
+-> been calling LockDosList/FindDosEntry on every single Tab since
+-> M5b. The same three list flags it asks for.
+-> dol_Name is a BSTR (length byte, then chars) even though the E
+-> module types it PTR TO CHAR, so it needs the BPTR shift like any
+-> other - the value IS the BPTR, not an address.
+-> Names are stored WITHOUT the colon; completion adds it.
+PROC tcscandev(pfx:PTR TO CHAR, plen)
+  DEF dl:PTR TO doslist, lf, sf, bn:PTR TO CHAR, nb[40]:ARRAY OF CHAR,
+      l, i
+  lf := LDF_READ OR LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS
+  sf := LDF_DEVICES OR LDF_VOLUMES OR LDF_ASSIGNS
+  dl := LockDosList(lf)
+  dl := NextDosEntry(dl, sf)
+  WHILE dl
+    bn := Shl(dl.name, 2)
+    IF bn
+      l := bn[0]
+      IF l > 38 THEN l := 38     -> nb is 40; a DOS name never nears it
+      FOR i := 0 TO l - 1
+        nb[i] := bn[i + 1]
+      ENDFOR
+      nb[l] := 0
+      IF l > 0
+        IF (plen = 0) OR tcpref(nb, pfx, plen) THEN tcadd(nb, TRUE, FALSE, TRUE)
+      ENDIF
+    ENDIF
+    dl := NextDosEntry(dl, sf)
+  ENDWHILE
+  UnLockDosList(lf)
+ENDPROC
+
 PROC tcscan(pfx:PTR TO CHAR, plen)
   curcon.tcn := 0
   curcon.tcpu := 0
@@ -8279,7 +8788,7 @@ PROC tcscancmd(pfx:PTR TO CHAR, plen)
   seg := FindSegment(NIL, NIL, TRUE)
   WHILE seg
     IF seg.uc = CMD_INTERNAL
-      IF (plen = 0) OR tcpref(seg.name, pfx, plen) THEN tcadd(seg.name, FALSE, FALSE)
+      IF (plen = 0) OR tcpref(seg.name, pfx, plen) THEN tcadd(seg.name, FALSE, FALSE, FALSE)
     ENDIF
     seg := FindSegment(NIL, seg, TRUE)
   ENDWHILE
@@ -8409,23 +8918,150 @@ PROC tchidname(n:PTR TO CHAR, l, prot)
   IF tcfold(n[i + 4]) <> "O" THEN RETURN FALSE
 ENDPROC TRUE
 
--> menu colours mirror ls: hidden-class grey (grey needs 16 pens),
--> directories blue (bright blue on 16 pens, the classic WB blue
--> pen 3 otherwise), everything else in the default pen
+-> menu colours, 1.2.7b4/b5 (Timm's CGX palette report): the old
+-> scheme picked absolute RGBs (ObtainBestPen grey/blue), which on a
+-> foreign palette can land indistinguishable from the background -
+-> invisible "hidden" entries on a dark-grey desktop. Directories now
+-> draw in the screen's FILLPEN role (Palette Prefs' "Active Window
+-> Title Bars" - pen 3, the classic blue, on stock WB): a role the
+-> user already made readable on their own screen. Hidden-class
+-> entries draw in hidpen's contrast-verified grey - the midpoint of
+-> the menu's real background and text colours, rejected if the
+-> palette snaps it onto the background (b4 tried the checkerboard
+-> knockout instead: boot verdict, unreadable shreds at 8px glyphs).
+-> Grey wins over dir colour - dimming is the point, same rule as ls.
+-> 1.2.7b7: no WBPENS special case any more - the menu is OUR UI
+-> overlay, not client ANSI output, so the fixed pens 8/12 are gone
+-> (his CTerm verdict on 12: "yellow = no thank you"); every screen
+-> takes the role + scan pens above.
+-> 1.2.7b9: a config pin outranks the derivation, and is read HERE
+-> rather than written into ovhid/drifill - see the pdirs/phid notes
+-> on the console object for why (the ReleasePen lifecycle).
 PROC menupen(flag)
   IF flag AND 2                 -> hidden-class grey
-    IF curcon.wbpens THEN RETURN 8
-    IF curcon.anstab[0] >= 0 THEN RETURN curcon.anstab[0]
-    IF curcon.ovgrey >= 0 THEN RETURN curcon.ovgrey
-    RETURN curcon.deffg
+    IF curcon.phid >= 0 THEN RETURN curcon.phid
+    IF curcon.ovhid >= 0 THEN RETURN curcon.ovhid
+    RETURN curcon.deffg         -> no dimming grey exists: visible,
+  ENDIF                         -> merely undimmed
+  IF flag AND 1                 -> directory colour
+    IF curcon.pdirs >= 0 THEN RETURN curcon.pdirs
+    IF curcon.drifill > 0 THEN RETURN curcon.drifill
+  ENDIF                         -> drifill 0 = fill IS the menu's pen-0
+ENDPROC curcon.deffg            -> background: fall through, readable
+
+-> 1.2.7b5/b6: the hidden-class grey, derived from the screen instead
+-> of thin air. b3's grey was an ABSOLUTE RGB ($555555 via
+-> ObtainBestPen) - on a dark-grey desktop the nearest pen to it IS
+-> the background and hidden entries render invisible (Tobias's worry,
+-> and nothing guarded it). b5 asked ObtainBestPen for the MIDPOINT of
+-> the menu's two real endpoint colours (background pen 0, text deffg)
+-> with a background readback guard - right on Workbench and CTerm,
+-> but the no-startup-sequence boot screen has NO grey at all and the
+-> nearest pen to the midpoint was the dir blue: hidden and dirs
+-> rendered identically (pixel-diffed from his ccon1.png). b6 scans
+-> the whole palette instead, because ObtainBestPen cannot express
+-> "not this colour": hidscan picks the closest pen to the midpoint
+-> among pens that keep their distance from background, text AND the
+-> dir colour - on that boot screen the survivor is WHITE, dim on
+-> grey, distinct from both. -1 = no survivor, menupen falls to deffg
+-> (visible, merely undimmed). Runs once per window open, after
+-> drifill; the obtained pen is released with ovgrey at both teardown
+-> sites. hidscan is VERBATIM in tests/hidpentest.e (vamos-proven,
+-> 7 palettes including all three of his screenshots).
+
+-> pure palette scan: tab = n triples of 32-bit left-justified guns
+-> (GetRGB32 layout); bgc/fgc = the menu's real endpoint colours as
+-> top-byte gun triples; dirc = the dir colour's triple or NIL.
+-> Returns the index closest to the bg/text midpoint among pens with
+-> byte-gun taxicab distance >= 48 from background (must be
+-> readable), text (must actually dim) and the dir colour (must not
+-> collide - the boot-screen lesson), or -1.
+PROC hidscan(tab:PTR TO LONG, n, bgc:PTR TO LONG, fgc:PTR TO LONG,
+             dirc:PTR TO LONG)
+  DEF i, k, cr, cg, cb, d, best, bestd, mr, mg, mb
+  mr := Shr(bgc[0] + fgc[0], 1)
+  mg := Shr(bgc[1] + fgc[1], 1)
+  mb := Shr(bgc[2] + fgc[2], 1)
+  best := -1
+  bestd := $7FFFFFFF
+  FOR i := 0 TO n - 1
+    k := Mul(i, 3)
+    cr := Shr(tab[k], 24) AND $FF
+    cg := Shr(tab[k + 1], 24) AND $FF
+    cb := Shr(tab[k + 2], 24) AND $FF
+    IF (Abs(cr - bgc[0]) + Abs(cg - bgc[1]) + Abs(cb - bgc[2])) >= 48
+      IF (Abs(cr - fgc[0]) + Abs(cg - fgc[1]) + Abs(cb - fgc[2])) >= 48
+        IF (dirc = NIL) OR
+           ((Abs(cr - dirc[0]) + Abs(cg - dirc[1]) + Abs(cb - dirc[2])) >= 48)
+          d := Abs(cr - mr) + Abs(cg - mg) + Abs(cb - mb)
+          IF d < bestd
+            bestd := d
+            best := i
+          ENDIF
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDFOR
+ENDPROC best
+
+-> the library wrapper around hidscan: read the palette (heap table,
+-> 12 bytes a pen - the handler's 10000-byte E stack must not carry
+-> a 3KB frame, the mountlist StackSize comment is load-bearing),
+-> scan, then obtain the winner BY ITS EXACT RGB - lands on the
+-> scanned pen or a same-colour twin, either serves. The background
+-> readback stays as belt: on a busy shared pen list the obtain can
+-> still hand back something else entirely.
+PROC hidpen(cm:PTR TO colormap)
+  DEF tab:PTR TO LONG, n, k, i, v, d,
+      bgc[3]:ARRAY OF LONG, fgc[3]:ARRAY OF LONG,
+      dirc[3]:ARRAY OF LONG, u[3]:ARRAY OF LONG, dp
+  IF cm = NIL THEN RETURN -1
+  n := cm.count
+  -> 1.2.7b7, THE b6 BOOT BUG: a V39 colormap for a 2-plane screen
+  -> still carries 32 entries - the slots past 1<<depth hold sprite
+  -> colours, the POINTER RED among them. The scan picked that red
+  -> (beats white on distance-to-midpoint), ObtainBestPen snapped it
+  -> to the background grey, the readback guard killed the result and
+  -> hidden fell to black on his boot shell. Scan ONLY the pens the
+  -> screen can display (hidpentest section D proves both halves).
+  IF curcon.rp.bitmap
+    k := Shl(1, curcon.rp.bitmap.depth)
+    IF n > k THEN n := k
   ENDIF
-  IF flag AND 1                 -> directory blue
-    IF curcon.wbpens THEN RETURN 12
-    IF curcon.anstab[4] >= 0 THEN RETURN curcon.anstab[4]
-    IF curcon.ovblue >= 0 THEN RETURN curcon.ovblue
-    RETURN 3                    -> the classic WB blue pen
+  IF n < 2 THEN RETURN -1
+  IF n > 256 THEN n := 256
+  tab := AllocMem(Mul(n, 12), 0)
+  IF tab = NIL THEN RETURN -1
+  GetRGB32(cm, 0, n, tab)
+  FOR i := 0 TO 2 DO bgc[i] := Shr(tab[i], 24) AND $FF
+  k := curcon.deffg
+  IF k >= n THEN k := 1              -> a deffg beyond this palette:
+  k := Mul(k, 3)                     -> read pen 1, the stock text pen
+  FOR i := 0 TO 2 DO fgc[i] := Shr(tab[k + i], 24) AND $FF
+  dp := NIL
+  IF (curcon.drifill > 0) AND (curcon.drifill < n)
+    k := Mul(curcon.drifill, 3)
+    FOR i := 0 TO 2 DO dirc[i] := Shr(tab[k + i], 24) AND $FF
+    dp := dirc
   ENDIF
-ENDPROC curcon.deffg
+  i := hidscan(tab, n, bgc, fgc, dp)
+  v := -1
+  IF i >= 0
+    k := Mul(i, 3)
+    v := ObtainBestPenA(cm, tab[k], tab[k + 1], tab[k + 2], NIL)
+    IF v >= 0
+      GetRGB32(cm, v, 1, u)
+      d := Abs((Shr(u[0], 24) AND $FF) - bgc[0]) +
+           Abs((Shr(u[1], 24) AND $FF) - bgc[1]) +
+           Abs((Shr(u[2], 24) AND $FF) - bgc[2])
+      IF d < 48
+        ReleasePen(cm, v)
+        v := -1
+      ENDIF
+    ENDIF
+  ENDIF
+  FreeMem(tab, Mul(n, 12))
+ENDPROC v
 
 PROC tcmenucalc()
   DEF i, l, maxl, p:PTR TO CHAR
@@ -8457,7 +9093,7 @@ PROC tcmenudraw()
     l := StrLen(p + 1)
     CopyMem(p + 1, nb, l)
     IF p[0] AND 1
-      nb[l] := "/"
+      nb[l] := tcsuffix(p[0])   -> 1.2.7b10: ':' for a device
       l++
     ENDIF
     WHILE l < curcon.tcmcolw
@@ -8480,37 +9116,102 @@ PROC tcmenudraw()
 ENDPROC
 
 -> close the menu: the rows under it come back from the model
+-> 1.2.7b11: the STATE half of tcclose, without the repaint. The menu
+-> is a pure overlay - the model under it was never touched - so
+-> forgetting it is always safe; the only question is who owes the
+-> pixels. Every caller but one closes the menu with the window
+-> geometry UNCHANGED and therefore owes them here. doresize does not:
+-> the window has already been resized by the time it closes the menu,
+-> so painting rows at the old grid throws them into the new window's
+-> border, and its final clear+redraw owes those pixels anyway.
+PROC tcdrop()
+  curcon.tcactive := FALSE
+  curcon.tcsel := -1
+ENDPROC
+
 PROC tcclose()
   DEF r
   IF curcon.tcactive = FALSE THEN RETURN
   FOR r := 0 TO curcon.tcmrows - 1
     drawmodelrow(curcon.tcmrow0 + r)
   ENDFOR
-  curcon.tcactive := FALSE
-  curcon.tcsel := -1
+  tcdrop()
 ENDPROC
 
 -> Tab in the cooked editor. First Tab completes (whole match, or the
 -> common prefix + the menu); further Tabs cycle the menu, Shift+Tab
 -> backwards; Enter accepts and closes, Esc closes, anything else
 -> closes and then acts normally.
+-> 1.2.7b12: make the pick, and reflect it in the edit line. The
+-> selection is inserted AS YOU MOVE (zsh menu-select), so the line
+-> always shows what Enter would accept. Shared by Tab/Shift+Tab
+-> cycling and the arrow walk - one place that knows how a menu pick
+-> becomes text, instead of two that must agree about the suffix.
+PROC tcpick(n)
+  DEF p:PTR TO CHAR, sfx[2]:ARRAY OF CHAR
+  curcon.tcsel := n
+  p := curcon.tcc[n]
+  StrCopy(curcon.tctmp, p + 1)
+  IF p[0] AND 1                    -> 1.2.7b10: ':' or '/', never
+    sfx[0] := tcsuffix(p[0])       -> a space - the word is unfinished
+    sfx[1] := 0
+    StrAdd(curcon.tctmp, sfx)
+  ENDIF
+  IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp)) THEN drawedit()
+  tcmenudraw()
+ENDPROC
+
+-> 1.2.7b12, his ask: walk the menu with the arrow keys instead of
+-> only cycling through it. The menu is filled ROW-MAJOR, tcmcols
+-> wide, tcshown entries - so the last row is the only short one and
+-> the only part needing care.
+-> Left/Right step one entry and wrap through the whole list, which
+-> is exactly what Tab and Shift+Tab already do. Up/Down move a whole
+-> row and wrap WITHIN THE COLUMN: a column whose last row is short
+-> lands on its own bottom entry rather than jumping into a
+-> neighbour's, so holding Down walks one column and returns to where
+-> it started.
+-> Returns the new index, or -1 when there is nothing to move to.
+PROC tcgridmove(code)
+  DEF n, c, k
+  IF curcon.tcshown <= 0 THEN RETURN -1
+  IF curcon.tcsel < 0 THEN RETURN 0   -> nothing picked yet: the first
+  n := curcon.tcsel                   -> arrow simply picks one
+  IF code = RK_RIGHT
+    n := n + 1
+    IF n >= curcon.tcshown THEN n := 0
+  ELSEIF code = RK_LEFT
+    n := n - 1
+    IF n < 0 THEN n := curcon.tcshown - 1
+  ELSE
+    IF curcon.tcmcols < 1 THEN RETURN n
+    c := Mod(n, curcon.tcmcols)
+    IF code = RK_DOWN
+      n := n + curcon.tcmcols
+      IF n >= curcon.tcshown THEN n := c    -> off the bottom of this
+    ELSE                                    -> column: back to its top
+      n := n - curcon.tcmcols
+      IF n < 0                              -> off the top: to the
+        k := Div(curcon.tcshown - 1 - c, curcon.tcmcols)   -> LAST entry
+        n := c + Mul(k, curcon.tcmcols)     -> this column really has
+      ENDIF
+    ENDIF
+  ENDIF
+ENDPROC n
+
 PROC dotab(back)
-  DEF s:PTR TO CHAR, l, i, sep, plen, cpl, p:PTR TO CHAR,
-      dirp[300]:ARRAY OF CHAR
+  DEF s:PTR TO CHAR, l, i, sep, plen, cpl, p:PTR TO CHAR, devok,
+      dirp[300]:ARRAY OF CHAR, sfx[2]:ARRAY OF CHAR, n
   IF curcon.tcactive
     IF curcon.tcshown = 0 THEN RETURN
     IF back
-      curcon.tcsel := curcon.tcsel - 1
-      IF curcon.tcsel < 0 THEN curcon.tcsel := curcon.tcshown - 1
+      n := curcon.tcsel - 1
+      IF n < 0 THEN n := curcon.tcshown - 1
     ELSE
-      curcon.tcsel := curcon.tcsel + 1
-      IF curcon.tcsel >= curcon.tcshown THEN curcon.tcsel := 0
+      n := curcon.tcsel + 1
+      IF n >= curcon.tcshown THEN n := 0
     ENDIF
-    p := curcon.tcc[curcon.tcsel]
-    StrCopy(curcon.tctmp, p + 1)
-    IF p[0] AND 1 THEN StrAdd(curcon.tctmp, '/')
-    IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp)) THEN drawedit()
-    tcmenudraw()
+    tcpick(n)
     RETURN
   ENDIF
   -> v1.1 (19.7.26, the s:ccon-* lesson): Tab NEVER accepts the
@@ -8534,6 +9235,12 @@ PROC dotab(back)
   FOR i := curcon.tcws TO curcon.cpos - 1
     IF (s[i] = "/") OR (s[i] = ":") THEN sep := i + 1
   ENDFOR
+  -> 1.2.7b10: sep still sitting where it started means no '/' and no
+  -> ':' has been typed yet, so this word could still BECOME a device
+  -> name and the DOS list is worth scanning. Captured HERE because
+  -> tcws is overwritten with sep a few lines down and the test would
+  -> then be true for every word.
+  devok := IF sep = curcon.tcws THEN TRUE ELSE FALSE
   IF (sep - curcon.tcws) > 280 THEN RETURN
   FOR i := 0 TO sep - curcon.tcws - 1
     dirp[i] := s[curcon.tcws + i]
@@ -8557,6 +9264,12 @@ PROC dotab(back)
   ENDIF
   tcscan(s + sep, plen)
   tcfreelock()
+  -> 1.2.7b10: devices MERGE with the directory's own matches rather
+  -> than replacing them - the same rule his RAM:-vs-C: catch settled
+  -> for word-one completion. `du<Tab>` in a directory holding
+  -> dumps.txt should offer dumps.txt AND DUMP:, not pick a source
+  -> and hide the other. After tcscan, which does the reset.
+  IF devok THEN tcscandev(s + sep, plen)
   IF curcon.tcn = 0
     DisplayBeep(NIL)
     RETURN
@@ -8566,7 +9279,9 @@ PROC dotab(back)
     -> the one match: complete it, '/' opens a dir, ' ' ends a file
     p := curcon.tcc[0]
     StrCopy(curcon.tctmp, p + 1)
-    StrAdd(curcon.tctmp, IF (p[0] AND 1) THEN '/' ELSE ' ')
+    sfx[0] := tcsuffix(p[0])    -> 1.2.7b10: ':' device, '/' dir,
+    sfx[1] := 0                 -> ' ' file - the word is finished
+    StrAdd(curcon.tctmp, sfx)
     IF tcreplace(curcon.tctmp, StrLen(curcon.tctmp))
       drawedit()
     ELSE
@@ -8596,6 +9311,13 @@ PROC dotab(back)
   ENDWHILE                  -> and output cursor track it
   curcon.tcmrow0 := edlastrow(StrLen(curcon.ebuf)) + 1
   curcon.tcsel := -1
+  -> 1.2.7b13: snapshot the word AS THE MENU FINDS IT - common prefix
+  -> already extended above and included on purpose. That extension is
+  -> what Tab earned before any menu existed and is not what Esc is
+  -> undoing; Esc takes back the CANDIDATE, which is the only thing
+  -> the menu itself put there.
+  StrCopy(curcon.tcstem, curcon.ebuf + curcon.tcws,
+          curcon.tcwend - curcon.tcws)
   curcon.tcactive := TRUE
   tcmenudraw()
   IF curcon.tcmore THEN DisplayBeep(NIL)  -> more than the menu shows
@@ -8659,4 +9381,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.7b3 (5.8.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.7b13 (11.8.26) CCON: LTX console handler', 0

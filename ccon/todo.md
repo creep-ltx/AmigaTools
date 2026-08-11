@@ -880,7 +880,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
 
 ### Theme A: "fits your system" — compatibility gaps that bite daily
 
-- [ ] **FONT option — `FONTname/size` in the open string.** The most
+- [x] **FONT option — `FONTname/size` in the open string.** The most
       visible 1.0 gap: everything is Topaz 8 unless a borrowed
       window brings its own font. THE WRINKLE, spotted before it
       cost a boot: OpenDiskFont() does DOS I/O on the caller's
@@ -894,7 +894,7 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       cells: cw/ch/gridcalc already derive from the rastport font,
       but boot-verify the block cursor, blip, selection cell math
       and menu columns at a non-topaz size.
-- [ ] **SGR 3/4/7 — italic, underline, inverse — as real soft
+- [x] **SGR 3/4/7 — italic, underline, inverse — as real soft
       styles.** Stock console renders these; CCON drops them (Ed
       is fine, but ports and BBS output lose face). The catch: the
       attr plane is a FULL byte (fg+bg nibbles), so styles need a
@@ -904,18 +904,18 @@ boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
       fg/bg swap the selection already does. All the batched run
       painters (drawmrow, drawselrow, render, outchr) grow a style
       dimension to their run-splitting.
-- [ ] **The memory knob — `LINES=n` open option.** 4000-line model
+- [x] **The memory knob — `LINES=n` open option.** 4000-line model
       per window is ~600K at 80 cols; a 2MB real machine chokes.
       LINES=n clamps SBMAX per console (model allocation is
       already per-console since M10 — the knob the design punted
       is now trivial); consider a smaller default for windows
       opened WITHOUT the option when total consoles > 1. Pays for
       the style plane above.
-- [ ] **Insert/delete character — CSI @ / CSI P.** Small renderer
+- [x] **Insert/delete character — CSI @ / CSI P.** Small renderer
       + model work (ScrollRaster horizontally inside the row, cell
       copies in visrow/sarow like L/M do between rows). Closes a
       compatibility hole a fullscreen app will eventually hit.
-- [ ] **xterm title sequences — ESC]0;title BEL (and ST).** A
+- [x] **xterm title sequences — ESC]0;title BEL (and ST).** A
       feature and a bugfix in one: gives clients a proper retitle
       path AND properly fixes the More-retitle stomp (the console
       keeps the client title, appends its own [scrollback -n] /
@@ -967,25 +967,25 @@ boot says so. How each landed:
 Boot checklist (the usual ladder — every 1.0 feature must still
 hold, they all repaint through the grown painters):
 
-- [ ] plain boot: NewShell CCON: opens, types, completes, scrolls
-- [ ] `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"` — three
+- [x] plain boot: NewShell CCON: opens, types, completes, scrolls
+- [x] `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"` — three
       styles render, survive Shift+Up into scrollback and back,
       select/copy over them, menu restore over them
-- [ ] `NewShell CCON:0/0/640/200/test/FONTtopaz/9` — topaz 9 is
+- [x] `NewShell CCON:0/0/640/200/test/FONTtopaz/9` — topaz 9 is
       the OTHER ROM size, guaranteed loaded: a real non-8x8 cell.
       Block cursor, blip, selection cells, completion menu columns
       all line up. (A disk font works only if something already
       loaded it — that is the designed limit, not a bug.)
-- [ ] unknown font name → topaz 8, no crash
-- [ ] `NewShell CCON:0/0/640/200/small/LINES=200` — scrollback
+- [x] unknown font name → topaz 8, no crash
+- [x] `NewShell CCON:0/0/640/200/small/LINES=200` — scrollback
       stops at ~200 lines back, no wrap garbage
-- [ ] CSI @/P: Ed or a test echo `*e[5@` / `*e[3P` mid-line —
+- [x] CSI @/P: Ed or a test echo `*e[5@` / `*e[3P` mid-line —
       cells shift, colours/styles ride along
-- [ ] `echo "*e]0;retitled*07"` (BEL) — title changes; scroll back
+- [x] `echo "*e]0;retitled*07"` (BEL) — title changes; scroll back
       and forth — suffix appends, title survives
-- [ ] More a file, let it retitle, scroll back → More's title keeps
+- [x] More a file, let it retitle, scroll back → More's title keeps
       the [scrollback -n] suffix instead of vanishing
-- [ ] Ed still: menus, raw arrows, block cursor — the render parser
+- [x] Ed still: menus, raw arrows, block cursor — the render parser
       grew states, Ed is the canary for parser regressions
 
 ### 1.1b2 — disk fonts via the helper process (19.7.26)
@@ -1022,13 +1022,13 @@ after poking. Fallback ladder intact: no helper -> OpenFont
 
 Boot checklist deltas (rest of the 1.1b1 ladder unchanged):
 
-- [ ] `NewShell CCON:0/0/640/200/test/FONT=microknight/8` COLD —
+- [x] `NewShell CCON:0/0/640/200/test/FONT=microknight/8` COLD —
       MicroKnight from disk, no prefs dance
-- [ ] FONT=topaz/9 — the disk topaz 9, cells visibly taller
-- [ ] unknown font name → topaz 8, no requester, no hang
-- [ ] a second FONT window while the first lives (helper is
+- [x] FONT=topaz/9 — the disk topaz 9, cells visibly taller
+- [x] unknown font name → topaz 8, no requester, no hang
+- [x] a second FONT window while the first lives (helper is
       spawn-per-request — no shared state to collide)
-- [ ] `version l:ccon-handler` says 1.1b2
+- [x] `version l:ccon-handler` says 1.1b2
 
 ### 1.1b3 — the font telemetry boot (19.7.26)
 
@@ -1057,7 +1057,7 @@ title when a FONT option was asked for. Decode:
 Helper stack bumped to 16384 while in there. Marker and fherr come
 OUT before 1.1 final.
 
-- [ ] boot FONT=MicroKnight/8, read the title, decode above
+- [x] boot FONT=MicroKnight/8, read the title, decode above
 
 ### 1.1b4 — the telemetry was blind (19.7.26)
 
@@ -1080,7 +1080,7 @@ Reading the next screenshot is now unambiguous: no marker = FONT
 never parsed OR an old build; [b4 font e0] + topaz glyphs = loaded
 but not applied; eN = the decode table above.
 
-- [ ] reboot, FONT=MicroKnight/8, read the title
+- [x] reboot, FONT=MicroKnight/8, read the title
 
 ### 1.1b5 — the shell eats the spec (19.7.26)
 
@@ -1106,9 +1106,9 @@ was never a clean pipe.
 handed us (raw BSTR, 76 chars), with the [b4 font eN] stage
 appended when a FONT parsed. One boot, two opens, full truth:
 
-- [ ] `newshell ccon:0/0/640/80/test/FONT=microknight/8` - title
+- [x] `newshell ccon:0/0/640/80/test/FONT=microknight/8` - title
       shows what the shell REALLY passes
-- [ ] `echo >ccon:0/0/640/80/test2/FONT=microknight/8/WAIT hello`
+- [x] `echo >ccon:0/0/640/80/test2/FONT=microknight/8/WAIT hello`
       - echo's Open() bypasses the shell: expect the raw spec in
       the title WITH the FONT tokens, [b4 font e0], and MicroKnight
       glyphs if the loader chain is healthy
@@ -1171,7 +1171,7 @@ titles, More retitle, Ed canary.
 - [x] OSC titles GREEN: title changed on the BEL sequence.
 - [x] FONTtopaz/11 GREEN: real 11px grid, cursor/cells aligned.
 - [x] LINES GREEN: LINES10 floored to 100, scroll range matches.
-- [ ] CSI @/P FAILED on boot: both result rows wiped except the
+- [x] CSI @/P FAILED on boot: both result rows wiped except the
       newly printed XYZ. The model shift was PROVEN right in a
       vamos harness (01234XYZ56789 / 0123489 exactly) - the
       horizontal ScrollRaster was the liar. b7 replaces it: shift
@@ -1233,15 +1233,15 @@ full clear - nothing to restore from without a model.
       dead. With this, ALL FIVE Theme A features are boot-verified:
       FONT (MicroKnight/8 + topaz/11 from disk), SGR 3/4/7, LINES,
       CSI @/P, xterm titles.
-- [ ] regression sweep - eraseedit is EVERY keystroke's eraser
+- [x] regression sweep - eraseedit is EVERY keystroke's eraser
       now repainting from model: type/edit/kill keys feel, ghost
       accept/reject, Ctrl+R banner in and out, completion menu,
       history walk, commit echo, wrapped long lines
-- [ ] a real \r client: `copy` a big file with a progress
+- [x] a real \r client: `copy` a big file with a progress
       printer, or lha - the 1.0-era theft should be gone
-- [ ] More retitle + [scrollback -n] suffix appending (the last
+- [x] More retitle + [scrollback -n] suffix appending (the last
       untested corner of the titles item)
-- [ ] Ed canary (parser grew OSC states + @/P since 1.0)
+- [x] Ed canary (parser grew OSC states + @/P since 1.0)
 
 ### 1.1b9 — the sweep verdict: 29/30, one regression, one truth (19.7.26 morning)
 
@@ -1313,14 +1313,14 @@ no snapshot = 1.0 behavior. More/Ed now leave the transcript
 EXACTLY as they found it - no console on the platform ever did
 this.
 
-- [ ] b10 boot: b9's two garbage sightings dead (Ctrl+Left/Right
+- [x] b10 boot: b9's two garbage sightings dead (Ctrl+Left/Right
       on long line, Ctrl+U from line end)
-- [ ] more s:startup-sequence, page around, quit: the transcript
+- [x] more s:startup-sequence, page around, quit: the transcript
       is BACK, no More bar anywhere, Shift+Up history clean
-- [ ] Ed a file, edit, save, quit: transcript restored the same
-- [ ] More then RESIZE mid-More, quit: falls back gracefully
+- [x] Ed a file, edit, save, quit: transcript restored the same
+- [x] More then RESIZE mid-More, quit: falls back gracefully
       (no restore, no crash)
-- [ ] Ctrl+C break out of More (no clean exit): shell reprompts -
+- [x] Ctrl+C break out of More (no clean exit): shell reprompts -
       what does the screen do? (snapshot stays armed until the
       next cooked SetMode... watch for weirdness, this is the
       one soft corner)
@@ -1402,14 +1402,14 @@ opens). This is unrelated to the shell's '=' eating - that trap
 is still real and still needs FONTname/n or a quoted spec; this
 fix only removes the SLASH-COUNTING trap.
 
-- [ ] boot: `newshell ccon:FONTtopaz/8` -> topaz, no slashes needed
-- [ ] `newshell ccon:WAIT` and `newshell ccon:LINES200` - bare
+- [x] boot: `newshell ccon:FONTtopaz/8` -> topaz, no slashes needed
+- [x] `newshell ccon:WAIT` and `newshell ccon:LINES200` - bare
       keyword shortcuts, both should just work
-- [ ] `newshell ccon:0/0/640/80/test/FONTmicroknight/8` - the
+- [x] `newshell ccon:0/0/640/80/test/FONTmicroknight/8` - the
       OLD fully-positional spelling, unchanged
-- [ ] a bare `newshell ccon:` still honors Font Prefs (untouched
+- [x] a bare `newshell ccon:` still honors Font Prefs (untouched
       by this parser change)
-- [ ] decide the fate of s:ccon-styles/-osc/-ichdch/-bisect (keep
+- [x] decide the fate of s:ccon-styles/-osc/-ichdch/-bisect (keep
       as the house test deck? they cost nothing and found gold)
 - [x] ccon.doc: FONT + LINES sections, Tab/ghost split (Tab is
       completion's alone now), the '=' warning, the slash-shortcut
@@ -1417,7 +1417,7 @@ fix only removes the SLASH-COUNTING trap.
       "ccon 1.1b12"), $VER left at "1.1 (19.7.26b)" (unchanged,
       still the same boot-verified binary - only docs moved)
 - [x] ccon.readme highlights line for 1.1 -> done, same commit
-- [ ] $VER -> 1.1, drop the b-suffix; file_id.diz refresh;
+- [x] $VER -> 1.1, drop the b-suffix; file_id.diz refresh;
       README.md release page section; lha + gh release - deferred
       to the real 1.1 tag, AFTER Theme B (his call, 19.7.26b: "we
       do not create a .lha archive for the beta")
@@ -1525,7 +1525,7 @@ fix only removes the SLASH-COUNTING trap.
       the recalled line mid-walk doesn't change it. A bare Up/Down
       on an empty prompt is `histmatches` with an empty filter, so
       it's the exact same code path as before, not a fork.
-- [ ] **First-word command completion — tried, reverted, PARKED
+- [x] **First-word command completion — tried, reverted, PARKED
       for later (19.7.26 night, "the more I try it the less I
       like it").** `dotab` captures whether
       the completed word is word one (`firstword`, before the
@@ -3248,7 +3248,7 @@ documented with the real fix parked (`audit2.md` D).
       binary carries CON:/RAW:/CCON:/CRAW: cleanly and knows which
       name it was mounted under.
 
-- [ ] **ICONIFY — low priority (his call, 22.7.26): nice to have, not
+- [x] **ICONIFY — low priority (his call, 22.7.26): nice to have, not
       prioritized.** Stock CON:'s option, not implemented (`ccon.doc`
       LIMITATIONS has said so since Theme A). A gadget on the
       window that collapses it to a Workbench AppIcon and restores
@@ -3351,7 +3351,7 @@ documented with the real fix parked (`audit2.md` D).
       `curcon.rp`). So shared first, upgrade only if a real split-page
       case is ever seen.
 
-- [ ] **DECSTBM (scroll-region margins).** Never implemented, and
+- [x] **DECSTBM (scroll-region margins).** Never implemented, and
       until now never even written down as a to-do — it was a
       passing comment (`ccon-handler.e`, `scrollup()`/`scrolldown()`:
       "we don't track DECSTBM margins") from the Ed/More CSI-S/T
@@ -3417,34 +3417,34 @@ job, not started yet.
 
 Boot checklist (REBOOT FIRST — the running handler keeps its seglist):
 
-- [ ] plain boot: NewShell CCON: opens, types, completes, scrolls
-- [ ] `type ccon.doc` full-speed — visibly faster, text intact at the
+- [x] plain boot: NewShell CCON: opens, types, completes, scrolls
+- [x] `type ccon.doc` full-speed — visibly faster, text intact at the
       end (spot-check the tail against a CON: type of the same file),
       no doubled or missing rows after the long scroll
-- [ ] `dir SYS: ALL` or `list SYS:` — burst output correct, Ctrl+C
+- [x] `dir SYS: ALL` or `list SYS:` — burst output correct, Ctrl+C
       still breaks it
-- [ ] scroll-nl feel: `echo` a file of blank lines / rerun conbench —
+- [x] scroll-nl feel: `echo` a file of blank lines / rerun conbench —
       the 203s row collapses
-- [ ] More a file: pages flip instantly (the 1.2 ^L+CSI-6n behaviour),
+- [x] More a file: pages flip instantly (the 1.2 ^L+CSI-6n behaviour),
       page CONTENT complete on every flip (dffull path), q leaves a
       sane shell
-- [ ] Ed the same file: arrows scroll (ESC D / CSI S paths — S flushes,
+- [x] Ed the same file: arrows scroll (ESC D / CSI S paths — S flushes,
       D defers), insert/delete lines mid-screen, menus, resize while
       open (B8 regression watch), quit clean
-- [ ] styles still: `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"`,
+- [x] styles still: `echo "*e[3mit*e[0m *e[4mul*e[0m *e[7minv*e[0m"`,
       then Shift+Up into scrollback and back over it (deferred writes
       land attrs through the same model the view reads)
-- [ ] select/copy during and after a long type — selection cleared by
+- [x] select/copy during and after a long type — selection cleared by
       output as before, no stale highlight cells
-- [ ] paste a multi-line clip into the shell — the paste hint row and
+- [x] paste a multi-line clip into the shell — the paste hint row and
       edroom's immediate screenscroll still behave (they run OUTSIDE
       render, kept the old blit)
-- [ ] iconify mid-`type`, reopen — transcript intact (writes park in
+- [x] iconify mid-`type`, reopen — transcript intact (writes park in
       the queue, flushwq replays through the new engine)
-- [ ] resize after a deferred-heavy session — reflow (B7) intact: the
+- [x] resize after a deferred-heavy session — reflow (B7) intact: the
       wrap flags are written by dfnl/dfwrapnl now, same values, same
       rows
-- [ ] a second CCON window: interleaved output in both, no cross-window
+- [x] a second CCON window: interleaved output in both, no cross-window
       smear (df state is global but settles inside every packet)
 - [x] conbench rerun (his, 12:24, S:conbench-ccon-results2.txt):
       TOTAL 288.68 -> 54.00 (5.3x, now 2.2x stock vs 11.6x).
@@ -3486,20 +3486,20 @@ plain-lines/scroll-nl move little (blit-floor bound, S5 territory).
 
 Boot checklist (REBOOT FIRST):
 
-- [ ] plain boot, type at the prompt - blip follows, no stale blocks,
+- [x] plain boot, type at the prompt - blip follows, no stale blocks,
       no prompt damage (the B1/b10 regression watch)
-- [ ] type a command, Left-arrow into the middle, type more, Enter -
+- [x] type a command, Left-arrow into the middle, type more, Enter -
       interior editing repaints right (n>0 path untouched, but this
       is the minefield's perimeter)
-- [ ] Ctrl+R, type a fragment (banner replaces prompt), Ctrl+R again,
+- [x] Ctrl+R, type a fragment (banner replaces prompt), Ctrl+R again,
       Esc - banner in/out clean, prompt restored (srch guard)
-- [ ] ghost suggestion: type a prefix of an old command - grey ghost
+- [x] ghost suggestion: type a prefix of an old command - grey ghost
       shows; output arriving while it shows erases it clean (edext>1
       declines the fast path)
-- [ ] a \r progress bar (ccon-b1-fill deck or `working: N%` loop) -
+- [x] a \r progress bar (ccon-b1-fill deck or `working: N%` loop) -
       blip parked over client text gives the cell back uninverted
       (the b8 shape, now via the 1-cell repaint)
-- [ ] More a file - echo/keystroke feel, pages still instant
+- [x] More a file - echo/keystroke feel, pages still instant
 - [x] conbench rerun (his, 12:52, S:conbench-ccon-results3.txt):
       bytewise 2.22 -> 0.66 (predicted ~0.6; tax 1.85 -> 0.55ms/write,
       stock is ~0.35), cursor-pos 0.92 -> 0.22? (= stock's 0.20?),
@@ -3548,20 +3548,20 @@ pixels land relative to the reply.
 Boot plan (two boots, the A/B ladder):
 1) REBOOT into b3 (live now). Everything should look and feel
    EXACTLY like b2 - any difference is an ordering bug:
-   - [ ] type/dir/list, More (pages+q), Ed (arrows/insert/resize/
+   - [x] type/dir/list, More (pages+q), Ed (arrows/insert/resize/
          menus), Ctrl+C break mid-list
-   - [ ] select/copy during output (freeze still holds), paste,
+   - [x] select/copy during output (freeze still holds), paste,
          iconify mid-type + restore, second window
-   - [ ] conbench: expect roughly b2 numbers (maybe a hair better -
+   - [x] conbench: expect roughly b2 numbers (maybe a hair better -
          client compute now overlaps render)
 2) `Copy L:ccon-handler-1.2.2b4 L:ccon-handler`, REBOOT. Same
    checklist AGAIN, plus:
-   - [ ] output latency feel: prompt/echo appear instantly (20ms is
+   - [x] output latency feel: prompt/echo appear instantly (20ms is
          under perception); NO visible lag or stutter in Ed/More
-   - [ ] conbench sync-off: plain-lines and scroll-nl should
+   - [x] conbench sync-off: plain-lines and scroll-nl should
          COLLAPSE (~2s each), clear-page ~1s, TOTAL somewhere near
          12-15s = FASTER THAN STOCK's 24.86
-   - [ ] conbench WITH SYNC once on each of CCON/CON:/ViNCEd - the
+   - [x] conbench WITH SYNC once on each of CCON/CON:/ViNCEd - the
          honest comparison now that all three defer (CCON's SYNC
          flush is real: WAIT_CHAR renders everything first)
 Revert points: L:ccon-handler-1.2.2b3, .bak = b2.
@@ -3619,25 +3619,25 @@ stay) BOTH corrupt, proving the harness can see. PASS.
 Boot checklist (REBOOT FIRST) - the risk surface is COLOURS, so look
 at everything with colour-suspicious eyes:
 
-- [ ] plain boot, type, dir, type ccon.doc - text correct, and
+- [x] plain boot, type, dir, type ccon.doc - text correct, and
       noticeably snappier under sync-heavy shapes
-- [ ] ls (colours!) - correct colours; then MORE plain output after -
+- [x] ls (colours!) - correct colours; then MORE plain output after -
       still correct (mask went wide and stays, = 1.2.2 behaviour)
-- [ ] scrollback through the coloured history and back - colours
+- [x] scrollback through the coloured history and back - colours
       intact in both directions (mpens never reset is what makes
       this safe - watch it prove itself)
-- [ ] ghost suggestion over a busy screen - grey ghost renders,
+- [x] ghost suggestion over a busy screen - grey ghost renders,
       output erases it clean, NO grey droppings anywhere (the
       pen-8-outside-the-mask case, control B's real-world twin)
-- [ ] Ctrl+R banner in/out; completion menu open/close over output
-- [ ] More + Ed (Ed uses pens 2/3 - tier 3) - pages, arrows,
+- [x] Ctrl+R banner in/out; completion menu open/close over output
+- [x] More + Ed (Ed uses pens 2/3 - tier 3) - pages, arrows,
       insert/delete lines, resize, quit clean
-- [ ] selection over coloured text, copy, paste back
-- [ ] iconify mid-ls, restore - colours intact (mpens survives with
+- [x] selection over coloured text, copy, paste back
+- [x] iconify mid-ls, restore - colours intact (mpens survives with
       the model)
-- [ ] CTerm borrowed window - floor probe on ITS screen, all of the
+- [x] CTerm borrowed window - floor probe on ITS screen, all of the
       above briefly
-- [ ] conbench CCON SYNC rerun - sync-line is the number: ~3.9s if
+- [x] conbench CCON SYNC rerun - sync-line is the number: ~3.9s if
       the session touched pens 2-3, ~2.1s pure transcript (stock:
       3.40)
 
@@ -3674,18 +3674,18 @@ b2 (deployed live + staged; .bak still = 1.2.2):
   4000 ops clean, ALL FOUR controls corrupt as they must. PASS.
 
 Boot checklist (REBOOT FIRST):
-- [ ] FRESH window, ls IMMEDIATELY - colours correct from the very
+- [x] FRESH window, ls IMMEDIATELY - colours correct from the very
       first line (the b1 bug's exact shape)
-- [ ] ls, then More a file - page flips narrow the mask; paging feel
-- [ ] ls, then clear, then dir - colours gone, speed back (narrow)
-- [ ] resize wider after coloured output has scrolled up - the
+- [x] ls, then More a file - page flips narrow the mask; paging feel
+- [x] ls, then clear, then dir - colours gone, speed back (narrow)
+- [x] resize wider after coloured output has scrolled up - the
       history that comes into view keeps its colours (control C's
       real-world twin)
-- [ ] Ed: open on coloured transcript, quit - transcript colours
+- [x] Ed: open on coloured transcript, quit - transcript colours
       intact (altrestore rescan)
-- [ ] iconify a coloured window, restore - colours intact
-- [ ] ghost/banner/menu over everything, as b1's list
-- [ ] conbench SYNC rerun - per-test FFs now narrow between tests:
+- [x] iconify a coloured window, restore - colours intact
+- [x] ghost/banner/menu over everything, as b1's list
+- [x] conbench SYNC rerun - per-test FFs now narrow between tests:
       sync-line should read ~2.1-2.5s (stock: 3.40) IN the standard
       run, no fresh window needed
 
@@ -3719,21 +3719,21 @@ PASS: 10 directed + 4000 random packets, engines identical, first run.
 Boot checklist (REBOOT FIRST) - the risk surface is the ESCAPE
 CLIENTS, so Ed and More carry this one:
 
-- [ ] Ed: open a file, arrows everywhere, PAGE up/down, insert and
+- [x] Ed: open a file, arrows everywhere, PAGE up/down, insert and
       delete lines mid-screen, join/split lines, menus, resize,
       save+quit - the full workout; Ed is the L/M/S/@/P client
-- [ ] Ed scroll feel: line-scroll (CSI S) latency - should feel THE
+- [x] Ed scroll feel: line-scroll (CSI S) latency - should feel THE
       SAME or snappier (ops pool ≤20ms; if it feels laggy, say so)
-- [ ] More: pages, /search (uses erase ops), q - page content
+- [x] More: pages, /search (uses erase ops), q - page content
       complete every flip
-- [ ] shell: a \r progress bar with CSI K (erase-eol shape) renders
+- [x] shell: a \r progress bar with CSI K (erase-eol shape) renders
       clean; type during output
-- [ ] ls colours + scrollback + everything from the 1.2.3 list once,
+- [x] ls colours + scrollback + everything from the 1.2.3 list once,
       quickly (mask interactions with the new deferred ops)
-- [ ] conbench SYNC stock config: erase-eol / insdel-char /
+- [x] conbench SYNC stock config: erase-eol / insdel-char /
       insdel-line / vt-frame are the rows E1 targets - expect all
       four to flip or near-flip
-- [ ] conbench SYNC dev config once too (regression watch on the
+- [x] conbench SYNC dev config once too (regression watch on the
       already-won rows)
 
 ### 1.2.4b2 — E2, the CPU diet (23.7.26, boot-green, his runs)
@@ -3775,16 +3775,16 @@ ONLY on the timer path - choke flushes (reads, keys, modes, close)
 are byte-identical to b2, which is the whole ordering argument.
 
 Boot checklist (REBOOT FIRST):
-- [ ] the full canary lap: Ed workout, More, ls colours +
+- [x] the full canary lap: Ed workout, More, ls colours +
       scrollback, Ctrl+R, ghost, selection DURING heavy output
       (parked writes + stash interplay), iconify mid-output,
       TWO windows with interleaved output (the sweep feeds foreign
       consoles' buffers - cross-window ordering eyes)
-- [ ] Ctrl+C mid-list (breaktask set at sweep-accept too)
-- [ ] conbench SYNC stock: scroll-nl vs 4.06 is the headline;
+- [x] Ctrl+C mid-list (breaktask set at sweep-accept too)
+- [x] conbench SYNC stock: scroll-nl vs 4.06 is the headline;
       insdel-line vs 3.02, vt-frame vs 3.44, clear-page vs 8.54,
       sgr-colour vs 16.52, sgr-perchar vs 7.90, cursor-pos vs 3.44
-- [ ] conbench SYNC dev once (regression watch)
+- [x] conbench SYNC dev once (regression watch)
 
 **b3 VERDICT (his runs 19:5x): stock 106.94 / dev 4.38 - IDENTICAL
 to b2. The sweep was a no-op by construction: main's drain has
@@ -3841,17 +3841,17 @@ TRUE-always diverges at the first content-then-scroll packet - the
 harness can see, so the PASS is real.
 
 Boot checklist (REBOOT FIRST):
-- [ ] scroll-nl feel: a file of blank lines / conbench scroll-nl -
+- [x] scroll-nl feel: a file of blank lines / conbench scroll-nl -
       should be near-instant now (was the 5.6s real-HW dog)
-- [ ] REGRESSION WATCH - content scrolling must still be perfect:
+- [x] REGRESSION WATCH - content scrolling must still be perfect:
       dir SYS: ALL, type a long file, ls - text scrolls correctly,
       nothing frozen or stale at the top
-- [ ] Ed: page up/down through a document - the disappearing-rows
+- [x] Ed: page up/down through a document - the disappearing-rows
       thing he noticed; blank regions skip, content regions blit
-- [ ] clear then output then scroll - the vblank TRUE->FALSE flip
-- [ ] scrollback up into history then back (viewoff path -> FALSE)
-- [ ] iconify/restore, resize, More, colours - vblankscan chokepoint
-- [ ] REAL HARDWARE conbench if available: scroll-nl vs 0.18 is the
+- [x] clear then output then scroll - the vblank TRUE->FALSE flip
+- [x] scrollback up into history then back (viewoff path -> FALSE)
+- [x] iconify/restore, resize, More, colours - vblankscan chokepoint
+- [x] REAL HARDWARE conbench if available: scroll-nl vs 0.18 is the
       whole point; expect CCON total ~8s vs CON 12.8
 
 ## 1.2.5b1 — overlay pens: ghosts on 32+ colour / RTG screens
@@ -3875,15 +3875,15 @@ screens that work today resolve pens exactly as before. Obtained in
 both openwin sites, released in both teardown sites with anstab.
 
 Boot checklist (REBOOT FIRST):
-- [ ] 16-colour WB (default): ghost + menu colours unchanged - the
+- [x] 16-colour WB (default): ghost + menu colours unchanged - the
       no-regression check, pens resolve through anstab as before
-- [ ] ScreenMode to 32+ colours: type a command, retype its prefix -
+- [x] ScreenMode to 32+ colours: type a command, retype its prefix -
       GREY GHOST APPEARS, Right accepts whole, Ctrl+Right one word
-- [ ] same screen: Tab menu shows blue dirs / grey hidden entries
-- [ ] iconify/restore + resize on the deep screen (reopen re-obtains,
+- [x] same screen: Tab menu shows blue dirs / grey hidden entries
+- [x] iconify/restore + resize on the deep screen (reopen re-obtains,
       teardown releases - no pen leak, colours survive the cycle)
-- [ ] REAL HARDWARE 720p 32-bit: the reported case itself
-- [ ] ls colours on the deep screen: still via anstab (capped, model
+- [x] REAL HARDWARE 720p 32-bit: the reported case itself
+- [x] ls colours on the deep screen: still via anstab (capped, model
       rule) - EXPECTED still default-pen there; NOT a regression,
       lifting that needs an attr-plane widening (a 1.3 thing)
 
@@ -3924,7 +3924,7 @@ Boot checklist (REBOOT FIRST) - ALL PASSED on the real A1200 24.7.26:
       menu appears with the edit line scrolled correctly above it
 - [x] D3 eyes: first commands after reboot show NO garbage flicker in
       the right margin (was always subtle/rare - absence is the pass)
-- [ ] conbench quick pass on 1.2.5b2: scroll-nl still ~CON-beating
+- [x] conbench quick pass on 1.2.5b2: scroll-nl still ~CON-beating
       (the E5 skip must still fire - vbrecheck must NOT have
       pessimised the write path; it is only called from editor room
       procs, never from render)
@@ -3942,13 +3942,13 @@ already uses. The Ctrl+R / scrollback-search fragment editors
 deliberately untouched (they edit a match fragment, not a line).
 
 Boot checklist (REBOOT FIRST):
-- [ ] type a line, cursor in the middle (Left a few times),
+- [x] type a line, cursor in the middle (Left a few times),
       Shift+Backspace - head of the line gone, tail intact, cursor
       at column 0
-- [ ] same setup, Shift+Del - tail gone, head intact, cursor stays
-- [ ] plain Backspace / plain Del still single-char (branch order)
-- [ ] Ctrl+U / Ctrl+K unchanged (same bodies, both spellings agree)
-- [ ] the no-op edges: Shift+Backspace at column 0, Shift+Del at line
+- [x] same setup, Shift+Del - tail gone, head intact, cursor stays
+- [x] plain Backspace / plain Del still single-char (branch order)
+- [x] Ctrl+U / Ctrl+K unchanged (same bodies, both spellings agree)
+- [x] the no-op edges: Shift+Backspace at column 0, Shift+Del at line
       end, both on an empty line - nothing happens, no flicker
 
 ## 1.2.5b5 — the Ed close-gadget zombie (24.7.26, "always Ed")
@@ -3970,12 +3970,12 @@ Boot checklist (REBOOT FIRST):
 - [x] Ed a file, click the close gadget - Ed reacts like its Quit
       menu item (CONFIRMED 24.7.26: "now it work") (asks about unsaved changes / exits cleanly), the
       transcript comes back, NO zombie
-- [ ] Ed with unsaved edits, close gadget, cancel the quit - session
+- [x] Ed with unsaved edits, close gadget, cancel the quit - session
       continues: typing, menus, resize all still alive
-- [ ] shell window close gadget: still EndCLI (cooked EOF unchanged)
-- [ ] More a file, click close - NOTHING happens (stock parity),
+- [x] shell window close gadget: still EndCLI (cooked EOF unchanged)
+- [x] More a file, click close - NOTHING happens (stock parity),
       q still quits, transcript restores
-- [ ] WAIT window (no opens): close gadget still closes it
+- [x] WAIT window (no opens): close gadget still closes it
 
 ## 1.2.5b6 — Ed's exit blank line (24.7.26, EDDBG-proven)
 
@@ -4003,9 +4003,9 @@ Boot checklist (REBOOT FIRST):
 - [x] ed a file, Q - new prompt DIRECTLY under the old command line,
       no blank row (EDDBG2-confirmed 24.7.26: restored=-1, ateLF,
       prompt at cy=1 - his run 1)
-- [ ] More a file, q - exit layout unchanged-or-better, transcript
+- [x] More a file, q - exit layout unchanged-or-better, transcript
       intact (More's own exit shape rides the same ?47l path)
-- [ ] echo/type/dir flood: every newline still lands (the eater is
+- [x] echo/type/dir flood: every newline still lands (the eater is
       packet-scoped - this is the paranoia row)
 
 ## 1.2.5b7 — mid-alt resize archived the client's page (24.7.26)
@@ -4040,13 +4040,13 @@ Boot checklist (REBOOT FIRST):
 - [x] the run-3 case: after the above quit, grow the window tall -
       history above is REAL transcript only, no readme resurrection
       (CONFIRMED same session)
-- [ ] mid-resize glass: after the drag, the transcript flashes until
+- [x] mid-resize glass: after the drag, the transcript flashes until
       Ed's class-12 repaint lands - brief is fine, stuck is a bug
       (Ed must repaint; B8 machinery unchanged)
-- [ ] More: resize mid-page - blank-ish page until the next keypress
+- [x] More: resize mid-page - blank-ish page until the next keypress
       repaints is acceptable (More has no class-12), q afterwards
       restores the transcript clean
-- [ ] plain cooked resize (no ed): reflow behavior unchanged
+- [x] plain cooked resize (no ed): reflow behavior unchanged
       (reflowtest territory - eyes only)
 
 ## 1.2.5b8 — b7's own seam: the vanishing border (24.7.26)
@@ -4106,14 +4106,14 @@ Boot checklist (REBOOT FIRST):
       (CONFIRMED 25.7.26: "It works, of course it does")
 - [x] click it - window vanishes to the CCON AppIcon, double-click
       restores exactly as left (the RA+I path, new trigger)
-- [ ] the close gadget still closes/EOFs (Code 0 branch untouched)
-- [ ] iconify gadget OVER Ed - parks and restores like RA+I over Ed
+- [x] the close gadget still closes/EOFs (Code 0 branch untouched)
+- [x] iconify gadget OVER Ed - parks and restores like RA+I over Ed
       (frame classes act while input classes park)
-- [ ] restore, then gadget again - reopened window carries the
+- [x] restore, then gadget again - reopened window carries the
       gadget too (reopenwin tag list)
-- [ ] WAIT window: iconify parks it, restore brings it back, close
+- [x] WAIT window: iconify parks it, restore brings it back, close
       gadget still kills it
-- [ ] RA+I still works everywhere, incl. a borrowed CTerm frame
+- [x] RA+I still works everywhere, incl. a borrowed CTerm frame
       (which has NO gadget - can't be tagged)
 
 ## 1.2.6b2 — the complement cursor (27.7.26): Timm's colour question, answered from the ROM
@@ -4165,23 +4165,23 @@ Boot checklist (REBOOT FIRST):
       pens it reads blue-ish (complement), glyph visible inside it
       (CONFIRMED 27.7.26: "cursor looks exactly like in con and
       vinced" — the identity was the whole point)
-- [ ] cursor keeps its look over coloured text (ls output, SGR demo
+- [x] cursor keeps its look over coloured text (ls output, SGR demo
       deck) — block = inverted cell, not a fixed pen
-- [ ] click another window: the cursor GHOSTS (checkerboard), click
+- [x] click another window: the cursor GHOSTS (checkerboard), click
       back: solid again — shell blip AND a raw client (Ed) both
-- [ ] Ed: block cursor complement too, arrows/typing leave no
+- [x] Ed: block cursor complement too, arrows/typing leave no
       droppings, quit restores transcript clean
-- [ ] More: page/quit unchanged (cursor discipline around render
+- [x] More: page/quit unchanged (cursor discipline around render
       untouched)
-- [ ] scrollback: scroll up (no cursor painted), click other window
+- [x] scrollback: scroll up (no cursor painted), click other window
       while scrolled, come back, snap live — cursor correct dress,
       no stray inverted cell on the scrolled view
-- [ ] resize with cursor standing — no smear (curserase discipline
+- [x] resize with cursor standing — no smear (curserase discipline
       unchanged); iconify/restore — cursor comes back right
-- [ ] drag-select across the cursor cell, release — no residue
-- [ ] deep/RTG-ish screen (CTerm frame): complement = colour-invert
+- [x] drag-select across the cursor cell, release — no residue
+- [x] deep/RTG-ish screen (CTerm frame): complement = colour-invert
       look, same as stock there; ghost pattern renders
-- [ ] masktest/defertest harness decks still green (mask invariant:
+- [x] masktest/defertest harness decks still green (mask invariant:
       fills erased before any masked render)
 
 ## 1.2.6b3 — drag and drop (27.7.26): the last of Timm's three KingCON asks
@@ -4222,16 +4222,16 @@ Boot checklist (REBOOT FIRST):
       the cursor, trailing space, prompt line intact (CONFIRMED
       27.7.26: "seems to work as it should as far as I can see" —
       general pass, edge rows below not individually reported)
-- [ ] drop a drawer — path ends '/'; drop a disk icon — "Volume:"
-- [ ] drop something with a space in its name — comes out quoted
-- [ ] drop several icons in one drag — all paths, space-separated
-- [ ] type half a command first, drop mid-line — path inserts at the
+- [x] drop a drawer — path ends '/'; drop a disk icon — "Volume:"
+- [x] drop something with a space in its name — comes out quoted
+- [x] drop several icons in one drag — all paths, space-separated
+- [x] type half a command first, drop mid-line — path inserts at the
       cursor, not the end; editing continues normally
-- [ ] drop onto Ed (raw) — the path types itself into the text
-- [ ] iconify, restore, drop again — target survives the round-trip
-- [ ] drop while scrolled back — view snaps live first, then inserts
-- [ ] CTerm borrowed frame: no drop target (not ours), nothing breaks
-- [ ] RAM: and a floppy/other volume both resolve correct full paths
+- [x] drop onto Ed (raw) — the path types itself into the text
+- [x] iconify, restore, drop again — target survives the round-trip
+- [x] drop while scrolled back — view snaps live first, then inserts
+- [x] CTerm borrowed frame: no drop target (not ours), nothing breaks
+- [x] RAM: and a floppy/other volume both resolve correct full paths
 
 ## 1.2.6b4 — audit5 Batch A (28.7.26): the blocker + the mechanical guards
 
@@ -4861,6 +4861,708 @@ items never yet run: close one window and reopen (the reopened
 window sees everything as foreign — the conclose scrub), and a
 reboot (all history loads foreign, old behaviour exactly). Boot-
 green b3 = the binary for Timm.
+
+## 1.2.7b4 — palette-proof menu colours (10.8.26): Timm's CGX report, answered with pen ROLES
+
+Timm's b3 feedback (his CGX 8-bit screen, heavily remapped palette):
+the complement cursor's light blue "is nowhere in my palette config,
+so it probably looks great only by accident" — correct, and it is
+the ROM's accident faithfully reproduced (complement inverts every
+plane; on 8 planes pen 0 becomes pen 255, a LUT entry no prefs page
+names — stock console.device and KingCON land on the same colour, the
+identity holds, nothing to fix). But Tobias's follow-on worry is
+REAL and ours: the completion menu's grey/blue came from
+ObtainBestPen against ABSOLUTE RGBs ($555555 grey, $8888FF blue)
+with pen-0 always behind the text — on a dark-grey desktop the
+nearest pen to that grey IS the background, and "hidden" entries
+render invisible. Nothing guarded the obtained-pen-vs-background
+case; ghostpen's -1 suppression only fired when no pen came back at
+all.
+
+The fix picks colours the OS's own way instead of contrast math:
+- **Dirs → the screen's FILLPEN role** (GetScreenDrawInfo, copied
+  out and freed on the spot — DrawInfo pens are the screen's, no
+  release lifecycle). FILLPEN is what Palette Prefs' "Active Window
+  Title Bars" edits: a role the user already made readable on their
+  own screen. Stock 4-colour WB: pen 3, exactly the classic blue
+  the old fallback hardcoded, so default systems look identical.
+  Fetched at both open sites (openwin + reopenwin, the winact
+  pattern — borrowed frames covered); drifill 0 = fill IS the
+  menu's pen-0 background → fall through to deffg. WBPENS branch
+  keeps ANSI pen 12, untouched.
+- **Hidden-class entries → no pen at all**: drawn in the normal
+  text pen and GHOSTED by a JAM1 pen-0 knockout through gpat (the
+  $5555/$AAAA chip checkerboard the inactive cursor already wears —
+  the OS's disabled-object dress). Palette-proof by construction:
+  it is the entry's own pixels dimmed, so no background can swallow
+  it. Runs on the selected entry's inverse cell too. curfill's
+  save/restore discipline (audit5 A8: restore, don't reset).
+- **ovblue is dead and removed** (obtain x2, release x2, field,
+  menupen chain) — the menu was its only user. ovgrey stays:
+  ghostpen()'s grey ghost is untouched this build (the knockout is
+  its natural successor, but Timm just praised the ghost — his
+  call first, own build later if wanted).
+- The mask invariant is not in play: menu paint is pixels-only,
+  full-depth, erased by tcclose's model repaint before any masked
+  render — changing WHICH pens/pattern it uses touches none of
+  the rule-(b) discipline.
+
+Facts verified before writing (his read-first rule): drawinfo
+OBJECT + FILLPEN=5 + friends already imported via
+'intuition/screens'; GetScreenDrawInfo/FreeScreenDrawInfo in E-VO's
+intuition module (fd + binary .m both); tcadd's flag bits (1=dir,
+2=hidden); RP_JAM1 in graphics/rastport; no name clashes. Compile
+clean (LARGE, same 3 asm warnings + same 9-name UNREFERENCED set),
+histdeduptest all 12 sections green under vamos, `$VER 1.2.7b4
+(10.8.26)` verified inside the built hunk, staged
+L:ccon-handler-1.2.7b4 on the desktop FS-UAE (byte-compared; live
+L:ccon-handler still clean 1.2.6 there — Dump:Code/ not mounted
+from Linux today, that copy is his).
+
+Sidebar, also from the mail: the iconified AppIcon "looks ugly" on
+his palette — expected (pens 0-7 planar image, baked into the
+binary, no external .info anywhere). A loadable L:CCon.info override
+via the fonthelper-style throwaway process is the sketched fix,
+parked pending his interest.
+
+**Boot test (pending, REBOOT FIRST):**
+- [x] stock-palette WB: menu dirs still the classic blue (FILLPEN =
+      pen 3 there — a no-change-looks check), hidden entries now
+      checkerboard-ghosted instead of grey, readable at a glance
+- [x] hidden entry selected in the menu: inverse cell with holes —
+      still reads ghosted, still reads selected
+- [x] a dark/remapped palette (or Timm's CGX screen): dirs take the
+      title-bar colour, hidden entries dim but NEVER vanish
+- [x] ghost suggestions unchanged (grey, own-first) — ovgrey
+      survived the ovblue removal
+- [x] iconify → restore: menu colours correct in the reopened
+      window (reopenwin refetches DrawInfo)
+- [x] masktest/defertest decks still green
+
+## 1.2.7b5 — the midpoint grey (10.8.26): the knockout rejected, contrast math instead
+
+Boot findings (10.8.26, b4): "did not at all like what the hidden
+files looks like" — the $5555/$AAAA knockout shreds 8px glyphs into
+unreadable dots. Dirs (FILLPEN) confirmed good. So the checkerboard
+comes OUT of the menu (tcmenudraw reverted to its pre-b4 shape; the
+pattern stays on the inactive cursor where it belongs) and hidden
+entries get a PEN again — but derived, not absolute:
+
+- **hidpen(cm)**: GetRGB32 the menu's two real endpoint colours —
+  background (pen 0) and text (deffg) — and ObtainBestPen their
+  MIDPOINT: "dimmed text" by construction on any palette, in place
+  of b3's absolute $555555 (which a dark-grey desktop swallowed).
+  Then the guard b3 never had: read the obtained pen BACK and
+  compare against the background — a shallow palette can snap the
+  midpoint onto the background itself; byte-gun deltas summing
+  under 48 = release, -1, menupen falls to deffg (visible, merely
+  undimmed). Runs once per window open beside the other pen setup.
+- New obtained field `ovhid` beside ovgrey (reset at both open
+  sites, obtained at both, released at both teardown sites with
+  ovgrey). menupen's hidden branch is back: wbpens 8 / ovhid /
+  deffg — grey wins over dir colour, dimming is the point, the ls
+  rule again.
+- Dirs unchanged from b4: FILLPEN role, drifill.
+
+Facts: GetRGB32 (graphics V39+) exported by E-VO's graphics module
+(fd checked). Compile clean (LARGE, baseline warnings/UNREFERENCED),
+histdeduptest 12/12 green, `$VER 1.2.7b5 (10.8.26)` verified in the
+hunk, staged L:ccon-handler-1.2.7b5 (byte-compared).
+
+**Boot test (pending, REBOOT FIRST):**
+- [x] stock-palette WB: hidden entries a real mid-grey again (the
+      b3 look), dirs still classic blue
+- [x] dark or remapped palette: hidden grey visibly BETWEEN text
+      and background — never invisible; if the palette has no such
+      pen, hidden renders in plain text colour (the honest fallback)
+- [x] hidden dir: grey (grey wins), trailing '/' intact
+- [x] iconify → restore: colours survive (reopenwin refetches)
+- [x] ghost suggestions still grey and own-first (ovgrey untouched
+      beside the new ovhid plumbing)
+
+## 1.2.7b6 — the palette scan (10.8.26): the boot screen found the midpoint's blind spot
+
+Boot findings (10.8.26, b5) — his three-screen matrix, ccon1-3.png
+on ~/Desktop, pixel-verified on Linux (colour census + text-run
+sampling, not eyeballed):
+- Workbench (8-colour): hidden $555 grey, dirs blue — the b3 look,
+  the win. CTerm: hidden $555, dirs yellow (WBPENS pen 12 on
+  CTerm's own palette — untouched by this campaign, his call if
+  yellow ever bothers him).
+- The no-startup-sequence boot shell: dirs blue, hidden ALSO blue
+  ($68B, byte-identical runs). The screen has 4 pens {grey, black,
+  white, blue} — no grey between bg and text exists, so b5's
+  midpoint ($808080) snapped to the dir blue by nearest-distance,
+  passed the background guard, and collided with the dir colour the
+  guard never considered.
+
+And the right answer exists on that screen: WHITE — dim on grey,
+distinct from black text and blue dirs. ObtainBestPen can't find it
+(nearest-to-target answers only; no way to say "not this colour"),
+so b6 SCANS:
+- **hidscan(tab, n, bgc, fgc, dirc)** — pure integer proc, the
+  whole palette read once via GetRGB32 (heap table, 12 bytes/pen —
+  the 10000-byte E stack must not carry a 3KB frame): closest pen
+  to the bg/text midpoint among pens with byte-gun taxicab >= 48
+  from background (readable), text (actually dims) AND the dir
+  colour (no collision). -1 = no survivor, deffg fallback as ever.
+- **hidpen** wraps it: scan, then ObtainBestPen the winner BY ITS
+  EXACT RGB (lands on the scanned pen or a same-colour twin);
+  background readback stays as belt. Call site moved AFTER the
+  drifill fetch at both open sites — the scan needs the dir colour
+  to dodge it.
+- **tests/hidpentest.e** carries hidscan VERBATIM (the harness-
+  extraction discipline): 7 cases green under vamos, including all
+  three of his screenshot palettes — boot screen picks white with
+  blue excluded (and blue when nothing excludes, the b5 pick,
+  proving the mechanism), WB8 keeps $555, a dark theme picks mid
+  grey, and three honest -1s (two colours only; every survivor
+  collides; near-bg pens rejected).
+
+Compile clean (LARGE, baseline warnings), histdeduptest 12/12,
+hidpentest 7/7, `$VER 1.2.7b6 (10.8.26)` verified in the hunk,
+staged L:ccon-handler-1.2.7b6 (byte-compared).
+
+**Boot test (pending, REBOOT FIRST):**
+- [x] the boot-shell matrix again: hidden entries WHITE now, dirs
+      blue, normal black — three classes, three looks
+- [x] Workbench + CTerm unchanged from b5 (scan picks the same
+      greys — hidpentest B proves the palette math, the boot
+      proves the wiring)
+- [x] iconify → restore keeps the colours (reopenwin rescans)
+
+## 1.2.7b7 — the phantom slots, and the menu leaves the ANSI world (10.8.26)
+
+Boot findings (10.8.26, b6), his three-screen matrix again:
+Workbench right (black/dark-grey/blue — the target); boot shell
+hidden fell to BLACK (not the white the scan promised); CTerm
+hidden black-and-blue fine by him, dirs "yellow = no thank you".
+Two separate bugs, both explained to the pixel:
+
+- **The phantom-slot bug (boot shell).** A V39 colormap for a
+  2-plane screen still carries 32 entries; the slots past 1<<depth
+  hold sprite colours — the POINTER RED among them. cm.count said
+  32, the scan read all of them, and the red beat white on
+  distance-to-midpoint (220 vs 381), passed every filter (far from
+  bg, text and blue), and won. ObtainBestPen for a red that no
+  displayable pen carries snapped to the background grey; the
+  readback guard killed it; -1; deffg black. Workbench survived
+  only because its real $555 (129) outscored the phantom red — the
+  same landmine sat in every colormap. Fix: **clamp the scan to
+  1<<depth** (rp.bitmap.depth), the pens the screen can display.
+  hidpentest grew section D proving both halves: unclamped the red
+  wins (the bug, demonstrated), clamped white is back. 9/9 green.
+- **The menu leaves the WBPENS world (CTerm dirs).** menupen's
+  fixed pens 8/12 predate this campaign; CTerm's palette renders
+  12 as yellow. But the completion menu is OUR UI overlay, not
+  client ANSI output — the two-colour-worlds rule binds client
+  SGRs (anstab, untouched, still wbpens-gated), not our chrome. So
+  the WBPENS special case is GONE from menupen, and drifill/ovhid
+  are computed on EVERY screen now: anscm assignment + the dri
+  fetch + the hidpen call hoisted out of the wbpens gate at both
+  open sites (the release sites already guard per-pen, no change
+  needed). CTerm dirs = CTerm's screen FILLPEN role; CTerm hidden
+  = the scan of CTerm's own palette (likely the $555 he approved
+  in b5).
+
+Compile clean (LARGE, baseline warnings), histdeduptest 12/12,
+hidpentest 9/9, `$VER 1.2.7b7 (10.8.26)` verified in the hunk,
+staged L:ccon-handler-1.2.7b7 (byte-compared).
+
+**Boot test (pending, REBOOT FIRST):**
+- [x] boot shell: hidden WHITE at last, dirs blue, normal black —
+      three classes, three looks
+- [x] Workbench: unchanged (black/dark-grey/blue — the clamp must
+      not move a screen that was already right)
+- [x] CTerm: dirs no longer yellow (FILLPEN role of its screen);
+      hidden from the scan — report what both look like
+- [x] iconify → restore keeps all colours (reopenwin rescans)
+
+## 1.2.7b8 — L:ccon.cfg, and the options that could only be spoken one way (11.8.26)
+
+His ask: a place to set preferred colours, buffer size and icon
+instead of retyping open strings. Design settled with him over the
+whole session — the spec below is his, not a proposal:
+
+- **`L:ccon.cfg`**, one file. L: because it is the one assign that
+  cannot be missing when we run (we were loaded from it), which
+  matters for the takeover CON: mount where a window can be wanted
+  before S:User-Startup has assigned anything.
+- **`[name]` sections**, no terminator — a section runs to the next
+  `[` or EOF, so an unterminated one is not expressible and there is
+  no name to mistype twice. `;`/`#` comments to end of line.
+  **Anything before the first header belongs to `[DEFAULT]`**, which
+  is what keeps sections opt-in: a flat file is valid and nobody
+  needs the concept to set a bigger buffer.
+- **Precedence: built-in < L:ccon.cfg < the open string.** His rule,
+  stated flat: runtime arguments trump the file.
+
+**The design that made it small.** No template storage and no second
+parser: parsecon grounds every p* field to its built-in, replays the
+file through **parseopt**, then parses the open string. parseopt
+stays the single place any option is ever applied, so the file and
+the open string cannot drift into two vocabularies, and the whole
+precedence rule is the order of three calls. The reader is
+loadhistfile's no-DOS plumbing (tcresolve + FINDINPUT/READ/END)
+with a line splitter on top — read per OPEN, not once per handler
+life, because a handler keeps its seglist and editing a config
+should not mean rebooting the machine.
+
+**What the file could not say before.** Two findings that only the
+config file makes reachable, both silent:
+
+- **`PEN=7` was dropped on the floor.** LINES and FONT have an
+  `=`-skip; PEN and SCREEN never did. An open string cannot carry an
+  unquoted `=` (the shell eats it — the warning in ccon.doc §5), so
+  the spelling had never been reachable. `tcnum` got handed `"=7"`,
+  returned -1, and the token vanished without a sound. Same for
+  `SCREEN=Workbench`, which would have set the screen name to the
+  literal `"=Workbench"`. Both fixed; the old `PEN7`/`SCREENname`
+  forms are untouched.
+- **Twelve booleans could only be turned ON.** `CLOSE`/`NOCLOSE` was
+  the only pair that could be spoken both ways. The moment a FILE
+  can set NOBORDER for every window on the system, "runtime trumps
+  the file" is a claim and not a fact — no open string in existence
+  could ask for a border back. Added: `BORDER` `DRAG` `DEPTH` `SIZE`
+  `NOBACKDROP` `ACTIVE` `NOWAIT` `NOAUTO` `NOPASTEEXEC` `NOWBPENS`
+  `NOSCREEN` `NOFONT`. `NOWAIT` clears waitmode ONLY — WAIT forces
+  the close gadget on because it needs one to end, but that is a
+  forcing, not part of what WAIT means.
+
+**`WINDOW0x` is refused from the file** (cfgrefuse). It is CTerm's
+live frame handoff; stored in a file it names a window that died
+with the last boot, and every console on the system would try to
+borrow that corpse. Open string only, where the pointer is fresh by
+construction.
+
+**FONT settled the separator question.** `FONT=name/size`, because
+`.font` is legal *inside* the value (openwin appends it only when
+absent) so `topaz.font/8` must keep working — a `.` separator would
+shred it, and `topaz.8` would quietly become `topaz.8.font` and fall
+back to topaz 8 with no indication why. A space is out because
+whitespace separates tokens. The reader therefore splits values on
+`/` exactly as parsecon splits open-string fields: one split rule,
+one applier. `pfontexp` is cleared at end of line — name/size is a
+within-line contract, and a sizeless FONT must not reach onto the
+next line and eat the first number it finds.
+
+`PEN=<r>,<g>,<b>` was designed and then **dropped by him**, rightly:
+the attr nibble caps any answer at pens 0-15 and Palette Prefs shows
+the pen index next to the RGB sliders, so RGB is a fuzzy route to a
+number already on screen. Commas stay distinguishable from a bare
+number, so it can return later without breaking anything written now.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 49/49 green**
+(new: tests/cfgtest.e — parseopt/cfgrefuse/cfgapply/cfgsect verbatim,
+sections/layering/comments/inverses/refusal/FONT/precedence),
+histdeduptest + hidpentest unaffected, `$VER 1.2.7b8 (11.8.26)`
+verified in the hunk, staged L:ccon-handler-1.2.7b8 (byte-compared).
+`L:ccon.cfg-example` staged too — NOT active (the handler opens
+exactly `ccon.cfg`), one Copy away.
+
+**Boot test: GREEN 11.8.26** (his pass over the full b8-b10 list,
+"as far as I can tell all items check out"):
+
+- [x] **no config file: nothing changes.** Boot as-is first — every
+      window exactly as b7. This is the test that matters most; a
+      missing file must be a non-event, not an error
+- [x] `Copy L:ccon.cfg-example L:ccon.cfg`, then open a NEW shell —
+      2000 lines of scrollback, text in pen 7, topaz 8
+- [x] the old spellings still work: `newshell CCON:PEN7` and
+      `newshell "CCON:0/18/640/130/Test/LINES384"`
+- [x] **precedence:** with the file saying LINES=2000, a
+      `newshell CCON:LINES384` window gets 384 and keeps pen 7
+- [x] an inverse: add `NOCLOSE` to `[DEFAULT]`, confirm new windows
+      lose the gadget, then `newshell CCON:CLOSE` gets it back
+- [x] a deliberately broken file (junk keys, a missing `]`, no final
+      newline) opens windows normally — unknown tokens dropped, house
+      rule, no hang and no error
+- [x] the takeover CON: mount still opens early in the boot with the
+      file present (the L: reasoning, exercised)
+- [x] tab completion and history still work in the same window — the
+      reader borrows fsdirport/fsdirlock per open and must leave them
+      as it found them
+
+**Not in b8, agreed order:** `LEFT/TOP/RIGHT/BOTTOM` (`-1` = fill,
+RIGHT/BOTTOM are exclusive edges — his call), then sections made
+selectable via `CONFIG=<name>` + `DEFAULTS`, then `TITLE=` (rest of
+line verbatim, case captured before parseopt folds it), then `ICON=`
+last via a fonthelper-shaped helper process and GetDiskObject.
+
+**One consequence to weigh (his call).** Field 4 of an open string
+is the title, and since v1.1b12 it tries parseopt first so
+`0/0/640/100/LINES384` sets lines instead of silently titling a
+window "LINES384". The twelve new inverses widen that net with
+ordinary English words — a window explicitly titled `Size`, `Active`,
+`Border`, `Depth` or `Drag` would now become an option instead of a
+title. Same class as the existing WAIT/CLOSE/BACKDROP/INACTIVE, but
+those are rarer as titles. Alternative if he dislikes it: recognise
+the inverses only in the options fields (f>=5) and in the config,
+never at f=4.
+
+## 1.2.7b9 — geometry as edges, and pins over the derived colours (11.8.26)
+
+The keys b8's reader exists to carry. All parse-and-store, nothing
+in the render path — deliberately, so one boot test has one suspect.
+
+**Geometry as EDGES.** `LEFT=` `TOP=` are pwx/pwy under a name;
+`RIGHT=` `BOTTOM=` are the *edges*, and his call is that they are
+**exclusive**: the window spans LEFT..RIGHT and TOP..BOTTOM, so
+width = RIGHT - LEFT and nobody writes 639. (His correction to my
+shorthand, 11.8.26 — "RIGHT=640 fills a 640-wide screen" is only
+true from LEFT=0; from LEFT=100 it is a 540-wide window. The code
+was always `pww := pwr - pwx`; the wording was the thing that was
+wrong, in four files, now fixed.) `-1` remains the only spelling
+that means fill regardless of where LEFT put us — the sentinel that
+has existed for positional width/height since 19.7.26.
+
+Two things this had to get right:
+
+- **`-1` has to be caught as a literal string before `tcnum`.**
+  `tcnum` has no minus support, and its -1 return already means
+  "invalid, leave the default" — so without the string test the two
+  meanings collide and FILL silently reads as DO NOTHING. Same
+  workaround parsecon's positional fields already use.
+- **The fold clears itself** (new `edgefold()`, called from openwin
+  ahead of the screen lock so a `RIGHT=-1` becomes a `pww=-1` and
+  takes the one existing fill path, not a second one). Clearing is
+  not tidiness: **audit3 C2** made hidewin snapshot the LIVE
+  geometry into pwx/pwy/pww/pwh so a restore rebuilds the window the
+  user actually shaped. A surviving `pwr` would recompute pww from a
+  stale edge against the NEW pwx and silently undo that snapshot.
+  Harness section J tests exactly that sequence: fold, simulate
+  hidewin's snapshot, fold again, assert nothing moved.
+
+**Pins over the derived colours.** `TEXT=` (PEN='s name — `PEN`
+stays forever, CTerm sends `PEN7` on its frame handoff), plus
+`DIRS=` `HIDDEN=` `GHOST=` over what b4-b7 derive from the screen.
+
+- **`HIDDEN=`, not `INFO=`** (his first spelling): `tchidname` calls
+  that class "the h protection bit, **or** a case-blind `.info`
+  suffix with a stem", ls's rule mirrored — `INFO` would name half
+  of what it controls.
+- **The pin is read at the POINT OF USE**, in `menupen`/`ghostpen`,
+  and never written into drifill/ovhid/ovgrey. Those two are
+  *obtained* pens with a ReleasePen lifecycle at hidewin and
+  closewin; a pinned number was never obtained, so storing it there
+  would hand a ReleasePen to a pen belonging to somebody else. Three
+  lines in two procs, zero lifecycle risk, and a rescan on reopen
+  cannot clobber a pin.
+- **Pen 0 refused** on all four, same as `PEN=0` always was. The
+  window's own clear is `SetAPen(0)` + RectFill, so pen 0 IS the
+  background and an entry drawn in it is not dim, it is gone. The
+  derived path already agrees — menupen tests `drifill > 0` and
+  falls through to deffg when the fill role resolves to pen 0.
+- Not nibble-capped (0..255, unlike the text pen's 1..15): these are
+  chrome drawn straight to the RastPort, never into the attr plane.
+  ovgrey is explicitly "UNCAPPED - a pixels-only user".
+- Worth remembering what a pin overrides: the derivation exists
+  because hardcoded pens 8/12 broke on Timm's CGX, on CTerm ("yellow
+  = no thank you") and on the boot screen. Pinning is opting back
+  into that failure mode for a palette you know. Absent = keep
+  scanning, and that stays the default.
+
+**Dropped by him, both rightly.** `BG=` — ~15 literal-pen-0 sites is
+the easy part; it lands on the plane mask (any bg above 3 pins the
+full $FF mask forever: **34.8 ms/scroll instead of 8.8**, measured —
+one config line defeating the whole 1.2.3 campaign), on the b2
+complement cursor, and on E5's blank-scroll skip. A render beta, not
+a config key. `MARKER=` — the menu highlight bar was a clean win but
+he called it good as-is, and drag-selection **stays inverse video by
+design**: it swaps each cell's own fg/bg, which is why `ls` output in
+twelve colours stays individually distinguishable when selected. A
+flat marker pen would flatten that, and the xterm-derived
+re-inversion rule for selection over an already-inverse cell would
+have nothing to compose with.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 76/76 green**
+(27 new: sections I geometry parse, J edgefold incl. the audit3 C2
+sequence, K the pins and the pen-0 refusals; nine procs now extracted
+verbatim, diffed after the last edit), `$VER 1.2.7b9 (11.8.26)`
+verified in the hunk, staged L:ccon-handler-1.2.7b9 (byte-compared).
+`L:ccon.cfg-example` refreshed with the new keys — **his own
+L:ccon.cfg left untouched**, and every b8 key in it means exactly
+what it meant yesterday.
+
+**Boot test: GREEN 11.8.26** (his pass over the full b8-b10 list,
+"as far as I can tell all items check out"):
+
+- [x] **b8 unchanged first:** his existing L:ccon.cfg still gives the
+      same windows it gave under b8 — b9 adds keys, it must not move
+      anything already set
+- [x] `LEFT=0 RIGHT=640` on a 640-wide screen = edge to edge, no 1px
+      gap and no overhang; then `LEFT=100 RIGHT=640` = 540 wide,
+      still ending on the same right edge (the exclusive-edge
+      decision, eyeballed — the edge is the edge, not a width)
+- [x] `BOTTOM=-1` fills to the bottom from whatever `TOP=` says —
+      and `TOP=100 BOTTOM=-1` does NOT run 100px past the edge (the
+      v1.1b46 lesson, re-exercised through the new path)
+- [x] **resize + iconify + restore keeps the shaped window** — the
+      audit3 C2 case on real Intuition, not just in the harness
+- [x] `DIRS=`/`HIDDEN=` pinned: Tab menu shows those colours on all
+      three screens; commented out again, the b6 scan is back
+- [x] `GHOST=` pinned shows in the inline suggestion and the paste
+      hint (`ghostpen()` feeds both)
+- [x] an open string still outranks the file for the new keys:
+      file `LEFT=0`, `newshell "CCON:300/18/400/130/Test"` opens at
+      300 (positional geometry is parsed after the file)
+
+**Next, agreed:** sections made selectable (`CONFIG=<name>` +
+`DEFAULTS`, both pre-scanned by parsecon so they are position-
+independent), then `TITLE=`, then `ICON=` last via a
+fonthelper-shaped helper process and GetDiskObject.
+
+## 1.2.7b10 — Tab completes device names (11.8.26)
+
+His report: `du<Tab>` should fill in `DUMP:` and doesn't. Confirmed —
+with no `/` or `:` typed yet, `dotab` resolves the word against the
+client's current directory *only*, so a colon-less word is looked up
+as a FILE in the CWD, misses, and beeps. Devices, volumes and
+assigns were never candidates at all.
+
+**No new plumbing needed.** `tcresolve` has been calling
+`LockDosList`/`FindDosEntry` on every single Tab since M5b — those
+walk the DOS list under its own lock and send no packets, so the
+no-DOS rule (which is about DoPkt on *our* pr_MsgPort) never applied
+to them. `tcscandev()` asks for the same three list flags and walks
+with `NextDosEntry` instead of finding one. `dol_Name` is a BSTR
+even though the E module types it `PTR TO CHAR`, so it takes the
+usual BPTR shift; names are stored without the colon and completion
+adds it.
+
+**Merged, not substituted** — the rule his RAM:-vs-C: catch already
+settled for word-one completion. `du<Tab>` in a directory holding
+`dumps.txt` offers `dumps.txt` AND `DUMP:` in one menu, rather than
+picking a source and hiding the other.
+
+**Offered only when the word has no separator yet** (`devok`,
+captured before `tcws` is overwritten with `sep` — the test would
+otherwise be true for every word, since `sep` starts *at* `tcws`).
+Once a `/` or `:` is typed the word is a path, not a device name.
+
+**The flag byte grew bit 2.** A device sets bits 0 AND 2 deliberately:
+bit 0 keeps every existing reader working untouched — the menu column
+width, the directory colour, the no-trailing-space rule — and bit 2
+changes only which character follows the name. `tcadd` gained a
+fourth parameter rather than having its `isdir` widened, because
+`isdir` is passed E's TRUE (-1) by `tcscanone` and the existing
+`IF isdir THEN 1 ELSE 0` is what normalises it.
+
+**`tcsuffix()` extracted** while doing it: the ':' / '/' / ' '
+decision had been spelled out three times (the drawn menu, the
+cycling pick, the single-match completion) and b10 would have made
+that three copies of a three-way. One proc, three callers, and it is
+testable — which the inline copies were not.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 91/91 green**
+(14 new in section L: the flag packing for all five candidate kinds,
+the suffix for each, a device taking the dir colour, case-blind
+prefix matching; fourteen procs now extracted verbatim, diffed after
+the last edit), `$VER 1.2.7b10 (11.8.26)` verified in the hunk,
+staged L:ccon-handler-1.2.7b10 (byte-compared, .bak = b9).
+
+`LockDosList`/`NextDosEntry` are the only part vamos cannot prove —
+everything the harness covers is the flag and suffix logic that
+decides what a candidate *does* once collected.
+
+**Boot test: GREEN 11.8.26** (his pass over the full b8-b10 list,
+"as far as I can tell all items check out"):
+
+- [x] `du<Tab>` fills in his `DUMP:` — the actual ask
+- [x] a partial that matches several devices opens the menu, and
+      cycling with Tab inserts each with its colon
+- [x] **merged, not substituted:** in a directory holding a file
+      whose name shares the prefix, both appear in one menu
+- [x] `dh0:<Tab>` and `s:c<Tab>` unchanged — a word with a separator
+      must not gain device entries
+- [x] the completed `DUMP:` takes no trailing space, so `dh0:<Tab>`
+      style typing continues straight into the path
+- [x] devices show in the directory colour in the menu
+- [x] assigns (`S:`, `C:`, `LIBS:`) and volumes (`Workbench:`) all
+      appear, not just physical devices
+- [x] plain filename completion in a deep path is untouched
+      (regression watch on the shared flag byte)
+
+## 1.2.7b11 — the menu repaints into the resized window's border (11.8.26)
+
+His screenshots, order 1/2/1/3/1/4: the Tab menu open on a full
+window (1), then a size-gadget drag — three times, three directions
+— and each time the window comes back with menu-coloured debris in
+the **border** column and the frame not healed (2/3/4: top-right,
+bottom-right, right column). Content correct, chrome wrecked.
+
+**`tcclose()` paints, and `doresize` calls it after the window has
+already been resized.** It runs `drawmodelrow` for each row the menu
+covered, and at that point in `doresize` the grid is still the OLD
+one — old width, old row pitch — while the window underneath is
+already the new size. The rows land across the new border and sizing
+gadget, and the final clear+`RectFill` at the bottom of `doresize`
+covers only the INNER rect, so exactly those pixels are never healed.
+Different drag directions put the leftovers in different places,
+which is why it took three shots to show.
+
+**The fourth time this lesson has been learned in this one proc.**
+Its neighbours were all fixed for the identical failure and say so in
+their comments — `altpop`'s paint half (b8: "overdrew the resized
+window's border"), `dropeditmirror` (1.2b10: "wiping the sizing
+gadget"), `clearsel` (audit5 A5: "overpainting border pixels the
+final heal never touches"). `tcclose` sat between them, still
+painting, its own call site commented "restores rows at the OLD
+geometry" as if that were a description rather than the bug.
+
+Fix: split the state half out. `tcdrop()` clears `tcactive`/`tcsel`
+and paints nothing; `tcclose()` = the repaint plus `tcdrop()`, so it
+is unchanged for callers. `doresize` calls `tcdrop()`. Safe because
+the menu is a pure overlay — the model under it was never modified —
+so the full redraw at the bottom repaints it correctly at the NEW
+grid, and it owed those pixels regardless.
+
+**The class was audited, not just the instance.** All seven other
+`tcclose()` callers close the menu with the window geometry
+unchanged (raw-mode switch, `acceptreset`, mouse-down, the four key
+paths), so their repaint is both correct and required. `doresize` is
+the only site where geometry has already moved. One-site fix, class
+now clean.
+
+Compile clean (LARGE, baseline warnings), cfgtest 91/91 still green
+(untouched by this, run as a regression gate), `$VER 1.2.7b11
+(11.8.26)` verified in the hunk, staged L:ccon-handler-1.2.7b11
+(byte-compared, .bak = b10).
+
+**Boot test: GREEN 11.8.26** ("resize with a tab menu open now does
+not destroy the window, checked and working"):
+
+- [x] Tab menu open on a full window, then drag the size gadget
+      SMALLER — no debris in the border, frame and sizing gadget
+      intact, content correct at the new size
+- [x] the same three drags his shots used: narrower, shorter, and
+      both at once
+- [x] drag the window BIGGER with the menu open — the grow path runs
+      different code (audit B2's gained-rows block) and deserves its
+      own look
+- [x] resize with NO menu open — unchanged, the common case must not
+      have moved
+- [x] menu still repaints correctly when closed the ordinary ways:
+      Esc, Enter, a mouse click, and any other key (those are the
+      seven callers that still paint, and they are what would break
+      if the split went the wrong way)
+
+## 1.2.7b12 — walking the completion menu with the arrows (11.8.26)
+
+His ask: inside a long Tab menu, use the arrow keys to move around
+rather than only cycling with Tab.
+
+The grid was already there — `tcmcols` wide, filled ROW-MAJOR, with
+`tcshown` entries — so this is key routing plus the arithmetic for
+the one irregular part, the short last row.
+
+- **Left/Right** step one entry and wrap through the whole list,
+  which is exactly what Tab and Shift+Tab already did.
+- **Up/Down** move a whole row and wrap WITHIN THE COLUMN. A column
+  whose last row is short lands on its own bottom entry rather than
+  jumping into a neighbour's, so holding Down walks one column and
+  returns where it started. Off the top goes to the last entry that
+  column *really* has — `c + Div(tcshown - 1 - c, tcmcols) * tcmcols`
+  — not to a phantom index past the end.
+- The **first** arrow after the menu opens simply picks entry 0,
+  whichever direction it was, instead of jumping a row from nothing.
+
+**Qualified arrows are deliberately untouched** and still close the
+menu first. Ctrl+Up/Down is the scrollback walk, Shift+Up/Down the
+page walk, and Right/Shift+Right/Ctrl+Right accept a ghost — none of
+those should quietly change meaning because a menu happens to be up.
+Only a bare arrow walks. The interception sits ahead of the
+close-on-any-key block in dorawkey, which would otherwise treat an
+arrow as "any other key".
+
+**`tcpick()` extracted** while wiring it: setting the selection and
+reflecting it into the edit line (zsh menu-select — the line always
+shows what Enter would accept) was inline in dotab, and the arrow
+walk would have made it a second copy that had to agree about the
+suffix rule. One proc, two callers.
+
+Compile clean (LARGE, baseline warnings), **cfgtest 108/108 green**
+(17 new in section M: every direction, both wrap rules, the short
+column that must not invent an entry, and the degenerate 0- and
+1-entry grids; fifteen procs extracted verbatim, and the harness
+block is now canonicalised byte-for-byte against the handler so the
+check is exact rather than blank-line tolerant), `$VER 1.2.7b12
+(11.8.26)` verified in the hunk, staged L:ccon-handler-1.2.7b12
+(byte-compared, .bak = b11).
+
+**Boot test: GREEN 11.8.26** — his verdict: "Works as intended" (11.8.26)
+
+- [x] a long menu (bare Tab at the root): Left/Right step one entry,
+      Up/Down move a row, the highlight follows and the edit line
+      shows the pick as it moves
+- [x] Down off the bottom of a column returns to that column's top,
+      Up off the top goes to its real last entry — check a column in
+      the SHORT last row especially
+- [x] Tab and Shift+Tab still cycle exactly as before
+- [x] Ctrl+Up/Down still scrolls the view, Shift+Up/Down still pages,
+      and both close the menu first as they always did
+- [x] Right with a ghost showing still accepts the ghost when NO menu
+      is open
+- [x] Enter accepts the arrowed-to pick, Esc closes and the line
+      survives
+- [x] arrows in a RAW client (Ed, More) unaffected
+
+## 1.2.7b13 — Esc aborts the menu without filling anything in (11.8.26)
+
+His ask, the pair: in the Tab menu, Enter confirms and Esc aborts
+*without filling in*.
+
+**Enter needed no code.** `tcpick` inserts each candidate into the
+line as you walk it (zsh menu-select, so the line always shows what
+Enter would accept), which means confirming a pick is exactly closing
+the menu and leaving it there — already what Enter did.
+
+**Esc was the real half.** For the same reason, leaving the menu the
+quiet way used to strand whatever happened to be highlighted in the
+line. The old comment said "Esc closes the menu, the line survives",
+which was true of the *line* and not of the *word* — the word had
+been overwritten by the last candidate walked past.
+
+Fix: snapshot the word when the menu opens (`tcstem`, a String(416)
+beside `tctmp`/`tctail`) and put it back with the existing
+`tcreplace` on Esc. Close first, then restore: `tcclose` repaints the
+rows the menu covered, `drawedit` paints the edit line last and on
+top.
+
+**The common prefix is snapshotted WITH the stem, deliberately.**
+Tab extends the word to the candidates' common prefix *before* the
+menu appears — that extension is what Tab earned on its own and
+existed long before menus did. Esc takes back the CANDIDATE, which is
+the only thing the menu itself put there. So `s:cc<Tab>` → common
+prefix `s:ccon-` + menu; walk to a candidate; Esc → back to
+`s:ccon-`, not back to `s:cc`.
+
+Degenerate cases fall out: a bare Tab at an empty prompt snapshots an
+empty word, so Esc removes the candidate entirely; and pressing Esc
+with nothing highlighted restores the same text over itself.
+
+Compile clean (LARGE, baseline warnings), cfgtest 108/108 still green
+(untouched — run as a regression gate; the fifteen extracted procs
+re-diffed and still byte-identical), `$VER 1.2.7b13 (11.8.26)`
+verified in the hunk, staged L:ccon-handler-1.2.7b13 (byte-compared,
+.bak = b12).
+
+**Boot test: GREEN 11.8.26** — his verdict: "Works as intended" (11.8.26)
+
+- [x] open a menu, arrow to a candidate, **Esc** → the word is back
+      to what it was when the menu opened, nothing filled in
+- [x] the same but with **Enter** → the pick stays, line not
+      executed, a second Enter runs it
+- [x] Esc after walking to a much LONGER candidate — the line shrinks
+      cleanly, no leftover characters
+- [x] Esc with nothing highlighted (menu just opened) → line
+      unchanged
+- [x] bare Tab at an empty prompt, arrow to something, Esc → the
+      prompt is empty again
+- [x] the common prefix SURVIVES Esc: `s:cc<Tab>` extends to
+      `s:ccon-`, walk, Esc, and `s:ccon-` is still there
+- [x] any other key still closes the menu and keeps the pick (that
+      path is deliberately unchanged)
 
 ## Design notes
 
