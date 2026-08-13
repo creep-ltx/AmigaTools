@@ -39,12 +39,38 @@
    "mid-packet dfflush" (legacy no-op) to stand in for the pixel
    escapes. Directed scenarios first, then seeded-random packets -
    no Date/random dependency, the LCG is fixed-seed so every run is
-   the same run. */
+   the same run.
+
+   v3 (J1, 1.2.8): JUMP=n jump scroll. Both engines' nl() grows the
+   handler's exact bottom-margin fork: scroll jmp rows (one blit /
+   jmp ring advances) and land the cursor jmp rows up. Three claims:
+
+     A. engine equivalence survives jumping - the full v2 suite runs
+        at jmp 1 (regression, the untouched claim), 3 and ROWS-1,
+        legacy vs deferred cell-identical throughout;
+     B. jumping changes WHEN rows scroll, never WHAT the console
+        holds: for pure stream output (no FF, no region ops, no
+        cursor jumps - the only traffic jumpok() lets jump) the
+        logical stream [rows scrolled into history] ++ [visible rows
+        0..cy] of a jmp=3 deferred run equals a jmp=1 legacy run's,
+        wrap flags included, cursor column identical, and every
+        visible row BELOW the jumped cursor is blank;
+     C. the harness can SEE (controls): a jump that forgets to clear
+        the vacated ring rows, and one that lands the cursor a row
+        low, must both diverge - plus v2's forced-blank lie, kept.
+
+   Claim B is the one that needed a new instrument: the transcript
+   log - every row appended to history at scroll time, compared as
+   an append-only stream with a watermark, plus the ring-offset
+   (d0 = dtn-ltn) alignment of the two visible regions. */
 
 CONST COLS=10, ROWS=6, SBMAX=16,
       MCELLS=160,               -> SBMAX * COLS: the model planes
       SCELLS=60,                -> ROWS * COLS: the screen grids
-      PACKETS=4000, PKMAX=40
+      PACKETS=4000, PKMAX=40,
+      TRMAX=6000,               -> transcript rows per engine (claim B)
+      TRPACKETS=300             -> claim B packet count (avg ~14
+                                -> scrolls per packet stays under TRMAX)
 
 DEF -> legacy engine: model+attr+wrap ring, screen grid, cursor
     lm[MCELLS]:ARRAY OF CHAR, la[MCELLS]:ARRAY OF CHAR,
@@ -67,6 +93,20 @@ DEF -> legacy engine: model+attr+wrap ring, screen grid, cursor
                                 -> the screen is provably blank
     forcevb=FALSE,              -> control: force dvblank TRUE always
                                 -> (a lie) - must make the grids diverge
+    -> v3 (J1): per-engine jump counts (1 = classic scroll-by-one;
+    -> phases A set both alike, claim B runs legacy@1 vs deferred@3)
+    ljmp=1, djmp=1,
+    -> claim B: the transcript logs - every row that leaves the
+    -> visible region, in order, content + attr + wrap flag
+    trlog=FALSE,                -> appending armed (B/C phases only -
+                                -> the A phases would overflow TRMAX)
+    ltrm:PTR TO CHAR, ltra:PTR TO CHAR, ltrw:PTR TO CHAR, ltn=0,
+    dtrm:PTR TO CHAR, dtra:PTR TO CHAR, dtrw:PTR TO CHAR, dtn=0,
+    trchk=0,                    -> transcript rows already proven equal
+    trover=FALSE,               -> TRMAX exceeded (phase ends cleanly)
+    -> claim C controls, deferred engine's jump only: a lie each
+    forcejclear=FALSE,          -> jump skips the vacated-row clears
+    forcejland=FALSE,           -> jump lands the cursor one row low
     -> the current attr both engines stamp on writes; varied per packet
     -> so a span painted from the wrong row or column shows up in the
     -> attr plane even when the glyphs happen to match
@@ -103,7 +143,20 @@ PROC lclearrow(r)
 ENDPROC
 
 PROC lscroll()
-  DEF i
+  DEF i, off
+  IF trlog                          -> v3 claim B: row 0 enters history
+    IF ltn < TRMAX
+      off := Mul(lrow(0), COLS)
+      FOR i := 0 TO COLS - 1
+        ltrm[Mul(ltn, COLS) + i] := lm[off + i]
+        ltra[Mul(ltn, COLS) + i] := la[off + i]
+      ENDFOR
+      ltrw[ltn] := lw[lrow(0)]
+      ltn := ltn + 1
+    ELSE
+      trover := TRUE
+    ENDIF
+  ENDIF
   FOR i := 0 TO SCELLS - COLS - 1   -> ScrollRaster: shift up one row,
     lsm[i] := lsm[i + COLS]         -> vacated bottom row cleared
     lsa[i] := lsa[i + COLS]
@@ -117,11 +170,17 @@ PROC lscroll()
 ENDPROC
 
 PROC lnl()
+  DEF k
   lcx := 0
   lcy := lcy + 1
   IF lcy >= ROWS
-    lscroll()
-    lcy := ROWS - 1
+    IF ljmp > 1                     -> v3 (J1): the handler's outnl fork
+      FOR k := 1 TO ljmp DO lscroll()
+      lcy := ROWS - ljmp
+    ELSE
+      lscroll()
+      lcy := ROWS - 1
+    ENDIF
   ENDIF
   lw[lrow(lcy)] := 0
 ENDPROC
@@ -316,7 +375,20 @@ ENDPROC
 
 -> dfscroll(), the handler shape: ring bookkeeping + pend/full/shift
 PROC dscroll()
-  DEF r
+  DEF r, i, off
+  IF trlog                          -> v3 claim B: row 0 enters history
+    IF dtn < TRMAX
+      off := Mul(drow(0), COLS)
+      FOR i := 0 TO COLS - 1
+        dtrm[Mul(dtn, COLS) + i] := dm[off + i]
+        dtra[Mul(dtn, COLS) + i] := da[off + i]
+      ENDFOR
+      dtrw[dtn] := dw[drow(0)]
+      dtn := dtn + 1
+    ELSE
+      trover := TRUE
+    ENDIF
+  ENDIF
   dtop := Mod(dtop + 1, SBMAX)
   dclearrow(ROWS - 1)
   IF dfull THEN RETURN
@@ -339,11 +411,23 @@ PROC dscroll()
 ENDPROC
 
 PROC dnl()
+  DEF k
   dcx := 0
   dcy := dcy + 1
   IF dcy >= ROWS
-    dscroll()
-    dcy := ROWS - 1
+    IF djmp > 1                     -> v3 (J1): the handler's dfnl fork
+      FOR k := 1 TO djmp
+        dscroll()
+        IF forcejclear              -> control: "forgot the clear" -
+          dm[Mul(drow(ROWS - 1), COLS)] := 99  -> stale junk survives
+        ENDIF                       -> in a vacated row
+      ENDFOR
+      dcy := ROWS - djmp
+      IF forcejland THEN dcy := (ROWS - djmp) + 1  -> control: a row low
+    ELSE
+      dscroll()
+      dcy := ROWS - 1
+    ENDIF
   ENDIF
   dw[drow(dcy)] := 0
 ENDPROC
@@ -709,64 +793,10 @@ PROC directed()
   feed(b, 6, t++)
 ENDPROC
 
-PROC main()
-  DEF p, n, i, c
-  directed()
-  FOR p := 0 TO PACKETS - 1
-    curat := 1 + Mod(p, 7)          -> a fresh attr stamp per packet
-    n := 1 + rnd(PKMAX - 1)
-    FOR i := 0 TO n - 1
-      c := rnd(100)
-      IF c < 40
-        pkt[i] := 33 + rnd(90)      -> printable
-      ELSEIF c < 56
-        pkt[i] := 10                -> LF - scroll pressure is the point
-      ELSEIF c < 60
-        pkt[i] := 13
-      ELSEIF c < 63
-        pkt[i] := 9
-      ELSEIF c < 65
-        pkt[i] := 8
-      ELSEIF c < 68
-        pkt[i] := 12
-      ELSEIF c < 71
-        pkt[i] := 1                 -> mid-packet flush (forcing packet)
-      ELSEIF c < 74
-        pkt[i] := 2                 -> E1: K
-      ELSEIF c < 76
-        pkt[i] := 3                 -> J
-      ELSEIF c < 79
-        pkt[i] := 4                 -> @
-      ELSEIF c < 82
-        pkt[i] := 5                 -> P
-      ELSEIF c < 85
-        pkt[i] := 6                 -> L
-      ELSEIF c < 88
-        pkt[i] := 7                 -> M
-      ELSEIF c < 90
-        pkt[i] := 14                -> S
-      ELSEIF c < 92
-        pkt[i] := 15                -> T
-      ELSE
-        pkt[i] := 20 + rnd(6)       -> cursor jump
-      ENDIF
-    ENDFOR
-    feed(pkt, n, 100 + p)
-    IF fails > 4
-      WriteF('stopping after \d failures\n', fails)
-      RETURN
-    ENDIF
-  ENDFOR
-  IF fails > 0
-    WriteF('\d FAILURES in the honest run\n', fails)
-    RETURN
-  ENDIF
-  WriteF('honest run PASS: 10 directed + \d random packets identical\n', PACKETS)
-  -> E5 control: force the blank-skip flag TRUE always (claim every
-  -> screen is blank, even mid-content). A correct harness MUST now
-  -> diverge - if it does not, the blank-skip test proves nothing.
-  forcevb := TRUE
-  fails := 0
+-> ---------------- v3: state reset, generators, claim B ----------------
+
+PROC reset()
+  DEF i
   seed := $1234
   dtop := 0; dcx := 0; dcy := 0; ltop := 0; lcx := 0; lcy := 0
   FOR i := 0 TO MCELLS - 1
@@ -778,7 +808,254 @@ PROC main()
   FOR i := 0 TO SBMAX - 1
     lw[i] := 0; dw[i] := 0
   ENDFOR
+  dpend := 0
+  dfull := FALSE
   dvblank := TRUE
+  ltn := 0; dtn := 0; trchk := 0
+  trover := FALSE
+ENDPROC
+
+-> the v2 full-alphabet packet (region ops, cursor jumps, FF included)
+PROC randfull()
+  DEF i, n, c
+  n := 1 + rnd(PKMAX - 1)
+  FOR i := 0 TO n - 1
+    c := rnd(100)
+    IF c < 40
+      pkt[i] := 33 + rnd(90)      -> printable
+    ELSEIF c < 56
+      pkt[i] := 10                -> LF - scroll pressure is the point
+    ELSEIF c < 60
+      pkt[i] := 13
+    ELSEIF c < 63
+      pkt[i] := 9
+    ELSEIF c < 65
+      pkt[i] := 8
+    ELSEIF c < 68
+      pkt[i] := 12
+    ELSEIF c < 71
+      pkt[i] := 1                 -> mid-packet flush (forcing packet)
+    ELSEIF c < 74
+      pkt[i] := 2                 -> E1: K
+    ELSEIF c < 76
+      pkt[i] := 3                 -> J
+    ELSEIF c < 79
+      pkt[i] := 4                 -> @
+    ELSEIF c < 82
+      pkt[i] := 5                 -> P
+    ELSEIF c < 85
+      pkt[i] := 6                 -> L
+    ELSEIF c < 88
+      pkt[i] := 7                 -> M
+    ELSEIF c < 90
+      pkt[i] := 14                -> S
+    ELSEIF c < 92
+      pkt[i] := 15                -> T
+    ELSE
+      pkt[i] := 20 + rnd(6)       -> cursor jump
+    ENDIF
+  ENDFOR
+ENDPROC n
+
+-> claim B's alphabet: pure stream output - exactly the traffic
+-> jumpok() lets jump in the handler (no FF, no region ops, no cursor
+-> jumps), LF-heavy for scroll pressure
+PROC randstream()
+  DEF i, n, c
+  n := 1 + rnd(PKMAX - 1)
+  FOR i := 0 TO n - 1
+    c := rnd(100)
+    IF c < 45
+      pkt[i] := 33 + rnd(90)
+    ELSEIF c < 70
+      pkt[i] := 10
+    ELSEIF c < 78
+      pkt[i] := 13
+    ELSEIF c < 84
+      pkt[i] := 9
+    ELSEIF c < 88
+      pkt[i] := 8
+    ELSE
+      pkt[i] := 1
+    ENDIF
+  ENDFOR
+ENDPROC n
+
+-> phase A: the v2 lockstep suite at one shared jump count
+PROC phasea(j, base)
+  DEF p, n
+  ljmp := j; djmp := j
+  reset()
+  directed()
+  FOR p := 0 TO PACKETS - 1
+    curat := 1 + Mod(p, 7)          -> a fresh attr stamp per packet
+    n := randfull()
+    feed(pkt, n, base + p)
+    IF fails > 4
+      WriteF('stopping after \d failures (jmp \d)\n', fails, j)
+      RETURN FALSE
+    ENDIF
+  ENDFOR
+  IF fails > 0
+    WriteF('\d FAILURES at jmp \d\n', fails, j)
+    RETURN FALSE
+  ENDIF
+  WriteF('phase A jmp=\d PASS: 10 directed + \d random packets identical\n', j, PACKETS)
+ENDPROC TRUE
+
+-> claim B: feed both engines WITHOUT the grid compare (they run at
+-> different jump counts on purpose), then check the logical stream
+PROC feedb(buf:PTR TO CHAR, n, tag)
+  DEF i, r
+  dpend := 0
+  dfull := FALSE
+  dgen := dgen + 1
+  IF dgen > 255
+    FOR r := 0 TO ROWS - 1
+      dfd[r] := 0
+    ENDFOR
+    dgen := 1
+  ENDIF
+  dblo := ROWS
+  dbhi := -1
+  FOR i := 0 TO n - 1
+    dbyte(buf[i])
+  ENDFOR
+  dflush()
+  FOR i := 0 TO n - 1
+    lbyte(buf[i])
+  ENDFOR
+  trcompare(tag)
+ENDPROC
+
+PROC trbad(tag, why, a, b)
+  fails := fails + 1
+  WriteF('CLAIM-B FAIL packet \d: \s (\d vs \d)\n', tag, why, a, b)
+  WriteF('  ltn=\d dtn=\d lcx=\d lcy=\d dcx=\d dcy=\d trchk=\d\n',
+         ltn, dtn, lcx, lcy, dcx, dcy, trchk)
+ENDPROC
+
+PROC trcompare(tag)
+  DEF d0, i, j, r, x, lo, do2
+  IF trover THEN RETURN           -> a truncated log cannot testify
+  d0 := dtn - ltn
+  -> the deferred run only ever scrolls EARLIER, never less
+  IF d0 < 0 THEN RETURN trbad(tag, 'transcript ran BEHIND', dtn, ltn)
+  IF dcx <> lcx THEN RETURN trbad(tag, 'cursor column', dcx, lcx)
+  IF dcy <> (lcy - d0) THEN RETURN trbad(tag, 'cursor row (ring-adjusted)', dcy, lcy - d0)
+  -> 1: the settled transcript prefix, watermark onward (append-only,
+  -> so each row is checked exactly once across the whole phase)
+  FOR i := trchk TO ltn - 1
+    FOR x := 0 TO COLS - 1
+      IF ltrm[Mul(i, COLS) + x] <> dtrm[Mul(i, COLS) + x] THEN RETURN trbad(tag, 'transcript glyph row', i, x)
+      IF ltra[Mul(i, COLS) + x] <> dtra[Mul(i, COLS) + x] THEN RETURN trbad(tag, 'transcript attr row', i, x)
+    ENDFOR
+    IF ltrw[i] <> dtrw[i] THEN RETURN trbad(tag, 'transcript wrap row', i, 0)
+  ENDFOR
+  trchk := ltn
+  -> 2: rows the jumped run already filed as history but the jmp=1 run
+  -> still shows - D transcript row j = L visible row j-ltn
+  FOR j := ltn TO dtn - 1
+    r := j - ltn
+    FOR x := 0 TO COLS - 1
+      IF dtrm[Mul(j, COLS) + x] <> lsm[Mul(r, COLS) + x] THEN RETURN trbad(tag, 'early-history glyph', j, x)
+      IF dtra[Mul(j, COLS) + x] <> lsa[Mul(r, COLS) + x] THEN RETURN trbad(tag, 'early-history attr', j, x)
+    ENDFOR
+    IF dtrw[j] <> lw[lrow(r)] THEN RETURN trbad(tag, 'early-history wrap', j, 0)
+  ENDFOR
+  -> 3: the visible overlap, ring-offset aligned: L row r = D row r-d0
+  FOR r := d0 TO lcy
+    lo := Mul(r, COLS)
+    do2 := Mul(r - d0, COLS)
+    FOR x := 0 TO COLS - 1
+      IF lsm[lo + x] <> dsm[do2 + x] THEN RETURN trbad(tag, 'visible glyph', r, x)
+      IF lsa[lo + x] <> dsa[do2 + x] THEN RETURN trbad(tag, 'visible attr', r, x)
+    ENDFOR
+    IF lw[lrow(r)] <> dw[drow(r - d0)] THEN RETURN trbad(tag, 'visible wrap', r, 0)
+  ENDFOR
+  -> 4: everything below the jumped cursor is blank - screen AND model
+  FOR r := dcy + 1 TO ROWS - 1
+    do2 := Mul(r, COLS)
+    FOR x := 0 TO COLS - 1
+      IF dsm[do2 + x] THEN RETURN trbad(tag, 'below-cursor screen not blank', r, x)
+      IF dm[Mul(drow(r), COLS) + x] THEN RETURN trbad(tag, 'below-cursor model not blank', r, x)
+    ENDFOR
+  ENDFOR
+ENDPROC
+
+PROC phaseb(base, quiet)
+  DEF p, n
+  ljmp := 1; djmp := 3
+  reset()
+  trlog := TRUE
+  FOR p := 0 TO TRPACKETS - 1
+    curat := 1 + Mod(p, 7)
+    n := randstream()
+    feedb(pkt, n, base + p)
+    IF trover
+      IF quiet = FALSE THEN WriteF('claim B: transcript cap at packet \d (fine, phase ends)\n', base + p)
+      trlog := FALSE
+      RETURN fails = 0
+    ENDIF
+    IF fails > 0
+      trlog := FALSE
+      RETURN FALSE
+    ENDIF
+  ENDFOR
+  trlog := FALSE
+ENDPROC fails = 0
+
+PROC main()
+  DEF p, n, i
+  ltrm := New(Mul(TRMAX, COLS))
+  ltra := New(Mul(TRMAX, COLS))
+  ltrw := New(TRMAX)
+  dtrm := New(Mul(TRMAX, COLS))
+  dtra := New(Mul(TRMAX, COLS))
+  dtrw := New(TRMAX)
+  IF (ltrm = NIL) OR (ltra = NIL) OR (ltrw = NIL) OR
+     (dtrm = NIL) OR (dtra = NIL) OR (dtrw = NIL)
+    WriteF('out of memory for the transcript logs\n')
+    RETURN
+  ENDIF
+  -> phase A: engine lockstep at jmp 1 (the v2 regression), 3, ROWS-1
+  fails := 0
+  IF phasea(1, 100) = FALSE THEN RETURN
+  fails := 0
+  IF phasea(3, 5100) = FALSE THEN RETURN
+  fails := 0
+  IF phasea(ROWS - 1, 10100) = FALSE THEN RETURN
+  -> claim B: jumping must preserve the logical stream exactly
+  fails := 0
+  IF phaseb(15000, FALSE) = FALSE
+    WriteF('claim B FAILED\n')
+    RETURN
+  ENDIF
+  WriteF('claim B PASS: \d stream packets, jmp=3 vs jmp=1 logical streams identical\n', TRPACKETS)
+  -> claim C controls: each lie must make claim B diverge
+  forcejclear := TRUE
+  fails := 0
+  IF phaseb(20000, TRUE)
+    WriteF('control (uncleaned jump rows) did NOT diverge - harness BLIND\nFAIL\n')
+    RETURN
+  ENDIF
+  WriteF('control (uncleaned jump rows) correctly DIVERGES - harness can see\n')
+  forcejclear := FALSE
+  forcejland := TRUE
+  fails := 0
+  IF phaseb(25000, TRUE)
+    WriteF('control (cursor lands a row low) did NOT diverge - harness BLIND\nFAIL\n')
+    RETURN
+  ENDIF
+  WriteF('control (cursor lands a row low) correctly DIVERGES - harness can see\n')
+  forcejland := FALSE
+  -> E5 control: force the blank-skip flag TRUE always (claim every
+  -> screen is blank, even mid-content). A correct harness MUST now
+  -> diverge - if it does not, the blank-skip test proves nothing.
+  ljmp := 1; djmp := 1
+  forcevb := TRUE
+  fails := 0
+  reset()
   FOR p := 0 TO PACKETS - 1
     curat := 1 + Mod(p, 7)
     n := 1 + rnd(PKMAX - 1)
@@ -794,9 +1071,9 @@ PROC main()
         pkt[i] := 10
       ENDFOR
     ENDIF
-    feed(pkt, n, 200 + p)
+    feed(pkt, n, 30000 + p)
     IF fails > 0
-      WriteF('control (forced-blank lie) correctly DIVERGES at packet \d - harness can see\n', 200 + p)
+      WriteF('control (forced-blank lie) correctly DIVERGES at packet \d - harness can see\n', 30000 + p)
       WriteF('PASS\n')
       RETURN
     ENDIF

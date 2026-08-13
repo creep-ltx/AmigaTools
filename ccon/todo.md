@@ -5761,3 +5761,89 @@ histdeduptest, hidpentest. Deployed to `L:ccon-handler`, staged as
 
 **The release ladder from here:** tag `ccon-1.2.7` (done), then the
 `.lha` from his staging, the GH release, and Aminet at his pace.
+
+## 1.2.8b1 — J1: JUMP=n jump scroll (14.8.26)
+
+The copper/blitter read-through (AmigaReferences/
+copper-blitter-and-chip-scheduling.md, the NoCpuDemo study) closed
+with the same doctrine graphics-and-performance.md opened: the
+chipset runs at chipset speed whatever CPU is bolted on, so BLIT
+COUNT is the budget that matters. The 1.2.2-1.2.4 campaigns spent
+that budget down to one ScrollRaster per flush; under SYNC (a
+WAIT_CHAR barrier per line - the only numbers Tobias wants quoted
+now) the cadence is a flush per LINE, S5 pooling cannot help, and
+that one blit per line is the whole remaining bill. J1 stops paying
+it per line: at the bottom margin, scroll JUMP rows in ONE blit and
+let the next JUMP-1 newlines walk down the vacated rows blit-free.
+The scroll bill divides by JUMP; the cursor rides the lower part of
+the window instead of pinning to the last row - xterm's jumpScroll
+trade, stated in the docs.
+
+- `pjump` parsed (JUMP=n / JUMPn, parseopt + the cfg file, 0 =
+  off), `jeff` = pjump clamped to rows-1 in gridcalc (re-clamped on
+  every resize).
+- `jumpok()` gates it to plain streamed cooked output: rawmode or
+  altvalid (More, Ed - anything that owns its cursor geometry) keeps
+  the classic one-line scroll, pixel-identical to 1.2.7.
+- Deferred engine: dfnl() runs dfscroll() jeff times and lands the
+  cursor jeff rows up - dfflush already settles ANY dfpend in one
+  ScrollRaster, so no new blit logic exists to be wrong.
+- Legacy engine: screenscroll() refactored to screenscrolln(n) (one
+  blit, n x per-line ring bookkeeping verbatim); screenscroll() IS
+  screenscrolln(1) for the room-making callers (edroom, pastehint,
+  tab menu, CSI escapes - none jump).
+- ESC D / NEL / CSI S keep one-line semantics untouched.
+
+Known semantic edge, documented in ccon.doc: jumping files the top
+jeff rows into scrollback EARLIER than scroll-by-one would. A
+cooked client that mixes bottom-margin LF scrolling with absolute
+positioning sees its text jeff-1 rows higher than under stock; a
+clear-screen right after a jump leaves rows in history that
+scroll-by-one would have wiped before they got there. Opt-in knob,
+off by default, exactly why.
+
+Harness: defertest v3 (compile clean, run under vamos, PASS first
+run):
+- phase A: the full v2 lockstep suite (10 directed + 4000 random
+  packets, full alphabet) at jmp 1 (regression), 3 and rows-1 -
+  legacy vs deferred cell-identical at every jump count;
+- claim B: the new transcript instrument - for jumpok()'s alphabet
+  (pure stream output), [rows scrolled to history] ++ [visible rows
+  0..cy] of a jmp=3 run equals a jmp=1 run's exactly (glyphs,
+  attrs, wrap flags), cursor column identical, every visible row
+  below the jumped cursor blank in screen AND model - 300 packets;
+- claim C controls: a jump that forgets the vacated-row clears and
+  one that lands the cursor a row low both DIVERGE (harness can
+  see), v2's forced-blank lie kept and still seen.
+cfgtest: JUMP branch mirrored into its verbatim parseopt
+(re-diffed byte-identical against the handler's), four new cases
+(JUMP=8 file form, JUMP8 open-string form, garbage refused, 0 a
+real answer): 157/157. Full deck green: masktest, edanchortest,
+ederasetest, histdeduptest, hidpentest, reflowtest, sbmaxtest,
+sbresizetest.
+
+Compile clean (LARGE, baseline warnings), `$VER 1.2.8b1 (14.8.26)`
+verified in the hunk.
+
+**Deployed 14.8.26 over wasabi (his flow: put + reboot): backup
+L:ccon-handler-1.2.7 made ON the machine first, staged
+L:ccon-handler-1.2.8b1 beside the live copy, reboot, Version
+confirms 1.2.8b1. Bench boot-proof (real A1200 + PiStorm32, 84x54
+window, REPS 3 SCALE 8 SYNC, all same boot, conbench driven via
+`NewShell "CCON:.../JUMP8" FROM S:script`):**
+- **JUMP unset = 1.2.7 to the hundredth** (TOTAL 19.16 vs 19.10,
+  sync-line 7.04 = 7.04): the off state is the old handler.
+- **JUMP8: sync-line 7.04 -> 1.50 (4.7x), TOTAL 19.16 -> 13.02.**
+- **JUMP32: sync-line 0.64 (11x), TOTAL 11.52.**
+- **Stock CON: same spec: 139.16 total, sync-line 7.12** - CCON is
+  now 10.7x (JUMP8) / 12.1x (JUMP32) faster than stock overall
+  under SYNC, and the last tied row (sync-line, the S5-era blit
+  floor) is won 4.7-11x.
+Full numbers in ~/Projects/ccon-perf.md (J1 campaign section) and
+S:cb-#?.txt on the machine.
+
+Still to do before 1.2.8 ships: his own eyes on the jump-scroll
+look (JUMP is default-off precisely so the release is safe either
+way), a cooked interactive session under JUMP8 (prompt riding
+mid-window, edroom/pastehint/tab-menu still make room one line at a
+time by design), changelog + ccon.readme entries, tag.

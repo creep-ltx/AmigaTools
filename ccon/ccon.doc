@@ -245,6 +245,23 @@
              text rows than the ring holds would have nowhere to
              scroll back to.
 
+  JUMPn      Jump scroll: how many rows one scroll moves (default
+             0 = off, clamped to the window height minus one).
+             With JUMP8, output that reaches the bottom row scrolls
+             eight rows in ONE blitter pass and the next seven
+             lines print into the vacated space without scrolling
+             at all. A long listing pays an eighth of the scroll
+             work - the biggest remaining cost in synchronous
+             output - at the price of the cursor riding the lower
+             part of the window instead of pinning to the last row.
+             The same trade hardware terminals and xterm's
+             jumpScroll made, for the same reason.
+             Only plain streamed output jumps. A raw-mode console
+             or one showing the alternate screen (More, Ed - any
+             program that positions its own cursor) always gets the
+             classic one-line scroll, so full-screen programs are
+             pixel-identical with JUMP set or not.
+
   LEFT=n     The window's edges, as an alternative to the positional
   TOP=n      x/y/w/h fields. RIGHT and BOTTOM are EDGES, not sizes:
   RIGHT=n    the window spans LEFT..RIGHT across and TOP..BOTTOM

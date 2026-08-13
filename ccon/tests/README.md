@@ -296,3 +296,27 @@ What it covers, by section:
 Only the file *read* stays boot-tested - it is the same no-DOS
 FINDINPUT/READ/END plumbing `loadhistfile` has used since v1.1.
 Everything the harness covers is the logic on top of it.
+
+## defertest.e - runs on Linux (v3, J1)
+
+The deferred-blit engine (S2+S3, 1.2.2) against the legacy immediate
+engine, cell for cell, over byte grids - the harness that gated every
+render-engine build since. v2 added the E1 region escapes and cursor
+jumps. v3 (1.2.8) adds JUMP=n jump scroll:
+
+- phase A - the full lockstep suite (10 directed + 4000 random
+  packets) three times, at jump 1 (the untouched regression), 3 and
+  rows-1; legacy and deferred must stay cell-identical at each.
+- claim B - jumping changes WHEN rows scroll, never WHAT the console
+  holds: a transcript log appends every row at the moment it scrolls
+  to history, and for pure stream output the logical stream
+  [transcript ++ visible rows 0..cy] of a jump=3 run must equal a
+  jump=1 run's exactly (glyphs, attrs, wrap flags), with the cursor
+  column identical and every visible row below the jumped cursor
+  blank in screen AND model.
+- claim C - three seeing-controls that MUST diverge: a jump that
+  skips the vacated-row clears, one that lands the cursor a row low,
+  and v2's forced-blank lie.
+
+`ecompile defertest.e`, run under vamos. Prints a PASS line per
+phase; any FAIL dumps the packet and both grids.

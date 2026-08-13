@@ -33,6 +33,7 @@ CONST RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F
 OBJECT con
   waitmode, closegad, pauto, pnoborder, pnodrag, pnodepth, pnosize,
   pbackdrop, pinactive, pasteexec, wbpens, deffg, fwptr, plines,
+  pjump,                        -> J1 (1.2.8): JUMP=n
   pfontsize, pfontexp,
   pwx, pwy, pww, pwh, pwr, pwb,
   pdirs, phid, pghost, pcfgdef,
@@ -215,6 +216,16 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'JUMP', 4)
+    -> J1 (1.2.8): jump scroll - at the bottom margin an LF scrolls
+    -> n rows in ONE blit and the next n-1 newlines scroll nothing.
+    -> The raw value is unclamped here (any n >= 0); gridcalc folds
+    -> it to rows-1 where the window is known, so JUMP=999 legally
+    -> means "a page at a time". 0 (the default) = today's behaviour.
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    v := tcnum(tok + v)
+    IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
   -> ---- 1.2.7b9: geometry as EDGES, for the config file ----
   -> LEFT/TOP are pwx/pwy under a name; RIGHT/BOTTOM are the edges,
   -> folded into pww/pwh by openwin once there is a screen to measure.
@@ -676,6 +687,7 @@ PROC ground()
   cc.pasteexec := FALSE
   cc.pscrname[0] := 0
   cc.plines := 0
+  cc.pjump := 0                 -> J1: jump scroll off by default
   cc.pfontname[0] := 0
   cc.pfontsize := 0
   cc.pfontexp := FALSE
@@ -781,6 +793,19 @@ PROC main()
   ground()
   feed(['PEN=0'], 1, 'DEFAULT')
   checkn('PEN=0 refused, text stays visible', cc.deffg, 1)
+  -> J1 (1.2.8): the jump-scroll knob, both spellings, garbage refused
+  ground()
+  feed(['JUMP=8'], 1, 'DEFAULT')
+  checkn('JUMP=8 lands (J1)', cc.pjump, 8)
+  ground()
+  opt('JUMP8')
+  checkn('JUMP8 works (open-string spelling)', cc.pjump, 8)
+  ground()
+  feed(['JUMP=zap'], 1, 'DEFAULT')
+  checkn('JUMP=garbage refused, default stands', cc.pjump, 0)
+  ground()
+  feed(['JUMP=0'], 1, 'DEFAULT')
+  checkn('JUMP=0 is a real answer (off)', cc.pjump, 0)
 
   WriteF('--- C: comments, trimming, blanks ---\n')
   ground()

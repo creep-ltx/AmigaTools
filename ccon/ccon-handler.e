@@ -188,6 +188,9 @@ OBJECT console
   tf:PTR TO textfont
   cw, ch, baseline              -> cell metrics (topaz: fixed)
   left, topy, cols, rows        -> the text grid inside the window
+  jeff                          -> J1 (1.2.8): effective jump-scroll
+                                -> count - pjump clamped to rows-1 by
+                                -> gridcalc, 1 = scroll-by-one (off)
   cx, cy                        -> output cursor, in cells
   cursx, cursy                  -> raw block cursor; -1 = not painted
   winact                        -> 1.2.6b2: window active? TRUE = solid
@@ -360,6 +363,13 @@ OBJECT console
   pastehintrow                  -> row the "N more queued" hint is
                                 -> currently drawn on, -1 = none
   plines                        -> v1.1 LINES=n parsed (0 = default)
+  pjump                         -> J1 (1.2.8) JUMP=n parsed (0 = off):
+                                -> scroll n rows per blit at the bottom
+                                -> margin, trading the "cursor rides the
+                                -> last row" look for one ScrollRaster
+                                -> per n lines - the blit-count doctrine
+                                -> applied to the one blit per line SYNC
+                                -> output still pays
   pfontsize, pfontexp           -> v1.1 FONTname/size parse state (the
                                 -> size rides the NEXT '/'-token)
   oscn, oscsk                   -> v1.1 xterm OSC title parser state
@@ -2124,6 +2134,16 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'JUMP', 4)
+    -> J1 (1.2.8): jump scroll - at the bottom margin an LF scrolls
+    -> n rows in ONE blit and the next n-1 newlines scroll nothing.
+    -> The raw value is unclamped here (any n >= 0); gridcalc folds
+    -> it to rows-1 where the window is known, so JUMP=999 legally
+    -> means "a page at a time". 0 (the default) = today's behaviour.
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    v := tcnum(tok + v)
+    IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
   -> ---- 1.2.7b9: geometry as EDGES, for the config file ----
   -> LEFT/TOP are pwx/pwy under a name; RIGHT/BOTTOM are the edges,
   -> folded into pww/pwh by openwin once there is a screen to measure.
@@ -2291,6 +2311,7 @@ PROC parsecon(bname)
                                         -> default; PASTEEXEC opts out
   curcon.pscrname[0] := 0              -> global array: garbage until set
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
+  curcon.pjump := 0                    -> J1: jump scroll off by default
   curcon.pfontname[0] := 0             -> open like everything else
   curcon.pfontsize := 0
   curcon.pfontexp := FALSE
@@ -2531,6 +2552,13 @@ PROC gridcalc()
   IF curcon.cols > 255 THEN curcon.cols := 255      -> redraw's row buffer is 256
   IF curcon.cols < 2 THEN curcon.cols := 2
   IF curcon.rows < 1 THEN curcon.rows := 1
+  -> J1: fold JUMP=n to what this grid can honour. rows-1 keeps every
+  -> jump a real scroll (n = rows is dffull's business, not a blit's);
+  -> 1 = the plain one-line scroll every path always did. Recomputed
+  -> here so a resize re-clamps it with everything else.
+  curcon.jeff := curcon.pjump
+  IF curcon.jeff > (curcon.rows - 1) THEN curcon.jeff := curcon.rows - 1
+  IF curcon.jeff < 1 THEN curcon.jeff := 1
   -> 1.2.3 masked rendering: the floor, probed the way the ROM does it
   -> (GetBitMapAttr(BMA_FLAGS=12), BMF_STANDARD=bit 3, from the 46.1
   -> disassembly's own init at $2a1a): standard planar bitmap -> floor 1,
@@ -5351,28 +5379,50 @@ ENDPROC
 -> ---------- output: a cell-grid renderer (CSI parsing comes with the
 -> full CTerm renderer transplant in a later milestone) ----------
 
--> scroll the whole screen up one line: pixels, model, edit anchor.
--> The old top row becomes history - just advance the ring, no copying.
-PROC screenscroll()
+-> scroll the whole screen up n lines: pixels, model, edit anchor.
+-> The old top rows become history - just advance the ring, no copying.
+-> J1 (1.2.8): parameterized - ONE ScrollRaster whatever n is (the
+-> srbench fact: a ten-row blit costs what a one-row blit costs), then
+-> the per-line bookkeeping n times, verbatim. screenscroll() below
+-> keeps the classic one-line shape for the room-making callers
+-> (edroom, pastehint, the tab menu, CSI escapes) - only the newline
+-> paths ever pass n > 1.
+PROC screenscrolln(n)
+  DEF k
   IF curcon.vblank = FALSE       -> E5: skip the blit on an all-blank
-    ScrollRaster(curcon.rp, 0, curcon.ch,   -> screen (moves nothing)
+    ScrollRaster(curcon.rp, 0, Mul(n, curcon.ch),  -> screen (moves nothing)
                  curcon.win.borderleft, curcon.win.bordertop,
                  curcon.win.width - curcon.win.borderright - 1,
                  curcon.win.height - curcon.win.borderbottom - 1)
   ENDIF
-  IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1       -> the edit anchor scrolled with the rest
-  IF curcon.sb
-    curcon.sbtop := curcon.sbtop + 1
-    IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
-    IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
-    -> audit6 F1: count while a snapshot is ARMED, not only in raw -
-    -> a cooked alt client's edroom scrolls recycled ring rows
-    -> uncounted, and altpop's over understated = a wrong join at
-    -> the oldest history row after ?47l
-    IF curcon.rawmode OR curcon.altvalid THEN curcon.rawscr := curcon.rawscr + 1
-    clearrow(curcon.rows - 1)   -> (rawscr: altrestore's overflow
-  ENDIF                         -> accounting, see the alt procs)
+  FOR k := 1 TO n
+    IF curcon.ancy > 0 THEN curcon.ancy := curcon.ancy - 1     -> the edit anchor scrolled with the rest
+    IF curcon.sb
+      curcon.sbtop := curcon.sbtop + 1
+      IF curcon.sbtop >= curcon.sbmax THEN curcon.sbtop := 0
+      IF curcon.sbcnt < (curcon.sbmax - curcon.rows) THEN curcon.sbcnt := curcon.sbcnt + 1
+      -> audit6 F1: count while a snapshot is ARMED, not only in raw -
+      -> a cooked alt client's edroom scrolls recycled ring rows
+      -> uncounted, and altpop's over understated = a wrong join at
+      -> the oldest history row after ?47l
+      IF curcon.rawmode OR curcon.altvalid THEN curcon.rawscr := curcon.rawscr + 1
+      clearrow(curcon.rows - 1) -> (rawscr: altrestore's overflow
+    ENDIF                       -> accounting, see the alt procs)
+  ENDFOR
 ENDPROC
+
+PROC screenscroll() IS screenscrolln(1)
+
+-> J1: may THIS newline jump? Only plain streamed output: a raw-mode
+-> or alternate-screen client (More, Ed) owns its cursor geometry and
+-> expects "scroll leaves me on the last row" exactly; cooked stream
+-> output (dir, list, type, a compiler) never looks back at the row it
+-> is on. jeff = 1 (JUMP unset/0) short-circuits everything.
+PROC jumpok()
+  IF curcon.jeff <= 1 THEN RETURN FALSE
+  IF curcon.rawmode THEN RETURN FALSE
+  IF curcon.altvalid THEN RETURN FALSE
+ENDPROC TRUE
 
 -> ---------- S2+S3 (perf campaign, 23.7.26): the deferred-blit engine.
 -> srbench (S4) made the numbers hard: on the A1200 target a ScrollRaster
@@ -5467,12 +5517,27 @@ ENDPROC
 
 -> outnl()/outwrapnl(), deferred: same cursor and wrap-flag mechanics,
 -> dfscroll() where they had screenscroll()
+-> J1 (1.2.8): under JUMP=n the bottom-margin scroll runs dfscroll()
+-> jeff times - jeff ring advances, jeff cleared rows, dfpend + jeff -
+-> and lands the cursor jeff rows up. dfflush already settles ANY
+-> dfpend in one ScrollRaster, so the engine needed no new blit logic:
+-> the next jeff-1 newlines walk down the vacated rows blit-free, and
+-> under SYNC (a flush per line, the one cadence S5 pooling cannot
+-> help) the scroll blit bill drops by jeff.
 PROC dfnl()
+  DEF k
   curcon.cx := 0
   curcon.cy := curcon.cy + 1
   IF curcon.cy >= curcon.rows
-    dfscroll()
-    curcon.cy := curcon.rows - 1
+    IF jumpok()
+      FOR k := 1 TO curcon.jeff
+        dfscroll()
+      ENDFOR
+      curcon.cy := curcon.rows - curcon.jeff
+    ELSE
+      dfscroll()
+      curcon.cy := curcon.rows - 1
+    ENDIF
   ENDIF
   setwrapf(curcon.cy, 0)
 ENDPROC
@@ -5565,8 +5630,13 @@ PROC outnl()
   curcon.cx := 0
   curcon.cy := curcon.cy + 1
   IF curcon.cy >= curcon.rows
-    screenscroll()
-    curcon.cy := curcon.rows - 1
+    IF jumpok()                 -> J1: one blit, jeff lines (the legacy
+      screenscrolln(curcon.jeff)  -> engine's half of dfnl's bargain)
+      curcon.cy := curcon.rows - curcon.jeff
+    ELSE
+      screenscroll()
+      curcon.cy := curcon.rows - 1
+    ENDIF
   ENDIF
   setwrapf(curcon.cy, 0)        -> B7: a real newline STARTS a logical
 ENDPROC                         -> line - the row below is not a
@@ -9665,4 +9735,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.7 (11.8.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b1 (14.8.26) CCON: LTX console handler', 0
