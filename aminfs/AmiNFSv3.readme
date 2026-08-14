@@ -8,8 +8,8 @@ Architecture: m68k-amigaos
 
 DRAFT - edit before upload.
 
-  AmiNFS - mount a Linux or NAS directory as an Amiga volume.
-==============================================================
+  AmiNFSv3 - mount a Linux or NAS directory as an Amiga volume.
+================================================================
 
 WHAT IT IS
 
@@ -18,7 +18,7 @@ WHAT IT IS
   volume: Workbench icon, device and volume name, and every program
   simply uses it as a disk. Existing Amiga NFS clients speak NFSv2
   over UDP, which modern Linux servers no longer offer at all -
-  AmiNFS talks to a current kernel nfsd and to a Synology NAS
+  AmiNFSv3 talks to a current kernel nfsd and to a Synology NAS
   out of the box.
 
 
@@ -54,7 +54,7 @@ INSTALLATION
   nfs-handler into L:, NFSDismount into C:, edit the NFS0 DOSDriver
   (server address, export path, options) and Mount it. The full
   manual - including the one /etc/exports line the Linux side
-  needs, the firewall ports, and per-setup tuning - is AmiNFS.doc.
+  needs, the firewall ports, and per-setup tuning - is AmiNFSv3.doc.
 
 
 HISTORY

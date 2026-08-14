@@ -1,4 +1,4 @@
-# AmiNFS
+# AmiNFSv3
 
 An NFSv3 client filesystem for AmigaOS — mount a Linux export or a
 NAS share as an ordinary Amiga volume. A DOS handler speaking the
@@ -12,7 +12,7 @@ Why write a new one: every existing Amiga NFS client descends from
 `ch_nfsc` (1994) — NFSv2 over UDP — and modern Linux kernels have
 **removed NFSv2 serving entirely** (no `CONFIG_NFSD_V2`, and
 nfs-utils disables UDP). A v2 client has no server left to talk to.
-AmiNFS speaks v3 over TCP against a stock kernel `nfsd`, and against
+AmiNFSv3 speaks v3 over TCP against a stock kernel `nfsd`, and against
 a Synology NAS unchanged.
 
 **Status: 0.1 (pre-release).** Every build boot-verified on real
@@ -53,7 +53,7 @@ handler.
 - `nfs-handler` — the filesystem, goes in `L:`
 - `NFSDismount` — clean stop by device name, goes in `C:`
 - `NFS0` — a documented DOSDriver to copy and edit
-- `AmiNFS.doc` — the full manual: installation, every mount option,
+- `AmiNFSv3.doc` — the full manual: installation, every mount option,
   Linux/NAS server setup (including the firewall hunt), tuning
 - `tests/nfswire.py` — the protocol harness: a hand-rolled
   RPC/XDR/NFS3 client for Linux that doubles as the reference
@@ -72,7 +72,7 @@ Drag it to `DEVS:DOSDrivers` when you want it at every boot — the
 handler connects lazily, so mounting before the network is up costs
 nothing. Linux side, one `/etc/exports` line and three firewall
 ports; the Synology needs nothing at all. Details and the options
-table: `AmiNFS.doc`.
+table: `AmiNFSv3.doc`.
 
 ## Building
 

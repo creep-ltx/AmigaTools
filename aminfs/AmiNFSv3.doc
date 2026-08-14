@@ -1,5 +1,5 @@
-                    AmiNFS 0.1 - documentation
-                    ==========================
+                    AmiNFSv3 0.1 - documentation
+                    ============================
 
   An NFSv3 client filesystem for AmigaOS 2.0+. Mounts a directory
   exported by a Linux machine or a NAS as an ordinary Amiga volume:
@@ -13,7 +13,7 @@
   - AmigaOS 2.0 or newer (developed and tested on 3.2). Any CPU:
     the binary is plain 68000 code.
   - A TCP/IP stack providing bsdsocket.library V4: Roadshow,
-    AmiTCP, Miami, Genesis, or the Emu68 lwIP stack. AmiNFS is
+    AmiTCP, Miami, Genesis, or the Emu68 lwIP stack. AmiNFSv3 is
     developed against the Emu68 lwIP stack; reports from other
     stacks are welcome.
   - An NFSv3 server. A stock Linux kernel nfsd works as-is, and so
@@ -235,7 +235,7 @@
 
   The handler reports its life through the kernel debug channel
   (KPrintF): mount events, the addresses it connects to, and every
-  error path, prefixed `aminfs:`. Capture it with Sashimi (Aminet)
+  error path, prefixed `AmiNFSv3:`. Capture it with Sashimi (Aminet)
   or any serial-debug catcher. First things to check when a mount
   gives "device not mounted" errors:
 
