@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b19 (14.8.2026)";
+    "$VER: nfs-handler 0.1b20 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -180,11 +180,11 @@ static void kputu(ULONG v)
 
 #define FHSIZE_MAX      64
 /* Transfer sizes are runtime options (RSIZE=/WSIZE=). Defaults suit a
- * fast box; small-memory or slow-NIC machines shrink them at mount.
+
  * On Emu68's lwIP keep WSIZE <= 65536: larger blocked sends wake on a
  * coarse timer, ~485ms per chunk (measured). */
-#define RSIZE_DEFAULT   131072
-#define WSIZE_DEFAULT   65536
+#define RSIZE_DEFAULT   65536
+#define WSIZE_DEFAULT   32768
 #define XFER_MIN        4096
 #define XFER_MAX        131072
 #define REPBUF_EXTRA    4096

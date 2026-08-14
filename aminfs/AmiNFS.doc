@@ -1,0 +1,257 @@
+                    AmiNFS 0.1 - documentation
+                    ==========================
+
+  An NFSv3 client filesystem for AmigaOS 2.0+. Mounts a directory
+  exported by a Linux machine or a NAS as an ordinary Amiga volume:
+  it gets a device name, a volume name, a Workbench icon, and every
+  program simply uses it as a disk.
+
+
+  1. REQUIREMENTS
+  ---------------
+
+  - AmigaOS 2.0 or newer (developed and tested on 3.2). Any CPU:
+    the binary is plain 68000 code.
+  - A TCP/IP stack providing bsdsocket.library V4: Roadshow,
+    AmiTCP, Miami, Genesis, or the Emu68 lwIP stack. AmiNFS is
+    developed against the Emu68 lwIP stack; reports from other
+    stacks are welcome.
+  - An NFSv3 server. A stock Linux kernel nfsd works as-is, and so
+    does a Synology NAS. NFSv2-only servers are not supported (and
+    modern Linux cannot serve v2 anyway - that is why this handler
+    exists).
+  - About 130 KB of memory per mounted device at default settings
+    (handler code plus transfer buffers; the buffers follow the
+    RSIZE/WSIZE options).
+
+
+  2. INSTALLATION
+  ---------------
+
+  1. Copy nfs-handler to L:
+  2. Copy NFSDismount to C:
+  3. Copy the NFS0 DOSDriver (and its icon) somewhere sensible and
+     edit its Startup line - host, export path, options (section 3).
+
+  For mount-on-demand, keep the DOSDriver in SYS:Storage/DOSDrivers
+  and mount it by path:
+
+      Mount SYS:Storage/DOSDrivers/NFS0
+
+  For automount at every boot, drag it into DEVS:DOSDrivers. The
+  handler connects lazily - nothing touches the network until the
+  first access - so it is safe to mount before the TCP stack is up.
+
+  Several mounts run side by side: copy the file to NFS1, NFS2, ...
+  and give each its own Startup line. Each device is a separate
+  handler process with its own connection and its own volume.
+
+  Note that `Mount NFS0: FROM file` does NOT accept DOSDriver-format
+  files (it expects a classic MountList with a `NFS0:` stanza) -
+  mount by direct path as shown above, or from DEVS:DOSDrivers by
+  plain `Mount NFS0:`.
+
+
+  3. THE DOSDRIVER AND ITS OPTIONS
+  --------------------------------
+
+  A minimal DOSDriver:
+
+      Handler    = L:nfs-handler
+      StackSize  = 16384
+      Priority   = 5
+      GlobVec    = -1
+      Startup    = "192.168.1.10:/srv/amiga"
+
+  Startup is `host:/export/path`, optionally followed by options,
+  all inside one pair of quotes. The host is a dotted-quad address
+  (name resolution is on the wish list). Options:
+
+  VOLUME=name    The volume name - what Workbench shows and what
+                 `name:` resolves to. Default: the last component
+                 of the export path.
+
+  UID=n GID=n    The identity sent with every request (AUTH_UNIX).
+                 Default 1000/1000. Match this to the file owner on
+                 the server, or export with all_squash (section 4)
+                 and forget about it. For a Synology, use the ids
+                 the NAS assigned your user (section 5).
+
+  TZ=[+|-]H[:MM] Hours east of UTC. NFS timestamps are UTC and the
+                 Amiga clock usually is not; TZ=+2 makes dates read
+                 as local wall-clock time both ways (displayed
+                 dates, and SetDate back). Default 0.
+
+  RSIZE=n        Transfer chunk sizes in bytes, 4096..131072,
+  WSIZE=n        default 65536/32768. Larger values cost memory
+                 (the buffers are sized from these) and can help
+                 fast setups; see section 7 before turning them up.
+
+  DEPTH=1..8     Write/read pipelining: how many NFS requests the
+                 handler keeps in flight during large transfers.
+                 The default 1 is the plain synchronous handler -
+                 one request at a time, the safe choice everywhere.
+                 Higher values overlap the per-request latency and
+                 can multiply large-file speed on fast stacks;
+                 section 7 has measured combinations. Data safety
+                 is identical at every depth: requests are matched
+                 by transaction id, only contiguously-acknowledged
+                 bytes are ever reported, short transfers re-issue
+                 their tail, and a dead connection is replayed from
+                 the last safe byte (NFS writes are idempotent, so
+                 a replay can never corrupt).
+
+
+  4. THE LINUX SERVER
+  -------------------
+
+  One line in /etc/exports:
+
+      /srv/amiga 192.168.1.0/24(rw,insecure,no_subtree_check,all_squash,anonuid=1000,anongid=1000)
+
+  then `exportfs -ra` (and `systemctl enable --now nfs-server` the
+  first time). The pieces that matter:
+
+  - `insecure` is required: Amiga stacks do not use privileged
+    source ports.
+  - `all_squash,anonuid=...` maps every access to one server user,
+    which makes UID handling a non-issue for a single-user Amiga.
+  - The subnet restriction means testing from the server itself
+    via 127.0.0.1 is refused - test via the LAN address.
+
+  If the server runs a firewall (ufw, firewalld, nftables), open
+  TCP ports 111 (rpcbind), 2049 (nfsd) and the mountd port (see
+  /etc/nfs.conf; often 20048) to your LAN. This is worth stating
+  loudly: a default-deny host firewall silently eats the Amiga's
+  connections while everything the server itself initiates still
+  works - it looks exactly like a Amiga-side bug and is not.
+
+      ufw allow from 192.168.1.0/24 to any port 111,2049,20048 proto tcp
+
+
+  5. A NAS (SYNOLOGY)
+  -------------------
+
+  Enable NFS in DSM (Control Panel -> File Services), give the
+  shared folder an NFS permission entry for your LAN, and mount:
+
+      Startup = "192.168.1.20:/volume1/homes/you VOLUME=NAS UID=1026 GID=100"
+
+  The UID/GID are the ones the NAS assigned your user - check with
+  `id` over SSH, or by looking at any file you own from another
+  machine. Nothing else is needed; a Synology speaks NFSv3 over TCP
+  out of the box.
+
+
+  6. DAILY USE
+  ------------
+
+  Mount as above. Both the device name (NFS0:) and the volume name
+  (whatever VOLUME= says) work in paths once the handler has run;
+  the volume appears on Workbench with a disk icon.
+
+  Dismount:
+
+      NFSDismount NFS0:
+
+  This refuses while any file or lock on the volume is open, removes
+  the volume from the system cleanly, and the handler exits. The
+  device stays known: the next access to NFS0: starts a fresh
+  handler, loading L:nfs-handler anew from disk - which also means
+  replacing the handler binary never needs a reboot. Note that a
+  relaunch reuses the Startup line the device was first mounted
+  with; changed options in the DOSDriver file take effect at the
+  next fresh Mount (after a reboot, if the device already exists).
+
+  Filenames pass through byte-for-byte (Amiga Latin-1 on one side,
+  usually UTF-8 on the other: ASCII names are always fine, accented
+  characters will differ in look between the two worlds). Lookups
+  are case-insensitive the Amiga way even though the server is
+  case-sensitive: if exactly one entry matches regardless of case,
+  it is used.
+
+
+  7. PERFORMANCE
+  --------------
+
+  The defaults are chosen to behave everywhere: modest buffers, no
+  pipelining. What to try, by setup - and measure, path quality
+  varies more than settings do:
+
+  Emu68 / PiStorm (lwIP stack):
+      RSIZE=65536 WSIZE=16384 DEPTH=8
+      Small chunks with a deep pipeline stream best on this stack;
+      large WSIZE values combined with depth stall badly (a blocked
+      send beyond the stack's real buffer waits on a coarse timer).
+      Measured on an A1200/PiStorm against Linux over one Wi-Fi
+      hop: 13-14 MB/s both directions with c:Copy, 65 MB/s reads
+      with a 512 KB application buffer.
+
+  Real NIC, fast stack (Roadshow + Zorro card):
+      Start with defaults, then try RSIZE=131072 WSIZE=65536, then
+      DEPTH=2..4. The NIC will likely be the ceiling.
+
+  PCMCIA NIC or 8 MB-class machines:
+      RSIZE=16384 WSIZE=16384 (small buffers, ~40 KB total). The
+      NIC is the ceiling; depth changes little on a CPU-bound
+      machine and nothing on the bus-bound part.
+
+  Two structural notes. Directories of many small files are bound
+  by per-file round trips (open/create/close each cost a few), not
+  bandwidth - around 143 files/s read and 45 files/s written on the
+  reference setup. And large-file speed follows the size of the
+  reads an application makes: a program reading in 256 KB blocks
+  gets several times the throughput of one reading 16 KB at a time,
+  because the handler can only pipeline within one request.
+
+
+  8. LIMITS AND HONEST NOTES
+  --------------------------
+
+  - File sizes: correct up to 4 GB. Above 2 GB the handler is
+    exact, but AmigaDOS itself is not: FileInfoBlock sizes are
+    signed 32-bit (some programs will show negative sizes), and
+    Seek cannot address past 2 GB. Reading a 2.5 GB file start to
+    finish works and was verified byte-exact.
+  - Writes are UNSTABLE with a COMMIT when a file is closed (or on
+    Flush). The server's write verifier is checked throughout: if
+    the server restarts while a file is open, the Close fails with
+    an error rather than pretending the data survived.
+  - Protection bits: r and w/d map to the server mode (rwed on the
+    Amiga side is mode 644, `Protect rd` gives 444). Directories
+    always keep the server's execute bit so they stay traversable.
+    The e bit and comments are not stored (SetComment returns an
+    error rather than quietly dropping the comment).
+  - Timestamps are stored in UTC on the server; use TZ=.
+  - Symbolic and hard links on the server are not followed.
+  - The host must currently be a dotted-quad address.
+  - A server that goes away mid-operation costs a timeout (about
+    ten seconds) and the operation fails with an error; the next
+    access reconnects. A handler survives server reboots.
+
+
+  9. TROUBLESHOOTING
+  ------------------
+
+  The handler reports its life through the kernel debug channel
+  (KPrintF): mount events, the addresses it connects to, and every
+  error path, prefixed `aminfs:`. Capture it with Sashimi (Aminet)
+  or any serial-debug catcher. First things to check when a mount
+  gives "device not mounted" errors:
+
+  - Can anything else on the LAN reach the server's NFS? (A phone
+    app or second PC rules the server in or out.)
+  - The server firewall (section 4) - the classic silent failure.
+  - The export line: `insecure` present? subnet right?
+  - `showmount -e <server>` on the server itself lists what is
+    actually exported where.
+
+
+  10. HISTORY
+  -----------
+
+  0.1  First release. NFSv3 over TCP; read and write; UNSTABLE
+       writes with COMMIT-on-close and verifier tracking; VOLUME,
+       UID/GID, TZ, RSIZE/WSIZE, DEPTH mount options; pipelined
+       transfers with fault-injection-tested recovery; NFSDismount;
+       case-insensitive lookups; reboot-free handler upgrades.

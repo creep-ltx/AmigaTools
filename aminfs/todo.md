@@ -11,7 +11,9 @@ over UDP — and modern Linux removed NFSv2 serving entirely (no
 CONFIG_NFSD_V2 in this kernel; rpc.nfsd dropped v2 too). v3 is the
 floor now, and TCP sidesteps nfs-utils's disabled-by-default UDP.
 
-Decided 14.8.26: write our own (not port anfs), in C (not E).
+Decision 14.8.26: write our own (not port anfs), in C - v3/TCP
+is the only protocol modern servers still speak, and C has the
+proven bsdsocket recipe.
 
 ## Milestones
 
@@ -38,7 +40,7 @@ Decided 14.8.26: write our own (not port anfs), in C (not E).
   RPC (delayed-ACK stall; wasabi speedtest: raw upstream 3 MB/s).
   b11 SO_SNDBUF/SO_RCVBUF: 8.4s. b12 the real lever = CHUNK SIZE:
   WRCHUNK 64K + RDCHUNK 32K -> WRITE 0.91s = 2.4 MB/s, READ 9.7.
-  THEN HIS CORRECTION ("speedtest gave me ~28MB/s") BROKE THE STORY:
+  THEN A CORRECTION ("speedtest gave ~28MB/s previously") BROKE THE STORY:
   re-measured, down = 17-47 MB/s across runs - the 3 MB/s "wire
   ceiling" was ONE anomalous sample. Method lesson relearned: on a
   Wi-Fi path, single-run benches are weather reports; use min-of-N
@@ -178,7 +180,7 @@ Known rough edges for b7+:
   A600-class: 8K/8K) - to be MEASURED per setup where possible, not
   guessed.
 
-## b16 (14.8.26): THE PIPELINE CHAPTER - his call, bench-decided
+## b16 (14.8.26): THE PIPELINE CHAPTER - bench-decided
 
 DEPTH= write pipelining (1..4, default 1 = the sync path untouched, so
 real/slow machines never pay). RPC layer split into rpc_send/rpc_recv
@@ -203,7 +205,7 @@ new options need a fresh Mount (= reboot if the device node exists).
 
 ## b17 (14.8.26): pipelined READS + the streaming plateau - 13 MB/s both ways
 
-His green light ("as long as it does not hurt real hardware") + wasabid
+Green light given (constraint: must not hurt real hardware) + wasabid
 comparison (41/52 MB/s raw both directions - which also KILLED the
 "weak Wi-Fi direction" theory for good). Server exonerated by harness:
 UNSTABLE 32K write = 0.02ms server-side; ALL per-RPC cost is
@@ -227,7 +229,7 @@ chapter closed.
 
 ## b18+b19 (14.8.26): the regimes question -> two fixes and a 65 MB/s receipt
 
-His question ("small files? a 2.5GB file?") measured all three regimes
+The regimes question (small files? 2.5GB?) measured all three
 and found two real defects:
 - b18 FIX: Copy ALL left Linux-untraversable directories - SET_PROTECT
   mapped dir modes without x. Dirs now mirror r into x (files stay

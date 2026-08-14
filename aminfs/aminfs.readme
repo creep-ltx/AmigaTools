@@ -1,0 +1,62 @@
+Short:    NFSv3 client filesystem - mount Linux/NAS shares
+Author:   Tobias Karlsson
+Uploader: tobiaskarlsson80 gmail com (Tobias Karlsson)
+Type:     comm/net
+Version:  0.1
+Requires: AmigaOS 2.0+; a TCP/IP stack (bsdsocket.library V4)
+Architecture: m68k-amigaos
+
+DRAFT - edit before upload.
+
+  AmiNFS - mount a Linux or NAS directory as an Amiga volume.
+==============================================================
+
+WHAT IT IS
+
+  A mounted filesystem handler speaking NFSv3 over TCP. A directory
+  exported by a Linux machine or a NAS becomes an ordinary Amiga
+  volume: Workbench icon, device and volume name, and every program
+  simply uses it as a disk. Existing Amiga NFS clients speak NFSv2
+  over UDP, which modern Linux servers no longer offer at all -
+  AmiNFS talks to a current kernel nfsd and to a Synology NAS
+  out of the box.
+
+
+FEATURES
+
+  - Read and write, with honest failure handling: writes are
+    committed when a file closes, and the server's write verifier
+    is tracked - a server restart mid-file fails the Close instead
+    of losing data silently
+
+  - Automount from DEVS:DOSDrivers or mount-on-demand from Storage;
+    NFSDismount stops a handler cleanly, and the next access
+    remounts it fresh (replacing the handler binary needs no
+    reboot)
+
+  - Mount options for the volume name, identity (UID/GID), local
+    time zone, transfer sizes, and request pipelining - the
+    defaults are safe on any machine from a plain 68000 up, the
+    options let a fast setup stretch its legs
+
+  - Fast: on an A1200 with a PiStorm, 13-14 MB/s through c:Copy in
+    both directions, and 65 MB/s reading through an application
+    with a large buffer. Case-insensitive lookups the Amiga way,
+    correct behaviour verified byte-for-byte against the server
+    throughout development
+
+  - Files up to 4 GB (above 2 GB some AmigaDOS programs display
+    sizes wrongly - a 32-bit OS limit, not the handler's)
+
+
+INSTALLATION
+
+  nfs-handler into L:, NFSDismount into C:, edit the NFS0 DOSDriver
+  (server address, export path, options) and Mount it. The full
+  manual - including the one /etc/exports line the Linux side
+  needs, the firewall ports, and per-setup tuning - is AmiNFS.doc.
+
+
+HISTORY
+
+  0.1  First release.
