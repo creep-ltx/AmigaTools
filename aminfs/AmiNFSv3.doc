@@ -6,6 +6,9 @@
   it gets a device name, a volume name, a Workbench icon, and every
   program simply uses it as a disk.
 
+  Source, issues and newest version:
+  https://github.com/creep-ltx/AmiNFSv3
+
 
   1. REQUIREMENTS
   ---------------

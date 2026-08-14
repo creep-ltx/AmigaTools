@@ -15,6 +15,8 @@ nfs-utils disables UDP). A v2 client has no server left to talk to.
 AmiNFSv3 speaks v3 over TCP against a stock kernel `nfsd`, and against
 a Synology NAS unchanged.
 
+Repo: <https://github.com/creep-ltx/AmiNFSv3> (canonical home).
+
 **Status: 0.1 (pre-release).** Every build boot-verified on real
 hardware (A1200 + PiStorm/Emu68) against Linux kernel nfsd and
 Synology DSM; every transfer in the log below byte-compared on the

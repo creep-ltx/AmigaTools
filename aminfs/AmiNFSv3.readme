@@ -47,6 +47,11 @@ INSTALLATION
   needs, the firewall ports, and per-setup tuning - is AmiNFSv3.doc.
 
 
+SOURCE
+
+  https://github.com/creep-ltx/AmiNFSv3
+
+
 HISTORY
 
   0.1  First release.
