@@ -1,4 +1,4 @@
-# cnfs — NFSv3 client filesystem handler for AmigaOS 3.2
+# AmiNFS — NFSv3 client filesystem handler for AmigaOS 3.2
 
 The goal: mount a Linux NFS export as an Amiga volume. Icon in
 DEVS:DOSDrivers for automount, or keep it in Storage and `Mount NFS0:`

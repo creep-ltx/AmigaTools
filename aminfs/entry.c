@@ -3,4 +3,4 @@
  * literals in the main TU land in .text ahead of its functions, which
  * is why the entry cannot live there. */
 extern long handler_main(void);
-long cnfs_entry(void) { return handler_main(); }
+long aminfs_entry(void) { return handler_main(); }

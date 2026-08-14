@@ -1,5 +1,5 @@
 /*
- * cnfs-handler - an NFSv3-over-TCP client filesystem for AmigaOS 3.x.
+ * AmiNFS nfs-handler - an NFSv3-over-TCP client filesystem for AmigaOS 3.x.
  *
  * Speaks SunRPC/XDR/MOUNT3/NFS3 through bsdsocket.library to a stock
  * Linux kernel nfsd. The wire logic mirrors tests/nfswire.py, which is
@@ -41,7 +41,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: cnfs-handler 0.1b6 (14.8.2026)";
+    "$VER: nfs-handler 0.1b7 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -118,8 +118,8 @@ static void kputu(ULONG v)
     while (i < 12) kputc(buf[i++]);
 }
 
-#define DBG(x)      do { kput("cnfs: "); kput(x); kputc('\n'); } while (0)
-#define DBG2(x, n)  do { kput("cnfs: "); kput(x); kputu(n); kputc('\n'); } while (0)
+#define DBG(x)      do { kput("aminfs: "); kput(x); kputc('\n'); } while (0)
+#define DBG2(x, n)  do { kput("aminfs: "); kput(x); kputu(n); kputc('\n'); } while (0)
 
 /* ------------------------------------------------------------------ */
 /* protocol constants (mirrors nfswire.py)                            */
@@ -322,7 +322,7 @@ static LONG tcp_connect(ULONG ip, UWORD dstport)
     sa.sin_port = dstport;             /* big-endian host: already net order */
     sa.sin_addr.s_addr = ip;
     rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
-    kput("cnfs: connect port "); kputu(dstport); kput(" rc ");
+    kput("aminfs: connect port "); kputu(dstport); kput(" rc ");
     if (rc < 0) { kput("-"); kputu(-rc); } else kputu(rc);
     if (rc < 0) { kput(" errno "); kputu(Errno()); }
     kputc('\n');
@@ -369,8 +369,10 @@ static void rpc_begin(ULONG prog, ULONG vers, ULONG proc)
     pk_u32(prog); pk_u32(vers); pk_u32(proc);
     /* AUTH_UNIX cred: stamp, machinename, uid, gid, gids<0> */
     pk_u32(AUTH_UNIX);
-    pk_u32(4 + 4 + 4 + 4 + 4 + 4);     /* body length: stamp+name"cnfs"+uid+gid+0 */
-    pk_u32(0); pk_str("cnfs"); pk_u32(1000); pk_u32(1000); pk_u32(0);
+    /* body: stamp(4) + name "aminfs" (4 len + 6 + 2 pad = 12) + uid(4)
+     * + gid(4) + gids count(4) = 28. Length must track the name. */
+    pk_u32(28);
+    pk_u32(0); pk_str("aminfs"); pk_u32(1000); pk_u32(1000); pk_u32(0);
     pk_u32(AUTH_NULL); pk_u32(0);      /* verf */
 }
 
@@ -1240,7 +1242,7 @@ static void parse_startup(void)
         return;
     }
     len = b[0];
-    kput("cnfs: startup len "); kputu(len); kput(" ");
+    kput("aminfs: startup len "); kputu(len); kput(" ");
     for (i = 0; i < len && i < 80; i++) kputc(b[1 + i] >= 32 ? b[1 + i] : '?');
     kputc('\n');
 
@@ -1260,7 +1262,7 @@ static void parse_startup(void)
         g_export[o] = 0;
     }
 
-    kput("cnfs: host '"); kput(g_host); kput("' export '"); kput(g_export);
+    kput("aminfs: host '"); kput(g_host); kput("' export '"); kput(g_export);
     kput("'\n");
 
     /* volume name = last path component of the export */

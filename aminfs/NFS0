@@ -1,8 +1,8 @@
-/* NFS0 - mount a Linux NFSv3 export via cnfs-handler.
+/* NFS0 - mount a Linux NFSv3 export via nfs-handler.
  * Drop in DEVS:DOSDrivers (with an icon) for automount, or keep in
  * SYS:Storage/DOSDrivers and 'Mount NFS0:' by hand.
  * Startup is "host:/export/path"; host is a dotted quad for now. */
-Handler    = L:cnfs-handler
+Handler    = L:nfs-handler
 StackSize  = 16384
 Priority   = 5
 GlobVec    = -1
