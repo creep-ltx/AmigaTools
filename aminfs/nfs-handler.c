@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b13 (14.8.2026)";
+    "$VER: nfs-handler 0.1b14 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -1682,6 +1682,12 @@ static void act_die(struct DosPacket *pkt)
     }
     DBG("ACTION_DIE: shutting down");
     g_devnode->dn_Task = NULL;         /* next open gets a fresh mount */
+    /* Drop the cached seglist too: DOS would happily re-run THIS code
+     * forever, making handler upgrades need a reboot. Cleared, the next
+     * access reloads L:nfs-handler from disk. The running seglist leaks
+     * (~25KB, we are executing it and cannot UnLoadSeg ourselves) -
+     * the price of a reboot-free upgrade path, reclaimed at reboot. */
+    g_devnode->dn_SegList = 0;
     g_dying = 1;
     pkt->dp_Res1 = DOSTRUE;
     pkt->dp_Res2 = 0;
