@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b16 (14.8.2026)";
+    "$VER: nfs-handler 0.1b17 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -1025,7 +1025,7 @@ static LONG resolve(struct CLock *base, UBYTE *bstr,
                     UBYTE *outfh, ULONG *outfhlen, struct Attr *a,
                     LONG wantparent, char *leaf);
 
-#define PIPE_MAX 4
+#define PIPE_MAX 8
 
 /* Pipelined UNSTABLE writes: up to DEPTH= WRITE RPCs in flight.
  * Safe by construction: disjoint absolute-offset chunks; replies
@@ -1145,6 +1145,106 @@ static LONG nfs_write_pipe(struct CFile *cf, ULONG offset,
         return err;
     }
     *written = len;
+    return 0;
+}
+
+/* Pipelined READs: mirror of nfs_write_pipe. Requests are tiny, so
+ * depth never trips the lwIP blocked-send hazard; replies stream in
+ * and land at their slot's offset in dst. Same guarantees: xid
+ * matching, contiguous watermark, short-read tail re-issue, sync
+ * fallback from the watermark on transport death. */
+static LONG nfs_read_pipe(struct CFile *cf, ULONG offset,
+                          UBYTE *dst, ULONG want, ULONG *got)
+{
+    struct { ULONG xid, off, len; LONG busy; } sl[PIPE_MAX];
+    LONG nbusy = 0, err = 0, dead = 0, at_eof = 0;
+    ULONG next = 0, wm, i, replies = 0;
+
+    err = net_up();
+    if (err) { *got = 0; return err; }
+    for (i = 0; i < PIPE_MAX; i++) sl[i].busy = 0;
+
+    for (;;) {
+        while (!err && !dead && !at_eof && next < want && nbusy < (LONG)g_depth) {
+            ULONG chunk = want - next;
+            if (chunk > g_rsize) chunk = g_rsize;
+            rpc_begin(NFS_PROG, NFS_VERS, NFS3_READ);
+            pk_opaque(cf->fh, cf->fhlen);
+            pk_u64(0, offset + next); pk_u32(chunk);
+            for (i = 0; i < PIPE_MAX && sl[i].busy; i++) ;
+            sl[i].xid = g_xid; sl[i].off = next; sl[i].len = chunk;
+            sl[i].busy = 1;
+            if (rpc_send(g_sock)) { sl[i].busy = 0; dead = 1; break; }
+            nbusy++;
+            next += chunk;
+        }
+        if (nbusy == 0) break;
+
+        {
+            struct UB u;
+            struct Attr a;
+            ULONG rxid, st, count, eof, dlen;
+            UBYTE *data;
+
+            if (dead || !rpc_recv(g_sock, &u, &rxid)) { dead = 1; break; }
+            replies++;
+            for (i = 0; i < PIPE_MAX; i++)
+                if (sl[i].busy && sl[i].xid == rxid) break;
+            if (i == PIPE_MAX) { dead = 1; break; }
+
+            st = ub_u32(&u);
+            if (st != 0) {
+                if (!err) err = nfs3_to_dos(st);
+                sl[i].busy = 0; nbusy--;
+                continue;
+            }
+            ub_postop_attr(&u, &a);
+            count = ub_u32(&u);
+            eof = ub_u32(&u);
+            data = ub_opaque(&u, &dlen);
+            if (!data || u.err || dlen < count || count > sl[i].len) {
+                dead = 1; break;
+            }
+            if (g_testshort && udivmod(replies, g_testshort, NULL) * g_testshort == replies
+                && count > 1 && !eof) {
+                count >>= 1;
+                DBG2("TESTSHORT: pretending short read of ", count);
+            }
+            memcpy(dst + sl[i].off, data, count);
+            if (count < sl[i].len && !eof) {
+                ULONG ro = sl[i].off + count, rl = sl[i].len - count;
+                rpc_begin(NFS_PROG, NFS_VERS, NFS3_READ);
+                pk_opaque(cf->fh, cf->fhlen);
+                pk_u64(0, offset + ro); pk_u32(rl);
+                sl[i].xid = g_xid; sl[i].off = ro; sl[i].len = rl;
+                if (rpc_send(g_sock)) { sl[i].busy = 0; nbusy--; dead = 1; break; }
+            } else {
+                if (eof && sl[i].off + count < want) at_eof = 1;
+                sl[i].busy = 0; nbusy--;
+            }
+        }
+    }
+
+    wm = next;
+    for (i = 0; i < PIPE_MAX; i++)
+        if (sl[i].busy && sl[i].off < wm) wm = sl[i].off;
+
+    if (dead) {
+        /* transport died: reconnect and finish from the watermark with
+         * the synchronous path (absolute offsets, idempotent). nfs_read
+         * works relative to cf->pos, so borrow it briefly. */
+        ULONG more = 0, save = cf->pos;
+        LONG e2;
+        drop_conn();
+        cf->pos = offset + wm;
+        e2 = nfs_read(cf, dst + wm, want - wm, &more);
+        cf->pos = save;
+        *got = wm + more;
+        return e2;
+    }
+    if (err) { *got = wm; return err; }
+    if (at_eof) { *got = wm; return 0; }   /* eof mid-span: contiguous only */
+    *got = want;
     return 0;
 }
 
@@ -1585,7 +1685,9 @@ static void act_read(struct DosPacket *pkt)
 
     if (cf->pos >= cf->size) { pkt->dp_Res1 = 0; pkt->dp_Res2 = 0; return; }
     if (want > cf->size - cf->pos) want = cf->size - cf->pos;
-    err = nfs_read(cf, dst, want, &got);
+    err = (g_depth > 1 && want > g_rsize)
+        ? nfs_read_pipe(cf, cf->pos, dst, want, &got)
+        : nfs_read(cf, dst, want, &got);
     if (err && got == 0) { pkt->dp_Res1 = -1; pkt->dp_Res2 = err; return; }
     cf->pos += got;
     pkt->dp_Res1 = got;
@@ -1919,7 +2021,7 @@ static void parse_startup(void)
                 g_wsize = v;
             } else if (t > 6 && !c_memcmp(tok, "DEPTH=", 6)) {
                 ULONG v = tok[6] - '0';
-                if (v >= 1 && v <= 4) g_depth = v;
+                if (v >= 1 && v <= 8) g_depth = v;
             } else if (t > 10 && !c_memcmp(tok, "TESTSHORT=", 10)) {
                 g_testshort = tok[10] - '0';
             } else if (t > 9 && !c_memcmp(tok, "TESTDROP=", 9)) {

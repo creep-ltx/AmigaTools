@@ -201,6 +201,30 @@ WSIZE=32768 DEPTH=2 (+RSIZE=131072). Both his DOSDrivers carry it;
 NOTE: a dismount/relaunch keeps the DEVICE NODE's cached dn_Startup -
 new options need a fresh Mount (= reboot if the device node exists).
 
+## b17 (14.8.26): pipelined READS + the streaming plateau - 13 MB/s both ways
+
+His green light ("as long as it does not hurt real hardware") + wasabid
+comparison (41/52 MB/s raw both directions - which also KILLED the
+"weak Wi-Fi direction" theory for good). Server exonerated by harness:
+UNSTABLE 32K write = 0.02ms server-side; ALL per-RPC cost is
+turnaround. b17 = nfs_read_pipe (mirror of the write pipe: xid slots,
+watermark, short-read tail re-issue, eof-mid-span handling, sync
+fallback; TESTSHORT works on reads too), PIPE_MAX 8, DEPTH= up to 8.
+All fault modes byte-identical on real iron, reads and writes.
+
+Bench matrix verdict (interleaved, min+median of 3): the winner is
+SMALL chunks + DEEP pipeline = streaming: W16K x D8 ~13 MB/s writes
+(vs 3.5 for W32K x D2!) and rock consistent; 8K same plateau (noise
+apart); W32K x D8 mid; W64K + depth = the known lwIP poison. Reads
+plateau ~12-14 regardless (read requests are tiny; RSIZE 32-128K all
+fine). SHIPPED both DOSDrivers: RSIZE=65536 WSIZE=16384 DEPTH=8.
+Real-file finale: 22MB moodbox READ 14.2 / WRITE 13.1 MB/s (runs
+within 0.08s of each other); moodbox->NAS cross-copy through the
+Amiga 6.6 MB/s combined, cmp-verified on the Synology.
+Day's write path: 0.17 -> 13.1 MB/s = 77x. Remaining gap to raw
+wasabid (41+) = per-RPC turnaround at 16K granularity; good enough,
+chapter closed.
+
 ## Open questions
 
 - Handler main loop: WaitSelect on socket + packet-port signal bit in
