@@ -178,6 +178,29 @@ Known rough edges for b7+:
   A600-class: 8K/8K) - to be MEASURED per setup where possible, not
   guessed.
 
+## b16 (14.8.26): THE PIPELINE CHAPTER - his call, bench-decided
+
+DEPTH= write pipelining (1..4, default 1 = the sync path untouched, so
+real/slow machines never pay). RPC layer split into rpc_send/rpc_recv
+(replies matched by xid); contiguous-watermark accounting; short
+writes re-issue their tail in place; NFS error drains outstanding then
+truncates append-writes to the watermark; dead transport falls back to
+the sync path from the watermark (idempotent replay). Fault hooks
+TESTSHORT=n (every nth reply treated half-accepted) and TESTDROP=n
+(simulated transport death) - all three scenarios produced
+BYTE-IDENTICAL 2MB files through the real state machine on real iron.
+
+The bench story had a twist: at WSIZE=64K, depth HURTS monotonically
+(depth4 = 10x worse - queued chunks reconstitute the >sndbuf blocked-
+send poison). First theory (total in-flight <= 64K) REFUTED by test:
+32K x depth4 = 128K in flight ran FINE. The real find, interleaved
+same-window rounds: 64K x1 is boom-or-bust (0.38..5.2s); 32K x2 is
+0.70-0.97s EVERY round - the second in-flight chunk absorbs the stall
+whenever it lands. Consistency beat peak: shipped config for Emu68 =
+WSIZE=32768 DEPTH=2 (+RSIZE=131072). Both his DOSDrivers carry it;
+NOTE: a dismount/relaunch keeps the DEVICE NODE's cached dn_Startup -
+new options need a fresh Mount (= reboot if the device node exists).
+
 ## Open questions
 
 - Handler main loop: WaitSelect on socket + packet-port signal bit in

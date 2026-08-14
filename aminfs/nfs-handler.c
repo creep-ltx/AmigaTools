@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b15 (14.8.2026)";
+    "$VER: nfs-handler 0.1b16 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -266,6 +266,9 @@ static UBYTE *g_req;                   /* request build buffer */
 static UBYTE *g_rep;                   /* reply buffer */
 static ULONG  g_reqlen;
 static ULONG  g_rsize, g_wsize;        /* RSIZE=/WSIZE= transfer chunks */
+static ULONG  g_depth;                 /* DEPTH= write pipeline (1=sync) */
+static ULONG  g_testshort;             /* fault injection: every Nth */
+static ULONG  g_testdrop;              /*   write reply halved / dropped */
 static ULONG  g_reqbufsz, g_repbufsz;
 
 /* ------------------------------------------------------------------ */
@@ -455,15 +458,21 @@ static void rpc_begin(ULONG prog, ULONG vers, ULONG proc)
     pk_u32(AUTH_NULL); pk_u32(0);      /* verf */
 }
 
-static LONG rpc_finish(LONG s, struct UB *u)
+static LONG rpc_send(LONG s)
 {
     ULONG msglen = g_reqlen - 4;
-    ULONG total = 0, last = 0;
     UBYTE *p = g_req;
 
     p[0] = 0x80 | (msglen >> 24); p[1] = msglen >> 16;
     p[2] = msglen >> 8; p[3] = msglen;
-    if (sendall(s, g_req, g_reqlen)) return 0;
+    return sendall(s, g_req, g_reqlen);
+}
+
+/* One reply record into g_rep, RPC header parsed and checked. The xid
+ * comes back via *rxid so pipelined callers can match it to a slot. */
+static LONG rpc_recv(LONG s, struct UB *u, ULONG *rxid)
+{
+    ULONG total = 0, last = 0;
 
     while (!last) {
         UBYTE mark[4]; ULONG n;
@@ -480,11 +489,20 @@ static LONG rpc_finish(LONG s, struct UB *u)
     {
         ULONG xid = ub_u32(u), mtype = ub_u32(u), stat = ub_u32(u);
         ULONG vlen;
-        if (u->err || xid != g_xid || mtype != 1 || stat != 0) return 0;
+        if (u->err || mtype != 1 || stat != 0) return 0;
         ub_u32(u); ub_opaque(u, &vlen);        /* verifier */
         if (ub_u32(u) != 0) return 0;          /* accept_stat */
+        *rxid = xid;
     }
     return !u->err;
+}
+
+static LONG rpc_finish(LONG s, struct UB *u)
+{
+    ULONG rxid;
+    if (rpc_send(s)) return 0;
+    if (!rpc_recv(s, u, &rxid)) return 0;
+    return rxid == g_xid;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1007,6 +1025,129 @@ static LONG resolve(struct CLock *base, UBYTE *bstr,
                     UBYTE *outfh, ULONG *outfhlen, struct Attr *a,
                     LONG wantparent, char *leaf);
 
+#define PIPE_MAX 4
+
+/* Pipelined UNSTABLE writes: up to DEPTH= WRITE RPCs in flight.
+ * Safe by construction: disjoint absolute-offset chunks; replies
+ * matched by xid; only the contiguous watermark is ever reported;
+ * short writes re-issue their tail in place; a dead transport falls
+ * back to the synchronous path from the watermark (NFS writes are
+ * idempotent, so replaying a maybe-landed chunk is harmless).
+ * DEPTH=1 never enters this function. */
+static LONG nfs_write_pipe(struct CFile *cf, ULONG offset,
+                           const UBYTE *data, ULONG len, ULONG *written)
+{
+    struct { ULONG xid, off, len; LONG busy; } sl[PIPE_MAX];
+    LONG nbusy = 0, err = 0, dead = 0;
+    ULONG next = 0, wm, i, replies = 0;
+
+    err = net_up();
+    if (err) { *written = 0; return err; }
+    for (i = 0; i < PIPE_MAX; i++) sl[i].busy = 0;
+
+    for (;;) {
+        while (!err && !dead && next < len && nbusy < (LONG)g_depth) {
+            ULONG chunk = len - next;
+            if (chunk > g_wsize) chunk = g_wsize;
+            rpc_begin(NFS_PROG, NFS_VERS, NFS3_WRITE);
+            pk_opaque(cf->fh, cf->fhlen);
+            pk_u64(0, offset + next); pk_u32(chunk); pk_u32(0);
+            pk_opaque(data + next, chunk);
+            for (i = 0; i < PIPE_MAX && sl[i].busy; i++) ;
+            sl[i].xid = g_xid; sl[i].off = next; sl[i].len = chunk;
+            sl[i].busy = 1;
+            if (rpc_send(g_sock)) { sl[i].busy = 0; dead = 1; break; }
+            nbusy++;
+            next += chunk;
+        }
+        if (nbusy == 0) break;
+
+        {
+            struct UB u;
+            ULONG rxid, st, count;
+
+            if (dead || !rpc_recv(g_sock, &u, &rxid)) { dead = 1; break; }
+            replies++;
+            if (g_testdrop && replies == g_testdrop) {
+                DBG("TESTDROP: simulating transport death");
+                g_testdrop = 0;
+                dead = 1;
+                break;
+            }
+            for (i = 0; i < PIPE_MAX; i++)
+                if (sl[i].busy && sl[i].xid == rxid) break;
+            if (i == PIPE_MAX) { dead = 1; break; }   /* unknown xid */
+
+            st = ub_u32(&u);
+            if (st != 0) {
+                if (!err) err = nfs3_to_dos(st);
+                sl[i].busy = 0; nbusy--;
+                continue;              /* stop issuing, drain the rest */
+            }
+            wcc_data(&u);
+            count = ub_u32(&u);
+            ub_u32(&u);                /* committed level */
+            if (u.p + 8 <= u.end) {
+                if (!cf->verf_valid) {
+                    memcpy(cf->wverf, u.p, 8);
+                    cf->verf_valid = 1;
+                } else if (c_memcmp(cf->wverf, u.p, 8)) {
+                    DBG("write verifier changed - server restarted mid-file");
+                    cf->lost = 1;
+                }
+            }
+            if (u.err || count == 0) { dead = 1; break; }
+            cf->dirty = 1;
+            if (g_testshort && udivmod(replies, g_testshort, NULL) * g_testshort == replies
+                && count > 1) {
+                count >>= 1;
+                DBG2("TESTSHORT: pretending short write of ", count);
+            }
+            if (count < sl[i].len) {
+                ULONG ro = sl[i].off + count, rl = sl[i].len - count;
+                rpc_begin(NFS_PROG, NFS_VERS, NFS3_WRITE);
+                pk_opaque(cf->fh, cf->fhlen);
+                pk_u64(0, offset + ro); pk_u32(rl); pk_u32(0);
+                pk_opaque(data + ro, rl);
+                sl[i].xid = g_xid; sl[i].off = ro; sl[i].len = rl;
+                if (rpc_send(g_sock)) { sl[i].busy = 0; nbusy--; dead = 1; break; }
+            } else {
+                sl[i].busy = 0; nbusy--;
+            }
+        }
+    }
+
+    /* contiguous watermark: everything below the lowest outstanding */
+    wm = next;
+    for (i = 0; i < PIPE_MAX; i++)
+        if (sl[i].busy && sl[i].off < wm) wm = sl[i].off;
+
+    if (dead) {
+        ULONG more = 0;
+        LONG e2;
+        drop_conn();
+        e2 = nfs_write(cf, offset + wm, data + wm, len - wm, &more);
+        *written = e2 ? wm + more : len;
+        return e2;
+    }
+    if (err) {
+        /* an append-style write may leave acked bytes past the failed
+         * chunk; trim so the file ends exactly where we say it does.
+         * Never shrink below the pre-write size. */
+        if (offset + wm >= cf->size) {
+            struct NfsArgs na;
+            memset(&na, 0, sizeof(na));
+            na.fh = cf->fh; na.fhlen = cf->fhlen;
+            na.set_size = 1; na.size = offset + wm;
+            nfs_status_op(NFS3_SETATTR, &na);
+        }
+        *written = wm;
+        return err;
+    }
+    *written = len;
+    return 0;
+}
+
 /* resolve to the parent + typed leaf, then find the server-case entry */
 static LONG resolve_entry(struct CLock *base, UBYTE *bstr,
                           UBYTE *pfh, ULONG *plen,
@@ -1523,7 +1664,9 @@ static void act_write(struct DosPacket *pkt)
     ULONG want = pkt->dp_Arg3, done = 0;
     LONG err;
 
-    err = nfs_write(cf, cf->pos, src, want, &done);
+    err = (g_depth > 1 && want > g_wsize)
+        ? nfs_write_pipe(cf, cf->pos, src, want, &done)
+        : nfs_write(cf, cf->pos, src, want, &done);
     cf->pos += done;
     if (cf->pos > cf->size) cf->size = cf->pos;
     if (err && done == 0) { pkt->dp_Res1 = -1; pkt->dp_Res2 = err; return; }
@@ -1774,6 +1917,13 @@ static void parse_startup(void)
                 if (v < XFER_MIN) v = XFER_MIN;
                 if (v > XFER_MAX) v = XFER_MAX;
                 g_wsize = v;
+            } else if (t > 6 && !c_memcmp(tok, "DEPTH=", 6)) {
+                ULONG v = tok[6] - '0';
+                if (v >= 1 && v <= 4) g_depth = v;
+            } else if (t > 10 && !c_memcmp(tok, "TESTSHORT=", 10)) {
+                g_testshort = tok[10] - '0';
+            } else if (t > 9 && !c_memcmp(tok, "TESTDROP=", 9)) {
+                g_testdrop = tok[9] - '0';
             } else if (t > 3 && !c_memcmp(tok, "TZ=", 3)) {
                 LONG k = 3, neg = 0, h = 0, m = 0;
                 if (tok[k] == '-') { neg = 1; k++; }
@@ -1822,6 +1972,7 @@ LONG handler_main(void)
     g_sock = -1; g_have_root = 0; g_rootfhlen = 0; g_xid = 100;
     g_uid = 1000; g_gid = 1000; g_volset = 0; g_tzoff = 0;
     g_rsize = RSIZE_DEFAULT; g_wsize = WSIZE_DEFAULT;
+    g_depth = 1; g_testshort = 0; g_testdrop = 0;
     g_req = g_rep = NULL;
 
     me = (struct Process *)FindTask(NULL);

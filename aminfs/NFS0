@@ -6,7 +6,7 @@ Handler    = L:nfs-handler
 StackSize  = 16384
 Priority   = 5
 GlobVec    = -1
-Startup    = "192.168.68.117:/home/creep/Amiga VOLUME=moodbox TZ=+2"
+Startup    = "192.168.68.117:/home/creep/Amiga VOLUME=moodbox TZ=+2 WSIZE=32768 DEPTH=2"
 
 /* Startup is "host:/export/path [options]"; host is a dotted quad.
  * Options: VOLUME=name  Workbench/volume name (default: export leaf)
@@ -16,6 +16,12 @@ Startup    = "192.168.68.117:/home/creep/Amiga VOLUME=moodbox TZ=+2"
  *          RSIZE=n WSIZE=n  transfer chunk bytes, 4096..131072
  *                       (defaults 131072/65536; small-memory machines
  *                       can shrink; Emu68 lwIP: keep WSIZE <= 65536)
+ *          DEPTH=1..4   write pipelining. 1 (default) = one WRITE at a
+ *                       time, always safe. 2+ keeps that many RPCs in
+ *                       flight - measured best on Emu68 lwIP with
+ *                       WSIZE=32768 DEPTH=2 (steady ~2.6 MB/s writes,
+ *                       no stall spikes). CPU-bound machines with real
+ *                       NICs gain little; leave at 1 there.
  * Mount from Storage with:  Mount SYS:Storage/DOSDrivers/NFS0
  * (Mount X: FROM file needs classic MountList stanzas, not this format.)
  * Dismount cleanly with:    NFSDismount NFS0:  */
