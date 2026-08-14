@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b14 (14.8.2026)";
+    "$VER: nfs-handler 0.1b15 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -179,11 +179,16 @@ static void kputu(ULONG v)
 #define RECV_TIMEOUT    10             /* seconds, per recv */
 
 #define FHSIZE_MAX      64
-#define RDCHUNK         131072         /* per NFS READ (server rtpref 1MB) */
-#define WRCHUNK         65536         /* per NFS WRITE: chunk size
-                                          amortizes the per-RPC stall */
-#define REPBUF_SIZE     (RDCHUNK + 4096)
-#define REQBUF_SIZE     (WRCHUNK + 768)
+/* Transfer sizes are runtime options (RSIZE=/WSIZE=). Defaults suit a
+ * fast box; small-memory or slow-NIC machines shrink them at mount.
+ * On Emu68's lwIP keep WSIZE <= 65536: larger blocked sends wake on a
+ * coarse timer, ~485ms per chunk (measured). */
+#define RSIZE_DEFAULT   131072
+#define WSIZE_DEFAULT   65536
+#define XFER_MIN        4096
+#define XFER_MAX        131072
+#define REPBUF_EXTRA    4096
+#define REQBUF_EXTRA    768
 #define NAME_MAX_AMIGA  106
 
 /* ------------------------------------------------------------------ */
@@ -260,6 +265,8 @@ static ULONG  g_xid;
 static UBYTE *g_req;                   /* request build buffer */
 static UBYTE *g_rep;                   /* reply buffer */
 static ULONG  g_reqlen;
+static ULONG  g_rsize, g_wsize;        /* RSIZE=/WSIZE= transfer chunks */
+static ULONG  g_reqbufsz, g_repbufsz;
 
 /* ------------------------------------------------------------------ */
 /* XDR pack into g_req / unpack out of g_rep. m68k is big-endian =    */
@@ -267,7 +274,7 @@ static ULONG  g_reqlen;
 
 static void pk_u32(ULONG v)
 {
-    if (g_reqlen + 4 <= REQBUF_SIZE) {
+    if (g_reqlen + 4 <= g_reqbufsz) {
         UBYTE *p = g_req + g_reqlen;
         p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v;
         g_reqlen += 4;
@@ -280,7 +287,7 @@ static void pk_opaque(const UBYTE *d, ULONG n)
 {
     ULONG pad = (4 - (n & 3)) & 3;
     pk_u32(n);
-    if (g_reqlen + n + pad <= REQBUF_SIZE) {
+    if (g_reqlen + n + pad <= g_reqbufsz) {
         memcpy(g_req + g_reqlen, d, n);
         memset(g_req + g_reqlen + n, 0, pad);
         g_reqlen += n + pad;
@@ -392,7 +399,7 @@ static LONG tcp_connect(ULONG ip, UWORD dstport)
         return -1;
     }
     {
-        LONG one = 1, buf = 131072;
+        LONG one = 1, buf = (g_rsize > g_wsize ? g_rsize : g_wsize);
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         /* a full write chunk must queue in one go, or every WRITE RPC
          * stalls against the peer's delayed ACKs (measured: ~90ms/16KB) */
@@ -464,7 +471,7 @@ static LONG rpc_finish(LONG s, struct UB *u)
         last = mark[0] & 0x80;
         n = ((ULONG)(mark[0] & 0x7F) << 24) | ((ULONG)mark[1] << 16)
           | ((ULONG)mark[2] << 8) | mark[3];
-        if (total + n > REPBUF_SIZE) return 0;
+        if (total + n > g_repbufsz) return 0;
         if (recvn(s, g_rep + total, n)) return 0;
         total += n;
     }
@@ -612,12 +619,12 @@ static LONG nfs_call(ULONG proc, const struct NfsArgs *na, struct UB *u,
             pk_u64(0, na->a); pk_u32(na->b);
         } else if (proc == NFS3_READDIRPLUS) {
             pk_u64(na->a, na->b);
-            if (g_reqlen + 8 <= REQBUF_SIZE) {   /* cookieverf: raw 8 bytes */
+            if (g_reqlen + 8 <= g_reqbufsz) {   /* cookieverf: raw 8 bytes */
                 memcpy(g_req + g_reqlen, verf, 8);
                 g_reqlen += 8;
             }
             pk_u32(4096);              /* dircount */
-            pk_u32(REPBUF_SIZE - 512); /* maxcount */
+            pk_u32(g_repbufsz - 512); /* maxcount */
         } else if (proc == NFS3_SETATTR) {
             pk_sattr(na);
             pk_u32(0);                 /* guard: no ctime check */
@@ -854,7 +861,7 @@ static LONG nfs_read(struct CFile *cf, UBYTE *dst, ULONG want, ULONG *got)
         ULONG count, eof, dlen;
         UBYTE *data;
 
-        if (chunk > RDCHUNK) chunk = RDCHUNK;
+        if (chunk > g_rsize) chunk = g_rsize;
         na.fh = cf->fh; na.fhlen = cf->fhlen;
         na.a = cf->pos + done; na.b = chunk;
         err = nfs_call(NFS3_READ, &na, &u, NULL);
@@ -943,7 +950,7 @@ static LONG nfs_write(struct CFile *cf, ULONG offset,
         LONG err;
         ULONG st, chunk = len - done, count;
 
-        if (chunk > WRCHUNK) chunk = WRCHUNK;
+        if (chunk > g_wsize) chunk = g_wsize;
         memset(&na, 0, sizeof(na));
         na.fh = cf->fh; na.fhlen = cf->fhlen;
         na.a = offset + done;
@@ -1753,6 +1760,20 @@ static void parse_startup(void)
                 for (k = 4; tok[k] >= '0' && tok[k] <= '9'; k++)
                     v = v * 10 + (tok[k] - '0');
                 g_gid = v;
+            } else if (t > 6 && !c_memcmp(tok, "RSIZE=", 6)) {
+                ULONG v = 0; LONG k;
+                for (k = 6; tok[k] >= '0' && tok[k] <= '9'; k++)
+                    v = v * 10 + (tok[k] - '0');
+                if (v < XFER_MIN) v = XFER_MIN;
+                if (v > XFER_MAX) v = XFER_MAX;
+                g_rsize = v;
+            } else if (t > 6 && !c_memcmp(tok, "WSIZE=", 6)) {
+                ULONG v = 0; LONG k;
+                for (k = 6; tok[k] >= '0' && tok[k] <= '9'; k++)
+                    v = v * 10 + (tok[k] - '0');
+                if (v < XFER_MIN) v = XFER_MIN;
+                if (v > XFER_MAX) v = XFER_MAX;
+                g_wsize = v;
             } else if (t > 3 && !c_memcmp(tok, "TZ=", 3)) {
                 LONG k = 3, neg = 0, h = 0, m = 0;
                 if (tok[k] == '-') { neg = 1; k++; }
@@ -1800,6 +1821,7 @@ LONG handler_main(void)
     g_nlocks = g_nfiles = 0; g_dying = 0;
     g_sock = -1; g_have_root = 0; g_rootfhlen = 0; g_xid = 100;
     g_uid = 1000; g_gid = 1000; g_volset = 0; g_tzoff = 0;
+    g_rsize = RSIZE_DEFAULT; g_wsize = WSIZE_DEFAULT;
     g_req = g_rep = NULL;
 
     me = (struct Process *)FindTask(NULL);
@@ -1813,8 +1835,10 @@ LONG handler_main(void)
 
     parse_startup();
 
-    g_req = AllocVec(REQBUF_SIZE, MEMF_PUBLIC);
-    g_rep = AllocVec(REPBUF_SIZE, MEMF_PUBLIC);
+    g_reqbufsz = g_wsize + REQBUF_EXTRA;
+    g_repbufsz = g_rsize + REPBUF_EXTRA;
+    g_req = AllocVec(g_reqbufsz, MEMF_PUBLIC);
+    g_rep = AllocVec(g_repbufsz, MEMF_PUBLIC);
     if (!g_req || !g_rep) {
         if (g_req) FreeVec(g_req);
         if (g_rep) FreeVec(g_rep);

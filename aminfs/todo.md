@@ -159,6 +159,25 @@ Known rough edges for b7+:
   (mountd port 892 via portmap, no DSM changes), NAS: volume lists his
   real home share on the A1200. moodbox share awaits his exports line.
 
+## b15 (14.8.26): RSIZE=/WSIZE= + the 68000 question answered
+
+- Transfer sizes are mount options now (4K..128K, clamped; buffers
+  runtime-sized after Startup parse; socket bufs follow the larger).
+  8K/8K config: 2MB round trip verified on real iron.
+- Binary confirmed 68000-CLEAN by disassembly scan (the five suspect
+  hits were string bytes in .text, not instructions). Bebbo default
+  target = 68000; A600-with-PCMCIA-NIC class machines are in scope.
+- FIRST REBOOT-FREE UPGRADE: NFSDismount both shares, put new L:
+  binary, access device -> b15 running. b14's dn_SegList drop, proven.
+- Pipelining verdict for the doc: depth is a knob; DEPTH=1 = today's
+  synchronous path, so slow machines are never locked out. CPU-bound
+  real machines gain ~nothing (no idle wire); high-LATENCY links
+  (PCMCIA wifi, routed mounts) would gain even on slow CPUs. Parked.
+- Doc TODO for release: best-values table (Emu68/lwIP: 128K/64K;
+  Roadshow+Zorro NIC: try 128K/128K; PCMCIA or 8MB machines: 32K/16K;
+  A600-class: 8K/8K) - to be MEASURED per setup where possible, not
+  guessed.
+
 ## Open questions
 
 - Handler main loop: WaitSelect on socket + packet-port signal bit in
