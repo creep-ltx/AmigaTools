@@ -6,11 +6,13 @@ Handler    = L:nfs-handler
 StackSize  = 16384
 Priority   = 5
 GlobVec    = -1
-Startup    = "192.168.68.117:/home/creep/Amiga VOLUME=moodbox"
+Startup    = "192.168.68.117:/home/creep/Amiga VOLUME=moodbox TZ=+2"
 
 /* Startup is "host:/export/path [options]"; host is a dotted quad.
  * Options: VOLUME=name  Workbench/volume name (default: export leaf)
  *          UID=n GID=n  AUTH_UNIX identity (default 1000/1000)
+ *          TZ=[+|-]H[:MM]  hours east of UTC for displayed dates
+ *                       (NFS times are UTC; the Amiga has no zone)
  * Mount from Storage with:  Mount SYS:Storage/DOSDrivers/NFS0
  * (Mount X: FROM file needs classic MountList stanzas, not this format.)
  * Dismount cleanly with:    NFSDismount NFS0:  */

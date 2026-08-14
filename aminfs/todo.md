@@ -30,8 +30,21 @@ Decided 14.8.26: write our own (not port anfs), in C (not E).
 - M3: write path. CREATE/WRITE/SETATTR/REMOVE/RMDIR/MKDIR/RENAME →
   FINDOUTPUT/FINDUPDATE/ACTION_WRITE/DELETE/CREATE_DIR/RENAME_OBJECT,
   SET_PROTECT/SET_DATE mapping (Amiga protection bits vs mode).
-- M4: perf. Attribute cache with TTL, readahead on sequential READ,
-  write clustering (UNSTABLE writes + COMMIT).
+- M4: perf. CLOSED 14.8.26, b10-b12, measured not guessed:
+  baseline b9 = READ 5.3 MB/s, WRITE 0.17 MB/s (FILE_SYNC 16K chunks),
+  LIST 100 files 0.07s (=> attr cache NOT justified, dropped).
+  b10 UNSTABLE+COMMIT alone made writes SLOWER (15s) - the fsync was
+  never the cost; the cost = stop-and-wait upstream, ~90ms per 16KB
+  RPC (delayed-ACK stall; wasabi speedtest: raw upstream 3 MB/s).
+  b11 SO_SNDBUF/SO_RCVBUF 64K: 8.4s. b12 the real lever = CHUNK SIZE:
+  WRCHUNK 64K + RDCHUNK 32K -> WRITE 0.91s = 2.4 MB/s (13x, at the
+  wire ceiling), READ 0.28s = 9.7 MB/s (2x). All cmp-verified.
+  Write correctness: UNSTABLE + COMMIT on ACTION_END/FLUSH, write
+  verifier tracked per file - server restart mid-file fails the Close
+  instead of losing data silently. TZ= option landed in b10
+  (display +offset, SET_DATE -offset; verified 06:09->08:09).
+  Also: this libgcc lacks __mulsi3 too - provided in-file (joins
+  udivmod; '*' with big constants emits the call at -O2).
 - M5: polish. DOSDrivers entry + icon, C:nfsctl dismount (ACTION_DIE
   teardown per ccon discipline), reconnect after server restart
   (fh's survive — that's the point of NFS statelessness).
@@ -97,7 +110,7 @@ Protection bits show ----rwed, dates land (UTC - see below).
 Known rough edges for b7+:
 - EXAMINE on a file lock: name '?', size 0 (needs real GETATTR + the
   leaf name stored in the lock at LOCATE time).
-- Timestamps are UTC; his wall clock is CEST. TZ= mount option later.
+- ~~Timestamps UTC~~ DONE b10: TZ=+2 in both real DOSDrivers.
 - probe_net() diagnostic + per-packet DBG spam: strip for b7.
 - Blocking connect/recv with no timeout: a dead server wedges the
   handler (and any shell touching it). SO_RCVTIMEO or WaitSelect

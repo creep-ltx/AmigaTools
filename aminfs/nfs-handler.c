@@ -15,8 +15,9 @@
  * than overlap. Connects lazily on first use, so mounting at boot
  * before the TCP stack is up costs nothing.
  *
- * Read/write since b9. Writes are FILE_SYNC for now; clustering is a
- * perf-campaign matter.
+ * Read/write since b9. Since b10 writes go UNSTABLE with a COMMIT at
+ * close - the write verifier is tracked, so a server reboot that eats
+ * uncommitted data fails the Close() instead of losing bytes silently.
  */
 
 #include <exec/types.h>
@@ -43,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b9 (14.8.2026)";
+    "$VER: nfs-handler 0.1b12 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -70,6 +71,19 @@ static int c_memcmp(const void *a, const void *b, __SIZE_TYPE__ n)
 }
 
 static LONG c_strlen(const char *s) { const char *p = s; while (*p) p++; return p - s; }
+
+/* This libgcc also lacks __mulsi3 (32x32 multiply on plain 68000);
+ * provide it so ordinary '*' keeps working everywhere. */
+LONG __mulsi3(LONG a, LONG b)
+{
+    ULONG ua = a, ub = b, r = 0;
+    while (ub) {
+        if (ub & 1) r += ua;
+        ua <<= 1;
+        ub >>= 1;
+    }
+    return (LONG)r;
+}
 
 /* -nostdlib means no reliable __udivsi3/__umodsi3; divide by hand */
 static ULONG udivmod(ULONG n, ULONG d, ULONG *rem)
@@ -154,6 +168,7 @@ static void kputu(ULONG v)
 #define NFS3_REMOVE     12
 #define NFS3_RMDIR      13
 #define NFS3_RENAME     14
+#define NFS3_COMMIT     21
 #define NFS3_READDIRPLUS 17
 #define NFS3_FSSTAT     18
 
@@ -164,8 +179,9 @@ static void kputu(ULONG v)
 #define RECV_TIMEOUT    10             /* seconds, per recv */
 
 #define FHSIZE_MAX      64
-#define RDCHUNK         16384          /* per NFS READ; tune in M4 */
-#define WRCHUNK         16384          /* per NFS WRITE */
+#define RDCHUNK         32768          /* per NFS READ */
+#define WRCHUNK         65536          /* per NFS WRITE: bigger chunks
+                                          amortize the per-RPC ACK stall */
 #define REPBUF_SIZE     (RDCHUNK + 4096)
 #define REQBUF_SIZE     (WRCHUNK + 768)
 #define NAME_MAX_AMIGA  106
@@ -209,6 +225,10 @@ struct CFile {
     UBYTE  fh[FHSIZE_MAX];
     ULONG  pos;
     ULONG  size;
+    LONG   dirty;                      /* UNSTABLE data awaiting COMMIT */
+    LONG   verf_valid;
+    LONG   lost;                       /* verifier changed mid-file */
+    UBYTE  wverf[8];
     char   name[NAME_MAX_AMIGA + 1];
 };
 
@@ -228,6 +248,7 @@ static char   g_host[64];              /* dotted quad from Startup */
 static char   g_export[192];
 static char   g_volname[32];
 static ULONG  g_uid, g_gid;            /* AUTH_UNIX identity (UID=/GID=) */
+static LONG   g_tzoff;                 /* seconds east of UTC (TZ=) */
 static LONG   g_volset;                /* VOLUME= given */
 
 static LONG   g_sock;                  /* persistent nfsd connection */
@@ -371,8 +392,12 @@ static LONG tcp_connect(ULONG ip, UWORD dstport)
         return -1;
     }
     {
-        LONG one = 1;
+        LONG one = 1, buf = 65536;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+        /* a full write chunk must queue in one go, or every WRITE RPC
+         * stalls against the peer's delayed ACKs (measured: ~90ms/16KB) */
+        setsockopt(s, SOL_SOCKET, SO_SNDBUF, &buf, sizeof(buf));
+        setsockopt(s, SOL_SOCKET, SO_RCVBUF, &buf, sizeof(buf));
     }
     return s;
 }
@@ -599,8 +624,11 @@ static LONG nfs_call(ULONG proc, const struct NfsArgs *na, struct UB *u,
         } else if (proc == NFS3_WRITE) {
             pk_u64(0, na->a);
             pk_u32(na->dlen);
-            pk_u32(2);                 /* FILE_SYNC */
+            pk_u32(0);                 /* UNSTABLE: COMMIT happens at close */
             pk_opaque(na->data, na->dlen);
+        } else if (proc == NFS3_COMMIT) {
+            pk_u64(0, 0);              /* offset 0, count 0 = whole file */
+            pk_u32(0);
         } else if (proc == NFS3_CREATE) {
             pk_str(na->name);
             pk_u32(0);                 /* UNCHECKED */
@@ -926,11 +954,46 @@ static LONG nfs_write(struct CFile *cf, ULONG offset,
         if (st != 0) { *written = done; return nfs3_to_dos(st); }
         wcc_data(&u);
         count = ub_u32(&u);
+        ub_u32(&u);                    /* committed level */
+        if (u.p + 8 <= u.end) {
+            if (!cf->verf_valid) {
+                memcpy(cf->wverf, u.p, 8);
+                cf->verf_valid = 1;
+            } else if (c_memcmp(cf->wverf, u.p, 8)) {
+                DBG("write verifier changed - server restarted mid-file");
+                cf->lost = 1;
+            }
+        }
         if (u.err || count == 0) { *written = done; return ERROR_SEEK_ERROR; }
+        cf->dirty = 1;
         done += count;
     }
     *written = done;
     return 0;
+}
+
+/* COMMIT the whole file; verify against the write verifier */
+static LONG nfs_commit(struct CFile *cf)
+{
+    struct UB u;
+    struct NfsArgs na;
+    LONG err;
+    ULONG st;
+
+    if (!cf->dirty) return cf->lost ? ERROR_SEEK_ERROR : 0;
+    memset(&na, 0, sizeof(na));
+    na.fh = cf->fh; na.fhlen = cf->fhlen;
+    err = nfs_call(NFS3_COMMIT, &na, &u, NULL);
+    if (err) return err;
+    st = ub_u32(&u);
+    if (st != 0) return nfs3_to_dos(st);
+    wcc_data(&u);
+    if (u.p + 8 <= u.end && cf->verf_valid && c_memcmp(u.p, cf->wverf, 8)) {
+        DBG("COMMIT verifier mismatch - unstable data lost");
+        cf->lost = 1;
+    }
+    cf->dirty = 0;
+    return cf->lost ? ERROR_SEEK_ERROR : 0;
 }
 
 static LONG resolve(struct CLock *base, UBYTE *bstr,
@@ -974,6 +1037,7 @@ static ULONG prot_from_mode(ULONG mode)
 static void ds_from_unix(struct DateStamp *ds, ULONG t)
 {
     ULONG insec, inday, sec;
+    t += g_tzoff;                      /* server time is UTC; show local */
     if (t < AMIGA_EPOCH) t = AMIGA_EPOCH;
     t -= AMIGA_EPOCH;
     ds->ds_Days   = udivmod(t, 86400, &insec);
@@ -1356,9 +1420,11 @@ static void act_end(struct DosPacket *pkt)
 {
     struct CFile *cf = (struct CFile *)pkt->dp_Arg1;
     struct CFile **pp;
+    LONG err = nfs_commit(cf);
     for (pp = &g_files; *pp; pp = &(*pp)->next)
         if (*pp == cf) { *pp = cf->next; FreeVec(cf); g_nfiles--; break; }
-    pkt->dp_Res1 = DOSTRUE;
+    pkt->dp_Res1 = err ? DOSFALSE : DOSTRUE;
+    pkt->dp_Res2 = err;
 }
 
 static void act_read(struct DosPacket *pkt)
@@ -1567,7 +1633,8 @@ static void act_set_date(struct DosPacket *pkt)
     memset(&na, 0, sizeof(na));
     na.set_mtime = 1;
     na.mtime = AMIGA_EPOCH + ds->ds_Days * 86400
-             + ds->ds_Minute * 60 + udivmod(ds->ds_Tick, TICKS_PER_SECOND, NULL);
+             + ds->ds_Minute * 60 + udivmod(ds->ds_Tick, TICKS_PER_SECOND, NULL)
+             - g_tzoff;                /* DateStamps are local; NFS is UTC */
     act_setattr_path(pkt, &na);
 }
 
@@ -1680,6 +1747,16 @@ static void parse_startup(void)
                 for (k = 4; tok[k] >= '0' && tok[k] <= '9'; k++)
                     v = v * 10 + (tok[k] - '0');
                 g_gid = v;
+            } else if (t > 3 && !c_memcmp(tok, "TZ=", 3)) {
+                LONG k = 3, neg = 0, h = 0, m = 0;
+                if (tok[k] == '-') { neg = 1; k++; }
+                else if (tok[k] == '+') k++;
+                for (; tok[k] >= '0' && tok[k] <= '9'; k++)
+                    h = h * 10 + (tok[k] - '0');
+                if (tok[k] == ':')
+                    for (k++; tok[k] >= '0' && tok[k] <= '9'; k++)
+                        m = m * 10 + (tok[k] - '0');
+                g_tzoff = (h * 3600 + m * 60) * (neg ? -1 : 1);
             } else if (t) {
                 kput("aminfs: unknown option "); kput(tok); kputc('\n');
             }
@@ -1716,7 +1793,7 @@ LONG handler_main(void)
     g_volnode = NULL; g_locks = NULL; g_files = NULL;
     g_nlocks = g_nfiles = 0; g_dying = 0;
     g_sock = -1; g_have_root = 0; g_rootfhlen = 0; g_xid = 100;
-    g_uid = 1000; g_gid = 1000; g_volset = 0;
+    g_uid = 1000; g_gid = 1000; g_volset = 0; g_tzoff = 0;
     g_req = g_rep = NULL;
 
     me = (struct Process *)FindTask(NULL);
@@ -1784,7 +1861,16 @@ LONG handler_main(void)
             case ACTION_INFO:           act_info(pkt, pkt->dp_Arg2); break;
             case ACTION_SAME_LOCK:      act_same_lock(pkt); break;
             case ACTION_IS_FILESYSTEM:  pkt->dp_Res1 = DOSTRUE; break;
-            case ACTION_FLUSH:          pkt->dp_Res1 = DOSTRUE; break;
+            case ACTION_FLUSH: {
+                struct CFile *cf;
+                pkt->dp_Res1 = DOSTRUE;
+                for (cf = g_files; cf; cf = cf->next)
+                    if (nfs_commit(cf)) {
+                        pkt->dp_Res1 = DOSFALSE;
+                        pkt->dp_Res2 = ERROR_SEEK_ERROR;
+                    }
+                break;
+            }
             case ACTION_CURRENT_VOLUME: pkt->dp_Res1 = MKBADDR(g_volnode); break;
             case ACTION_DIE:            act_die(pkt); break;
 
