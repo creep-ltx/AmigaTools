@@ -15,7 +15,8 @@
  * than overlap. Connects lazily on first use, so mounting at boot
  * before the TCP stack is up costs nothing.
  *
- * b1 is read-only: every mutating action answers ERROR_DISK_WRITE_PROTECTED.
+ * Read/write since b9. Writes are FILE_SYNC for now; clustering is a
+ * perf-campaign matter.
  */
 
 #include <exec/types.h>
@@ -31,6 +32,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/ioctl.h>
 #include <proto/bsdsocket.h>
 
 struct ExecBase *SysBase;
@@ -41,7 +43,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b7 (14.8.2026)";
+    "$VER: nfs-handler 0.1b9 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -142,18 +144,30 @@ static void kputu(ULONG v)
 #define NFS_VERS        3
 #define NFS_PORT        2049
 
+#define NFS3_GETATTR    1
+#define NFS3_SETATTR    2
 #define NFS3_LOOKUP     3
 #define NFS3_READ       6
+#define NFS3_WRITE      7
+#define NFS3_CREATE     8
+#define NFS3_MKDIR      9
+#define NFS3_REMOVE     12
+#define NFS3_RMDIR      13
+#define NFS3_RENAME     14
 #define NFS3_READDIRPLUS 17
 #define NFS3_FSSTAT     18
 
 #define NF3REG          1
 #define NF3DIR          2
 
+#define CONN_TIMEOUT    5              /* seconds, connect */
+#define RECV_TIMEOUT    10             /* seconds, per recv */
+
 #define FHSIZE_MAX      64
 #define RDCHUNK         16384          /* per NFS READ; tune in M4 */
+#define WRCHUNK         16384          /* per NFS WRITE */
 #define REPBUF_SIZE     (RDCHUNK + 4096)
-#define REQBUF_SIZE     2048
+#define REQBUF_SIZE     (WRCHUNK + 768)
 #define NAME_MAX_AMIGA  106
 
 /* ------------------------------------------------------------------ */
@@ -186,6 +200,7 @@ struct CLock {
     ULONG  ftype;                      /* NF3REG / NF3DIR */
     struct DirChunk *dc;               /* EXAMINE_NEXT snapshot */
     LONG   dctotal;
+    char   name[NAME_MAX_AMIGA + 1];   /* leaf name, for EXAMINE */
 };
 
 struct CFile {
@@ -194,6 +209,7 @@ struct CFile {
     UBYTE  fh[FHSIZE_MAX];
     ULONG  pos;
     ULONG  size;
+    char   name[NAME_MAX_AMIGA + 1];
 };
 
 struct Attr {                          /* decoded fattr3, 32-bit view */
@@ -211,6 +227,8 @@ static LONG   g_dying;
 static char   g_host[64];              /* dotted quad from Startup */
 static char   g_export[192];
 static char   g_volname[32];
+static ULONG  g_uid, g_gid;            /* AUTH_UNIX identity (UID=/GID=) */
+static LONG   g_volset;                /* VOLUME= given */
 
 static LONG   g_sock;                  /* persistent nfsd connection */
 static LONG   g_have_root;
@@ -312,21 +330,43 @@ static LONG ub_postop_attr(struct UB *u, struct Attr *a)
 static LONG tcp_connect(ULONG ip, UWORD dstport)
 {
     struct sockaddr_in sa;
-    LONG rc;
-    LONG s = socket(AF_INET, SOCK_STREAM, 0);
-    DBG2("socket fd ", s);
+    LONG rc, s, nb = 1;
+
+    s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return -1;
     memset(&sa, 0, sizeof(sa));
     sa.sin_len = sizeof(sa);
     sa.sin_family = AF_INET;
     sa.sin_port = dstport;             /* big-endian host: already net order */
     sa.sin_addr.s_addr = ip;
-    rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
-    kput("aminfs: connect port "); kputu(dstport); kput(" rc ");
-    if (rc < 0) { kput("-"); kputu(-rc); } else kputu(rc);
-    if (rc < 0) { kput(" errno "); kputu(Errno()); }
-    kputc('\n');
-    if (rc < 0) {
+
+    /* Non-blocking connect + WaitSelect = a real timeout; a dead server
+     * must never wedge the handler. If FIONBIO is unsupported we accept
+     * a plain blocking connect rather than fail. */
+    if (IoctlSocket(s, FIONBIO, (char *)&nb) == 0) {
+        rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
+        if (rc < 0) {
+            LONG e = Errno();
+            if (e == 35 || e == 36) {  /* EWOULDBLOCK / EINPROGRESS */
+                fd_set wf;
+                struct timeval tv;
+                FD_ZERO(&wf); FD_SET(s, &wf);
+                tv.tv_sec = CONN_TIMEOUT; tv.tv_usec = 0;
+                if (WaitSelect(s + 1, NULL, &wf, NULL, &tv, NULL) == 1) {
+                    LONG soerr = 0;
+                    socklen_t slen = sizeof(soerr);
+                    rc = (getsockopt(s, SOL_SOCKET, SO_ERROR, &soerr, &slen) == 0
+                          && soerr == 0) ? 0 : -1;
+                } else rc = -1;        /* timeout or select error */
+            }
+        }
+        nb = 0;
+        IoctlSocket(s, FIONBIO, (char *)&nb);
+    } else {
+        rc = connect(s, (struct sockaddr *)&sa, sizeof(sa));
+    }
+    if (rc != 0) {
+        DBG2("connect failed, port ", dstport);
         CloseSocket(s);
         return -1;
     }
@@ -350,7 +390,14 @@ static LONG sendall(LONG s, const UBYTE *d, ULONG n)
 static LONG recvn(LONG s, UBYTE *d, ULONG n)
 {
     while (n) {
-        LONG r = recv(s, d, n, 0);
+        fd_set rf;
+        struct timeval tv;
+        LONG r;
+        FD_ZERO(&rf); FD_SET(s, &rf);
+        tv.tv_sec = RECV_TIMEOUT; tv.tv_usec = 0;
+        r = WaitSelect(s + 1, &rf, NULL, NULL, &tv, NULL);
+        if (r != 1) { DBG("recv timeout"); return -1; }
+        r = recv(s, d, n, 0);
         if (r <= 0) return -1;
         d += r; n -= r;
     }
@@ -372,7 +419,7 @@ static void rpc_begin(ULONG prog, ULONG vers, ULONG proc)
     /* body: stamp(4) + name "aminfs" (4 len + 6 + 2 pad = 12) + uid(4)
      * + gid(4) + gids count(4) = 28. Length must track the name. */
     pk_u32(28);
-    pk_u32(0); pk_str("aminfs"); pk_u32(1000); pk_u32(1000); pk_u32(0);
+    pk_u32(0); pk_str("aminfs"); pk_u32(g_uid); pk_u32(g_gid); pk_u32(0);
     pk_u32(AUTH_NULL); pk_u32(0);      /* verf */
 }
 
@@ -434,23 +481,6 @@ static void drop_conn(void)
     g_sock = -1;
 }
 
-/* one-shot diagnostic: where does outbound TCP actually reach? */
-static LONG g_probed;
-static void probe_net(ULONG ip)
-{
-    static const UWORD ports[3] = { 111, 2049, 22 };
-    ULONG rtr = (ip & 0xFFFFFF00) | 1;   /* .1 = the router */
-    LONG i, s;
-    if (g_probed) return;
-    g_probed = 1;
-    for (i = 0; i < 3; i++) {
-        s = tcp_connect(ip, ports[i]);
-        if (s >= 0) CloseSocket(s);
-    }
-    s = tcp_connect(rtr, 80);
-    if (s >= 0) CloseSocket(s);
-}
-
 /* 0 = ok, else an AmigaDOS error code */
 static LONG net_up(void)
 {
@@ -468,7 +498,6 @@ static LONG net_up(void)
         DBG("bad host in Startup (need dotted quad)");
         return ERROR_BAD_STREAM_NAME;
     }
-    probe_net(ip);
 
     if (!g_have_root) {
         struct UB u;
@@ -518,8 +547,27 @@ static LONG net_up(void)
 
 /* One NFS transaction with a single silent reconnect on transport death.
  * The args are re-packed on retry, so a half-sent request never lingers. */
-struct NfsArgs { const UBYTE *fh; ULONG fhlen; const char *name;
-                 ULONG a, b, c; };
+struct NfsArgs {
+    const UBYTE *fh;  ULONG fhlen;
+    const char *name;
+    const UBYTE *fh2; ULONG fh2len;    /* RENAME destination dir */
+    const char *name2;
+    const UBYTE *data; ULONG dlen;     /* WRITE payload */
+    ULONG a, b, c;                     /* offset/count/cookie */
+    LONG set_mode;  ULONG mode;        /* sattr3 pieces */
+    LONG set_size;  ULONG size;
+    LONG set_mtime; ULONG mtime;
+};
+
+static void pk_sattr(const struct NfsArgs *na)
+{
+    if (na->set_mode) { pk_u32(1); pk_u32(na->mode); } else pk_u32(0);
+    pk_u32(0); pk_u32(0);              /* uid, gid: never set */
+    if (na->set_size) { pk_u32(1); pk_u64(0, na->size); } else pk_u32(0);
+    pk_u32(0);                         /* atime: DONT_CHANGE */
+    if (na->set_mtime) { pk_u32(2); pk_u32(na->mtime); pk_u32(0); }
+    else pk_u32(0);                    /* 2 = SET_TO_CLIENT_TIME */
+}
 
 /* returns 0 ok (u at status word), else DOS error */
 static LONG nfs_call(ULONG proc, const struct NfsArgs *na, struct UB *u,
@@ -545,6 +593,27 @@ static LONG nfs_call(ULONG proc, const struct NfsArgs *na, struct UB *u,
             }
             pk_u32(4096);              /* dircount */
             pk_u32(REPBUF_SIZE - 512); /* maxcount */
+        } else if (proc == NFS3_SETATTR) {
+            pk_sattr(na);
+            pk_u32(0);                 /* guard: no ctime check */
+        } else if (proc == NFS3_WRITE) {
+            pk_u64(0, na->a);
+            pk_u32(na->dlen);
+            pk_u32(2);                 /* FILE_SYNC */
+            pk_opaque(na->data, na->dlen);
+        } else if (proc == NFS3_CREATE) {
+            pk_str(na->name);
+            pk_u32(0);                 /* UNCHECKED */
+            pk_sattr(na);
+        } else if (proc == NFS3_MKDIR) {
+            pk_str(na->name);
+            pk_sattr(na);
+        } else if (proc == NFS3_REMOVE || proc == NFS3_RMDIR) {
+            pk_str(na->name);
+        } else if (proc == NFS3_RENAME) {
+            pk_str(na->name);
+            pk_opaque(na->fh2, na->fh2len);
+            pk_str(na->name2);
         }
         if (rpc_finish(g_sock, u)) return 0;
         DBG("transport error, reconnecting");
@@ -574,7 +643,24 @@ static LONG nfs3_to_dos(ULONG st)
 /* NFS operations at the level the packet code wants                  */
 
 static LONG nfs_lookup(const UBYTE *dirfh, ULONG dirfhlen, const char *name,
-                       UBYTE *outfh, ULONG *outfhlen, struct Attr *a);
+                       UBYTE *outfh, ULONG *outfhlen, struct Attr *a,
+                       char *actual /* server-case name out, may be NULL */);
+
+static LONG nfs_getattr(const UBYTE *fh, ULONG fhlen, struct Attr *a)
+{
+    struct UB u;
+    struct NfsArgs na;
+    LONG err;
+    ULONG st;
+
+    na.fh = fh; na.fhlen = fhlen;
+    err = nfs_call(NFS3_GETATTR, &na, &u, NULL);
+    if (err) return err;
+    st = ub_u32(&u);
+    if (st != 0) return nfs3_to_dos(st);
+    ub_fattr(&u, a);
+    return u.err ? ERROR_ACTION_NOT_KNOWN : 0;
+}
 
 /* whole-directory snapshot via READDIRPLUS; chunk list out */
 static LONG nfs_readdir(const UBYTE *dirfh, ULONG dirfhlen,
@@ -669,7 +755,8 @@ static void free_dircache(struct CLock *cl)
 }
 
 static LONG nfs_lookup(const UBYTE *dirfh, ULONG dirfhlen, const char *name,
-                       UBYTE *outfh, ULONG *outfhlen, struct Attr *a)
+                       UBYTE *outfh, ULONG *outfhlen, struct Attr *a,
+                       char *actual)
 {
     struct UB u;
     struct NfsArgs na;
@@ -704,6 +791,7 @@ static LONG nfs_lookup(const UBYTE *dirfh, ULONG dirfhlen, const char *name,
                 *outfhlen = hit->fhlen;
                 a->ftype = hit->ftype; a->mode = hit->mode; a->size = hit->size;
                 a->fileid = hit->fileid; a->mtime = hit->mtime;
+                if (actual) memcpy(actual, hit->name, hit->namelen + 1);
                 while (dc) { struct DirChunk *nx = dc->next; FreeVec(dc); dc = nx; }
                 return 0;
             }
@@ -717,6 +805,7 @@ static LONG nfs_lookup(const UBYTE *dirfh, ULONG dirfhlen, const char *name,
     if (!fh || n > FHSIZE_MAX || u.err) return ERROR_ACTION_NOT_KNOWN;
     memcpy(outfh, fh, n);
     *outfhlen = n;
+    if (actual) memcpy(actual, name, c_strlen(name) + 1);
     if (!ub_postop_attr(&u, a)) {
         /* server may omit attrs; treat as plain file of unknown size */
         a->ftype = NF3REG; a->mode = 0644; a->size = 0;
@@ -758,6 +847,109 @@ static LONG nfs_read(struct CFile *cf, UBYTE *dst, ULONG want, ULONG *got)
     }
     *got = done;
     return 0;
+}
+
+/* wcc_data: pre_op (bool + size/times) then post_op_attr; skip both */
+static void wcc_data(struct UB *u)
+{
+    struct Attr a;
+    if (ub_u32(u)) ub_skip(u, 8 + 8 + 8);   /* size u64, mtime, ctime */
+    ub_postop_attr(u, &a);
+}
+
+static LONG nfs_status_op(ULONG proc, struct NfsArgs *na)
+{
+    struct UB u;
+    LONG err = nfs_call(proc, na, &u, NULL);
+    ULONG st;
+    if (err) return err;
+    st = ub_u32(&u);
+    return st ? nfs3_to_dos(st) : 0;
+}
+
+/* CREATE or MKDIR: both reply post_op_fh3 + attrs; fall back to LOOKUP */
+static LONG nfs_make(ULONG proc, const UBYTE *dirfh, ULONG dirfhlen,
+                     const char *name, ULONG mode, LONG trunc,
+                     UBYTE *outfh, ULONG *outfhlen, struct Attr *a)
+{
+    struct UB u;
+    struct NfsArgs na;
+    LONG err;
+    ULONG st;
+
+    memset(&na, 0, sizeof(na));
+    na.fh = dirfh; na.fhlen = dirfhlen; na.name = name;
+    na.set_mode = 1; na.mode = mode;
+    if (trunc) { na.set_size = 1; na.size = 0; }
+    err = nfs_call(proc, &na, &u, NULL);
+    if (err) return err;
+    st = ub_u32(&u);
+    if (st != 0) return nfs3_to_dos(st);
+    {
+        UBYTE *fh = NULL;
+        ULONG n = 0;
+        LONG have_attr;
+        if (ub_u32(&u)) fh = ub_opaque(&u, &n);
+        have_attr = ub_postop_attr(&u, a);
+        if (fh && n && n <= FHSIZE_MAX && !u.err) {
+            memcpy(outfh, fh, n);
+            *outfhlen = n;
+            if (!have_attr) {
+                a->ftype = (proc == NFS3_MKDIR) ? NF3DIR : NF3REG;
+                a->mode = mode; a->size = 0; a->fileid = 0; a->mtime = 0;
+            }
+            return 0;
+        }
+    }
+    return nfs_lookup(dirfh, dirfhlen, name, outfh, outfhlen, a, NULL);
+}
+
+static LONG nfs_write(struct CFile *cf, ULONG offset,
+                      const UBYTE *data, ULONG len, ULONG *written)
+{
+    ULONG done = 0;
+
+    while (done < len) {
+        struct UB u;
+        struct NfsArgs na;
+        LONG err;
+        ULONG st, chunk = len - done, count;
+
+        if (chunk > WRCHUNK) chunk = WRCHUNK;
+        memset(&na, 0, sizeof(na));
+        na.fh = cf->fh; na.fhlen = cf->fhlen;
+        na.a = offset + done;
+        na.data = data + done; na.dlen = chunk;
+        err = nfs_call(NFS3_WRITE, &na, &u, NULL);
+        if (err) { *written = done; return err; }
+        st = ub_u32(&u);
+        if (st != 0) { *written = done; return nfs3_to_dos(st); }
+        wcc_data(&u);
+        count = ub_u32(&u);
+        if (u.err || count == 0) { *written = done; return ERROR_SEEK_ERROR; }
+        done += count;
+    }
+    *written = done;
+    return 0;
+}
+
+static LONG resolve(struct CLock *base, UBYTE *bstr,
+                    UBYTE *outfh, ULONG *outfhlen, struct Attr *a,
+                    LONG wantparent, char *leaf);
+
+/* resolve to the parent + typed leaf, then find the server-case entry */
+static LONG resolve_entry(struct CLock *base, UBYTE *bstr,
+                          UBYTE *pfh, ULONG *plen,
+                          char *actual, struct Attr *a,
+                          UBYTE *ofh, ULONG *olen)
+{
+    struct Attr pa;
+    char leaf[NAME_MAX_AMIGA + 1];
+    LONG err;
+
+    err = resolve(base, bstr, pfh, plen, &pa, 1, leaf);
+    if (err) return err;
+    return nfs_lookup(pfh, *plen, leaf, ofh, olen, a, actual);
 }
 
 /* ------------------------------------------------------------------ */
@@ -891,7 +1083,7 @@ static LONG resolve(struct CLock *base, UBYTE *bstr,
                     /* parent of root: stay (matches RAM: behaviour) */
                 } else {
                     UBYTE nfh[FHSIZE_MAX]; ULONG nlen; struct Attr na2;
-                    err = nfs_lookup(curfh, curlen, "..", nfh, &nlen, &na2);
+                    err = nfs_lookup(curfh, curlen, "..", nfh, &nlen, &na2, NULL);
                     if (err) return err;
                     memcpy(curfh, nfh, nlen); curlen = nlen; cura = na2;
                 }
@@ -905,7 +1097,7 @@ static LONG resolve(struct CLock *base, UBYTE *bstr,
                     return 0;
                 }
                 if (cura.ftype != NF3DIR) return ERROR_DIR_NOT_FOUND;
-                err = nfs_lookup(curfh, curlen, comp, nfh, &nlen, &na2);
+                err = nfs_lookup(curfh, curlen, comp, nfh, &nlen, &na2, NULL);
                 if (err) return err;
                 memcpy(curfh, nfh, nlen); curlen = nlen; cura = na2;
             }
@@ -927,7 +1119,7 @@ static LONG resolve(struct CLock *base, UBYTE *bstr,
 }
 
 /* the leaf name of a BSTR path, for EXAMINE's fib_FileName */
-static void __attribute__((unused)) leafname(UBYTE *bstr, char *out)
+static void leafname(UBYTE *bstr, char *out)
 {
     LONG len = bstr[0], i, start = 0, o = 0;
     for (i = 0; i < len; i++)
@@ -951,6 +1143,7 @@ static void act_locate(struct DosPacket *pkt)
     {
         struct CLock *cl = lock_new(fh, fhlen, a.ftype, a.fileid);
         if (!cl) { pkt->dp_Res1 = 0; pkt->dp_Res2 = ERROR_NO_FREE_STORE; return; }
+        leafname(BADDR(pkt->dp_Arg2), cl->name);
         pkt->dp_Res1 = MKBADDR(&cl->fl);
         pkt->dp_Res2 = 0;
     }
@@ -972,6 +1165,7 @@ static void act_copy_dir(struct DosPacket *pkt)
     lock_fh(cl, &fh, &fhlen, &ftype);
     nc = lock_new(fh, fhlen, ftype, cl ? cl->fl.fl_Key : 0);
     if (!nc) { pkt->dp_Res1 = 0; pkt->dp_Res2 = ERROR_NO_FREE_STORE; return; }
+    if (cl) memcpy(nc->name, cl->name, sizeof(nc->name));
     pkt->dp_Res1 = MKBADDR(&nc->fl);
     pkt->dp_Res2 = 0;
 }
@@ -992,7 +1186,7 @@ static void act_parent(struct DosPacket *pkt)
         const UBYTE *fh; ULONG fhlen, ftype;
         lock_fh(cl, &fh, &fhlen, &ftype);
         if (ftype == NF3DIR) {
-            err = nfs_lookup(fh, fhlen, "..", nfh, &nlen, &a);
+            err = nfs_lookup(fh, fhlen, "..", nfh, &nlen, &a, NULL);
         } else {
             /* parent of a file lock: we can't LOOKUP ".." on a file.
              * b1 punts to the root; fine for List/Type usage patterns. */
@@ -1015,26 +1209,19 @@ static void act_examine(struct DosPacket *pkt)
     struct CLock *cl = lock_of(pkt->dp_Arg1);
     struct FileInfoBlock *fib = BADDR(pkt->dp_Arg2);
     struct Attr a;
-    LONG is_root = (!cl || (cl->fhlen == g_rootfhlen &&
-                            !c_memcmp(cl->fh, g_rootfh, cl->fhlen)));
+    const UBYTE *fh;
+    ULONG fhlen, ftype;
+    LONG err, is_root;
 
-    /* We stored type/key at lock time; size/date need a fresh LOOKUP of
-     * ourselves - NFS has GETATTR but b1 leans on the lock's snapshot
-     * plus the dircache for EXNEXT. For EXAMINE on a dir (the common
-     * List entry) static data suffices; for a file, re-resolve is
-     * skipped in b1 (size shows 0 on direct Examine of a file lock).
-     * TODO b2: real GETATTR here. */
-    a.ftype = cl ? cl->ftype : NF3DIR;
-    a.mode = 0755; a.size = 0; a.mtime = 0;
-    a.fileid = cl ? (ULONG)cl->fl.fl_Key : 0;
-
-    fib_fill(fib, is_root ? g_volname : "", &a, is_root);
-    if (!is_root) {
-        /* no name stored in the lock in b1; EXAMINE_NEXT fills real names */
-        fib->fib_FileName[0] = 1;
-        fib->fib_FileName[1] = '?';
-    }
-    fib->fib_DiskKey = 0;              /* EXNEXT starts at index 0 */
+    err = net_up();
+    if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
+    lock_fh(cl, &fh, &fhlen, &ftype);
+    is_root = (fhlen == g_rootfhlen && !c_memcmp(fh, g_rootfh, fhlen));
+    err = nfs_getattr(fh, fhlen, &a);
+    if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
+    fib_fill(fib, is_root ? g_volname
+                          : (cl && cl->name[0] ? cl->name : "?"), &a, is_root);
+    fib->fib_DiskKey = 0;              /* EXAMINE_NEXT starts at index 0 */
     pkt->dp_Res1 = DOSTRUE;
     pkt->dp_Res2 = 0;
 }
@@ -1092,6 +1279,24 @@ static void act_examine_next(struct DosPacket *pkt)
     }
 }
 
+static void open_tail(struct DosPacket *pkt, struct FileHandle *fhandle,
+                      const UBYTE *fh, ULONG fhlen, ULONG size, UBYTE *namebstr)
+{
+    struct CFile *cf = AllocVec(sizeof(*cf), MEMF_PUBLIC | MEMF_CLEAR);
+    if (!cf) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = ERROR_NO_FREE_STORE; return; }
+    memcpy(cf->fh, fh, fhlen);
+    cf->fhlen = fhlen;
+    cf->size = size;
+    leafname(namebstr, cf->name);
+    cf->next = g_files;
+    g_files = cf;
+    g_nfiles++;
+    fhandle->fh_Arg1 = (LONG)cf;
+    fhandle->fh_Type = g_port;
+    pkt->dp_Res1 = DOSTRUE;
+    pkt->dp_Res2 = 0;
+}
+
 static void act_findinput(struct DosPacket *pkt)
 {
     struct FileHandle *fhandle = BADDR(pkt->dp_Arg1);
@@ -1103,20 +1308,48 @@ static void act_findinput(struct DosPacket *pkt)
         err = resolve(base, BADDR(pkt->dp_Arg3), fh, &fhlen, &a, 0, NULL);
     if (!err && a.ftype == NF3DIR) err = ERROR_OBJECT_WRONG_TYPE;
     if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
-    {
-        struct CFile *cf = AllocVec(sizeof(*cf), MEMF_PUBLIC | MEMF_CLEAR);
-        if (!cf) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = ERROR_NO_FREE_STORE; return; }
-        memcpy(cf->fh, fh, fhlen);
-        cf->fhlen = fhlen;
-        cf->size = a.size;
-        cf->next = g_files;
-        g_files = cf;
-        g_nfiles++;
-        fhandle->fh_Arg1 = (LONG)cf;
-        fhandle->fh_Type = g_port;
-        pkt->dp_Res1 = DOSTRUE;
-        pkt->dp_Res2 = 0;
+    open_tail(pkt, fhandle, fh, fhlen, a.size, BADDR(pkt->dp_Arg3));
+}
+
+/* FINDOUTPUT = MODE_NEWFILE: create-or-truncate */
+static void act_findoutput(struct DosPacket *pkt)
+{
+    struct FileHandle *fhandle = BADDR(pkt->dp_Arg1);
+    struct CLock *base = lock_of(pkt->dp_Arg2);
+    UBYTE pfh[FHSIZE_MAX]; ULONG plen; struct Attr pa, a;
+    UBYTE fh[FHSIZE_MAX]; ULONG fhlen;
+    char leaf[NAME_MAX_AMIGA + 1];
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve(base, BADDR(pkt->dp_Arg3), pfh, &plen, &pa, 1, leaf);
+    if (!err)
+        err = nfs_make(NFS3_CREATE, pfh, plen, leaf, 0644, 1, fh, &fhlen, &a);
+    if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
+    open_tail(pkt, fhandle, fh, fhlen, 0, BADDR(pkt->dp_Arg3));
+}
+
+/* FINDUPDATE = MODE_READWRITE: open existing, create if absent */
+static void act_findupdate(struct DosPacket *pkt)
+{
+    struct FileHandle *fhandle = BADDR(pkt->dp_Arg1);
+    struct CLock *base = lock_of(pkt->dp_Arg2);
+    UBYTE pfh[FHSIZE_MAX]; ULONG plen; struct Attr pa, a;
+    UBYTE fh[FHSIZE_MAX]; ULONG fhlen;
+    char leaf[NAME_MAX_AMIGA + 1];
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve(base, BADDR(pkt->dp_Arg3), pfh, &plen, &pa, 1, leaf);
+    if (!err) {
+        err = nfs_lookup(pfh, plen, leaf, fh, &fhlen, &a, NULL);
+        if (err == ERROR_OBJECT_NOT_FOUND)
+            err = nfs_make(NFS3_CREATE, pfh, plen, leaf, 0644, 0, fh, &fhlen, &a);
+        else if (!err && a.ftype == NF3DIR)
+            err = ERROR_OBJECT_WRONG_TYPE;
     }
+    if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
+    open_tail(pkt, fhandle, fh, fhlen, a.size, BADDR(pkt->dp_Arg3));
 }
 
 static void act_end(struct DosPacket *pkt)
@@ -1179,9 +1412,9 @@ static void act_info(struct DosPacket *pkt, BPTR infobptr)
             fhi = ub_u32(&u); flo = ub_u32(&u);   /* fbytes */
             /* bytes -> 512-byte blocks, shifted across the word split;
              * a >=1TB export overflows LONG id_NumBlocks, so clamp */
-            if (thi & 0xFFFFFF00) tblocks = 0x7FFFFFFF;
+            if (thi & 0xFFFFFF80) tblocks = 0x7FFFFFFF;
             else tblocks = (thi << 23) | (tlo >> 9);
-            if (fhi & 0xFFFFFF00) ublocks = 0;
+            if ((thi | fhi) & 0xFFFFFF80) ublocks = 0;
             else ublocks = tblocks - ((fhi << 23) | (flo >> 9));
             if ((LONG)ublocks < 0) ublocks = 0;
         }
@@ -1207,6 +1440,169 @@ static void act_same_lock(struct DosPacket *pkt)
     lock_fh(b, &fb, &lb, &t);
     pkt->dp_Res1 = (la == lb && !c_memcmp(fa, fb, la))
                  ? DOSTRUE : DOSFALSE;
+    pkt->dp_Res2 = 0;
+}
+
+static void act_write(struct DosPacket *pkt)
+{
+    struct CFile *cf = (struct CFile *)pkt->dp_Arg1;
+    const UBYTE *src = (const UBYTE *)pkt->dp_Arg2;
+    ULONG want = pkt->dp_Arg3, done = 0;
+    LONG err;
+
+    err = nfs_write(cf, cf->pos, src, want, &done);
+    cf->pos += done;
+    if (cf->pos > cf->size) cf->size = cf->pos;
+    if (err && done == 0) { pkt->dp_Res1 = -1; pkt->dp_Res2 = err; return; }
+    pkt->dp_Res1 = done;
+    pkt->dp_Res2 = 0;
+}
+
+static void act_delete(struct DosPacket *pkt)
+{
+    struct CLock *base = lock_of(pkt->dp_Arg1);
+    UBYTE pfh[FHSIZE_MAX]; ULONG plen;
+    UBYTE ofh[FHSIZE_MAX]; ULONG olen;
+    char actual[NAME_MAX_AMIGA + 1];
+    struct Attr a;
+    struct NfsArgs na;
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve_entry(base, BADDR(pkt->dp_Arg2), pfh, &plen,
+                            actual, &a, ofh, &olen);
+    if (!err) {
+        memset(&na, 0, sizeof(na));
+        na.fh = pfh; na.fhlen = plen; na.name = actual;
+        err = nfs_status_op(a.ftype == NF3DIR ? NFS3_RMDIR : NFS3_REMOVE, &na);
+    }
+    pkt->dp_Res1 = err ? DOSFALSE : DOSTRUE;
+    pkt->dp_Res2 = err;
+}
+
+static void act_rename(struct DosPacket *pkt)
+{
+    struct CLock *sbase = lock_of(pkt->dp_Arg1);
+    struct CLock *dbase = lock_of(pkt->dp_Arg3);
+    UBYTE spfh[FHSIZE_MAX], dpfh[FHSIZE_MAX], ofh[FHSIZE_MAX];
+    ULONG splen, dplen, olen;
+    char actual[NAME_MAX_AMIGA + 1], dleaf[NAME_MAX_AMIGA + 1];
+    struct Attr a, dpa;
+    struct NfsArgs na;
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve_entry(sbase, BADDR(pkt->dp_Arg2), spfh, &splen,
+                            actual, &a, ofh, &olen);
+    if (!err)
+        err = resolve(dbase, BADDR(pkt->dp_Arg4), dpfh, &dplen, &dpa, 1, dleaf);
+    if (!err) {
+        memset(&na, 0, sizeof(na));
+        na.fh = spfh; na.fhlen = splen; na.name = actual;
+        na.fh2 = dpfh; na.fh2len = dplen; na.name2 = dleaf;
+        err = nfs_status_op(NFS3_RENAME, &na);
+    }
+    pkt->dp_Res1 = err ? DOSFALSE : DOSTRUE;
+    pkt->dp_Res2 = err;
+}
+
+static void act_create_dir(struct DosPacket *pkt)
+{
+    struct CLock *base = lock_of(pkt->dp_Arg1);
+    UBYTE pfh[FHSIZE_MAX], fh[FHSIZE_MAX];
+    ULONG plen, fhlen;
+    char leaf[NAME_MAX_AMIGA + 1];
+    struct Attr pa, a;
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve(base, BADDR(pkt->dp_Arg2), pfh, &plen, &pa, 1, leaf);
+    if (!err)
+        err = nfs_make(NFS3_MKDIR, pfh, plen, leaf, 0755, 0, fh, &fhlen, &a);
+    if (err) { pkt->dp_Res1 = 0; pkt->dp_Res2 = err; return; }
+    {
+        struct CLock *cl = lock_new(fh, fhlen, NF3DIR, a.fileid);
+        if (!cl) { pkt->dp_Res1 = 0; pkt->dp_Res2 = ERROR_NO_FREE_STORE; return; }
+        leafname(BADDR(pkt->dp_Arg2), cl->name);
+        pkt->dp_Res1 = MKBADDR(&cl->fl);
+        pkt->dp_Res2 = 0;
+    }
+}
+
+/* SET_PROTECT / SET_DATE share the resolve-then-SETATTR shape */
+static void act_setattr_path(struct DosPacket *pkt, struct NfsArgs *na)
+{
+    struct CLock *base = lock_of(pkt->dp_Arg2);
+    UBYTE fh[FHSIZE_MAX]; ULONG fhlen;
+    struct Attr a;
+    LONG err = net_up();
+
+    if (!err)
+        err = resolve(base, BADDR(pkt->dp_Arg3), fh, &fhlen, &a, 0, NULL);
+    if (!err) {
+        na->fh = fh; na->fhlen = fhlen;
+        err = nfs_status_op(NFS3_SETATTR, na);
+    }
+    pkt->dp_Res1 = err ? DOSFALSE : DOSTRUE;
+    pkt->dp_Res2 = err;
+}
+
+static void act_set_protect(struct DosPacket *pkt)
+{
+    ULONG mask = pkt->dp_Arg4, mode = 0;
+    struct NfsArgs na;
+
+    if (!(mask & FIBF_READ_BIT)) mode |= 0444;
+    if (!(mask & (FIBF_WRITE_BIT | FIBF_DELETE_BIT))) mode |= 0200;
+    memset(&na, 0, sizeof(na));
+    na.set_mode = 1; na.mode = mode;
+    act_setattr_path(pkt, &na);
+}
+
+static void act_set_date(struct DosPacket *pkt)
+{
+    struct DateStamp *ds = (struct DateStamp *)pkt->dp_Arg4;
+    struct NfsArgs na;
+
+    memset(&na, 0, sizeof(na));
+    na.set_mtime = 1;
+    na.mtime = AMIGA_EPOCH + ds->ds_Days * 86400
+             + ds->ds_Minute * 60 + udivmod(ds->ds_Tick, TICKS_PER_SECOND, NULL);
+    act_setattr_path(pkt, &na);
+}
+
+static void act_set_file_size(struct DosPacket *pkt)
+{
+    struct CFile *cf = (struct CFile *)pkt->dp_Arg1;
+    LONG off = pkt->dp_Arg2, mode = pkt->dp_Arg3;
+    LONG base = (mode == OFFSET_BEGINNING) ? 0
+              : (mode == OFFSET_END) ? (LONG)cf->size : (LONG)cf->pos;
+    LONG nsize = base + off;
+    struct NfsArgs na;
+    LONG err;
+
+    if (nsize < 0) { pkt->dp_Res1 = -1; pkt->dp_Res2 = ERROR_SEEK_ERROR; return; }
+    memset(&na, 0, sizeof(na));
+    na.fh = cf->fh; na.fhlen = cf->fhlen;
+    na.set_size = 1; na.size = nsize;
+    err = nfs_status_op(NFS3_SETATTR, &na);
+    if (err) { pkt->dp_Res1 = -1; pkt->dp_Res2 = err; return; }
+    cf->size = nsize;
+    if (cf->pos > cf->size) cf->pos = cf->size;
+    pkt->dp_Res1 = nsize;
+    pkt->dp_Res2 = 0;
+}
+
+static void act_examine_fh(struct DosPacket *pkt)
+{
+    struct CFile *cf = (struct CFile *)pkt->dp_Arg1;
+    struct FileInfoBlock *fib = BADDR(pkt->dp_Arg2);
+    struct Attr a;
+    LONG err = nfs_getattr(cf->fh, cf->fhlen, &a);
+
+    if (err) { pkt->dp_Res1 = DOSFALSE; pkt->dp_Res2 = err; return; }
+    fib_fill(fib, cf->name[0] ? cf->name : "?", &a, 0);
+    pkt->dp_Res1 = DOSTRUE;
     pkt->dp_Res2 = 0;
 }
 
@@ -1258,15 +1654,43 @@ static void parse_startup(void)
         for (i = s; i < colon && o < 63; i++) g_host[o++] = b[i];
         g_host[o] = 0;
         o = 0;
-        for (i = colon + 1; i < e && o < 191; i++) g_export[o++] = b[i];
+        for (i = colon + 1; i < e && o < 191 && b[i] != ' '; i++)
+            g_export[o++] = b[i];
         g_export[o] = 0;
+
+        /* remaining space-separated tokens are options */
+        while (i < e) {
+            char tok[64];
+            LONG t = 0;
+            while (i < e && b[i] == ' ') i++;
+            while (i < e && b[i] != ' ' && t < 63) tok[t++] = b[i++];
+            tok[t] = 0;
+            if (t > 7 && !c_memcmp(tok, "VOLUME=", 7)) {
+                LONG k;
+                for (k = 0; tok[7 + k] && k < 31; k++) g_volname[k] = tok[7 + k];
+                g_volname[k] = 0;
+                g_volset = 1;
+            } else if (t > 4 && !c_memcmp(tok, "UID=", 4)) {
+                ULONG v = 0; LONG k;
+                for (k = 4; tok[k] >= '0' && tok[k] <= '9'; k++)
+                    v = v * 10 + (tok[k] - '0');
+                g_uid = v;
+            } else if (t > 4 && !c_memcmp(tok, "GID=", 4)) {
+                ULONG v = 0; LONG k;
+                for (k = 4; tok[k] >= '0' && tok[k] <= '9'; k++)
+                    v = v * 10 + (tok[k] - '0');
+                g_gid = v;
+            } else if (t) {
+                kput("aminfs: unknown option "); kput(tok); kputc('\n');
+            }
+        }
     }
 
     kput("aminfs: host '"); kput(g_host); kput("' export '"); kput(g_export);
     kput("'\n");
 
-    /* volume name = last path component of the export */
-    {
+    /* volume name = last path component of the export, unless VOLUME= */
+    if (!g_volset) {
         LONG start = 0;
         for (i = 0; g_export[i]; i++)
             if (g_export[i] == '/' && g_export[i + 1]) start = i + 1;
@@ -1292,6 +1716,7 @@ LONG handler_main(void)
     g_volnode = NULL; g_locks = NULL; g_files = NULL;
     g_nlocks = g_nfiles = 0; g_dying = 0;
     g_sock = -1; g_have_root = 0; g_rootfhlen = 0; g_xid = 100;
+    g_uid = 1000; g_gid = 1000; g_volset = 0;
     g_req = g_rep = NULL;
 
     me = (struct Process *)FindTask(NULL);
@@ -1333,7 +1758,6 @@ LONG handler_main(void)
         while ((msg = GetMsg(g_port))) {
             pkt = (struct DosPacket *)msg->mn_Node.ln_Name;
             pkt->dp_Res2 = 0;
-            DBG2("pkt ", pkt->dp_Type);
 
             switch (pkt->dp_Type) {
             case ACTION_LOCATE_OBJECT:  act_locate(pkt); break;
@@ -1343,6 +1767,16 @@ LONG handler_main(void)
             case ACTION_EXAMINE_OBJECT: act_examine(pkt); break;
             case ACTION_EXAMINE_NEXT:   act_examine_next(pkt); break;
             case ACTION_FINDINPUT:      act_findinput(pkt); break;
+            case ACTION_FINDOUTPUT:     act_findoutput(pkt); break;
+            case ACTION_FINDUPDATE:     act_findupdate(pkt); break;
+            case ACTION_WRITE:          act_write(pkt); break;
+            case ACTION_DELETE_OBJECT:  act_delete(pkt); break;
+            case ACTION_RENAME_OBJECT:  act_rename(pkt); break;
+            case ACTION_CREATE_DIR:     act_create_dir(pkt); break;
+            case ACTION_SET_PROTECT:    act_set_protect(pkt); break;
+            case ACTION_SET_DATE:       act_set_date(pkt); break;
+            case ACTION_SET_FILE_SIZE:  act_set_file_size(pkt); break;
+            case ACTION_EXAMINE_FH:     act_examine_fh(pkt); break;
             case ACTION_END:            act_end(pkt); break;
             case ACTION_READ:           act_read(pkt); break;
             case ACTION_SEEK:           act_seek(pkt); break;
@@ -1354,19 +1788,10 @@ LONG handler_main(void)
             case ACTION_CURRENT_VOLUME: pkt->dp_Res1 = MKBADDR(g_volnode); break;
             case ACTION_DIE:            act_die(pkt); break;
 
-            /* the write side arrives in b2+; refuse honestly for now */
-            case ACTION_FINDOUTPUT:
-            case ACTION_FINDUPDATE:
-            case ACTION_WRITE:
-            case ACTION_DELETE_OBJECT:
-            case ACTION_RENAME_OBJECT:
-            case ACTION_CREATE_DIR:
-            case ACTION_SET_PROTECT:
+            /* comments have no NFS home; refuse so nobody thinks they stick */
             case ACTION_SET_COMMENT:
-            case ACTION_SET_DATE:
-            case ACTION_SET_FILE_SIZE:
                 pkt->dp_Res1 = DOSFALSE;
-                pkt->dp_Res2 = ERROR_DISK_WRITE_PROTECTED;
+                pkt->dp_Res2 = ERROR_ACTION_NOT_KNOWN;
                 break;
 
             default:

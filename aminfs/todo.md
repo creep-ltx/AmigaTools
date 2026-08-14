@@ -105,6 +105,35 @@ Known rough edges for b7+:
 - wasabi run output sometimes swallowed (List's went missing twice,
   then streamed fine) - wasabi-side quirk, not cnfs; watch it.
 
+## 14.8.26 afternoon: b8+b9 = the rest of the day-one ask, DELIVERED
+
+- b8: probe/spam stripped; REAL TIMEOUTS (non-blocking connect +
+  WaitSelect 5s, WaitSelect 10s before every recv - a dead server can
+  no longer wedge the handler); GETATTR-backed EXAMINE with leaf names
+  stored in locks (List NFS9:pattern.bin shows real size now);
+  Startup options VOLUME= UID= GID=. All green on real iron.
+- b9: THE WRITE PATH, all server-side-verified on the real A1200:
+  Makedir/Echo>/Copy(2MB NFS->NFS byte-identical)/Rename/Protect
+  (rd -> mode 444)/Delete/rmdir. FILE_SYNC writes for now; UNSTABLE+
+  COMMIT clustering is the M4 perf campaign.
+- NFSDismount (C: tool): ACTION_DIE by device name; refuses while in
+  use; UnLockDosList BEFORE DoPkt (handler DIE takes the write lock -
+  holding read = mutual deadlock). Dismount -> "no handler running" ->
+  next access remounts from the kept seglist. Full mortal cycle green.
+- Mount mechanics NAILED (stock AUX file proves it, not just ours):
+  `Mount X: FROM file` parses ONLY MountList stanzas; bare DOSDriver
+  files mount by DIRECT PATH (`Mount SYS:Storage/DOSDrivers/NFS0`) or
+  from DEVS:DOSDrivers at boot. Volume name routes only after first
+  DEVICE access (handler must run to add the volume node).
+- INSTALLED on his A1200 (additive, boot untouched): L:nfs-handler,
+  C:NFSDismount, SYS:Storage/DOSDrivers/NFS0 (moodbox = ~/Amiga on
+  192.168.68.117) + NFS1 (NAS = Synology 192.168.68.118
+  /volume1/homes/creep UID=1026 GID=100) + PC0-copied icons.
+  He drags to DEVS:DOSDrivers when he wants boot automount.
+- NAS: GREEN end to end - Synology accepted the Amiga's MNT directly
+  (mountd port 892 via portmap, no DSM changes), NAS: volume lists his
+  real home share on the A1200. moodbox share awaits his exports line.
+
 ## Open questions
 
 - Handler main loop: WaitSelect on socket + packet-port signal bit in
