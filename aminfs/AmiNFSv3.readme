@@ -1,13 +1,3 @@
-Short:    NFSv3 client filesystem - mount Linux/NAS shares
-Author:   Tobias Karlsson
-Uploader: tobiaskarlsson80 gmail com (Tobias Karlsson)
-Type:     comm/net
-Version:  0.1
-Requires: AmigaOS 2.0+; a TCP/IP stack (bsdsocket.library V4)
-Architecture: m68k-amigaos
-
-DRAFT - edit before upload.
-
   AmiNFSv3 - mount a Linux or NAS directory as an Amiga volume.
 ================================================================
 
