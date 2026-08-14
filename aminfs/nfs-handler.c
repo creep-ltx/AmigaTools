@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b12 (14.8.2026)";
+    "$VER: nfs-handler 0.1b13 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -179,9 +179,9 @@ static void kputu(ULONG v)
 #define RECV_TIMEOUT    10             /* seconds, per recv */
 
 #define FHSIZE_MAX      64
-#define RDCHUNK         32768          /* per NFS READ */
-#define WRCHUNK         65536          /* per NFS WRITE: bigger chunks
-                                          amortize the per-RPC ACK stall */
+#define RDCHUNK         131072         /* per NFS READ (server rtpref 1MB) */
+#define WRCHUNK         65536         /* per NFS WRITE: chunk size
+                                          amortizes the per-RPC stall */
 #define REPBUF_SIZE     (RDCHUNK + 4096)
 #define REQBUF_SIZE     (WRCHUNK + 768)
 #define NAME_MAX_AMIGA  106
@@ -392,7 +392,7 @@ static LONG tcp_connect(ULONG ip, UWORD dstport)
         return -1;
     }
     {
-        LONG one = 1, buf = 65536;
+        LONG one = 1, buf = 131072;
         setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
         /* a full write chunk must queue in one go, or every WRITE RPC
          * stalls against the peer's delayed ACKs (measured: ~90ms/16KB) */

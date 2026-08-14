@@ -36,9 +36,21 @@ Decided 14.8.26: write our own (not port anfs), in C (not E).
   b10 UNSTABLE+COMMIT alone made writes SLOWER (15s) - the fsync was
   never the cost; the cost = stop-and-wait upstream, ~90ms per 16KB
   RPC (delayed-ACK stall; wasabi speedtest: raw upstream 3 MB/s).
-  b11 SO_SNDBUF/SO_RCVBUF 64K: 8.4s. b12 the real lever = CHUNK SIZE:
-  WRCHUNK 64K + RDCHUNK 32K -> WRITE 0.91s = 2.4 MB/s (13x, at the
-  wire ceiling), READ 0.28s = 9.7 MB/s (2x). All cmp-verified.
+  b11 SO_SNDBUF/SO_RCVBUF: 8.4s. b12 the real lever = CHUNK SIZE:
+  WRCHUNK 64K + RDCHUNK 32K -> WRITE 0.91s = 2.4 MB/s, READ 9.7.
+  THEN HIS CORRECTION ("speedtest gave me ~28MB/s") BROKE THE STORY:
+  re-measured, down = 17-47 MB/s across runs - the 3 MB/s "wire
+  ceiling" was ONE anomalous sample. Method lesson relearned: on a
+  Wi-Fi path, single-run benches are weather reports; use min-of-N
+  and control-probe the old build in the same window (b12 re-run in
+  the bad window: 0.47-2.96s for the SAME binary).
+  b13 final = WR 64K + RD 128K: READ 15.0 MB/s (stable), WRITE best
+  3.1 MB/s / high variance (upstream rides the Linux box's Wi-Fi RX).
+  128K WRITES ARE POISON: ~485ms/chunk - blocked send beyond lwIP's
+  real sndbuf wakes on a coarse timer, not ACKs. 64K = the cliff edge.
+  Remaining known lever (future chapter): pipelined WRITEs (2-3 XIDs
+  in flight) to overlap the per-RPC stall; needs nonblocking send +
+  reply draining. Not started - writes feel fine in daily use.
   Write correctness: UNSTABLE + COMMIT on ACTION_END/FLUSH, write
   verifier tracked per file - server restart mid-file fails the Close
   instead of losing data silently. TZ= option landed in b10
