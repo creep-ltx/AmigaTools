@@ -150,6 +150,13 @@
   (whatever VOLUME= says) work in paths once the handler has run;
   the volume appears on Workbench with a disk icon.
 
+  The volume wears the system default disk icon. To give it its own,
+  either put a def_NFS0.info (matching your device name) into
+  ENVARC:Sys/ - the same per-device mechanism the OS uses for
+  def_RAM.info and def_cd0.info, and nothing is added to the share -
+  or drop a disk.info into the export's root on the server, which
+  travels with the share instead.
+
   Dismount:
 
       NFSDismount NFS0:
