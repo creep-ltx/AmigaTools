@@ -225,6 +225,30 @@ Day's write path: 0.17 -> 13.1 MB/s = 77x. Remaining gap to raw
 wasabid (41+) = per-RPC turnaround at 16K granularity; good enough,
 chapter closed.
 
+## b18+b19 (14.8.26): the regimes question -> two fixes and a 65 MB/s receipt
+
+His question ("small files? a 2.5GB file?") measured all three regimes
+and found two real defects:
+- b18 FIX: Copy ALL left Linux-untraversable directories - SET_PROTECT
+  mapped dir modes without x. Dirs now mirror r into x (files stay
+  x-less by design). Caught because the server-side diff FAILED, not
+  because anything looked wrong from the Amiga. dir 755/file 644 now.
+- b19 FIX: the read pipe only engaged when want > RSIZE, so any app
+  reading in <=64K calls (wasabid GET, most buffered I/O) got one
+  synchronous RPC per call - a 2.5GB wasabi get TIMED OUT at 600s.
+  Now the pipe engages at want >= 32K and SUBDIVIDES the client's
+  request across the depth. Same get: 224s = 11.4 MB/s (~3x).
+The numbers (final b19, RSIZE=64K WSIZE=16K DEPTH=8):
+- 22.8MB file (Gant1-3.lha): READ 14.2 / WRITE 13.1 MB/s via c:Copy.
+- 100 x 10KB files: READ 143 files/s, WRITE 45 files/s (round-trip
+  diff-verified) - per-file round trips dominate, as expected.
+- 2.5GB sparse file: readbench (512K buffer) = 65.6 MB/s SUSTAINED,
+  byte-count receipt exact (0:2684354560) - the >2GB boundary is
+  clean in our unsigned math, and List 3.2 even displays the size
+  right. Caveats recorded: fib_Size is LONG so SOME apps will see
+  negative sizes >2GB; Seek is 32-bit-signed by DOS design; 4GB hard
+  cap per file. Big-buffer readers now BEAT raw wasabid (41-52).
+
 ## Open questions
 
 - Handler main loop: WaitSelect on socket + packet-port signal bit in

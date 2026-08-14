@@ -44,7 +44,7 @@ struct Library *SocketBase;
 LONG handler_main(void);
 
 static const char verstag[] __attribute__((used)) =
-    "$VER: nfs-handler 0.1b17 (14.8.2026)";
+    "$VER: nfs-handler 0.1b19 (14.8.2026)";
 
 /* ------------------------------------------------------------------ */
 /* mini libc (we link with -nostdlib; gcc also emits calls to these)  */
@@ -1164,10 +1164,18 @@ static LONG nfs_read_pipe(struct CFile *cf, ULONG offset,
     if (err) { *got = 0; return err; }
     for (i = 0; i < PIPE_MAX; i++) sl[i].busy = 0;
 
+    /* subdivide the client's request across the pipeline: a 64K Read
+     * from an app becomes depth-many smaller chunks in flight instead
+     * of one synchronous RPC */
+    {
+        ULONG csz = udivmod(want, g_depth, NULL);
+        if (csz > g_rsize) csz = g_rsize;
+        if (csz < 8192) csz = 8192;
+
     for (;;) {
         while (!err && !dead && !at_eof && next < want && nbusy < (LONG)g_depth) {
             ULONG chunk = want - next;
-            if (chunk > g_rsize) chunk = g_rsize;
+            if (chunk > csz) chunk = csz;
             rpc_begin(NFS_PROG, NFS_VERS, NFS3_READ);
             pk_opaque(cf->fh, cf->fhlen);
             pk_u64(0, offset + next); pk_u32(chunk);
@@ -1246,6 +1254,7 @@ static LONG nfs_read_pipe(struct CFile *cf, ULONG offset,
     if (at_eof) { *got = wm; return 0; }   /* eof mid-span: contiguous only */
     *got = want;
     return 0;
+    }
 }
 
 /* resolve to the parent + typed leaf, then find the server-case entry */
@@ -1685,7 +1694,7 @@ static void act_read(struct DosPacket *pkt)
 
     if (cf->pos >= cf->size) { pkt->dp_Res1 = 0; pkt->dp_Res2 = 0; return; }
     if (want > cf->size - cf->pos) want = cf->size - cf->pos;
-    err = (g_depth > 1 && want > g_rsize)
+    err = (g_depth > 1 && want >= 32768)
         ? nfs_read_pipe(cf, cf->pos, dst, want, &got)
         : nfs_read(cf, dst, want, &got);
     if (err && got == 0) { pkt->dp_Res1 = -1; pkt->dp_Res2 = err; return; }
@@ -1858,6 +1867,10 @@ static void act_setattr_path(struct DosPacket *pkt, struct NfsArgs *na)
     if (!err)
         err = resolve(base, BADDR(pkt->dp_Arg3), fh, &fhlen, &a, 0, NULL);
     if (!err) {
+        /* a directory without x is untraversable on the Linux side -
+         * mirror r into x for dirs (files stay x-less by design) */
+        if (na->set_mode && a.ftype == NF3DIR)
+            na->mode |= (na->mode & 0444) >> 2;
         na->fh = fh; na->fhlen = fhlen;
         err = nfs_status_op(NFS3_SETATTR, na);
     }
