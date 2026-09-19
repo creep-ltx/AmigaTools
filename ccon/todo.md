@@ -5847,3 +5847,165 @@ look (JUMP is default-off precisely so the release is safe either
 way), a cooked interactive session under JUMP8 (prompt riding
 mid-window, edroom/pastehint/tab-menu still make room one line at a
 time by design), changelog + ccon.readme entries, tag.
+
+## 1.2.8b2 — the KingCON everyday keys (19.9.26)
+
+A long-time KingCON user's mail listed the seven things they reach
+for every day. Each was read out of the KingCON 1.7 SOURCE
+(~/Downloads/KingCON-handler.asm), not out of the mail's paraphrase,
+and held against 1.2.8b1. This build = the four cheap ones; the
+scrollbar and the ASL-requester-on-empty-Tab are their own chapters
+(the requester needs a helper process - no-DOS rule, and AslRequest
+blocks), "first Tab inserts the first match, no menu" is a style
+question still open.
+
+What the source says (line numbers in the .asm):
+- Ctrl+P = the $10 branch (\80, :7923): lbC003C84 walks back over
+  spaces then to the previous $20, copies up to the next $20, inserts
+  at the cursor, adds a space if the char before the cursor is not
+  one. It never looks at a quote - the mail's bug, by construction.
+- Alt+Left/Right = $3FB/$3FA, Ctrl+Left/Right = $40F/$40E, same
+  handler (\45/\48), two boundary routine pairs: space only
+  (lbC003C84/lbC003CE6) vs lbC00681A's three-character class
+  space '/' ':' (lbC003D1E/lbC003D9E). Alt = word, Ctrl = component.
+- completion = ONE routine (lbC003720) in three modes $3EE/$3EF/$3F0
+  file/device/command. Command mode scans residents + C:
+  (multiassign-aware) + path.
+- .info = a menu toggle ($F901 "Show .info"), off by default.
+
+What landed:
+- [x] **Ctrl+P, quote-aware** - edlastarg() splits the line up to the
+      cursor the way the shell would (quotes, *" inside them) and
+      edrepeat() inserts the last argument whole-or-nothing. Separator
+      = what the line needs: none after a space, ' ' after a finished
+      argument, '" ' after an OPEN quote (original closed, copy left
+      open to type on).
+- [x] **Alt+Left/Right = word, Ctrl+Left/Right = path component**
+      (edsep/edjumpl/edjumpr). Ctrl's shipped space-only jump MOVED to
+      Alt - a behaviour change, in the changelog as one. Ctrl+W
+      untouched. Alt+Right on a ghost takes a word like Ctrl+Right.
+      The open-menu arrow intercept now excludes Alt too, or Alt+Left
+      would have walked the menu.
+- [x] **Alt+Tab = command completion** - tcscancmd() back from the
+      Theme B #2 parking lot, on the separate key it was parked for.
+      dotab(back, cmd). The CWD merge is GONE from tcscancmd: it was
+      right under plain Tab (his RAM: catch) and wrong here - plain
+      Tab is one key away, and `ca<Alt+Tab>` exists to reach C:
+      without the directory's own ca* files in the way. A word with
+      '/' or ':' in it falls through to plain completion. No device
+      merge in command mode.
+- [x] **NOINFO / SHOWINFO** - tcscanone skips .info names while the
+      typed prefix ends at or before the dot (plen <= l-5), so
+      `foo.<Tab>` still reaches the icon. h-bit files unaffected.
+      Default unchanged (shown, greyed). NOT a bare INFO keyword: an
+      unmatched token in the title slot IS the title, and "Info" is a
+      plausible one.
+
+Harness: tests/edargtest.e - 28/28 under vamos (16 repeat cases incl.
+the mail's open-quote line, *" escape, quote glued to a prefix,
+mid-line, no-room beep, exact fit; 12 jump cases). The four pure
+procs are byte-identical between harness and handler (script-
+checked). Compile clean, LARGE: the same three A4/A5 warnings, and
+the UNREFERENCED set is the baseline's MINUS tcscancmd. 107444 ->
+108808 bytes. NOT harnessed: the Alt+Tab wiring and NOINFO's skip -
+packet/DOS-list code vamos cannot drive; boot items below.
+
+Deployed to FS-UAE L: (live + staged L:ccon-handler-1.2.8b2;
+.bak = the clean 1.2.7 that was live). NOT on the real A1200 (that
+one runs 1.2.8b1 via wasabi).
+
+Boot checklist:
+- [ ] `rename foo` Ctrl+P -> `rename foo foo`; same after a space
+- [ ] `rename "my string here` Ctrl+P ->
+      `rename "my string here" "my string here`
+- [ ] Ctrl+P mid-line keeps the tail; on an empty line does nothing
+- [ ] `copy dh0:work/my file ram:` - Alt+Left/Right hop words,
+      Ctrl+Left/Right stop after every '/' and ':'
+- [ ] DOES ALT+ARROW / ALT+TAB ARRIVE AT ALL: under FS-UAE the host
+      WM may eat Alt+Tab before the emulator sees it (the MangoWM
+      Super+M lesson) - a dead Alt+Tab there is not yet a CCON bug;
+      the real A1200 is the verdict
+- [ ] `ca<Alt+Tab>` from RAM: offers C:'s ca* commands; residents
+      show (`al<Alt+Tab>` -> alias); Tab/Shift+Tab/arrows/Esc/Return
+      behave as in the file menu
+- [ ] `sys:ut<Alt+Tab>` completes as plain Tab would
+- [ ] plain Tab in a drawer with icons: unchanged (grey .info)
+- [ ] NOINFO in L:ccon.cfg, new window: icons gone from the menu,
+      `name.<Tab>` still finds name.info; `CCON:SHOWINFO` overrules
+- [ ] Alt+arrow with the menu OPEN closes it and jumps
+- [ ] Ed and More still fine (raw mode ignores all of this)
+
+### b2 boot result (19.9.26, FS-UAE)
+
+Everything green - Ctrl+P (all seven), the jumps, Alt+Tab against C:
+and the Path, the menu keys, the '/'-':' fall-through, NOINFO /
+SHOWINFO, the interactions, and b1's owed JUMP items - EXCEPT ONE:
+
+- [x] `al<Alt+Tab>`: "screen blinks but nothing appears" = the
+      no-candidates beep. Residents never showed.
+
+Section 3 (do Alt+arrow / Alt+Tab arrive on real iron) still open:
+the A1200 was not at hand. Under FS-UAE they arrive.
+
+## 1.2.8b3 — residents, walked by hand (19.9.26)
+
+Cause, read out of the Kickstart 3.1 ROM (kicka1200.rom, dos.library
+disassembled with machine68k; FindSegment = $f9ff9c):
+- FindSegment is a LOOKUP, not an enumerator. It takes strlen(name)
+  first and compares it against each entry's length byte before any
+  character; b2 called FindSegment(NIL, NIL, TRUE) and the walk ended
+  before it began. The parked Theme B version had the same call - it
+  never showed a resident either, nobody had asked it to.
+- The list head is DosInfo+$10 = di_NetHand. dosextens.h says
+  `#define di_ResList di_McName` (+0) in every NDK on this machine
+  (1.3-era, 3.1, 3.2) - the ROM's FindSegment AND AddSegment both go
+  through +$10, and KingCON reads +$10 (`di_NetHand`, .asm :11699).
+  The header is wrong; the ROM and a program that has worked for
+  thirty years agree.
+- seg_Name is a BSTR in place (length at +12, chars at +13); b2
+  handed it to tcpref as a C string.
+
+Fix: tcscancmd walks dosbase.root -> info -> nethand -> seg.next
+under Forbid(), copies each name out by its length byte, and offers
+uc >= 0 (Resident's own additions) plus CMD_INTERNAL (the built-ins)
+- KingCON's filter exactly (bpl / addq #2). CMD_SYSTEM and
+CMD_DISABLED are not commands. E field offsets probed under vamos
+before the build (root $22, info $18, nethand $10, next 0, uc 4).
+
+Compile clean, LARGE, the same three A4/A5 warnings. 108808 ->
+108984 bytes, `$VER 1.2.8b3 (19.9.26)` in the hunk. Deployed to
+FS-UAE L: (live + staged L:ccon-handler-1.2.8b3; b2 stays staged,
+.bak = clean 1.2.7).
+
+Boot checklist:
+- [x] `al<Alt+Tab>` -> alias (a built-in, CMD_INTERNAL)
+- [x] `<Alt+Tab>` on an empty word / `e<Alt+Tab>`: built-ins (echo,
+      else, endif, endcli...) sit in the menu beside C:'s
+- [x] `resident c:list` then `li<Alt+Tab>`: list appears ONCE (the
+      resident and C:'s copy dedupe)
+- [x] `ca<Alt+Tab>` from RAM: still C:'s ca* - no regression
+- [x] no junk entries (a name with garbage on its tail = the BSTR
+      copy is wrong)
+- [ ] real A1200: section 3, do Alt+arrow / Alt+Tab arrive
+
+### b3 boot result (19.9.26, FS-UAE): GREEN
+
+All five pass - residents and built-ins in the menu, the resident /
+C: pair dedupes, no junk names. The real-A1200 item stays open (no
+Amiga at hand today).
+
+Two HOST layers stood between Left-Alt+Tab and the handler on the
+way, neither of them CCON's:
+- MangoWM: `bind = ALT, Tab, toggleoverview,` - moved to
+  SUPER+CTRL, Tab (reload = `mmsg dispatch reload_config`).
+- FS-UAE itself: with no `modifier_key` option, LEFT ALT is
+  FS-UAE's Mod key on Linux (log: "Using default modifier key
+  LALT") - swallowed, never sent to the Amiga, and Mod+Tab is its
+  own switch-window. That was the "does nothing at all, not even
+  a blink" after the WM fix. `modifier_key = 0` in A1200.fs-uae;
+  F12 keeps the menu. Right Alt was never affected. Read out of the
+  3.2.35 source: Tab itself is mapped for ALL modifiers to the
+  Amiga's Tab, FS-UAE does nothing else to Alt+Tab.
+A user report of "Alt+Tab is dead" under an emulator = check these
+two before the handler.
+

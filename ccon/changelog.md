@@ -11,6 +11,37 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 
 ---
 
+## [1.2.8] — unreleased (draft)
+
+### Added
+- **`JUMP=n`, jump scroll.** At the bottom margin a newline scrolls
+  `n` rows in one blit and the next `n-1` newlines scroll nothing.
+  Off by default. (1.2.8b1)
+- **Ctrl+P repeats the argument before the cursor** — `rename
+  longname ` and one key gives the second name to edit. Arguments
+  are found the way the shell splits them, so a quoted name is
+  repeated whole, spaces and all; if its quote is still open the
+  original is closed and the copy left open to type on. A repeat
+  that does not fit beeps and leaves the line alone. (1.2.8b2)
+- **Alt+Tab completes a command**: the word is matched against
+  resident commands, `C:` and every directory on the shell's Path
+  instead of the current directory, so `ca<Alt+Tab>` reaches `C:`
+  from anywhere. Same menu, same keys. Plain Tab is unchanged.
+  (1.2.8b2; b3: resident commands and shell built-ins actually
+  show - b2's list walk found none)
+- **Alt+Left/Right jump by word.** (1.2.8b2)
+- **`NOINFO`** keeps `.info` files out of Tab completion until you
+  type into the suffix yourself (`foo.<Tab>`); `SHOWINFO` undoes it.
+  The default is unchanged: icons complete, greyed. (1.2.8b2)
+
+### Changed
+- **Ctrl+Left/Right now jump by path component** — spaces, `/` and
+  `:` all separate — so a long path is walked a directory at a time.
+  The old space-only jump moved to Alt+Left/Right. Ctrl+W still
+  deletes a whole space-separated word. (1.2.8b2)
+
+---
+
 ## [1.2.7] — 2026-08-11 (tag `ccon-1.2.7`)
 
 The configuration release. CCON: gains a defaults file, so the

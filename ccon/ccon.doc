@@ -205,6 +205,7 @@
 
   BORDER     DRAG        DEPTH       SIZE        NOBACKDROP
   ACTIVE     NOWAIT      NOAUTO      NOPASTEEXEC NOWBPENS
+  SHOWINFO
   NOSCREEN   Back to the default public screen.
   NOFONT     Back to the Font Prefs default.
 
@@ -226,6 +227,14 @@
              numbers and retargeted at the theme (C:Ed hardcodes
              WB pens; without this it would render in ANSI red).
              See section 17 for the full colour story.
+
+  NOINFO     Tab completion leaves .info files out. By default they
+             complete like any other file, drawn grey in the menu;
+             with NOINFO they are not offered at all - until you
+             type into the suffix yourself (`foo.<Tab>`), which is
+             asking for the icon by name. Files hidden with the h
+             protection bit are not affected. SHOWINFO undoes it.
+             See section 9.
 
   FONTname/size
              Open the window in this font, loading it from disk if
@@ -470,7 +479,10 @@
 
     typing            inserts at the cursor
     Left / Right      move by one character
-    Ctrl+Left/Right   jump by word
+    Alt+Left/Right    jump by word (spaces separate)
+    Ctrl+Left/Right   jump by path component: spaces, '/' and ':'
+                      all separate, so a long path is walked one
+                      directory at a time
     Shift+Left/Right  jump to start / end of line
     Backspace         delete before the cursor
     Del               delete under the cursor
@@ -485,6 +497,12 @@
                       (same as Shift+Backspace)
     Ctrl+K            delete from the cursor to line end
                       (same as Shift+Del)
+    Ctrl+P            repeat the argument before the cursor:
+                      `rename longname ` and Ctrl+P gives you the
+                      second name to edit. A quoted argument is
+                      repeated whole, spaces and all; if its quote
+                      is still open, the original is closed and the
+                      copy left open to type on
     Ctrl+L            clear the screen, keeping the line - the
                       cleared rows scroll into HISTORY, so Shift+Up
                       brings them back; nothing is destroyed
@@ -515,7 +533,7 @@
                                            grey: a suggestion
 
     Right / Shift+Right   accept the whole suggestion
-    Ctrl+Right            accept ONE word of it (leading space
+    Ctrl+Right, Alt+Right accept ONE word of it (leading space
                           included: from `ls`, one stroke takes
                           ` -la`)
     anything else         just keep typing; the ghost adapts or
@@ -578,6 +596,18 @@
   space, so you can type straight on into the path, and they are
   MERGED with what the current directory offers rather than
   replacing it - a word that could be either shows both in one menu.
+
+  COMMANDS have their own key: Alt+Tab completes the word against
+  what the shell could RUN - resident commands, C:, and every
+  directory on the shell's Path - instead of against a directory,
+  so `ca<Alt+Tab>` finds C:'s commands from wherever you happen to
+  be. Same menu, same keys once it is open. A word that already
+  holds a '/' or ':' is a path, and Alt+Tab completes it exactly as
+  Tab would.
+
+  .info files complete like any other file unless NOINFO (section
+  5) is set, which keeps them out of the menu until you type into
+  the ".info" yourself.
 
   Limits, by design: no quoted words, one menu page (80 candidates;
   a beep means there are more).

@@ -343,6 +343,9 @@ OBJECT console
   -> number was never obtained - storing one there would hand a
   -> ReleasePen to a pen belonging to somebody else.
   pdirs, phid, pghost
+  pnoinfo                       -> 1.2.8b2 NOINFO: Tab completion leaves
+                                -> .info files out (KingCON's default;
+                                -> ours stays "shown, greyed")
   waitmode, closegad
   fwptr                         -> WINDOW0xADDR: borrow this window
   fwin, oldidcmp                -> borrowed-window bookkeeping
@@ -2098,6 +2101,15 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.wbpens := TRUE
   ELSEIF StrCmp(tok, 'NOWBPENS')
     curcon.wbpens := FALSE
+  ELSEIF StrCmp(tok, 'NOINFO')
+    -> 1.2.8b2: Tab completion skips .info files (tcscanone's note).
+    -> SHOWINFO is the way back, for an open string to overrule a
+    -> NOINFO in L:ccon.cfg. Not a bare INFO: an unmatched token in
+    -> the title slot IS the title, and "Info" is a window title
+    -> somebody's script is using right now.
+    curcon.pnoinfo := TRUE
+  ELSEIF StrCmp(tok, 'SHOWINFO')
+    curcon.pnoinfo := FALSE
   ELSEIF StrCmp(tok, 'PEN', 3)
     -> PENn: the default text pen (CTerm sends PEN7 with its
     -> ANSI palette, where pen 1 is ANSI red)
@@ -2312,6 +2324,7 @@ PROC parsecon(bname)
   curcon.pscrname[0] := 0              -> global array: garbage until set
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
   curcon.pjump := 0                    -> J1: jump scroll off by default
+  curcon.pnoinfo := FALSE              -> 1.2.8b2: icons complete, greyed
   curcon.pfontname[0] := 0             -> open like everything else
   curcon.pfontsize := 0
   curcon.pfontexp := FALSE
@@ -7424,6 +7437,128 @@ PROC histload(slot)
   ENDWHILE
 ENDPROC
 
+-> ---------- 1.2.8b2: the KingCON everyday keys ----------
+-> A long-time KingCON user's mail listed what they reach for daily;
+-> Ctrl+P, the Alt/Ctrl word jumps, Alt+Tab and the .info switch are
+-> this batch. All four procs below are pure - line in, numbers out -
+-> and run verbatim in tests/edargtest.e.
+
+-> the last ARGUMENT before the cursor, split the way the shell
+-> would: a quoted run is one argument, spaces and all, and *" inside
+-> quotes does not close it. Returns start, end (exclusive, trailing
+-> spaces not included) and whether its quote is still open at the
+-> cursor; start -1 = there is none. KingCON's Ctrl+P walks back to
+-> the last space and never looks at quotes (handler 1.7, the $10
+-> branch: lbC003C84 then a scan for $20), which is the bug the mail
+-> reports - `"my string here` repeats just `here`.
+PROC edlastarg(s:PTR TO CHAR, cpos)
+  DEF i, st, en, open, inq, c, go
+  st := -1
+  en := -1
+  open := FALSE
+  i := 0
+  WHILE i < cpos
+    WHILE (i < cpos) AND (s[i] = 32)
+      i++
+    ENDWHILE
+    IF i < cpos
+      st := i
+      inq := FALSE
+      go := TRUE
+      WHILE go AND (i < cpos)
+        c := s[i]
+        IF inq
+          IF (c = "*") AND ((i + 1) < cpos)
+            i++                   -> the escaped character rides along
+          ELSEIF c = 34
+            inq := FALSE
+          ENDIF
+          i++
+        ELSEIF c = 32
+          go := FALSE
+        ELSE
+          IF c = 34 THEN inq := TRUE
+          i++
+        ENDIF
+      ENDWHILE
+      en := i
+      open := inq
+    ENDIF
+  ENDWHILE
+ENDPROC st, en, open
+
+-> Ctrl+P: repeat that argument at the cursor - `rename longname `
+-> and one key gives the second name to edit. The separator is
+-> whatever the line needs: nothing after a space, a space after a
+-> finished argument, and `" ` after one whose quote is still open -
+-> the original gets closed, the copy stays open for typing on.
+-> Whole or nothing (the B3 rule): a repeat that does not fit beeps
+-> and leaves the line alone.
+PROC edrepeat()
+  DEF s:PTR TO CHAR, l, st, en, open, n, sepn, tot, j
+  s := curcon.ebuf
+  l := StrLen(curcon.ebuf)
+  st, en, open := edlastarg(s, curcon.cpos)
+  IF st < 0 THEN RETURN
+  n := en - st
+  sepn := 0
+  IF open
+    sepn := 2
+  ELSEIF s[curcon.cpos - 1] <> 32
+    sepn := 1
+  ENDIF
+  tot := n + sepn
+  IF (l + tot) > edcap()
+    DisplayBeep(NIL)
+    RETURN
+  ENDIF
+  FOR j := l - 1 TO curcon.cpos STEP -1
+    s[j + tot] := s[j]
+  ENDFOR
+  j := curcon.cpos
+  IF open
+    s[j] := 34
+    j++
+  ENDIF
+  IF sepn > 0
+    s[j] := 32
+    j++
+  ENDIF
+  CopyMem(s + st, s + j, n)     -> the source sits before the cursor:
+  SetStr(curcon.ebuf, l + tot)  -> the shift above never touched it
+  s[l + tot] := 0
+  curcon.cpos := curcon.cpos + tot
+  drawedit()
+ENDPROC
+
+-> the two word jumps. Alt+Left/Right = by space-separated word, what
+-> Ctrl did alone through 1.2.8b1; Ctrl+Left/Right = by PATH
+-> COMPONENT - space, '/' and ':' all separate - so a long path is
+-> walked a directory at a time. KingCON's split exactly (its
+-> lbC00681A is this same three-character test).
+PROC edsep(c, path)
+  IF c = 32 THEN RETURN TRUE
+  IF path = FALSE THEN RETURN FALSE
+ENDPROC (c = "/") OR (c = ":")
+
+PROC edjumpl(s:PTR TO CHAR, p, path)
+  WHILE (p > 0) AND edsep(s[p - 1], path)
+    p--
+  ENDWHILE
+  WHILE (p > 0) AND (edsep(s[p - 1], path) = FALSE)
+    p--
+  ENDWHILE
+ENDPROC p
+
+PROC edjumpr(s:PTR TO CHAR, p, l, path)
+  WHILE (p < l) AND (edsep(s[p], path) = FALSE)
+    p++
+  ENDWHILE
+  WHILE (p < l) AND edsep(s[p], path)
+    p++
+  ENDWHILE
+ENDPROC p
+
 PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, k
   flushout(curcon)              -> S5: the transcript lands before the
@@ -7506,8 +7641,10 @@ PROC dovanilla(code, qual)
     RETURN
   ENDIF
   IF code = 9
-    -> Tab: completion (M5b); Shift+Tab cycles the menu backwards
-    dotab(qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT))
+    -> Tab: completion (M5b); Shift+Tab cycles the menu backwards,
+    -> Alt+Tab (1.2.8b2) completes a COMMAND instead of a filename
+    dotab(qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT),
+          qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT))
     RETURN
   ENDIF
   IF curcon.tcactive
@@ -7660,6 +7797,9 @@ PROC dovanilla(code, qual)
       curcon.cpos := j
       drawedit()
     ENDIF
+  ELSEIF code = 16
+    -> Ctrl+P (KingCON): repeat the argument before the cursor
+    edrepeat()
   ELSEIF code = 12
     -> Ctrl+L (readline): clear the screen, keep the line - the
     -> visible rows scroll into HISTORY (Shift+Up brings them back;
@@ -7756,7 +7896,7 @@ PROC dorawkey(code, qual)
       sbexit()                      -> reaches dovanilla's sbsrch gate
       snaplive()                    -> and completion needs the live
     ENDIF                           -> prompt visible, not a scrolled one
-    dotab(sh)
+    dotab(sh, qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT))
     RETURN TRUE
   ENDIF
   -> raw keys close an open completion menu - EXCEPT the qualifier
@@ -7787,7 +7927,9 @@ PROC dorawkey(code, qual)
   IF curcon.tcactive AND (curcon.rawmode = FALSE) AND
      (curcon.sbsrch = FALSE)
     IF (qual AND (IEQUALIFIER_CONTROL OR IEQUALIFIER_LSHIFT OR
-                  IEQUALIFIER_RSHIFT)) = 0
+                  IEQUALIFIER_RSHIFT OR IEQUALIFIER_LALT OR
+                  IEQUALIFIER_RALT)) = 0    -> 1.2.8b2: Alt+arrow
+                                            -> is a word jump now
       IF (code = RK_UP) OR (code = RK_DOWN) OR (code = RK_LEFT) OR
          (code = RK_RIGHT)
         idx := tcgridmove(code)
@@ -7933,14 +8075,12 @@ PROC dorawkey(code, qual)
       drawedit()
     ENDIF
   ELSEIF code = RK_LEFT
-    -> Shift = all the way (the house rule), Ctrl = word jump
+    -> Shift = all the way (the house rule); 1.2.8b2: Alt = word
+    -> jump, Ctrl = path-component jump (edsep's notes)
     IF qual AND IEQUALIFIER_CONTROL
-      WHILE (curcon.cpos > 0) AND (s[curcon.cpos - 1] = 32)
-        curcon.cpos := curcon.cpos - 1
-      ENDWHILE
-      WHILE (curcon.cpos > 0) AND (s[curcon.cpos - 1] <> 32)
-        curcon.cpos := curcon.cpos - 1
-      ENDWHILE
+      curcon.cpos := edjumpl(s, curcon.cpos, TRUE)
+    ELSEIF qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT)
+      curcon.cpos := edjumpl(s, curcon.cpos, FALSE)
     ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
       curcon.cpos := 0
     ELSEIF curcon.cpos > 0
@@ -7951,18 +8091,17 @@ PROC dorawkey(code, qual)
     IF (curcon.cpos = l) AND (curcon.sghost <> NIL)
       -> the ghost accepts (fish): Right and Shift+Right take all
       -> of it, Ctrl+Right the next word and its trailing space
-      IF qual AND IEQUALIFIER_CONTROL
+      -> (1.2.8b2: Alt+Right is a word key too, so it takes a word)
+      IF qual AND (IEQUALIFIER_CONTROL OR IEQUALIFIER_LALT OR
+                   IEQUALIFIER_RALT)
         sgword()
       ELSE
         sgall()
       ENDIF
     ELSEIF qual AND IEQUALIFIER_CONTROL
-      WHILE (curcon.cpos < l) AND (s[curcon.cpos] <> 32)
-        curcon.cpos := curcon.cpos + 1
-      ENDWHILE
-      WHILE (curcon.cpos < l) AND (s[curcon.cpos] = 32)
-        curcon.cpos := curcon.cpos + 1
-      ENDWHILE
+      curcon.cpos := edjumpr(s, curcon.cpos, l, TRUE)
+    ELSEIF qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT)
+      curcon.cpos := edjumpr(s, curcon.cpos, l, FALSE)
     ELSEIF qual AND (IEQUALIFIER_LSHIFT OR IEQUALIFIER_RSHIFT)
       curcon.cpos := StrLen(curcon.ebuf)
     ELSEIF curcon.cpos < l
@@ -9058,7 +9197,7 @@ ENDPROC
 -> single-directory case (tcscan) resets first; the multi-source
 -> case (tcscancmd) resets once and calls this per Path entry
 PROC tcscanone(port:PTR TO mp, lock, pfx:PTR TO CHAR, plen)
-  DEF res, nbuf[112]:ARRAY OF CHAR, l
+  DEF res, nbuf[112]:ARRAY OF CHAR, l, skip
   res := fscall(port, ACTION_EXAMINE_OBJECT, lock, Shr(fsfib, 2), 0)
   IF res = 0 THEN RETURN
   IF fsfib.direntrytype <= 0 THEN RETURN   -> a file, not a directory
@@ -9067,8 +9206,17 @@ PROC tcscanone(port:PTR TO mp, lock, pfx:PTR TO CHAR, plen)
     l := StrLen(nbuf)
     IF l > 0
       IF (plen = 0) OR tcpref(nbuf, pfx, plen)
-        tcadd(nbuf, fsfib.direntrytype > 0, tchidname(nbuf, l, fsfib.protection),
-              FALSE)
+        -> 1.2.8b2 NOINFO: icon files are not candidates - until the
+        -> typed prefix reaches past the stem into the ".info" itself
+        -> (`foo.<Tab>`), which is someone asking for the icon by
+        -> name. plen <= l - 5 is "the prefix ends at or before the
+        -> dot". h-bit files are not NOINFO's business and still show.
+        skip := FALSE
+        IF curcon.pnoinfo AND (plen <= (l - 5)) THEN skip := tcisinfo(nbuf, l)
+        IF skip = FALSE
+          tcadd(nbuf, fsfib.direntrytype > 0,
+                tchidname(nbuf, l, fsfib.protection), FALSE)
+        ENDIF
       ENDIF
     ENDIF
   ENDWHILE
@@ -9118,48 +9266,62 @@ PROC tcscan(pfx:PTR TO CHAR, plen)
   tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
 ENDPROC
 
--> PARKED (19.7.26 night) - dotab() no longer calls this. Tried as
--> word-one command completion (resident + C: + Path, later merged
--> with the current directory too), but he found it cluttered the
--> menu with entries he didn't want mixed into plain filename
--> completion and asked to revert. Left compiled-in and unused so
--> the plumbing (FindSegment/resident list, the pathnode/Path-chain
--> walk, all struct-offset-verified) doesn't have to be re-derived
--> if this gets picked back up later - see todo.md Theme B #2.
+-> COMMAND completion, Alt+Tab since 1.2.8b2. First tried as
+-> word-one completion under plain Tab (Theme B #2, 19.7.26) and
+-> parked the same night: it cluttered the filename menu with entries
+-> he didn't want there. On its own key there is nothing to clutter.
 ->
--> What it did: resident commands (memory-resident, Forbid()-
--> walkable via FindSegment, no packets - RKM: "must Forbid() lock
--> the list to use this call"), the current directory, C: always,
--> and every directory in the CLI's command path (cli_CommandDir).
+-> Sources: resident commands, C: always, and every directory in the
+-> CLI's command path (cli_CommandDir). NOT the current directory,
+-> which the parked
+-> version merged in: that was right when this ran under plain Tab
+-> (sitting in RAM:, Tab has to offer RAM:'s files) and is wrong
+-> here - plain Tab is one key away and covers it, and this key's
+-> whole point is `ca<Alt+Tab>` reaching C: from anywhere without
+-> the directory's own ca* files in the way.
 PROC tcscancmd(pfx:PTR TO CHAR, plen)
   DEF seg:PTR TO segment, proc:PTR TO process,
       cli:PTR TO commandlineinterface, pnb, pn:PTR TO pathnode,
-      fl:PTR TO filelock, port:PTR TO mp
+      fl:PTR TO filelock, port:PTR TO mp,
+      dl:PTR TO doslibrary, rn:PTR TO rootnode, di:PTR TO dosinfo,
+      bn:PTR TO CHAR, nb[40]:ARRAY OF CHAR, l, i
   curcon.tcn := 0
   curcon.tcpu := 0
   curcon.tcmore := FALSE
+  -> 1.2.8b3: the resident list is walked BY HAND, under Forbid(), no
+  -> packets. b2 asked FindSegment(NIL, ...) to enumerate and got
+  -> nothing (his `al<Alt+Tab>` beep): FindSegment is a lookup, it
+  -> takes strlen(name) first and matches it against each entry's
+  -> length byte, so a NIL name ends the walk before it starts.
+  -> The list head is DosInfo+16, di_NetHand - NOT di_McName, whatever
+  -> dosextens.h's di_ResList #define says: Kickstart 3.1's own
+  -> FindSegment and AddSegment both go through +16 (read out of the
+  -> ROM), and so does KingCON. seg_Name is a BSTR in place - length
+  -> byte, then characters, no promise of a NUL - so it is copied out
+  -> by length. What the shell would run: uc >= 0 (Resident's own
+  -> additions) and CMD_INTERNAL (the built-ins: alias, cd, ...);
+  -> CMD_SYSTEM and CMD_DISABLED are not commands.
+  dl := dosbase
+  rn := dl.root
+  di := Shl(rn.info, 2)
   Forbid()
-  seg := FindSegment(NIL, NIL, TRUE)
+  seg := Shl(di.nethand, 2)
   WHILE seg
-    IF seg.uc = CMD_INTERNAL
-      IF (plen = 0) OR tcpref(seg.name, pfx, plen) THEN tcadd(seg.name, FALSE, FALSE, FALSE)
+    IF (seg.uc >= 0) OR (seg.uc = CMD_INTERNAL)
+      bn := seg + 12                 -> seg_Name, the BSTR in place
+      l := bn[0]
+      IF l > 38 THEN l := 38
+      FOR i := 0 TO l - 1
+        nb[i] := bn[i + 1]
+      ENDFOR
+      nb[l] := 0
+      IF l > 0
+        IF (plen = 0) OR tcpref(nb, pfx, plen) THEN tcadd(nb, FALSE, FALSE, FALSE)
+      ENDIF
     ENDIF
-    seg := FindSegment(NIL, seg, TRUE)
+    seg := Shl(seg.next, 2)
   ENDWHILE
   Permit()
-  -> the current directory too - his catch: word-one completion
-  -> was searching ONLY where the shell would find something to
-  -> RUN, which meant sitting in RAM: and hitting Tab showed C:'s
-  -> commands while ignoring RAM: entirely. Merge, don't exclude -
-  -> `d<Tab>` in RAM: should offer `demo/` from RAM: AND `delete`
-  -> from C: in the same menu, not pick one source and hide the
-  -> other. tcresolve('') is the exact same CWD lookup plain word
-  -> completion already used (tcclient's blocked-reader current
-  -> dir) - just called explicitly instead of from a typed dirpart.
-  IF tcresolve('')
-    tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
-    tcfreelock()
-  ENDIF
   -> C: always, regardless of the Path chain below - the shell
   -> finds C: commands whether or not Path was ever touched,
   -> completion should too. tchas already dedupes against anything
@@ -9258,11 +9420,9 @@ PROC drawmodelrow(r)
   SetBPen(curcon.rp, 0)
 ENDPROC
 
--> hidden-class: the h protection bit, or a case-blind ".info"
--> suffix with a stem (ls's rule, mirrored)
-PROC tchidname(n:PTR TO CHAR, l, prot)
+-> a case-blind ".info" suffix with a stem (ls's rule, mirrored)
+PROC tcisinfo(n:PTR TO CHAR, l)
   DEF i
-  IF prot AND $80 THEN RETURN TRUE
   IF l < 6 THEN RETURN FALSE
   i := l - 5
   IF n[i] <> "." THEN RETURN FALSE
@@ -9271,6 +9431,11 @@ PROC tchidname(n:PTR TO CHAR, l, prot)
   IF tcfold(n[i + 3]) <> "F" THEN RETURN FALSE
   IF tcfold(n[i + 4]) <> "O" THEN RETURN FALSE
 ENDPROC TRUE
+
+-> hidden-class: the h protection bit, or an icon file
+PROC tchidname(n:PTR TO CHAR, l, prot)
+  IF prot AND $80 THEN RETURN TRUE
+ENDPROC tcisinfo(n, l)
 
 -> menu colours, 1.2.7b4/b5 (Timm's CGX palette report): the old
 -> scheme picked absolute RGBs (ObtainBestPen grey/blue), which on a
@@ -9553,7 +9718,13 @@ PROC tcgridmove(code)
   ENDIF
 ENDPROC n
 
-PROC dotab(back)
+-> 1.2.8b2: cmd = Alt+Tab, COMMAND completion - the word is matched
+-> against what the shell could run (tcscancmd) instead of against a
+-> directory. Only a bare word can be a command name that needs
+-> finding: once it holds a '/' or ':' the path is already spelled out
+-> and Alt+Tab is plain Tab. With the menu open the two keys are the
+-> same key - both just cycle.
+PROC dotab(back, cmd)
   DEF s:PTR TO CHAR, l, i, sep, plen, cpl, p:PTR TO CHAR, devok,
       dirp[300]:ARRAY OF CHAR, sfx[2]:ARRAY OF CHAR, n
   IF curcon.tcactive
@@ -9605,19 +9776,26 @@ PROC dotab(back)
   -> dirpart, or `version l:c<Tab>` eats its "l:" (latent since
   -> M5b - plain words never showed it, path words always did)
   curcon.tcws := sep
-  -> Theme B #2 (word-one command completion) tried and reverted,
-  -> parked for later (19.7.26 night) - cluttered the menu with
-  -> C:/resident/Path entries he didn't want mixed into plain
-  -> filename completion. tcscancmd() and its plumbing stay in the
-  -> source, unused, for whenever it's picked back up (see todo.md).
+  -> Theme B #2 (word-one command completion) tried and reverted
+  -> (19.7.26 night) - cluttered the menu with C:/resident/Path
+  -> entries he didn't want mixed into plain filename completion.
   -> Every word, including the first, is plain filename completion
-  -> again - the pre-Theme-B-#2 behaviour, unchanged.
-  IF tcresolve(dirp) = FALSE
-    DisplayBeep(NIL)
-    RETURN
+  -> under plain Tab. 1.2.8b2: tcscancmd() came back on ITS OWN KEY,
+  -> Alt+Tab - the "separate-key shape" it was parked for, and
+  -> KingCON's spelling of it.
+  IF cmd AND devok
+    -> devok is exactly "no '/' and no ':' typed yet" - and the DOS
+    -> list stays out of it below: nothing on it can be run
+    tcscancmd(s + sep, plen)
+    devok := FALSE
+  ELSE
+    IF tcresolve(dirp) = FALSE
+      DisplayBeep(NIL)
+      RETURN
+    ENDIF
+    tcscan(s + sep, plen)
+    tcfreelock()
   ENDIF
-  tcscan(s + sep, plen)
-  tcfreelock()
   -> 1.2.7b10: devices MERGE with the directory's own matches rather
   -> than replacing them - the same rule his RAM:-vs-C: catch settled
   -> for word-one completion. `du<Tab>` in a directory holding
@@ -9735,4 +9913,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b1 (14.8.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b3 (19.9.26) CCON: LTX console handler', 0
