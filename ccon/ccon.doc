@@ -236,6 +236,23 @@
              protection bit are not affected. SHOWINFO undoes it.
              See section 9.
 
+  SCROLLBAR  A scrollbar in the right border: knob, track and an
+             arrow pair, in the system look. Off by default;
+             NOSCROLLBAR undoes it. See section 11.
+
+  NOTABMENU  Several matches never open the completion menu. Tab
+             and Shift+Tab step through the matches in the line
+             itself. TABMENU undoes it. See section 9.
+
+  TABREQ     Tab on an empty word opens a file requester instead
+             of listing the whole directory; the pick is inserted
+             at the cursor. NOTABREQ undoes it. See section 9.
+
+  TABFIRST   The first Tab inserts the first match instead of
+             stopping at the common prefix. Independent of the
+             menu: with the menu on, it opens with that match
+             already picked. NOTABFIRST undoes it. See section 9.
+
   FONTname/size
              Open the window in this font, loading it from disk if
              it is not already resident. Left unset, the window
@@ -609,6 +626,31 @@
   5) is set, which keeps them out of the menu until you type into
   the ".info" yourself.
 
+  TWO SWITCHES change the style, separately (section 5, or
+  L:ccon.cfg). NOTABMENU drops the menu and keeps the cycle: Tab
+  and Shift+Tab step through the matches in the line with nothing
+  drawn, Esc takes the match back out, and any other key keeps it
+  and acts normally - Return included, which runs the line at once
+  since there is no menu to confirm. If the first Tab could extend
+  nothing it beeps, to say "several" - the next Tab starts the
+  cycle. TABFIRST makes the first Tab insert the first match
+  instead of stopping at the common prefix; with the menu on, the
+  menu opens with that entry picked. Both together are the Tab
+  KingCON users know.
+
+  A THIRD SWITCH, TABREQ, is about the one case where completion
+  has nothing to go on: Tab on an EMPTY word, with nothing typed
+  since the last blank. Normally that lists the whole directory.
+  With TABREQ it opens a file requester (asl.library) in the
+  shell's current directory, and what you pick is inserted at the
+  cursor - quoted if it holds a blank or an '=', followed by a
+  blank, a bare drawer ending in '/'. The requester does not hold
+  the window up: you can keep typing, and other CCON: windows keep
+  running; the pick lands wherever the cursor is when you make it.
+  Cancel inserts nothing. Only one requester can be up at a time -
+  a second empty Tab beeps. A word with anything in it, and
+  Alt+Tab, complete exactly as before.
+
   Limits, by design: no quoted words, one menu page (80 candidates;
   a beep means there are more).
 
@@ -661,6 +703,25 @@
   While you are back, the title bar shows [scrollback -n]. Any new
   output, or any other key, snaps the view to live. Colours are
   remembered per cell and survive the trip.
+
+  THE SCROLLBAR is optional: SCROLLBAR (section 5, or L:ccon.cfg)
+  puts one in the window's right border, in the system look.
+
+    the knob      its size is how much of the history the window
+                  shows, its position where you are in it; drag
+                  it and the text follows
+    the track     a click above or below the knob pages
+    the arrows    one line a click; held, they repeat and then
+                  speed up
+
+  The knob follows every other way of scrolling too, and a window
+  with nothing behind it shows a knob that fills its track. On the
+  alternate screen it does the same, for the same reason the keys
+  are refused there. A window with a sizing gadget gives up no
+  columns for the scrollbar - that border is already wide enough -
+  and a NOSIZE window about two. NOBORDER windows and borrowed
+  ones (WINDOW0x) have no border of CCON:'s to put it in, and get
+  none.
 
   Searching scrollback:
 
@@ -1046,12 +1107,14 @@
   The prebuilt binary is included; nothing needs compiling. To
   build it yourself, with the E-VO E compiler:
 
-    evo ccon-handler.e LARGE
+    evo ccon-handler.e LARGE ADDBUF=1
 
-  The LARGE model is required as of 1.0. The source is one file,
-  ccon-handler.e, and carries its design history as comments -
-  including how an E binary survives being started as a handler,
-  verified by disassembling the compiler's generated startup code.
+  The LARGE model is required as of 1.0; ADDBUF as of 1.2.8, where
+  the source outgrew one of the compiler's default buffers. The
+  source is one file, ccon-handler.e, and carries its design
+  history as comments - including how an E binary survives being
+  started as a handler, verified by disassembling the compiler's
+  generated startup code.
 
 
 20. FILES

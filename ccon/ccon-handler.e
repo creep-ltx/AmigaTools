@@ -77,7 +77,11 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        -> FreeDiskObject) + iconbase, for ICON=. Opened lazily by the
        -> HELPER process, never at init: an AppIcon most windows will
        -> never raise must not cost every mount a library open.
-       'wb','workbench/workbench','workbench/startup','icon'
+       'wb','workbench/workbench','workbench/startup','icon',
+       -> 1.2.8b6: asl.library for TABREQ - the call vectors only; the
+       -> tags are spelled out at the helper (the b5 buffer lesson:
+       -> a module's worth of identifiers is not free any more)
+       'asl'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -346,6 +350,42 @@ OBJECT console
   pnoinfo                       -> 1.2.8b2 NOINFO: Tab completion leaves
                                 -> .info files out (KingCON's default;
                                 -> ours stays "shown, greyed")
+  -> 1.2.8b4: completion's two style switches, INDEPENDENT of each
+  -> other (his call - the menu, the first-match insert and the
+  -> requester are three functions, not three settings of one):
+  -> 1.2.8b5: the scrollbar (SCROLLBAR / NOSCROLLBAR, default off).
+  -> Three raw gadgets in the right border - a prop and two sysiclass
+  -> arrow buttons - the recipe AmigaReferences/intuition-border-
+  -> gadgets.md paid for. One New() block (vsblk) holds the three
+  -> gadget structs, the PropInfo and the knob's Image; the arrow
+  -> images are BOOPSI objects and the DrawInfo stays held while they
+  -> live. "sb" is the scrollback model, so this family is "vs".
+  pscrollbar
+  vson                          -> the gadgets are IN the window
+  vsblk:PTR TO CHAR
+  vsprop:PTR TO gadget
+  vsgup:PTR TO gadget
+  vsgdn:PTR TO gadget
+  vspi:PTR TO propinfo
+  vsimup, vsimdn                -> sysiclass UPIMAGE / DOWNIMAGE
+  vsdri, vsscr                  -> the DrawInfo, and whose it is
+  vsbt, vsminh                  -> title-bar height assumed at build
+                                -> time; the window's minimum height
+  vsheld                        -> the knob is being dragged: WE must
+                                -> not NewModifyProp under the mouse
+  vsdir, vsrep, vsidle          -> an arrow is held: direction (+1 =
+                                -> back in time), ticks held, ticks
+                                -> with the pointer off the button
+  vsmoved                       -> a drag report arrived this drain
+  ptabmenu                      -> TABMENU (default) / NOTABMENU: several
+                                -> matches open the menu - or cycle in
+                                -> the line with nothing drawn
+  ptabfirst                     -> TABFIRST / NOTABFIRST (default): the
+                                -> first Tab already inserts match one
+  ptabreq                       -> 1.2.8b6 TABREQ / NOTABREQ (default):
+                                -> Tab on an EMPTY word opens an ASL
+                                -> file requester instead of listing
+                                -> the whole directory
   waitmode, closegad
   fwptr                         -> WINDOW0xADDR: borrow this window
   fwin, oldidcmp                -> borrowed-window bookkeeping
@@ -387,6 +427,9 @@ OBJECT console
   tcpool:PTR TO CHAR            -> entry = [flags CHAR][name NUL]
   tcpu, tcn, tcmore
   tcactive, tcsel               -> the menu: open?, highlighted index
+  tchid                         -> 1.2.8b4 NOTABMENU: open but UNDRAWN -
+                                -> a candidate cycle with no rows of its
+                                -> own (tcmrows = 0, nothing to restore)
   tcws, tcwend                  -> the word being completed, in ebuf
   tcstem                        -> 1.2.7b13: that word as it stood when
                                 -> the menu opened, so Esc can abort
@@ -558,6 +601,27 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> caller blocks on Wait(fhsig) before returning, so the mode can
     -> never be read by the wrong errand.
     fhmode=0,                   -> 0 = load a font, 1 = load an icon
+    -> 1.2.8b6 TABREQ: the ASL requester's helper. NOT a third fhmode:
+    -> the fh errands are serialised because every caller sleeps on
+    -> fhsig until its helper is done, and a file requester stays up
+    -> for as long as the user browses - sleeping through that would
+    -> freeze EVERY console this process serves. So this one is
+    -> ASYNCHRONOUS: its own stub, its own signal in main()'s Wait
+    -> mask, one requester at a time for the whole handler (arbusy),
+    -> and the asking console remembered by pointer and re-validated
+    -> with conok() when the answer comes back.
+    arstub=NIL:PTR TO CHAR,
+    argd[2]:ARRAY OF LONG,
+    arsigbit=-1, arsig=0,
+    arbusy=FALSE,               -> a helper is alive (also bars DIE:
+                                -> its code is OUR seglist)
+    arcon=NIL:PTR TO console,   -> who asked
+    arok=FALSE,                 -> the user picked something
+    arleft=0, artop=0,          -> where to open it
+    arscr=NIL,                  -> borrowed frames: their screen
+    arpubname[140]:ARRAY OF CHAR, -> owned windows: ours, by NAME
+    ardrawer[560]:ARRAY OF CHAR,  -> in: the shell's current directory
+    arpath[560]:ARRAY OF CHAR,    -> out: what was picked
     fhpath=NIL:PTR TO CHAR,     -> ICON=: the request, in
     fhdo=NIL:PTR TO diskobject, -> and what came back
     fhta=NIL:PTR TO textattr,   -> the request: in
@@ -885,6 +949,18 @@ PROC main()
     wp[9] := $4CDF              -> MOVEM.L (A7)+,D2-D7/A2-A6
     wp[10] := $7CFC
     wp[11] := $4E75             -> RTS
+    -> 1.2.8b6: the same twelve words again for the ASL helper,
+    -> pointing at its own glue block (see the arstub note)
+    arsigbit := AllocSignal(-1)
+    arstub := New(32)
+    IF (arsigbit >= 0) AND (arstub <> NIL)
+      arsig := Shl(1, arsigbit)
+      argd[0] := fhcapa4
+      argd[1] := {aslhelper}
+      CopyMem(fhstub, arstub, 24)
+      lp := arstub + 6
+      lp[0] := argd
+    ENDIF
     CacheClearU()               -> poked code vs instruction cache
     fhok := TRUE
   ENDIF
@@ -946,6 +1022,7 @@ PROC main()
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
     IF wbport THEN wsig := wsig OR Shl(1, wbport.sigbit)  -> ICONIFY: AppMessages
+    wsig := wsig OR arsig       -> 1.2.8b6: the requester's answer
     Wait(psig OR wsig)
     -> drain the packet port
     REPEAT
@@ -989,8 +1066,19 @@ PROC main()
               IF class = IDCMP_RAWKEY THEN dorawkey(code, qual)
               IF class = IDCMP_MENUPICK THEN domenupick(code, qual, ia, secs, mics)
               IF class = IDCMP_MOUSEBUTTONS THEN selmouse(code, secs, mics)
-              IF class = IDCMP_MOUSEMOVE THEN selmouse($FF, 0, 0)
+              -> 1.2.8b5: while the knob is held, motion is the
+              -> scrollbar's (below) and not a selection drag
+              IF (class = IDCMP_MOUSEMOVE) AND (c.vsheld = FALSE) THEN selmouse($FF, 0, 0)
             ENDIF
+            -> 1.2.8b5: the scrollbar is window FRAME, like NEWSIZE -
+            -> it acts for a parked raw client too, exactly as the
+            -> wheel does (scrollview itself refuses the alt screen).
+            -> A drag report only raises a flag: a fast drag queues
+            -> many, and ONE repaint after the drain serves them all.
+            IF class = IDCMP_GADGETDOWN THEN vsgdown(ia)
+            IF class = IDCMP_GADGETUP THEN vsgrelease()
+            IF class = IDCMP_INTUITICKS THEN vstick()
+            IF (class = IDCMP_MOUSEMOVE) AND c.vsheld THEN c.vsmoved := TRUE
             IF class = IDCMP_NEWSIZE THEN doresize()
             -> 1.2.6b2: frame classes like NEWSIZE - they act even for
             -> a parked raw client, so Ed's block cursor ghosts too
@@ -1015,6 +1103,10 @@ PROC main()
             ENDIF
           ENDIF
         UNTIL im = NIL
+        IF c.vsmoved              -> 1.2.8b5: the drain's drag reports,
+          c.vsmoved := FALSE      -> served once
+          vsdrag()
+        ENDIF
         IF c.iconreq              -> audit5 A1: the gadget's iconify,
           c.iconreq := FALSE      -> deferred. BEFORE closereq: both in
           curcon := c             -> one drain must end CLOSED (conclose
@@ -1055,6 +1147,17 @@ PROC main()
         IF amsg THEN doappmsg(amsg)
       UNTIL amsg = NIL
     ENDIF
+    -> 1.2.8b6: the file requester came back (ardone checks for
+    -> itself - arbusy only drops when the helper has really signalled)
+    IF arbusy THEN ardone()
+    -> 1.2.8b5: knobs follow their models - LAST, so whatever this
+    -> pass rendered or scrolled (packets, keys, the deferred flush
+    -> on the timer port) is what the knob shows when we go to sleep
+    c := conlist
+    WHILE c
+      IF c.vson THEN vssync(c)
+      c := c.next
+    ENDWHILE
   ENDWHILE
   killhandler()                 -> B5: release exec resources, then E's
 ENDPROC                         -> exit (CLEANUPALL) frees the New memory
@@ -1107,6 +1210,17 @@ PROC killhandler()
   IF iconbase
     CloseLibrary(iconbase)
     iconbase := NIL
+  ENDIF
+  -> 1.2.8b6: asl.library, opened by the requester helper. DIE is
+  -> refused while arbusy, so no helper can be inside AslRequest here.
+  IF aslbase
+    CloseLibrary(aslbase)
+    aslbase := NIL
+  ENDIF
+  IF arsigbit >= 0
+    FreeSignal(arsigbit)
+    arsigbit := -1
+    arsig := 0
   ENDIF
   IF diskfontbase
     CloseLibrary(diskfontbase)
@@ -1690,7 +1804,10 @@ PROC dopkt(pkt:PTR TO dospacket)
     -> DOSTRUE, and set dieing so main()'s loop falls out to
     -> killhandler(). No new packets arrive after dn_Task is cleared;
     -> any already queued drain normally as this iteration finishes.
-    IF conlist <> NIL
+    -> 1.2.8b6: and not while the ASL helper lives - a console can
+    -> close under an open requester, and that process is executing
+    -> OUR seglist until it signals.
+    IF (conlist <> NIL) OR arbusy
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_IN_USE)
     ELSE
       IF mydnode THEN mydnode.task := NIL
@@ -2110,6 +2227,34 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.pnoinfo := TRUE
   ELSEIF StrCmp(tok, 'SHOWINFO')
     curcon.pnoinfo := FALSE
+  ELSEIF StrCmp(tok, 'SCROLLBAR')
+    -> 1.2.8b5: a scrollbar in the right border (vsmake's note).
+    -> Owned, bordered windows only - a borrowed frame (WINDOW0x) and
+    -> a NOBORDER window have no border of ours to put it in.
+    curcon.pscrollbar := TRUE
+  ELSEIF StrCmp(tok, 'NOSCROLLBAR')
+    curcon.pscrollbar := FALSE
+  ELSEIF StrCmp(tok, 'NOTABMENU')
+    -> 1.2.8b4: several matches never open the menu; Tab and Shift+Tab
+    -> cycle the candidates in the line itself (dotab's note)
+    curcon.ptabmenu := FALSE
+  ELSEIF StrCmp(tok, 'TABMENU')
+    curcon.ptabmenu := TRUE
+  ELSEIF StrCmp(tok, 'TABFIRST')
+    -> 1.2.8b4: the first Tab inserts the first match instead of
+    -> stopping at the common prefix - KingCON's feel. Says nothing
+    -> about the menu: with TABMENU it opens with entry one picked.
+    curcon.ptabfirst := TRUE
+  ELSEIF StrCmp(tok, 'NOTABFIRST')
+    curcon.ptabfirst := FALSE
+  ELSEIF StrCmp(tok, 'TABREQ')
+    -> 1.2.8b6: Tab with nothing typed in the word = an ASL file
+    -> requester, the pick inserted at the cursor (tabreq's note).
+    -> The third of the three switches, and independent like them: a
+    -> word with anything in it completes exactly as before.
+    curcon.ptabreq := TRUE
+  ELSEIF StrCmp(tok, 'NOTABREQ')
+    curcon.ptabreq := FALSE
   ELSEIF StrCmp(tok, 'PEN', 3)
     -> PENn: the default text pen (CTerm sends PEN7 with its
     -> ANSI palette, where pen 1 is ANSI red)
@@ -2325,6 +2470,10 @@ PROC parsecon(bname)
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
   curcon.pjump := 0                    -> J1: jump scroll off by default
   curcon.pnoinfo := FALSE              -> 1.2.8b2: icons complete, greyed
+  curcon.pscrollbar := FALSE           -> 1.2.8b5: no scrollbar, as shipped
+  curcon.ptabmenu := TRUE              -> 1.2.8b4: the menu, and Tab stops
+  curcon.ptabfirst := FALSE            -> at the common prefix - as shipped
+  curcon.ptabreq := FALSE              -> 1.2.8b6: no requester
   curcon.pfontname[0] := 0             -> open like everything else
   curcon.pfontsize := 0
   curcon.pfontexp := FALSE
@@ -2674,6 +2823,186 @@ PROC iconload(path:PTR TO CHAR)
   fhmode := 0                   -> back to the common errand
 ENDPROC d
 
+-> ---------- TABREQ: the ASL file requester (1.2.8b6) ----------
+-> The KingCON mail's third item, behind its own switch (his ruling:
+-> menu, first-match and requester are three functions). Tab on an
+-> EMPTY word - nothing typed since the last blank - raises a file
+-> requester in the shell's current directory; the pick lands at the
+-> cursor the way a dropped icon does (quoted if it needs it, a
+-> trailing blank, a drawer ending '/').
+->
+-> ASYNCHRONOUS, unlike every other helper errand here (the arstub
+-> note at the globals): the handler goes straight back to its loop,
+-> every console stays live, and the answer arrives as a signal.
+-> What that costs is written down here rather than discovered later:
+-> - ONE requester per handler. A second empty Tab while one is up
+->   beeps. arbusy is the whole lock: set before the spawn, cleared
+->   only by ardone, read only by this process.
+-> - The asking console may be GONE when the answer comes. arcon is
+->   compared, never dereferenced, until conok() has vouched for it.
+-> - The requester may not lean on our window. ASLFR_WINDOW is NOT
+->   passed: by default ASL SHARES the parent window's UserPort, the
+->   port this process drains (the Ed lesson - two tasks on one port),
+->   and the window can close under it. An owned window's screen goes
+->   by public-screen NAME (no pointer to go stale); only a borrowed
+->   frame passes its screen pointer, which its owner keeps alive.
+->   ASLFR_PRIVATEIDCMP is set regardless - belt to the braces.
+-> - The helper runs OUR code: ACTION_DIE is refused while arbusy.
+-> The initial drawer is resolved HERE with lockpath (packet-level, no
+-> DOS) from the client's pr_CurrentDir - the client is parked in its
+-> Read, so the lock cannot move under us - and handed over as text.
+CONST ASLFR_TITLETEXT=$80080001, ASLFR_INITIALLEFTEDGE=$80080003,
+      ASLFR_INITIALTOPEDGE=$80080004, ASLFR_INITIALDRAWER=$80080009,
+      ASLFR_SCREEN=$80080028, ASLFR_PUBSCREENNAME=$80080029,
+      ASLFR_PRIVATEIDCMP=$8008002A, ASLFR_REJECTICONS=$8008003C
+
+-> runs ON THE HELPER process (A4 restored by the poked stub). A real
+-> process: DOS is legal here (AddPart), as in diskhelper.
+PROC aslhelper()
+  DEF p:PTR TO process, req:PTR TO LONG, n
+  p := FindTask(NIL)
+  p.windowptr := -1
+  arok := FALSE
+  arpath[0] := 0
+  IF aslbase = NIL THEN aslbase := OpenLibrary('asl.library', 37)
+  IF aslbase
+    req := AllocAslRequest(0,          -> ASL_FILEREQUEST
+      [ASLFR_TITLETEXT, 'Insert a file name',
+       ASLFR_INITIALDRAWER, ardrawer,
+       ASLFR_INITIALLEFTEDGE, arleft,
+       ASLFR_INITIALTOPEDGE, artop,
+       ASLFR_PRIVATEIDCMP, TRUE,
+       ASLFR_REJECTICONS, TRUE,
+       IF arscr THEN ASLFR_SCREEN ELSE ASLFR_PUBSCREENNAME,
+       IF arscr THEN arscr ELSE (IF arpubname[0] THEN arpubname ELSE NIL),
+       TAG_DONE, NIL])
+    IF req
+      IF AslRequest(req, NIL)
+        -> fr_Drawer at +8, fr_File at +4; a bare drawer is a pick too
+        n := StrLen(req[2])
+        IF n < 540
+          CopyMem(req[2], arpath, n + 1)
+          IF AddPart(arpath, req[1], 556) THEN arok := TRUE
+          -> a drawer picked with no file: say so with the '/', the
+          -> way dropbuild marks a dropped drawer
+          IF arok AND (StrLen(req[1]) = 0)
+            n := StrLen(arpath)
+            IF n > 0
+              IF (arpath[n - 1] <> ":") AND (arpath[n - 1] <> "/")
+                arpath[n] := "/"
+                arpath[n + 1] := 0
+              ENDIF
+            ENDIF
+          ENDIF
+          IF arpath[0] = 0 THEN arok := FALSE
+        ENDIF
+      ENDIF
+      FreeAslRequest(req)
+    ENDIF
+  ENDIF
+  Forbid()                      -> the signal is the LAST thing this
+  Signal(fhtask, arsig)         -> process does in our code: Forbid
+ENDPROC                         -> holds until it has left it (exit
+                                -> breaks the Forbid), so a DIE that
+                                -> follows ardone cannot unload us
+                                -> from under the stub's RTS
+
+-> Tab on an empty word, TABREQ set. TRUE = the key is dealt with
+-> (requester raised, or refused with a beep); FALSE = no requester
+-> is possible here, complete the old way.
+PROC tabreq()
+  DEF proc:PTR TO process
+  IF (arstub = NIL) OR (arsig = 0) THEN RETURN FALSE
+  IF arbusy
+    DisplayBeep(NIL)            -> one at a time, and it is up
+    RETURN TRUE
+  ENDIF
+  ardrawer[0] := 0
+  proc := tcclient()
+  IF proc
+    IF proc.currentdir
+      IF lockpath(proc.currentdir, ardrawer, 548) = FALSE THEN ardrawer[0] := 0
+    ENDIF
+  ENDIF
+  arscr := NIL
+  arpubname[0] := 0
+  IF curcon.fwin
+    arscr := curcon.win.wscreen
+  ELSE
+    IF curcon.pscrname[0] THEN AstrCopy(arpubname, curcon.pscrname, 139)
+  ENDIF
+  arleft := curcon.win.leftedge + 24
+  artop := curcon.win.topedge + 24
+  arcon := curcon
+  SetSignal(0, arsig)           -> no stale wakeups
+  arbusy := TRUE
+  IF CreateNewProc([NP_ENTRY, arstub,
+                    NP_NAME, 'ccon-filereq',
+                    NP_STACKSIZE, 32768,
+                    NP_COPYVARS, FALSE,
+                    NP_CURRENTDIR, 0,
+                    NP_INPUT, 0,
+                    NP_OUTPUT, 0,
+                    NP_CLOSEINPUT, FALSE,
+                    NP_CLOSEOUTPUT, FALSE,
+                    TAG_DONE, NIL]) = NIL
+    arbusy := FALSE
+    arcon := NIL
+    RETURN FALSE
+  ENDIF
+ENDPROC TRUE
+
+-> main()'s loop, every pass while arbusy: has the helper signalled?
+-> The pick goes in exactly as a dropped icon does (dodrop's cooked
+-> arm): settle output, the accept bundle, insert whole, one paint.
+-> A raw-mode window gets the bytes on its input queue instead.
+PROC ardone()
+  DEF pb[620]:ARRAY OF CHAR, n, i, p, needq, c:PTR TO console, k
+  IF (SetSignal(0, 0) AND arsig) = 0 THEN RETURN
+  SetSignal(0, arsig)
+  arbusy := FALSE
+  c := arcon
+  arcon := NIL
+  IF arok = FALSE THEN RETURN          -> cancelled
+  IF conok(c) = FALSE THEN RETURN      -> the window did not wait
+  IF c.win = NIL THEN RETURN           -> iconified meanwhile
+  curcon := c
+  n := StrLen(arpath)
+  needq := FALSE
+  FOR i := 0 TO n - 1
+    IF (arpath[i] = 32) OR (arpath[i] = "=") THEN needq := TRUE
+  ENDFOR
+  p := 0
+  IF needq
+    pb[p] := 34
+    p++
+  ENDIF
+  FOR i := 0 TO n - 1
+    pb[p] := arpath[i]
+    p++
+  ENDFOR
+  IF needq
+    pb[p] := 34
+    p++
+  ENDIF
+  pb[p] := 32
+  p++
+  pb[p] := 0
+  flushout(curcon)
+  acceptreset()
+  IF curcon.rawmode
+    IF inqroom(p)
+      FOR k := 0 TO p - 1 DO enqueue(pb[k])
+      inputarrived()
+    ELSE
+      DisplayBeep(NIL)
+    ENDIF
+  ELSE
+    IF pasteinsert(pb, p) = FALSE THEN DisplayBeep(NIL)
+    drawedit()
+  ENDIF
+ENDPROC
+
 -> ---------- v1.2 ICONIFY: AppIcon plumbing ----------
 -> The AppIcon is BAKED IN (bicondo, built at handler init) - no file, no
 -> icon.library, no DOS - so there is no icon-load path here at all.
@@ -2982,6 +3311,284 @@ ENDPROC
 -> ICONIFY hide: close the window but KEEP the console whole so reopenwin can
 -> restore it exactly. Contrast closewin, which disposes the model - a real
 -> teardown. Owned windows only (a borrowed frame belongs to its owner).
+-> ---------- the scrollbar (1.2.8b5) ----------
+-> His ruling on the KingCON mail: the scrollbar is its own config
+-> option. The build follows AmigaReferences/intuition-border-
+-> gadgets.md to the letter, because every shortcut in that note was
+-> tried once and rendered nothing: RAW Intuition gadgets (GadTools
+-> does not live in a border), the arrows' sysiclass images carried by
+-> GFLG_GADGIMAGE (without it Intuition reads the Image as a Border
+-> and paints air), sizes READ BACK from the images, and the frame
+-> repainted with RefreshWindowFrame, never RefreshGList.
+-> The geometry is KingCON 1.7's own (.asm :14270-14390), which agrees
+-> with the note: arrows flush right at 1 - width, the prop inset
+-> 4+4 (3+3 in a narrow lowres border), the down arrow sitting on the
+-> sizing gadget and the up arrow on the down arrow. REL gadgets place
+-> at (Width - 1 + LeftEdge), (Height - 1 + TopEdge).
+->
+-> The gadgets are built BEFORE OpenWindow and ride in on WA_GADGETS:
+-> only then does Intuition widen the right border for them, which a
+-> NOSIZE window needs (a SIZE window's right border already hosts the
+-> sizing gadget and is exactly this wide). gridcalc reads
+-> win.borderright, so the column count follows by itself.
+-> Returns the first gadget for WA_GADGETS, or NIL = no scrollbar.
+CONST VSB_SIZE=174              -> 3 gadgets (44) + PropInfo (22) + Image (20)
+-> the seven sysiclass names, spelled out: importing the whole of
+-> 'intuition/imageclass' for them breaks the build three hundred
+-> lines away (E-VO: "needs a better CPU" on the first inline
+-> MOVE.L A4,<global>) - values from the NDK header.
+CONST SYSIA_SIZE=$8002000B, SYSIA_WHICH=$8002000D,
+      SYSIA_DRAWINFO=$80020018,
+      SYSISIZE_MEDRES=0, SYSISIZE_LOWRES=1,
+      SIZEIMAGE=2, UPIMAGE=11, DOWNIMAGE=13
+
+PROC vssysi(dri, which, size) IS NewObjectA(NIL, 'sysiclass',
+  [SYSIA_DRAWINFO, dri, SYSIA_WHICH, which, SYSIA_SIZE, size,
+   TAG_DONE, NIL])
+
+PROC vsmake(scr:PTR TO screen)
+  DEF dri, sz, im:PTR TO image, brw, szh, aw, ah, dh, bt, pw, ple,
+      g:PTR TO gadget, pi:PTR TO propinfo, ta:PTR TO textattr
+  curcon.vson := FALSE
+  curcon.vsheld := FALSE
+  curcon.vsdir := 0
+  curcon.vsmoved := FALSE
+  curcon.vsminh := 60
+  IF (curcon.pscrollbar = FALSE) OR curcon.pnoborder OR (scr = NIL) THEN RETURN NIL
+  dri := GetScreenDrawInfo(scr)
+  IF dri = NIL THEN RETURN NIL
+  curcon.vsdri := dri
+  curcon.vsscr := scr
+  -> the size Intuition itself picks for this screen's window gadgets
+  sz := IF scr.flags AND SCREENHIRES THEN SYSISIZE_MEDRES ELSE SYSISIZE_LOWRES
+  brw := 18
+  szh := 10
+  im := vssysi(dri, SIZEIMAGE, sz)     -> a probe: measured, disposed
+  IF im
+    brw := im.width
+    szh := im.height
+    DisposeObject(im)
+  ENDIF
+  -> no sizing gadget: the arrows stand on the bottom border instead
+  IF curcon.pnosize THEN szh := scr.wborbottom
+  curcon.vsimup := vssysi(dri, UPIMAGE, sz)
+  curcon.vsimdn := vssysi(dri, DOWNIMAGE, sz)
+  curcon.vsblk := New(VSB_SIZE)
+  IF (curcon.vsimup = NIL) OR (curcon.vsimdn = NIL) OR (curcon.vsblk = NIL)
+    vsfree()
+    RETURN NIL
+  ENDIF
+  im := curcon.vsimup                  -> ALWAYS read back from the image
+  aw := im.width
+  ah := im.height
+  im := curcon.vsimdn
+  dh := im.height
+  ta := scr.font
+  bt := scr.wbortop + ta.ysize + 1     -> the title bar, before there is
+  curcon.vsbt := bt                    -> a window to ask (vsfix checks)
+  curcon.vsminh := bt + szh + ah + dh + 2 + 16
+  IF curcon.vsminh < 60 THEN curcon.vsminh := 60
+  curcon.vsprop := curcon.vsblk
+  curcon.vsgup := curcon.vsblk + 44
+  curcon.vsgdn := curcon.vsblk + 88
+  curcon.vspi := curcon.vsblk + 132
+  pi := curcon.vspi
+  pi.flags := AUTOKNOB OR FREEVERT OR PROPNEWLOOK OR PROPBORDERLESS
+  pi.vertbody := MAXBODY
+  pi.vertpot := MAXPOT
+  pi.horizbody := MAXBODY
+  IF brw > 15
+    pw := brw - 8
+    ple := 5 - brw
+  ELSE
+    pw := brw - 6
+    ple := 4 - brw
+  ENDIF
+  g := curcon.vsprop
+  g.nextgadget := curcon.vsgup
+  g.leftedge := ple
+  g.topedge := bt + 1
+  g.width := pw
+  g.height := 0 - (bt + szh + 2 + ah + dh)
+  g.flags := GFLG_RELRIGHT OR GFLG_RELHEIGHT
+  g.activation := GACT_RELVERIFY OR GACT_IMMEDIATE OR
+                  GACT_RIGHTBORDER OR GACT_FOLLOWMOUSE
+  g.gadgettype := GTYP_PROPGADGET
+  g.gadgetrender := curcon.vsblk + 154   -> the knob Image AUTOKNOB fills
+  g.specialinfo := pi
+  g.gadgetid := 1
+  g := curcon.vsgup
+  g.nextgadget := curcon.vsgdn
+  g.leftedge := 1 - aw
+  g.topedge := 1 - szh - dh - ah
+  g.width := aw
+  g.height := ah
+  g.flags := GFLG_RELRIGHT OR GFLG_RELBOTTOM OR GFLG_GADGIMAGE  -> THE bit
+  g.activation := GACT_RELVERIFY OR GACT_IMMEDIATE OR GACT_RIGHTBORDER
+  g.gadgettype := GTYP_BOOLGADGET
+  g.gadgetrender := curcon.vsimup
+  g.gadgetid := 2
+  g := curcon.vsgdn
+  g.nextgadget := NIL
+  g.leftedge := 1 - aw
+  g.topedge := 1 - szh - dh
+  g.width := aw
+  g.height := dh
+  g.flags := GFLG_RELRIGHT OR GFLG_RELBOTTOM OR GFLG_GADGIMAGE
+  g.activation := GACT_RELVERIFY OR GACT_IMMEDIATE OR GACT_RIGHTBORDER
+  g.gadgettype := GTYP_BOOLGADGET
+  g.gadgetrender := curcon.vsimdn
+  g.gadgetid := 3
+ENDPROC curcon.vsprop
+
+-> the window is open: the gadgets are live. bt was a FORMULA
+-> (wbortop + screen font + 1); the window knows the real title bar. If
+-> they disagree the prop is lifted out, corrected and put back - a
+-> wrong guess costs one frame repaint instead of a knob under the
+-> title.
+PROC vsfix()
+  DEF d, g:PTR TO gadget
+  IF (curcon.vsblk = NIL) OR (curcon.win = NIL) THEN RETURN
+  curcon.vson := TRUE
+  d := curcon.win.bordertop - curcon.vsbt
+  IF d <> 0
+    g := curcon.vsprop
+    RemoveGList(curcon.win, g, 3)
+    g.topedge := g.topedge + d
+    g.height := g.height - d
+    curcon.vsbt := curcon.vsbt + d
+    AddGList(curcon.win, g, -1, 3, NIL)
+    RefreshWindowFrame(curcon.win)
+  ENDIF
+ENDPROC
+
+-> BEFORE CloseWindow when there is a window (the gadgets come out of
+-> its list first, and the DrawInfo goes back while the window still
+-> pins its screen), or bare after a failed open.
+PROC vsfree()
+  IF curcon.vson AND (curcon.win <> NIL)
+    RemoveGList(curcon.win, curcon.vsprop, 3)
+  ENDIF
+  curcon.vson := FALSE
+  curcon.vsheld := FALSE
+  curcon.vsdir := 0
+  IF curcon.vsimup THEN DisposeObject(curcon.vsimup)
+  IF curcon.vsimdn THEN DisposeObject(curcon.vsimdn)
+  curcon.vsimup := NIL
+  curcon.vsimdn := NIL
+  IF curcon.vsdri THEN FreeScreenDrawInfo(curcon.vsscr, curcon.vsdri)
+  curcon.vsdri := NIL
+  curcon.vsscr := NIL
+  IF curcon.vsblk THEN Dispose(curcon.vsblk)
+  curcon.vsblk := NIL
+  curcon.vsprop := NIL
+  curcon.vsgup := NIL
+  curcon.vsgdn := NIL
+  curcon.vspi := NIL
+ENDPROC
+
+-> knob <- model. Called once per main-loop pass for every console,
+-> NOT from the scroll paths: sbcnt moves on every scrolled line and a
+-> NewModifyProp per line would hand the perf campaigns back. Here it
+-> is a Mul and a Div, and the prop is only touched when the numbers
+-> really differ - which, with the ring full and the view live, is
+-> never. The body is quantized (OR $3F, 1024 steps) so a filling
+-> ring redraws the knob when it has visibly changed, not per line.
+-> Never while the knob is held: Intuition is drawing it under the
+-> mouse, and our idea of the position would stamp over the drag.
+-> Takes the console explicitly - curcon is not ours to move here.
+PROC vssync(c:PTR TO console)
+  DEF body, pot
+  IF (c.vson = FALSE) OR (c.win = NIL) OR c.vsheld THEN RETURN
+  body := MAXBODY
+  pot := MAXPOT
+  IF (c.sbcnt > 0) AND (c.altvalid = FALSE) AND (c.sb <> NIL)
+    body := Div(Mul(c.rows, MAXBODY), c.sbcnt + c.rows) OR $3F
+    pot := Div(Mul(c.sbcnt - c.viewoff, MAXPOT), c.sbcnt)
+    IF pot < 0 THEN pot := 0
+  ENDIF
+  -> vertpot/vertbody are UNSIGNED words behind E's signed INT
+  IF ((c.vspi.vertpot AND $FFFF) <> pot) OR
+     ((c.vspi.vertbody AND $FFFF) <> body)
+    NewModifyProp(c.vsprop, c.win, NIL, c.vspi.flags, 0, pot,
+                  MAXBODY, body, 1)
+  ENDIF
+ENDPROC
+
+-> model <- knob. Intuition updates VertPot IN PLACE as the mouse
+-> drags, so the pot is the single source of truth; converting it is
+-> idempotent, which is why MOUSEMOVE and INTUITICKS may both land
+-> here without caring which of them Intuition felt like sending.
+PROC vsdrag()
+  DEF v
+  IF (curcon.vson = FALSE) OR (curcon.sbcnt <= 0) THEN RETURN
+  v := curcon.sbcnt - Div(Mul(curcon.vspi.vertpot AND $FFFF, curcon.sbcnt) + $7FFF, $FFFF)
+  IF v <> curcon.viewoff
+    IF (curcon.rawmode = FALSE) AND curcon.tcactive THEN tcclose()
+    scrollview(v - curcon.viewoff)
+  ENDIF
+ENDPROC
+
+PROC vsstep(n)
+  IF (curcon.rawmode = FALSE) AND curcon.tcactive THEN tcclose()
+  scrollview(n)
+ENDPROC
+
+PROC vsgdown(g)
+  IF curcon.vson = FALSE THEN RETURN
+  IF g = curcon.vsprop
+    curcon.vsheld := TRUE
+  ELSEIF g = curcon.vsgup
+    curcon.vsdir := 1
+  ELSEIF g = curcon.vsgdn
+    curcon.vsdir := -1
+  ELSE
+    RETURN
+  ENDIF
+  curcon.vsrep := 0
+  curcon.vsidle := 0
+  IF curcon.vsdir THEN vsstep(curcon.vsdir)   -> the click's own step
+  setidcmp()                    -> INTUITICKS (+ MOUSEMOVE) for the hold
+ENDPROC
+
+PROC vsgrelease()
+  IF curcon.vsheld
+    curcon.vsheld := FALSE
+    vsdrag()                    -> where the knob was let go
+  ENDIF
+  curcon.vsdir := 0
+  curcon.vsmoved := FALSE
+  setidcmp()                    -> and the ticks go quiet again
+ENDPROC
+
+-> a held arrow repeats off INTUITICKS (10/s): two ticks of grace so a
+-> click is one line, then a line a tick, then three. The button's
+-> own GFLG_SELECTED says whether the pointer is still on it. A
+-> RELVERIFY button released OFF the gadget sends no GADGETUP at all -
+-> so a hold that has not been "on" for five ticks is over.
+PROC vstick()
+  DEF g:PTR TO gadget
+  IF curcon.vson = FALSE THEN RETURN
+  IF curcon.vsheld
+    curcon.vsmoved := TRUE
+    RETURN
+  ENDIF
+  IF curcon.vsdir = 0 THEN RETURN
+  g := IF curcon.vsdir > 0 THEN curcon.vsgup ELSE curcon.vsgdn
+  IF g.flags AND GFLG_SELECTED
+    curcon.vsidle := 0
+    curcon.vsrep := curcon.vsrep + 1
+    IF curcon.vsrep > 8
+      vsstep(Mul(curcon.vsdir, 3))
+    ELSEIF curcon.vsrep > 2
+      vsstep(curcon.vsdir)
+    ENDIF
+  ELSE
+    curcon.vsidle := curcon.vsidle + 1
+    IF curcon.vsidle > 5 THEN vsgrelease()
+  ENDIF
+ENDPROC
+
 PROC hidewin()
   DEF i
   IF curcon.win = NIL THEN RETURN
@@ -3023,6 +3630,7 @@ PROC hidewin()
     RemoveAppWindow(curcon.appwin)  -> BEFORE its window goes
     curcon.appwin := NIL
   ENDIF
+  vsfree()                      -> 1.2.8b5: gadgets out BEFORE the window
   CloseWindow(curcon.win)
   curcon.win := NIL
   curcon.rp := NIL
@@ -3036,12 +3644,16 @@ ENDPROC
 PROC reopenwin()
   DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
-      dri:PTR TO drawinfo
+      dri:PTR TO drawinfo, vg
   IF curcon.win THEN RETURN
   idc := IDCMP_CLOSEWINDOW
   IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
   pubscr := NIL
   IF curcon.pscrname[0] THEN pubscr := LockPubScreen(curcon.pscrname)
+  -> 1.2.8b5: the scrollbar is measured against the screen it will
+  -> stand on, so it needs the lock the default screen never needed
+  IF (pubscr = NIL) AND curcon.pscrollbar THEN pubscr := LockPubScreen(NIL)
+  vg := vsmake(pubscr)
   curcon.win := OpenWindowTagList(NIL,
     [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
      WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
@@ -3056,12 +3668,15 @@ PROC reopenwin()
      WA_BORDERLESS, curcon.pnoborder,
      WA_BACKDROP, curcon.pbackdrop,
      WA_PUBSCREEN, pubscr,
-     WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
+     WA_MINWIDTH, 160, WA_MINHEIGHT, curcon.vsminh,
      WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
      WA_IDCMP, idc,
+     IF vg THEN WA_GADGETS ELSE TAG_IGNORE, vg,
      TAG_DONE, NIL])
+  IF curcon.win = NIL THEN vsfree()      -> while the screen is still held
   IF pubscr THEN UnlockPubScreen(NIL, pubscr)
   IF curcon.win = NIL THEN RETURN        -> reopen failed; stays hidden
+  vsfix()
   curcon.rp := curcon.win.rport
   curcon.winact := IF curcon.win.flags AND WFLG_WINDOWACTIVE THEN TRUE ELSE FALSE
   IF curcon.tf THEN SetFont(curcon.rp, curcon.tf)
@@ -3187,8 +3802,9 @@ PROC openwin()
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
       dri:PTR TO drawinfo,
       pubscr:PTR TO screen, fname[48]:ARRAY OF CHAR, fl, ok,
-      gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn
+      gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn, vg
   curcon.fwin := FALSE
+  curcon.vsminh := 60
   -> M6: with the input.device handler on, keys never touch IDCMP -
   -> the UserPort carries only the close gadget, stock console.device
   -> shape. IDCMP_MENUPICK must NOT be set: with it, Intuition delivers
@@ -3229,9 +3845,9 @@ PROC openwin()
     pubscr := NIL
     IF curcon.pscrname[0]
       pubscr := LockPubScreen(curcon.pscrname)
-    ELSEIF (curcon.pww = -1) OR (curcon.pwh = -1)
-      pubscr := LockPubScreen(NIL)
-    ENDIF
+    ELSEIF (curcon.pww = -1) OR (curcon.pwh = -1) OR curcon.pscrollbar
+      pubscr := LockPubScreen(NIL)   -> 1.2.8b5: the scrollbar measures
+    ENDIF                            -> the screen too (vsmake)
     -> his ask, 19.7.26: WIDTH/HEIGHT=-1 fills the screen he's
     -> opening on. v1.1b46 correction (his catch): "fills the
     -> screen" has to mean "fills what's LEFT of the screen from
@@ -3249,7 +3865,8 @@ PROC openwin()
     IF curcon.pww = -1 THEN curcon.pww := 640
     IF curcon.pwh = -1 THEN curcon.pwh := 200
     IF curcon.pww < 160 THEN curcon.pww := 160
-    IF curcon.pwh < 60 THEN curcon.pwh := 60
+    vg := vsmake(pubscr)        -> 1.2.8b5: sets vsminh (60 without a bar)
+    IF curcon.pwh < curcon.vsminh THEN curcon.pwh := curcon.vsminh
     curcon.win := OpenWindowTagList(NIL,
       [WA_TITLE, curcon.wtitlebase, WA_LEFT, curcon.pwx, WA_TOP, curcon.pwy,
        WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
@@ -3262,11 +3879,14 @@ PROC openwin()
        WA_BORDERLESS, curcon.pnoborder,
        WA_BACKDROP, curcon.pbackdrop,
        WA_PUBSCREEN, pubscr,
-       WA_MINWIDTH, 160, WA_MINHEIGHT, 60,
+       WA_MINWIDTH, 160, WA_MINHEIGHT, curcon.vsminh,
        WA_MAXWIDTH, -1, WA_MAXHEIGHT, -1,
        WA_IDCMP, idc,
+       IF vg THEN WA_GADGETS ELSE TAG_IGNORE, vg,
        TAG_DONE, NIL])
+    IF curcon.win = NIL THEN vsfree()   -> while the screen is still held
     IF pubscr THEN UnlockPubScreen(NIL, pubscr)
+    vsfix()
   ENDIF
   IF curcon.win = NIL
     -> audit B4: the open FAILED. autopend is cleared at the far end
@@ -3606,6 +4226,7 @@ PROC closewin()
     ReportMouse(FALSE, curcon.win)     -> hand the flag back the way the
     ModifyIDCMP(curcon.win, curcon.oldidcmp)  -> owner had it
   ELSE
+    vsfree()                    -> 1.2.8b5: gadgets out BEFORE the window
     CloseWindow(curcon.win)
   ENDIF
   curcon.win := NIL
@@ -3865,6 +4486,11 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed, wasalt
   IF curcon.win = NIL THEN RETURN
+  -> 1.2.8b5: border gadgets after a resize want the FRAME repainted
+  -> under them (the "right only after re-activating" symptom in the
+  -> border-gadgets note). First thing, so no early return skips it;
+  -> everything below paints strictly inside the borders.
+  IF curcon.vson THEN RefreshWindowFrame(curcon.win)
   flushout(curcon)              -> S5: the reflow reads the model -
                                 -> pending bytes land first
   -> 1.2.5b7, his find (screenshots 24.7.26 evening: "the readme in my
@@ -4647,6 +5273,15 @@ PROC setidcmp()
   IF (curcon.evmask AND Shl(1, IECLASS_RAWMOUSE)) = 0
     idc := idc OR IDCMP_MOUSEBUTTONS
     IF curcon.selon THEN idc := idc OR IDCMP_MOUSEMOVE
+  ENDIF
+  -> 1.2.8b5: the scrollbar. GADGETDOWN/UP always; the tick and the
+  -> motion report only for as long as something is actually held -
+  -> ten INTUITICKS a second into a handler that ignores them is not
+  -> free, and MOUSEMOVE is the selection's class the rest of the time.
+  IF curcon.vson
+    idc := idc OR IDCMP_GADGETDOWN OR IDCMP_GADGETUP
+    IF curcon.vsheld OR (curcon.vsdir <> 0) THEN idc := idc OR IDCMP_INTUITICKS
+    IF curcon.vsheld THEN idc := idc OR IDCMP_MOUSEMOVE
   ENDIF
   -> ICONIFY: keep the title-bar gadget's report alive across every IDCMP
   -> recompute (owned windows only - a borrowed frame carries no gadget)
@@ -7648,9 +8283,16 @@ PROC dovanilla(code, qual)
     RETURN
   ENDIF
   IF curcon.tcactive
-    IF code = 13
+    IF (code = 13) AND (curcon.tchid = FALSE)
       tcclose()   -> Enter ACCEPTS the selection and closes the menu;
       RETURN      -> the line stays put for a second Enter (zsh style)
+      -> 1.2.8b4: NOT under NOTABMENU. "Accept, then Enter again" is
+      -> a bargain the menu makes by being visible; a hidden cycle
+      -> shows nothing to accept, and an Enter that does nothing
+      -> reads as a dead key. It falls through: close, then commit.
+      -> Esc below is kept for both - taking the candidate back is as
+      -> useful without a menu, and costs a key that would otherwise
+      -> wipe the line.
     ELSEIF code = 27
       -> 1.2.7b13, his ask: Esc ABORTS. tcpick inserts each candidate
       -> into the line as you walk, so leaving the menu the quiet way
@@ -7924,8 +8566,11 @@ PROC dorawkey(code, qual)
   -> back closes the menu first - but that is an invariant proved
   -> three procs away, and one edit from being false. One term here
   -> costs nothing and removes the dependency.
+  -> 1.2.8b4: and only a menu that is ON SCREEN. A hidden cycle
+  -> (NOTABMENU) has no grid to walk - the arrow falls through to the
+  -> close block and then moves the cursor, as it would on any line.
   IF curcon.tcactive AND (curcon.rawmode = FALSE) AND
-     (curcon.sbsrch = FALSE)
+     (curcon.sbsrch = FALSE) AND (curcon.tchid = FALSE)
     IF (qual AND (IEQUALIFIER_CONTROL OR IEQUALIFIER_LSHIFT OR
                   IEQUALIFIER_RSHIFT OR IEQUALIFIER_LALT OR
                   IEQUALIFIER_RALT)) = 0    -> 1.2.8b2: Alt+arrow
@@ -9388,9 +10033,11 @@ PROC tcreplace(nt:PTR TO CHAR, nl)
   l := StrLen(curcon.ebuf)
   newlen := curcon.tcws + nl + (l - curcon.tcwend)
   IF newlen > edcap() THEN RETURN FALSE
-  IF curcon.tcactive
+  IF curcon.tcactive AND (curcon.tchid = FALSE)
     -> the menu's rows are frozen (tcmrow0): while it is open a
-    -> candidate may not grow the line down into it
+    -> candidate may not grow the line down into it. 1.2.8b4: a
+    -> hidden cycle (NOTABMENU) has no rows to grow into, and its
+    -> tcmrow0 is stale - the line's only limit is edcap above.
     IF (curcon.ancx + newlen + 1) > Mul(curcon.tcmrow0 - curcon.ancy, curcon.cols) THEN RETURN FALSE
   ENDIF
   StrCopy(curcon.tctail, s + curcon.tcwend)
@@ -9605,6 +10252,7 @@ ENDPROC
 
 PROC tcmenudraw()
   DEF idx, r, c, p:PTR TO CHAR, l, nb[260]:ARRAY OF CHAR
+  IF curcon.tchid THEN RETURN      -> 1.2.8b4 NOTABMENU: no rows, no paint
   FOR idx := 0 TO curcon.tcshown - 1
     r := Div(idx, curcon.tcmcols)
     c := idx - Mul(r, curcon.tcmcols)
@@ -9661,6 +10309,10 @@ ENDPROC
 -> common prefix + the menu); further Tabs cycle the menu, Shift+Tab
 -> backwards; Enter accepts and closes, Esc closes, anything else
 -> closes and then acts normally.
+-> 1.2.8b4: two independent switches bend that. NOTABMENU keeps the
+-> cycle and drops the drawing (tchid); TABFIRST makes the first Tab
+-> insert match one instead of stopping at the common prefix. All four
+-> combinations are legal; NOTABMENU + TABFIRST is KingCON's Tab.
 -> 1.2.7b12: make the pick, and reflect it in the edit line. The
 -> selection is inserted AS YOU MOVE (zsh menu-select), so the line
 -> always shows what Enter would accept. Shared by Tab/Shift+Tab
@@ -9772,6 +10424,15 @@ PROC dotab(back, cmd)
   ENDFOR
   dirp[sep - curcon.tcws] := 0
   plen := curcon.cpos - sep
+  -> 1.2.8b6 TABREQ: an EMPTY word - no dirpart, no prefix - is the
+  -> one case where completion has nothing to go on and would list
+  -> the whole directory. With the switch set that is the requester's
+  -> job; Alt+Tab is left alone (an empty COMMAND word still lists
+  -> what can be run). tabreq() FALSE = no requester to be had (no
+  -> helper, no asl.library to spawn into) - fall through, old way.
+  IF curcon.ptabreq AND (cmd = FALSE) AND (curcon.cpos = curcon.tcws)
+    IF tabreq() THEN RETURN
+  ENDIF
   -> candidates are BARE names: replacement must start after the
   -> dirpart, or `version l:c<Tab>` eats its "l:" (latent since
   -> M5b - plain words never showed it, path words always did)
@@ -9833,6 +10494,31 @@ PROC dotab(back, cmd)
     SetStr(curcon.tctmp, cpl)
     IF tcreplace(curcon.tctmp, cpl) THEN drawedit()
   ENDIF
+  IF curcon.ptabmenu = FALSE
+    -> 1.2.8b4 NOTABMENU: the same candidate cycle with nothing drawn.
+    -> tcactive goes up so every rule the menu already has - Tab and
+    -> Shift+Tab cycle, any other key ends it, Esc takes the candidate
+    -> back, output closes it - holds unchanged; tchid marks it as
+    -> owning NO ROWS (tcmrows 0 = tcclose restores nothing) and
+    -> every candidate is in the cycle, not one window-page of them.
+    -> Needs no model, so it sits ahead of the sb test below.
+    curcon.tchid := TRUE
+    curcon.tcmrows := 0
+    curcon.tcshown := curcon.tcn
+    curcon.tcsel := -1
+    StrCopy(curcon.tcstem, curcon.ebuf + curcon.tcws,
+            curcon.tcwend - curcon.tcws)
+    curcon.tcactive := TRUE
+    IF curcon.ptabfirst
+      tcpick(0)
+    ELSEIF cpl <= plen
+      -> several matches, nothing to extend, nothing drawn: without
+      -> this the key would look dead. The next Tab starts the cycle.
+      DisplayBeep(NIL)
+    ENDIF
+    RETURN
+  ENDIF
+  curcon.tchid := FALSE
   IF curcon.sb = NIL THEN RETURN   -> no model = no way to restore the rows
   tcmenucalc()              -> under a menu; prefix-only completion
   vbrecheck()               -> audit4 D2: the edit line is painted and
@@ -9851,7 +10537,14 @@ PROC dotab(back, cmd)
   StrCopy(curcon.tcstem, curcon.ebuf + curcon.tcws,
           curcon.tcwend - curcon.tcws)
   curcon.tcactive := TRUE
-  tcmenudraw()
+  -> 1.2.8b4 TABFIRST: the menu opens with entry one already picked
+  -> and in the line (tcpick paints the menu itself). The stem above
+  -> is what Esc goes back to, exactly as after an arrow walk.
+  IF curcon.ptabfirst
+    tcpick(0)
+  ELSE
+    tcmenudraw()
+  ENDIF
   IF curcon.tcmore THEN DisplayBeep(NIL)  -> more than the menu shows
 ENDPROC
 
@@ -9913,4 +10606,4 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b3 (19.9.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b6 (19.9.26) CCON: LTX console handler', 0

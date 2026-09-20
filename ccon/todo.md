@@ -6009,3 +6009,270 @@ way, neither of them CCON's:
 A user report of "Alt+Tab is dead" under an emulator = check these
 two before the handler.
 
+
+## 1.2.8b4 — the Tab switches: NOTABMENU and TABFIRST (19.9.26)
+
+Three items of the KingCON mail were still open after b3: the
+scrollbar, the ASL requester on an empty Tab, and "first Tab inserts
+the first match, no menu". His ruling on the shape: EVERY ONE of them
+is its own config option - scrollbar on/off, Tab menu on/off,
+requester on/off - because the menu, the requester and the
+first-match insert are three different functions, not three settings
+of one. So the "style question" b2 left open is answered by not
+asking it: two switches, all four combinations legal.
+
+- `TABMENU` (default) / `NOTABMENU` - is the menu drawn
+- `NOTABFIRST` (default) / `TABFIRST` - where the first Tab stops
+- reserved for their own builds: `SCROLLBAR`/`NOSCROLLBAR`,
+  `TABREQ`/`NOTABREQ` (not parsed yet - a key that does nothing is
+  not shipped)
+
+What landed:
+- [x] **NOTABMENU = the same cycle, undrawn.** New console field
+      `tchid`. dotab raises tcactive exactly as for a menu, with
+      tcmrows = 0 (tcclose restores nothing) and tcshown = tcn (the
+      whole candidate list cycles, not one window-page). Every rule
+      the menu had holds for free: Tab/Shift+Tab cycle, any other key
+      ends it and acts, output closes it, Esc goes back to the stem.
+      Four places learned about tchid: tcmenudraw returns, tcreplace
+      skips the frozen-rows limit (tcmrow0 is stale - no rows to grow
+      into), the plain-arrow grid walk stands down (an arrow closes
+      and moves the cursor), and ENTER FALLS THROUGH - "accept, then
+      Enter again" is a bargain the menu makes by being visible; with
+      nothing on screen it would read as a dead key. Needs no model,
+      so it sits ahead of the `sb = NIL` return.
+- [x] **The ambiguity beep.** NOTABMENU + NOTABFIRST, several
+      matches, nothing to extend (cpl <= plen): without a signal the
+      key looks dead. Beep; the next Tab starts the cycle.
+- [x] **TABFIRST** - after the menu (or the hidden cycle) is up,
+      tcpick(0). The common-prefix extension still runs first and IS
+      the stem, so Esc returns to the prefix - the same place Esc
+      returns to after an arrow walk.
+
+Compile clean, LARGE, the same three A4/A5 warnings, UNREFERENCED
+unchanged. 108984 -> 109572 bytes. NOT harnessed: all of it is key
+dispatch and menu state that vamos cannot drive; the index
+arithmetic is b3's, untouched. Deployed to FS-UAE L: (live + staged
+L:ccon-handler-1.2.8b4; b2/b3 stay staged, .bak = clean 1.2.7).
+L:ccon.cfg NOT touched - the switches go in by his hand, or per
+window: `newshell CCON:NOTABMENU`, `newshell CCON:NOTABMENU/TABFIRST`.
+
+Boot checklist:
+- [ ] `Version L:ccon-handler` = 1.2.8b4; plain window: Tab, the
+      menu, arrows, Enter-accepts, Esc - all exactly as b3
+- [ ] `newshell CCON:TABFIRST`: `type s:c<Tab>` - menu opens, entry
+      one highlighted AND in the line; Tab walks on from it; Esc
+      goes back to the common prefix; Enter accepts, second Enter runs
+- [ ] `newshell CCON:NOTABMENU`: `type s:c<Tab>` - common prefix,
+      nothing drawn; a second Tab puts the first match in the line,
+      Tab/Shift+Tab cycle and wrap
+- [ ] same window, a word with several matches and NO common
+      extension (`type s:<Tab>`): beep/flash, next Tab starts the cycle
+- [ ] NOTABMENU: cycle, then Enter - the line RUNS (one Enter)
+- [ ] NOTABMENU: cycle, then Esc - back to the stem; cycle, then
+      Left arrow - cursor moves, candidate stays
+- [ ] NOTABMENU: a directory with more entries than a window page -
+      the cycle reaches all of them (up to the 80 cap)
+- [ ] `newshell CCON:NOTABMENU/TABFIRST`: first Tab = first match
+      at once, Tab = next. KingCON's Tab.
+- [ ] Alt+Tab under each switch behaves the same way
+- [ ] a single match still completes whole with its space / '/' / ':'
+- [ ] the switches from L:ccon.cfg; `CCON:TABMENU` overrules a
+      NOTABMENU in the file
+
+## 1.2.8b5 — the scrollbar (19.9.26)
+
+`SCROLLBAR` / `NOSCROLLBAR`, default off (his ruling, see b4). The
+KingCON mail's item, built as KingCON builds it - a prop plus an
+arrow pair in the right border - but out of RAW gadgets, because
+AmigaReferences/intuition-border-gadgets.md (the cdiff saga) already
+paid for every wrong turn: GadTools does not live in a border, a
+sysiclass image on a plain gadget draws NOTHING without
+GFLG_GADGIMAGE, image sizes are read back and never requested, and
+border gadgets are repainted with RefreshWindowFrame.
+
+Geometry = KingCON 1.7's numbers (.asm :14270-14390), which agree
+with the note: arrows at 1 - width, prop inset 4+4 (3+3 when the
+border is <= 15 wide), down arrow on the sizing gadget, up arrow on
+the down arrow, REL gadgets at (Width-1+LeftEdge, Height-1+TopEdge).
+Hand-checked for a 200-high hires window: prop rows 12-168, gap 169,
+up 170-179, down 180-189, sizing gadget 190-199.
+
+The shape:
+- [x] **Built before OpenWindow, in on WA_GADGETS** (vsmake) - the
+      only way Intuition widens the right border for a NOSIZE window.
+      A SIZE window's border already hosts the sizing gadget and is
+      exactly this wide: no columns lost. gridcalc reads
+      win.borderright, so cols follow by themselves. Needs the screen
+      BEFORE the window: the default public screen is now locked for
+      the open when SCROLLBAR is set (both open sites).
+- [x] **The title bar height is a formula pre-open** (wbortop + screen
+      font + 1) and a fact post-open: vsfix compares with
+      win.bordertop and, on a mismatch, lifts the prop out, corrects
+      it, puts it back. A wrong guess costs a frame repaint.
+- [x] **WA_MINHEIGHT grows** to title + arrows + sizing gadget + 16,
+      so the prop's REL height can never go negative.
+- [x] **Knob <- model once per main-loop pass** (vssync, last thing
+      before Wait), never from the scroll paths: sbcnt moves per
+      scrolled line and a NewModifyProp per line would hand the perf
+      campaigns back. Body quantized (OR $3F), prop touched only when
+      pot/body differ: ring full + view live = never touched.
+      Every way of moving the view (keys, wheel, search, snaplive,
+      resize, alt screen) is covered by construction - nobody calls
+      the scrollbar, it looks.
+- [x] **Model <- knob** (vsdrag): VertPot is the truth, read on
+      MOUSEMOVE and INTUITICKS both; a drain's many drag reports
+      raise one flag and cost ONE redraw. vsheld blocks vssync while
+      the mouse has the knob. Round trip viewoff -> pot -> viewoff
+      verified exact for every position of every sbcnt 1..299 and
+      1000/2000/3970/4999/5000 (no 32-bit overflow at 5000).
+- [x] **Arrows**: GADGETDOWN steps once; INTUITICKS repeat after two
+      ticks of grace, x3 after eight. GFLG_SELECTED = pointer still
+      on the button. A RELVERIFY button released OFF the gadget sends
+      no GADGETUP - five unselected ticks end the hold.
+- [x] **INTUITICKS and MOUSEMOVE only while something is held**
+      (setidcmp); MOUSEMOVE stays the selection's class otherwise.
+      The scrollbar classes are FRAME classes: they act for a parked
+      raw client, as the wheel does; scrollview refuses the alt
+      screen on its own.
+- [x] **Teardown before CloseWindow** (vsfree, both sites):
+      RemoveGList, DisposeObject x2, FreeScreenDrawInfo while the
+      window still pins the screen, Dispose the block. doresize
+      starts with RefreshWindowFrame.
+- [x] Not for NOBORDER or WINDOW0x windows.
+
+TOOLCHAIN TRAP, cost an hour: the build died with "this instruction
+needs a better CPU/FPU" at `MOVE.L A4,fhcapa4` (line 907, untouched
+code). Bisected to: NOTHING in the code. A block of pure COMMENT
+lines was enough; no single line was. SHOWBUF: "general/identifier
+buffer used 99% of 634880 (expandable)" - the source (430K) crossed
+the point where E-VO expands that buffer mid-compile, and the
+expansion breaks the inline assembler's view of the globals. Any
+ADDBUF moves the layout and it compiles; ADDBUF=1 proven to produce
+a byte-identical binary on a source that builds either way. BUILD
+LINE IS NOW `ecompile ccon-handler.e ccon-handler LARGE ADDBUF=1`.
+Still 98% of the NEXT size (655360) - when this error comes back,
+raise ADDBUF before suspecting the code. Also: importing
+'intuition/imageclass' was the first suspect and is innocent, but the
+seven constants stay spelled out locally - cheaper than a module.
+
+Compile clean, the same three A4/A5 warnings, UNREFERENCED
+unchanged. 109572 -> 113784 bytes. Deployed to FS-UAE L: (live +
+staged L:ccon-handler-1.2.8b5; b4 staged beside it for a clean A/B
+if the Tab switches need testing without this).
+
+NOT harnessed and cannot be: all Intuition. Arithmetic checked
+off-line (above). This is the area with the worst track record -
+the checklist is long on purpose.
+
+Boot checklist:
+- [ ] plain window, no SCROLLBAR: nothing changed (b4 behaviour)
+- [ ] `newshell CCON:SCROLLBAR`: knob + two arrows in the right
+      border, system look, arrows ABOVE the sizing gadget, nothing
+      overlapping the title bar or the sizing gadget
+- [ ] same column count as a plain window of the same size
+- [ ] fresh window: knob fills the track, cannot be dragged
+- [ ] `list sys:c`: knob shrinks as history grows, stays at the
+      bottom; output speed feels unchanged (conbench if in doubt)
+- [ ] drag the knob: text follows live, title shows [scrollback -n];
+      drag to the very top = oldest line, to the bottom = live prompt
+- [ ] click the track above/below the knob: pages
+- [ ] click an arrow: one line. Hold: repeats, then faster. Press,
+      slide off the button, release: stops, and nothing is stuck
+      (wheel and keys still work, a later click works)
+- [ ] wheel / Shift+Up / Ctrl+Up / Ctrl+R content search: the knob
+      follows each
+- [ ] scrolled back via the knob, then type or let output arrive:
+      snaps live, knob drops to the bottom
+- [ ] resize (taller, shorter, narrower): gadgets follow, border
+      clean, no debris; shrink to the minimum height: prop still sane
+- [ ] Right-Amiga+I and back: scrollbar returns, transcript intact
+- [ ] select text with the mouse right next to the border, then use
+      the knob: neither confuses the other
+- [ ] Tab menu open, then drag the knob: menu closes cleanly
+- [ ] Ed and More in a SCROLLBAR window: knob full while they run,
+      back to the transcript's size after; Ed resize still works
+- [ ] `newshell CCON:SCROLLBAR/NOSIZE`: border widens by itself,
+      arrows sit on the bottom border
+- [ ] `CCON:SCROLLBAR/NOBORDER` and CTerm: no scrollbar, no harm
+- [ ] close the window, open another, several times: no leak, no
+      guru (Avail before/after)
+- [ ] SCROLLBAR from L:ccon.cfg; `CCON:NOSCROLLBAR` overrules it
+
+## 1.2.8b6 — TABREQ: the ASL requester on an empty Tab (19.9.26)
+
+`TABREQ` / `NOTABREQ`, default off - the third switch, independent of
+NOTABMENU and TABFIRST (his ruling, see b4). Tab on an EMPTY word
+(cpos = word start: no dirpart, no prefix) raises an ASL file
+requester in the shell's current directory; the pick is inserted at
+the cursor through dodrop's cooked arm (flushout, acceptreset,
+pasteinsert, one drawedit) with dropbuild's quoting (blank or '='),
+a trailing blank, a bare drawer ending '/'. Alt+Tab is left alone.
+KingCON's own routine (lbC003720 -> lbC00686A, .asm :9181) reaches
+its requester on more conditions than this; what ships is the
+mail's item, the empty Tab.
+
+THE DESIGN DECISION: ASYNCHRONOUS. b2 parked this item as "needs a
+helper process - AslRequest blocks". The helper exists (fhstub), but
+both of its errands are SYNCHRONOUS: the handler sleeps on fhsig
+until the helper is done. Fine for a font (milliseconds); a file
+requester stays up while the user browses, and one process serves
+every window - sleeping through it would freeze every console on
+the machine, a `list` in another shell included. So:
+- [x] its own poked stub (arstub = fhstub's 24 bytes, immediate
+      repointed at argd = [A4][{aslhelper}]) - NOT a third fhmode,
+      which is only safe because fh callers block
+- [x] its own signal (arsig) in main()'s Wait mask; ardone() runs
+      at the end of a pass while arbusy
+- [x] ONE requester per handler: arbusy set before the spawn,
+      cleared only by ardone; a second empty Tab beeps
+- [x] the asking console by POINTER, compared and conok()-vouched
+      before any use - the window may have closed (or iconified:
+      win = NIL drops the pick) under the requester
+- [x] NO ASLFR_WINDOW: by default ASL shares the parent window's
+      UserPort - the port this process drains (the Ed lesson) - and
+      the window can close under it. Owned windows pass their
+      public screen BY NAME (no pointer to go stale; NIL = default,
+      which is exactly where they open); only a borrowed frame
+      passes its screen pointer. ASLFR_PRIVATEIDCMP anyway.
+- [x] ACTION_DIE refused while arbusy (the helper executes our
+      seglist); the helper Forbid()s before its final Signal so it
+      is out of our code before anyone can act on the signal
+- [x] initial drawer resolved HANDLER-side with lockpath (packet
+      level) from the client's pr_CurrentDir - the client is parked
+      in its Read - and handed over as text; position = window + 24
+- [x] asl.library opened lazily by the helper, closed in killhandler
+- [x] tabreq() FALSE (no stub, spawn failed) = complete the old way
+
+Tags spelled out locally (eight CONSTs), only 'asl' imported: the
+identifier buffer is the b5 trap, and SHOWBUF now says 100% of
+655360. Built with ADDBUF=1; ADDBUF=1 and ADDBUF=3 binaries are
+byte-identical, so nothing layout-dependent leaked into the code.
+THE NEXT FEATURE WILL HIT THE BUFFER AGAIN - see the b5 note.
+
+Compile clean, same three warnings, UNREFERENCED unchanged.
+113784 -> 116192 bytes. Deployed to FS-UAE L: (live + staged
+L:ccon-handler-1.2.8b6; b4 and b5 staged beside it).
+
+Boot checklist:
+- [ ] no TABREQ: empty Tab lists the directory as always
+- [ ] `newshell CCON:TABREQ`, Tab at an empty prompt: requester
+      opens on the same screen, near the window, in the shell's
+      current directory (`cd sys:tools` first to see it follow)
+- [ ] pick a file: full path at the cursor + a blank; a name with a
+      space arrives quoted; pick a drawer only: ends '/'
+- [ ] `type <Tab>` (empty SECOND word): same, inserted after `type `
+- [ ] `type s:<Tab>` and `type st<Tab>`: NO requester, normal menu
+- [ ] Cancel: nothing inserted, nothing stuck, next Tab works
+- [ ] requester up: type in the window, run `list` in ANOTHER CCON
+      window - nothing is frozen
+- [ ] requester up, Tab on an empty word again: beep, no second one
+- [ ] requester up, CLOSE the shell window (endcli), then pick: no
+      guru, nothing inserted anywhere
+- [ ] requester up, iconify the window, pick: dropped quietly
+- [ ] requester up, resize / scroll back / drag the b5 knob: fine
+- [ ] Alt+Tab on an empty word: still the command list
+- [ ] TABREQ with NOTABMENU and with TABFIRST: each still does its
+      own thing on a non-empty word
+- [ ] CTerm (borrowed window) with TABREQ: requester on CTerm's screen
+- [ ] TABREQ from L:ccon.cfg; `CCON:NOTABREQ` overrules

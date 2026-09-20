@@ -33,6 +33,27 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 - **`NOINFO`** keeps `.info` files out of Tab completion until you
   type into the suffix yourself (`foo.<Tab>`); `SHOWINFO` undoes it.
   The default is unchanged: icons complete, greyed. (1.2.8b2)
+- **`SCROLLBAR`**: a scrollbar in the window's right border - a
+  knob sized to the history, a track that pages, and an arrow pair
+  that repeats and accelerates while held. It follows the view
+  whichever way it moves (keys, wheel, search) and costs nothing
+  while output streams: the knob is synced once per handler pass,
+  and only when it would visibly change. Off by default;
+  `NOSCROLLBAR` undoes it. Not in `NOBORDER` or borrowed windows.
+  (1.2.8b5)
+- **`TABREQ`**: Tab on an empty word opens an ASL file requester
+  in the shell's current directory instead of listing it; the pick
+  is inserted at the cursor, quoted when it needs to be. The
+  requester runs beside the handler, not inside it: the window -
+  and every other CCON: window - stays live while it is up. Off by
+  default; `NOTABREQ` undoes it. (1.2.8b6)
+- **`NOTABMENU` and `TABFIRST`**, two independent completion
+  switches. `NOTABMENU` never opens the menu: Tab and Shift+Tab
+  cycle the matches in the line itself, Esc takes the match back.
+  `TABFIRST` makes the first Tab insert the first match instead of
+  stopping at the common prefix - with the menu on, it opens with
+  that entry picked. Both together are KingCON's Tab. Defaults
+  unchanged (`TABMENU`, `NOTABFIRST`). (1.2.8b4)
 
 ### Changed
 - **Ctrl+Left/Right now jump by path component** — spaces, `/` and

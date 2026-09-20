@@ -218,7 +218,7 @@ design notes. A running handler keeps its seglist: after updating
 ## Building
 
 ```
-evo ccon-handler.e LARGE
+evo ccon-handler.e LARGE ADDBUF=1
 ```
 
 `LARGE` became necessary with the M10 console object: member
