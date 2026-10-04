@@ -320,3 +320,20 @@ jumps. v3 (1.2.8) adds JUMP=n jump scroll:
 
 `ecompile defertest.e`, run under vamos. Prints a PASS line per
 phase; any FAIL dumps the packet and both grids.
+
+## dplinetest.e - runs on Linux
+
+The 1.2.8b8 planar row writer's two asm routines, `dpcells` (a row's
+glyph offsets and pens, drawmrow's pen rules) and `dplinep` (one
+plane's pixel line at any cell width and start bit), copied VERBATIM
+from the handler and run against pixel-at-a-time E references:
+20000 random lines and 5000 random rows, bit for bit. Re-copy them if
+either changes.
+
+```
+ecompile dplinetest.e dplinetest
+vamos dplinetest
+```
+
+A control that breaks the right-edge merge fails at once (checked
+when written).

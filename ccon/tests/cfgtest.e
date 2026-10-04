@@ -221,11 +221,16 @@ PROC parseopt(tok:PTR TO CHAR)
     -> n rows in ONE blit and the next n-1 newlines scroll nothing.
     -> The raw value is unclamped here (any n >= 0); gridcalc folds
     -> it to rows-1 where the window is known, so JUMP=999 legally
-    -> means "a page at a time". 0 (the default) = today's behaviour.
+    -> means "a page at a time". 0 or 1 = scroll by one, always.
+    -> 1.2.8b8: unset (-1) = automatic, see jumpok.
     v := 4
     IF tok[v] = "=" THEN v := 5
-    v := tcnum(tok + v)
-    IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
+    IF StrCmp(tok + v, 'AUTO')
+      curcon.pjump := -1         -> 1.2.8b8: back to automatic (an open
+    ELSE                         -> string overruling a config's JUMP=n)
+      v := tcnum(tok + v)
+      IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
+    ENDIF
   -> ---- 1.2.7b9: geometry as EDGES, for the config file ----
   -> LEFT/TOP are pwx/pwy under a name; RIGHT/BOTTOM are the edges,
   -> folded into pww/pwh by openwin once there is a screen to measure.
@@ -687,7 +692,7 @@ PROC ground()
   cc.pasteexec := FALSE
   cc.pscrname[0] := 0
   cc.plines := 0
-  cc.pjump := 0                 -> J1: jump scroll off by default
+  cc.pjump := -1                -> 1.2.8b8: automatic (J1 was off)
   cc.pfontname[0] := 0
   cc.pfontsize := 0
   cc.pfontexp := FALSE
@@ -802,10 +807,20 @@ PROC main()
   checkn('JUMP8 works (open-string spelling)', cc.pjump, 8)
   ground()
   feed(['JUMP=zap'], 1, 'DEFAULT')
-  checkn('JUMP=garbage refused, default stands', cc.pjump, 0)
+  checkn('JUMP=garbage refused, default stands', cc.pjump, -1)
   ground()
   feed(['JUMP=0'], 1, 'DEFAULT')
   checkn('JUMP=0 is a real answer (off)', cc.pjump, 0)
+  -> 1.2.8b8: automatic is the default and has a name of its own
+  ground()
+  checkn('unset = automatic (-1)', cc.pjump, -1)
+  ground()
+  feed(['JUMP=8'], 1, 'DEFAULT')
+  opt('JUMP=AUTO')
+  checkn('JUMP=AUTO in the open string overrules the file', cc.pjump, -1)
+  ground()
+  opt('JUMPAUTO')
+  checkn('JUMPAUTO spelling', cc.pjump, -1)
 
   WriteF('--- C: comments, trimming, blanks ---\n')
   ground()

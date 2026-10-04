@@ -121,6 +121,37 @@ PROC edjumpr(s:PTR TO CHAR, p, l, path)
   ENDWHILE
 ENDPROC p
 
+PROC edkillto(s:PTR TO CHAR, l, from, upto)
+  DEF k
+  FOR k := upto TO l - 1
+    s[k - (upto - from)] := s[k]
+  ENDFOR
+ENDPROC l - (upto - from)
+
+-> Ctrl/Alt+Backspace (back=TRUE) and Ctrl/Alt+Del, as dovanilla runs them
+PROC kill(name:PTR TO CHAR, line:PTR TO CHAR, at, back, path, want:PTR TO CHAR, wantpos)
+  DEF j
+  StrCopy(ebuf, line)
+  cpos := at
+  IF back
+    IF cpos > 0
+      j := edjumpl(ebuf, cpos, path)
+      SetStr(ebuf, edkillto(ebuf, StrLen(ebuf), j, cpos))
+      cpos := j
+    ENDIF
+  ELSEIF cpos < StrLen(ebuf)
+    j := edjumpr(ebuf, cpos, StrLen(ebuf), path)
+    SetStr(ebuf, edkillto(ebuf, StrLen(ebuf), cpos, j))
+  ENDIF
+  IF StrCmp(ebuf, want) AND (cpos = wantpos)
+    WriteF('ok   \s\n', name)
+  ELSE
+    WriteF('FAIL \s\n     got  [\s] cpos=\d\n     want [\s] cpos=\d\n',
+           name, ebuf, cpos, want, wantpos)
+    fails++
+  ENDIF
+ENDPROC
+
 -> ---------- the checks ----------
 
 PROC rep(name:PTR TO CHAR, line:PTR TO CHAR, at, want:PTR TO CHAR, wantpos)
@@ -189,5 +220,15 @@ PROC main()
   jmp('ctrl-right stops after dh0:', edjumpr(p, 5, 30, TRUE), 9)
   jmp('ctrl-right stops after work/', edjumpr(p, 9, 30, TRUE), 14)
   jmp('ctrl-right at end stays', edjumpr(p, 30, 30, TRUE), 30)
+  kill('alt-bs: last word', 'copy dh0:a b', 12, TRUE, FALSE, 'copy dh0:a ', 11)
+  kill('alt-bs: over trailing space', 'copy dh0:a ', 11, TRUE, FALSE, 'copy ', 5)
+  kill('ctrl-bs: one path component', 'copy dh0:work/x', 15, TRUE, TRUE, 'copy dh0:work/', 14)
+  kill('ctrl-bs: through the slash', 'copy dh0:work/', 14, TRUE, TRUE, 'copy dh0:', 9)
+  kill('bs at 0: nothing', 'dir', 0, TRUE, FALSE, 'dir', 0)
+  kill('alt-bs mid-line keeps tail', 'aa bb cc', 5, TRUE, FALSE, 'aa  cc', 3)
+  kill('alt-del: word + space', 'aa bb cc', 3, FALSE, FALSE, 'aa cc', 3)
+  kill('ctrl-del: path component', 'copy dh0:work/x', 5, FALSE, TRUE, 'copy work/x', 5)
+  kill('del at end: nothing', 'dir', 3, FALSE, FALSE, 'dir', 3)
+  kill('alt-del last word', 'aa bb', 3, FALSE, FALSE, 'aa ', 3)
   WriteF('\n\d failure(s)\n', fails)
 ENDPROC

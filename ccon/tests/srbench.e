@@ -60,6 +60,7 @@ DEF win:PTR TO window, rp:PTR TO rastport,
     -> geometry - the window's SCREEN-absolute region and its bitmap,
     -> resolved once. zrow feeds the CPU test's vacated-strip clear.
     sbm:PTR TO bitmap, sdepth,
+    planar=FALSE,               -> 0.3: standard planar screen bitmap?
     ax, ay,                     -> il/it in screen coordinates
     zrow[128]:ARRAY OF CHAR
 
@@ -131,6 +132,13 @@ PROC main() HANDLE
   sbm := scr.rastport.bitmap
   sdepth := sbm.depth
   IF sdepth > 8 THEN sdepth := 8
+  -> 0.3: the hand-made tests (blit-1/blit-10 through sbm, cpu-1
+  -> through sbm.planes) assume a STANDARD planar bitmap. On an RTG
+  -> screen planes[] is not memory you own: cpu-1 there wrote into
+  -> random RAM and hung the A1200 (4.10.26, 1280x960 P96 screen).
+  -> Probe it the way the ROM console does (BMA_FLAGS=12, BMF_STANDARD
+  -> bit 3) and skip those three tests on anything else.
+  planar := (GetBitMapAttr(sbm, 12) AND 8) <> 0
   ax := win.leftedge + il
   ay := win.topedge + it
   FOR i := 0 TO 127
@@ -194,6 +202,7 @@ PROC runtests()
     SetBPen(rp, 0)
 
     DateStamp(t0)
+    IF (planar = FALSE) AND ((id = 6) OR (id = 7) OR (id = 8)) THEN id := id + 100
     SELECT id
     CASE 0                        -> scroll-1: screenscroll() verbatim
       FOR i := 1 TO reps
@@ -276,6 +285,7 @@ PROC runtests()
       ENDFOR
       rp.mask := $FF
     ENDSELECT
+    IF id >= 100 THEN id := id - 100   -> skipped: reads 0.0 in the table
     WaitBlit()                    -> the last blit may still be running;
     DateStamp(t1)                 -> without this the final op is free
     ticks[id] := stampticks(t0, t1)
@@ -357,7 +367,7 @@ PROC report(w, h, depth)
 
   StrCopy(res, '')
   addres('==========================================================\n')
-  StringF(scratch, 'srbench 0.2: window \dx\d, inner \dx\d, \dx\d cells of \dx\d, depth \d\n',
+  StringF(scratch, 'srbench 0.3: window \dx\d, inner \dx\d, \dx\d cells of \dx\d, depth \d\n',
           w, h, iw, ih, cols, rows, cw, ch, depth)
   addres(scratch)
   StringF(scratch, 'run     : reps \d per test\n', reps)
@@ -373,6 +383,7 @@ PROC report(w, h, depth)
             testname(i), secs, msop)
     addres(scratch)
   ENDFOR
+  IF planar = FALSE THEN addres('  (not a planar bitmap: blit-1, blit-10, cpu-1 skipped)\n')
   addres('\n')
   WriteF('\s', res)
 ENDPROC

@@ -6276,3 +6276,320 @@ Boot checklist:
       own thing on a non-empty word
 - [ ] CTerm (borrowed window) with TABREQ: requester on CTerm's screen
 - [ ] TABREQ from L:ccon.cfg; `CCON:NOTABREQ` overrules
+
+## 1.2.8b7 - word delete and drop modifiers (20.9.26)
+
+From a tester's reply to the 1.2.8 betas (six asks; these are the two
+quick ones. Iconify already ships since 1.2.6b1; SGR-in-Prompt,
+screennotify.library and the left-border glitch are open).
+
+- [x] Ctrl/Alt+Backspace/Del: dovanilla, branches ahead of the plain
+      ones, behind the Shift ones. Ctrl = edjumpl/edjumpr path split,
+      Alt = word split (the arrow convention). New pure helper
+      edkillto; harnessed in tests/edargtest.e (0 failures; one of my
+      own expectations was wrong - deleting `bb` at the cursor in
+      `aa bb cc` leaves two spaces, correctly).
+- [x] Drop modifiers: PeekQualifier (input.library vector on the
+      input.device we already hold, inputbase := ihreq.device) read
+      once per drop in dodrop; mode 1 Ctrl = parent path only
+      (lockpath is already separator-ended), mode 2 Alt = tail only
+      (name + drawer '/'). AppMessage has no qualifier field.
+- Compile clean, same three warnings, UNREFERENCED unchanged.
+  116192 -> 117216 bytes. Deployed to L: (live + staged
+  ccon-handler-1.2.8b7, .bak = b6).
+
+Boot checklist:
+- [ ] type `aa bb cc`: Alt+Backspace at the end removes `cc`, again `bb`
+- [ ] Ctrl+Backspace after `copy dh0:work/x` removes `x`, then `work/`
+- [ ] Alt+Del / Ctrl+Del mid-line: forward, cursor stays
+- [ ] Shift+Backspace / Shift+Del / Ctrl+W unchanged
+- [ ] drop a file icon plain: full path as before
+- [ ] hold Ctrl through the drop: drawer path only, ends `/`
+- [ ] hold Alt through the drop: file name only; a drawer -> `name/`
+- [ ] several icons at once with Ctrl: every one gets the same mode
+- [ ] a name with a space still arrives quoted in each mode
+- [ ] drop into a raw client (Ed/More): modes work there too
+- [ ] if PeekQualifier reads 0 (keys released before handling), the
+      plain path appears - note whether that ever happens in practice
+
+## 1.2.8b8 - direct rows on RTG (4.10.26)
+
+Trigger: a competing console's table beat CCON on six conbench rows
+(sync-line 0.92 vs 2.46 the loudest). Measured first, on the real A1200
++ PiStorm (32-bit B8G8R8A8 P96 Workbench, 1280x960; bench window
+127x94; conbench SCALE 10 REPS 3 SYNC, JUMP0; each build mounted as
+its own XCn: device from RAM: - no reboot, live CCON untouched).
+
+- Profile build (EClock phase counters in a public port, `ccstat`
+  reader; tools in the session scratchpad): a synced line = 10.75ms
+  ScrollRaster of 10.7ms total. The handler's own work is ~0.25ms.
+  srbench at the bench size: scroll-1 10.8ms, rectfill 2.0ms - the
+  board's READS are the bill, writes are cheap.
+- So: never read. dpaint() repaints rows from the model into the
+  locked framebuffer (p96LockBitMap via Picasso96API, offsets read off
+  the 2.495 jump table; cybergraphics LockBitMapTagList as fallback).
+  Scroll = repaint every row as far as dpreach() says (new content,
+  old content, dirt incl. dirt that scrolled off = dflost); dirty
+  spans direct; dffull rebuild direct. Pens via GetRGB32 into the
+  board layout (CLUT, 5 16-bit, 4 32-bit RGBFTYPEs; alpha 0 as P96
+  writes it). Glyph cache per font (kern, fallback glyph), 32-bit row
+  loop in inline asm (8-wide cells unrolled). Refuses (old path runs)
+  on: planar, no 020, proportional/wider-than-8/taller-than-32 font,
+  obscured or off-screen layer (one cliprect = the layer), 24-bit/
+  YUV formats, NODIRECT. Italic/underline cells: painted plain, then
+  Text() redraws them after the lock drops.
+- Traps hit on the way (all fixed): E's AND is bitwise (pointer AND
+  pointer = 0); openwin's gridcalc runs before the model exists; the
+  rig has NO cybergraphics.library; srbench's hand-made blits crash RTG
+  (0.3 guards them); the "8-bit" depth srbench printed was its own cap.
+- Pixel A/B: the same scripted output (colours, inverse, same-colour
+  inverse, italic/underline, scroll, CSI K, FF) grabbed via wasabi in
+  a direct and a NODIRECT window: identical, five runs. One earlier
+  run differed - the NODIRECT grab showed a half-drawn screen 1s after
+  the script's ready marker; did not reproduce with a 3s settle. OPEN:
+  why output lagged that long.
+
+Results (s), b7 -> b8 direct, same spec:
+  plain-lines 3.18 -> 1.24   block-4k 2.14 -> 0.58   wrap 2.18 -> 0.72
+  sgr-colour 3.34 -> 2.24    sgr-perchar 1.12 -> 0.30   vt-frame 1.42 -> 0.88
+  block-32k 0.32 -> 0.12     sync-line 20.96 -> 6.36    TOTAL 41.06 -> 18.38
+  With his L:ccon.cfg JUMP=8 on top: sync-line 1.18, TOTAL 12.84.
+  Unchanged: bytewise, scroll-nl (blank screen, no paint), cursor-pos,
+  erase-eol, insdel-*, clear-page ~ (1.36 -> 1.24).
+
+Not done / next:
+- [ ] boot test as the live handler (so far only as XCn: mounts)
+- [ ] obscured window: confirm the fallback (drag a window over it)
+- [ ] Ed / More / scrollback / selection / resize / iconify under direct
+- [ ] planar (the competitor's screen): colour rows straight to the
+      bitplanes, his hint - needs a planar rig I can drive (FS-UAE with
+      bsdsocket + wasabid?)
+- [ ] cfgtest: mirror DIRECT/NODIRECT into its verbatim parseopt
+
+### b8, continued: planar / stock (4.10.26, FS-UAE A1200-Stock-net)
+
+His ruling: "Most Amigas don't have RTG. It should be fast on ALL
+Amigas." Rig: new config ~/FS-UAE/Configurations/A1200-Stock-net.fs-uae
+(A1200-Stock + bsdsocket_library = 1) with wasabid started from
+S:User-Startup only when bsdsocket.library exists (FailAt-guarded
+Version probe); wasabi --host 127.0.0.1 (WASABI_HOST). Also
+A1200-net.fs-uae (030 JIT) made, not yet used. His WB there was 256
+colours (ScreenMode.prefs depth 8, the old ghost-text setting): set to
+16 for the bench; the depth-8 file is kept in the session scratchpad -
+RESTORE IT (or ask him) when done.
+
+Stock profile (14MHz 020, 2MB chip only, 16 colours, 91x33 MK7):
+- THE ENGINE WAS OFF: LINES=2000 x 91 cols x 3 planes = 555KB model vs
+  645KB free after boot -> New() failed -> sb=NIL -> legacy path, no
+  scrollback, 57ms a plain line. Fix: the model is capped at half of
+  AvailMem and halves until it allocates (first cut without the cap
+  took the machine to 68KB free and the next program could not load).
+- With the engine on, per synced line: 13ms blit, 8.3ms Text(), 3ms edit
+  bracket, ~6ms packet path. plain-lines: Text 6.4s of 11.9.
+- scroll-nl: 176ms a flush rebuilding a BLANK page (dffull redraw).
+  Fix: dffull with the screen blank at batch start (dfvb) and the model
+  still blank = skip. 28.7s -> 10.0s.
+- Planar direct writer (dpplanar/dprowp, bits straight into the planes
+  in mmask, any cell width, scrolls stay blits): pixel-identical (row
+  hashes of ReadPixelArray8 via wgrab, direct vs NODIRECT) but SLOWER
+  on stock in E+asm (plain 14.4 vs 10.3s): our code runs from chip RAM
+  against the display, Text() from ROM with the blitter doing planes.
+  -> each window now MEASURES (dpwant/dprec, EClock, 8 samples each
+  way, per job: text spans / scroll) and keeps the cheaper painter.
+  -> dprowp rewritten as two asm passes (dpcells: the row's glyph
+  offsets and pens; dplinep: one plane's pixel line, plane bit tested
+  inline) - tests/dplinetest.e proves both bit-exact against E
+  references (20000 lines / 5000 rows), with a seeing control.
+- JUMP default is now AUTOMATIC (pjump -1): scroll by one until half a
+  screen has scrolled since the console was last idle, then a quarter
+  screen per blit; jsettle() pulls the jump's blank tail back out of
+  history at rest (a read, or five quiet flush ticks), so at rest the
+  window looks exactly like scroll-by-one. Any CSI but m, any ESC but
+  [ ], FF, resize cancel a pending settle. JUMP=0/1 = always one,
+  JUMP=n = fixed, JUMP=AUTO = back to automatic (cfgtest 160/160).
+  End state seen on FS-UAE (List SYS:C + SYS:Libs): prompt on the
+  bottom row, listing continuous. The jump itself: needs his eyes.
+- RTG library is opened on the helper process now (rtgload, fhmode 2):
+  from the handler an OpenLibrary of a disk library FAILS - b8 had
+  worked only because a test tool had loaded Picasso96API first. Proven
+  after a cold A1200 reboot.
+- The painter choice is per window, per job (small spans <40 cells,
+  scroll, large spans), and job 0/2 re-measure when the plane count
+  in mmask changes (plain text = 1 plane, colour = 3-4).
+- Traps: bebbo-gcc printf/stdio binaries return 20 before main on
+  this stock config (dos-only output works - wgrab rewritten without
+  stdio); wasabi get/grab need the file's size in contiguous memory -
+  on 2MB that fails, so wgrab writes one FNV hash per pixel row; an
+  empty marker file cannot be polled with `wasabi get`; `pkill -f` with
+  a pattern from the same command line kills the calling shell.
+
+Results, 4.10.26 (SYNC; s):
+- Real A1200 + PiStorm, 32-bit P96 WB, 127x94, SCALE 10, cold boot:
+  b7 JUMP0 41.06 / b8 JUMP0 18.52 / b8 AUTO 12.50 (sync-line 20.96 ->
+  6.48 -> 0.96). Pixel A/B direct vs NODIRECT identical.
+- FS-UAE A1200 030 JIT, 640x245 bordered, MK7, 16 colours, SCALE 8:
+  b7 39.62 / b8 JUMP0 22.32 / b8 AUTO 10.36 (sync-line 13.60 -> 2.44,
+  sgr-colour 6.50 -> 2.68, sgr-perchar 6.82 -> 1.16, plain 2.90 ->
+  0.58). b7's total sits near the competitor table's CCON column.
+- FS-UAE A1200 stock (14MHz 020, 2MB chip), same window, LINES=100,
+  cbone N=1, fresh boot each: b7 -> b8 defaults: sgr 23.26 -> 15.86,
+  sync 5.60 -> 3.98, scroll-nl 18.58 -> 10.28, block 6.54 -> 6.00,
+  plain 10.26 -> 9.72, perchar 8.14 -> 8.42, eeol 3.86 -> 4.66.
+  OPEN: eeol is level when run alone (4.66 vs 4.86); the in-sequence
+  gap is state carried from the colour tests - b7 gets FASTER there.
+
+Still to do before b8 can ship:
+- [ ] his eyes on automatic jump + settle (long `type`, `dir`, a slow
+      producer that pauses mid-output, Ctrl+C mid-burst)
+- [ ] boot as the LIVE handler (all of the above ran as XCn:/XSn:
+      mounts from RAM:), on FS-UAE and the A1200
+- [ ] Ed / More / scrollback / selection / resize / iconify / tab menu
+      over a window that has jumped and not yet settled
+- [ ] a covered window: direct must decline (cliprect check) - not yet
+      exercised on purpose
+- [ ] the eeol in-sequence gap on stock (above)
+- [ ] cfgtest's parseopt mirror predates b2 (NOINFO etc. missing) -
+      only the JUMP branch was re-synced
+- [ ] restore: his FS-UAE WB was set back to 256 colours (depth 8)
+- [ ] UNEXPLAINED: conbench SYNC SCALE 1 REPS 3 on FS-UAE stock (16
+      colours, 640x245, his cfg: LINES=2000, SCROLLBAR, MK7) with the OLD
+      b7 handler sat on a blank window ~1 hour, handler eating all CPU
+      (wasabid at pri 1 could not answer), stopped by closing FS-UAE.
+      b7 had taken a 2000-line model leaving 176KB chip free. b8 ran the
+      same suite in ~5 min (TOTAL 104.06). Find out what b7 was doing
+      (blank tests: scroll-nl / insdel-line; scrollbar knob updates
+      against a 2000-line history?) and make sure b8 cannot hit it.
+
+## 1.2.8b9 - speed on a stock A1200 (4.10.26)
+
+Goal: much faster conbench on a stock A1200, fullscreen PAL Hires 16
+colours. Rig: FS-UAE A1200-Stock-net
+(14MHz 020, 2MB chip, cycle-exact), WB set to 16 colours for these runs
+(his 256-colour ScreenMode.prefs is saved in the session scratchpad -
+RESTORE IT when done), conbench REPS 3 SCALE 1 SYNC in an
+XC1:0/0/640/256/name/DEFAULTS window (77x30, topaz 8).
+
+Totals (s): b7 101.34 -> b8 102.12 -> b9 36.66 (2.8x). Per test b7 -> b9:
+plain 8.80->2.08, block-4k 4.80->1.66, block-32k 3.06->1.10, bytewise
+3.24->2.44, scroll-nl 16.04->2.94, wrap 3.20->0.96, sgr-colour
+21.38->7.98, sgr-perchar 8.08->3.38, cursor 3.58->2.40, vt 4.82->2.04,
+insdel-line 3.08->1.24, insdel-char 2.72->1.32, clear 9.74->2.22,
+erase-eol 3.46->2.14, sync 5.34->2.76.
+
+What b9 is (each step benched; numbers are the conbench TOTAL after it):
+- dirty arrays slide (dfd/dfx0/dfx1 are windows into 512-entry buffers;
+  a scroll moves the window, O(1)); paced flushes (next flush waits
+  1.5x what this one cost, 20..160ms; one round, no render-sweep-render
+  loop); WOBSZ 4K -> 16K; clearrow one asm pass = 67.5
+- the C engine (engine/engine.c, INCBIN'd as engine/engine.bin, built
+  by engine/build.sh with m68k-elf-gcc 16): render()'s deferred path for
+  printables, LF/CR/BS/TAB/FF and CSI m H f A-D K J L M S T @ P, mirrored
+  statement for statement; everything else is handed back to E at a
+  sequence boundary. fxsetup checks the struct layout (genstruct.py) and
+  the CPU (020+) before turning it on = 51.7
+- exact plane mask (mpens itself, not the ROM's 1/3/$FF tiers)
+- the planar painter (dpplanar -> ppaint): pre-shifted glyph cache per
+  window bit phase, four cells per output long, glyph longs transposed in
+  registers, per-plane (bits AND A) XOR X; asm in engine/pgroups.s
+  (pfused for cells up to 8 lines, ptrans+pplane above) = 45.8 -> 43.9
+- the region ops (L M S T @ P) in C = see below; the cooked blip waits
+  for rest when no read is parked (blipdefer/blipnow: one quiet tick, a
+  read, or a choke point with a reader draws it) = 41.3
+- main loop: a wakeup that brought only packets skips the port walk = 39.8
+- newline runs in one register loop (lfrun), long-word copies/fills of
+  the model rows = 38.5; wacc: the common ACTION_WRITE accepted in C
+  (copy, break owner, ReplyPkt by hand via exec PutMsg) = 36.6
+
+Testing done:
+- engine/fxdiff (engine/mkdiff.py builds it): the handler's own source,
+  main renamed, dfflush a bookkeeping stub; random streams through
+  render() E-only and with the C engine; every model byte, console field,
+  engine global and a digest of what each flush paints compared. 8 seeds
+  x 7200 chunks, 0 mismatches (vamos -C 68020 -H disable -m 32768).
+- pixel A/B: wgrab row hashes of the same test file (colours, inverse,
+  styles, wraps, CSI K/H, tabs, Latin-1, FF) typed into a DPFORCE window
+  and a NODIRECT one, five x positions (bit phases 0,2,4,5,7 of the
+  grid): identical. A planted painter bug was caught (control).
+- DPFORCE (new, undocumented): direct painting always, no measuring.
+
+Traps found:
+- gcc 16 -O2 miscompiles the engine: -flate-combine-instructions (off).
+- the open string separates options with '/': "name/DEFAULTS DPFORCE"
+  silently dropped both and the window came up in L:ccon.cfg's MK7/7.
+- On stock, code size is speed: a 1.8KB C painter lost to Text(); the
+  painter's slab loop is kept under 256 bytes (vasm -L).
+- gcc 16 -Os was slower than -O2 on the machine; bebbo's gcc the other
+  way round. Measure blobs with btest/ptest2 (session scratchpad).
+
+Not done / next:
+- [ ] his eyes: the blip appearing one tick after output stops; paced
+      flush look on a flood (screen updates ~6/s on stock under load)
+- [ ] boot as the live handler (all runs were XC1: mounts) + the real
+      A1200 (PiStorm: the C engine and painter run from fast memory there)
+- [ ] the b8 list above still stands (jump look, Ed/More/selection under
+      direct, covered window, cfgtest mirror)
+- [ ] restore his WB ScreenMode.prefs (depth 8)
+- [ ] painter vs Text on plain one-plane rows is level (~3ms a row on
+      stock): s=0 windows could skip the lo glyph reads
+
+### b9, continued: sync-line (4.10.26)
+
+conbench on the stock rig: sync-line 2.76 -> 1.24, TOTAL 36.66 -> 30.50
+(plain 1.70, block-4k 1.20, block-32k 0.92, bytewise 2.24, scroll-nl 2.46,
+wrap 0.68, sgr 6.86, perchar 3.16, cursor 2.26, vt 1.66, insdel-line 1.06,
+insdel-char 1.16, clear 1.96, erase-eol 1.94).
+- the blip waits out a WaitForChar poller too (bliptick), and the erase
+  call is skipped when nothing of the editor is on screen
+- barrier cadence (jsync): four WAIT_CHAR flushes inside one burst grow
+  the automatic jump to rows-1 and skip the half-screen wait; jsettle
+  puts gridcalc's jump back (C mirror + harness covers jsync)
+- ppsetup keyed (pkey), planar flushes skip the direct/Text measuring
+- printable scan four bytes a long read (prscan), abfill/abcopy in asm
+- cflush (dfflush for the planar painter), cfout (flushout -> render ->
+  dfflush whole), wchar (ACTION_WAIT_CHAR): E only resumes (cfresume)
+- pfused1: one plane, edges inside, uniform runs of groups through a hot
+  loop with nothing else in it (plain pen-1-on-0 needs no masking)
+Trap (it hung FS-UAE once): gcc -mpcrel keeps A5 as its PIC register
+and never saves it; a "register a5" variable for LockLayerRom clobbered
+E's frame pointer. A5 is now saved and set by hand inside the asm.
+Measuring tools (session scratchpad): vt/vt2/vt3 run the blob under
+vamos -I and count instructions per function (brk.py); btest/ptest2 time
+it on the machine; syncrun.sh times sync-line alone.
+
+### b9, continued: styles and screennotify (4.10.26)
+
+From a user's list (Hexaae): iconify gadget (done 1.2.6), Ctrl/Alt word
+delete and drop modifiers (done 1.2.8b7) - and three new:
+- Underline did not show: AskSoftStyle on the 3.2 WB 8x8 screen font
+  answers $FFFFFFFE (no algorithmic underline), and MicroKnight7/7's
+  underline (baseline+1) is the next row. setsoft no longer asks the font;
+  ulline() draws a line under every underlined Text (baseline+1, or the
+  cell's last line when the baseline is). Pens read off the screen
+  (pens tool, ReadPixel) confirm it. TRAP: FS-UAE's window shows the
+  Hires screen scaled down - bold+underline looked like an inverted
+  block in screenshots while the pens were right. Read pens, not pixels.
+- Bold: style bit 3 -> FSF_BOLD; SGR 1/22, the 23/24/27 resets keep it
+  (E and the C mirror; harness green); painters send bold cells to Text.
+- screennotify.library 1.0 (Aminet util/libs/ScreenNotify10.lha; API
+  read from its own headers/source): opened on the helper, one
+  AddWorkbenchClient(port, -128) at the first window (KingCON's shape);
+  WORKBENCH Value FALSE = hide every CCON window on the WB screen
+  (flushout + hidewin, c.wbgone) before the reply, TRUE = reopenwin +
+  flushwq. Writes park while wbgone, ensurewin waits. killhandler
+  removes the client (retries while a notice is out). Tested in FS-UAE:
+  CloseWorkBench succeeds with a CCON window up, the window returns with
+  its contents, output written during the gap appears after; Avail flat
+  over three cycles.
+- Still open: the left-border glitch (needs the thin-border patch's
+  name to reproduce); on a 2 MB machine one window takes ~467K.
+- 1.2.8b10 (4.10.26) = b9 + bold/underline + screennotify, $VER only
+  changed for the build. fxdiff 8 seeds x 7200: 0 mismatches. REAL A1200
+  (PiStorm, 1280x960x24 RTG): his prompt underlined as written, bold/
+  underline/italic/inverse and their SGR ends checked on pixel rows;
+  conbench SCALE 10 SYNC REPS 3 97x72 = 8.52 (b9 8.40-8.92, noise).
+  screennotify.library 1.0 put in his LIBS: (his OK): CloseWorkBench with
+  two CCON windows = 1, no screens open in the gap, both back with
+  contents, bold output written during the gap shown; 3 cycles, fast
+  memory flat after the first reopen; with Clock open CloseWorkBench = 0
+  and the CCON windows came straight back (the TRUE-on-failure path).
+  Previous build kept as L:ccon-handler-1.2.8b9 there.

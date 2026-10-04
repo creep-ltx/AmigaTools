@@ -64,7 +64,7 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        'exec/interrupts',
        'graphics/text','graphics/rastport','graphics/gfx',
        'devices/inputevent','devices/timer','devices/input',
-       'devices/clipboard',
+       'devices/clipboard', 'cybergraphics', 'graphics/clip', 'timer',
        'dos/dos','dos/dosextens','dos/filehandler','dos/dostags',
        'keymap','diskfont',
        -> v1.2 ICONIFY: 'wb' = workbench.library (AddAppIconA/RemoveAppIcon) +
@@ -81,7 +81,11 @@ MODULE 'intuition/intuition','intuition/intuitionbase',
        -> 1.2.8b6: asl.library for TABREQ - the call vectors only; the
        -> tags are spelled out at the helper (the b5 buffer lesson:
        -> a module's worth of identifiers is not free any more)
-       'asl'
+       'asl',
+       -> 1.2.8b7: PeekQualifier for the Ctrl/Alt drop modes - the
+       -> AppMessage carries no qualifier of its own. Base = the
+       -> input.device we already hold open (ihreq.device).
+       'input'
 
 CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> all, text sits flush against the border;
@@ -130,14 +134,21 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> console.device's 0 - menu operations arrive
                         -> already digested into IECLASS_MENULIST
       RK_UP=$4C, RK_DOWN=$4D, RK_RIGHT=$4E, RK_LEFT=$4F,
+      LBMI_PIXFMT=$84001004,      -> 1.2.8b8 cybergraphics LockBitMap tags
+      LBMI_BYTESPERROW=$84001006,
+      LBMI_BASEADDRESS=$84001007,
       DFROWS=256,       -> S3 deferred-blit engine: dirty-row bookkeeping
                         -> arrays, one slot per view row. cols is already
                         -> clamped to 255 (gridcalc), rows is not - a
                         -> window taller than DFROWS rows just runs the
                         -> legacy immediate path (dfstart declines)
-      WOBSZ=4096,       -> S5 write-behind buffer, bytes per console.
+      FXCONSIZE=4180,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
+      WOBSZ=16384,      -> S5 write-behind buffer, bytes per console.
+                        -> (1.2.8b9: 4096 -> 16384, so a paced flush
+                        -> can pool several screens of a burst)
                         -> Writes larger than this stay fully
                         -> synchronous (flush, render, reply after)
+      WOFMAX=160000,    -> 1.2.8b9: the paced flush's longest wait
       WOFLUSHUS=20000,  -> S5 flush latency: one PAL frame. Sparse
                         -> output lands within 20ms (imperceptible);
                         -> burst producers fill ~15-25 lines per flush,
@@ -195,6 +206,15 @@ OBJECT console
   jeff                          -> J1 (1.2.8): effective jump-scroll
                                 -> count - pjump clamped to rows-1 by
                                 -> gridcalc, 1 = scroll-by-one (off)
+  jauto                         -> 1.2.8b8: JUMP unset = automatic -
+                                -> jump only inside a burst, settle after
+  jburst                        -> 1.2.8b8: bottom-margin scrolls since
+                                -> the console was last idle
+  jslk                          -> 1.2.8b8: the rows below the cursor are
+                                -> blank because a jump made them so -
+                                -> settle may pull history back over them
+  jwrote                        -> 1.2.8b8: output since the last tick
+  jidle                         -> 1.2.8b8: quiet ticks while jslk
   cx, cy                        -> output cursor, in cells
   cursx, cursy                  -> raw block cursor; -1 = not painted
   winact                        -> 1.2.6b2: window active? TRUE = solid
@@ -347,6 +367,19 @@ OBJECT console
   -> number was never obtained - storing one there would hand a
   -> ReleasePen to a pen belonging to somebody else.
   pdirs, phid, pghost
+  pdirect                       -> 1.2.8b8 DIRECT: rows written straight
+                                -> into an RTG framebuffer (default on;
+                                -> NODIRECT = the graphics.library path)
+  dcal[24]:ARRAY OF LONG        -> 1.2.8b8: direct or graphics.library,
+                                -> measured per job (0 small text spans,
+                                -> 1 scroll, 2 large text spans), 8 LONGs
+                                -> each: sel (0 measuring, 1 direct, 2
+                                -> graphics), samples, ticks+units direct,
+                                -> ticks+units graphics, n direct, n gfx
+  dpm                           -> planes in mmask when jobs 0/2 measured
+  dpok                          -> 1.2.8b8: this window CAN go direct
+                                -> (gridcalc's probe: 8-bit RTG screen,
+                                -> cybergraphics, fixed font <= 8x32)
   pnoinfo                       -> 1.2.8b2 NOINFO: Tab completion leaves
                                 -> .info files out (KingCON's default;
                                 -> ours stays "shown, greyed")
@@ -496,9 +529,34 @@ OBJECT console
   pscrname[64]:ARRAY OF CHAR    -> SCREENname: a public screen
   pfontname[40]:ARRAY OF CHAR   -> v1.1 FONT: the requested face
   osct[84]:ARRAY OF CHAR        -> v1.1: OSC title being collected
+  blipdefer                     -> 1.2.8b9: the cooked-mode blip is not
+                                -> drawn yet (output with no read parked;
+                                -> blipnow draws it at rest)
+  bliptick                      -> 1.2.8b9: flushed on this timer tick
+  jsync                         -> 1.2.8b9: WAIT_CHARs that flushed output
+                                -> mid-burst (the barrier cadence)
+  wbgone                        -> 1.2.8b9: window closed because the
+                                -> Workbench screen is closing
+                                -> (screennotify.library); reopens with it
 ENDOBJECT
 
-DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
+DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
+    dpbpp=1,                    -> 1.2.8b8: bytes per pixel, this paint
+    dfvb=FALSE,                 -> 1.2.8b8: screen blank when the batch
+                                -> began (vblank at dfstart)
+    dflost=0,                   -> 1.2.8b8: widest dirt scrolled off the
+                                -> top this batch (cols+1 of it)
+    dgtf=NIL,                   -> 1.2.8b8 direct rows: the font the
+    dgch=0,                     -> glyph cache below was built from
+    dgl=NIL:PTR TO CHAR,        -> 256 glyphs x ch rows, one byte each
+    dxt=NIL:PTR TO LONG,        -> byte -> two pixel-mask longs
+    dm32=NIL:PTR TO LONG,       -> byte -> eight 0/-1 longs, one per pixel
+    dpgo=NIL:PTR TO LONG,       -> per cell of the row being painted:
+    dpxl=NIL:PTR TO LONG,       -> glyph offset, fg EOR bg, bg - as
+    dpbl=NIL:PTR TO LONG,       -> longs of four pixels each
+    dpfm=NIL:PTR TO CHAR,       -> planar: per cell, $FF where this
+    dpbm=NIL:PTR TO CHAR,       -> plane's bit is set in fg / bg
+    port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> M10a: THE console. Everything per-window is inside it; what
     -> stays out here is genuinely shared across any future windows -
     -> the ports, the devices, the one input chain, the fs plumbing.
@@ -518,6 +576,8 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> flushes every write-behind buffer that has bytes.
     ftreq=NIL:PTR TO timerequest,
     flusharmed=FALSE,
+    fdelay=20000,               -> 1.2.8b9: the next flush's wait (us) -
+                                -> grows with what the last flush cost
     -> E4 (1.2.4b3): drain-on-flush. When the flush timer fires, the
     -> port is swept for consecutive ACTION_WRITEs that can join the
     -> batch before the render - backpressure-driven pooling, the same
@@ -600,7 +660,13 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     -> second copy of all three. Serialised by construction: every
     -> caller blocks on Wait(fhsig) before returning, so the mode can
     -> never be read by the wrong errand.
-    fhmode=0,                   -> 0 = load a font, 1 = load an icon
+    fhmode=0,                   -> 0 = load a font, 1 = load an icon,
+                                -> 2 = open the RTG library (1.2.8b8)
+    rtgtried=FALSE,             -> 1.2.8b8: rtgload ran (once is enough)
+    -> 1.2.8b9: screennotify.library (Stefan Becker's; KingCON's
+    -> AddWorkbenchClient shape): the Workbench screen may close and
+    -> reopen (a screen mode change) with CCON windows on it
+    snbase=NIL, snport=NIL:PTR TO mp, snclient=NIL, sntried=FALSE,
     -> 1.2.8b6 TABREQ: the ASL requester's helper. NOT a third fhmode:
     -> the fh errands are serialised because every caller sleeps on
     -> fhsig until its helper is done, and a file requester stays up
@@ -672,9 +738,31 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
     dfpend=0,                   -> ScrollRasters owed to the screen
     dffull=FALSE,               -> a screenful+ went by (or FF): no blit,
                                 -> redraw() rebuilds everything at flush
-    dfd[DFROWS]:ARRAY OF CHAR,  -> per view row: dirty this packet?
-    dfx0[DFROWS]:ARRAY OF CHAR, -> dirty span, first col...
-    dfx1[DFROWS]:ARRAY OF CHAR, -> ...and last col, INCLUSIVE
+    dfd:PTR TO CHAR,            -> per view row: dirty this packet?
+                                -> 1.2.8b9: dfd/dfx0/dfx1 are WINDOWS
+                                -> into twice-as-long buffers (dfdb..):
+                                -> a scroll slides the window by one
+                                -> (dirt moves with the content in O(1))
+                                -> and every DFROWS slides it copies
+                                -> back - the old per-scroll shift loop
+                                -> was ~0.7ms a line on a stock 020
+    dfdb[512]:ARRAY OF CHAR, dfx0b[512]:ARRAY OF CHAR,
+    dfx1b[512]:ARRAY OF CHAR, dfo=0,
+    -> 1.2.8b9: the C engine's view of the globals above, by address
+    -> (struct fx in engine.c - same order), and its on/off switch: on
+    -> only when fxsetup's layout check agrees with genstruct.py
+    fxtab[32]:ARRAY OF LONG, fastok=FALSE, fxret=0, fxold=NIL,
+    -> the planar painter's context (struct pctx in engine.c) and its
+    -> pre-shifted glyph cache, rebuilt when font, height or phase move
+    pctx[24]:ARRAY OF LONG, gsh=NIL:PTR TO CHAR, gshtf=NIL, gshch=0,
+    gshs=-1, gshcs=0, ptmp=NIL,
+    pkey[6]:ARRAY OF LONG,      -> what pctx was last built for (ppsetup)
+    dpsty[DFROWS]:ARRAY OF CHAR, -> 1.2.8b8: rows dpaint left to Text
+    dpri[4]:ARRAY OF LONG,      -> 1.2.8b8: P96's RenderInfo
+    dprgb[48]:ARRAY OF LONG,    -> 1.2.8b8: GetRGB32 of pens 0-15
+    dppen[16]:ARRAY OF LONG,    -> 1.2.8b8: pen -> framebuffer pixel
+    dfx0:PTR TO CHAR,           -> dirty span, first col...
+    dfx1:PTR TO CHAR,           -> ...and last col, INCLUSIVE
     -> 1.2.3: the masked-render bracket state. maskon = render() is
     -> running and rp_Mask carries mmask (penuse/maskcalc keep the two
     -> synchronous while it is TRUE - the b2 bug fix); dfnarrow = a
@@ -723,7 +811,7 @@ DEF port:PTR TO mp,             -> our packet port = pr_MsgPort
 
 
 PROC main()
-  DEF proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
+  DEF msigs, proc:PTR TO process, msg:PTR TO mn, pkt:PTR TO dospacket,
       dnode:PTR TO devicenode, psig, wsig, im:PTR TO intuimessage,
       class, code, qual, mx, my, ia, secs, mics, tmp,
       stps:PTR TO CHAR, c:PTR TO console, cnext,
@@ -790,6 +878,8 @@ PROC main()
       ENDIF
     ENDIF
   ENDIF
+  IF treq THEN timerbase := treq.io.device  -> 1.2.8b8: ReadEClock for
+                                -> the direct/graphics measurement
   -> S5: the flush timer clones treq's opened device (io_Device/io_Unit
   -> copy - the standard second-request pattern; only treq CloseDevices).
   -> ftreq = NIL is survivable: armflush degrades to immediate flush.
@@ -835,10 +925,15 @@ PROC main()
 
   -> E2e: the printable-class table - exactly render()'s old predicate,
   -> ((c >= 32 AND c <= 126) OR c >= 160), built once
+  dfd := dfdb
+  dfx0 := dfx0b
+  dfx1 := dfx1b
+  FOR tmp := 0 TO 511 DO dfdb[tmp] := 0
+  fxsetup()
   FOR tmp := 0 TO 255
     prtbl[tmp] := IF ((tmp >= 32) AND (tmp <= 126)) OR (tmp >= 160) THEN 1 ELSE 0
     zerorun[tmp] := 0           -> E globals start as garbage
-    dfd[tmp] := 0               -> audit4 D3 (1.2.5b2): same rule - a
+                                -> audit4 D3 (1.2.5b2): same rule - a
                                 -> garbage byte equal to the FIRST live
                                 -> dfgen (1) made dfmark merge heap
                                 -> noise from dfx0/dfx1 into a span, and
@@ -979,6 +1074,22 @@ PROC main()
   -> exec, no packets. (Found by disassembly: the compiled MapRawKey
   -> stub jumps through keymapbase, and nothing had ever set it.)
   keymapbase := OpenLibrary('keymap.library', 36)
+  -> 1.2.8b8: the RTG framebuffer lock is opened by rtgload(), on the
+  -> helper process, the first time an RTG window is probed: from THIS
+  -> process an OpenLibrary of a library still on disk fails (the
+  -> load needs DOS - the no-DOS rule; it worked in testing only while
+  -> another program happened to have the library in memory).
+  dm32 := New(8192)
+  dxt := New(2048)              -> 1.2.8b8 direct rows: the expansion
+  dpgo := New(1024)             -> table and the per-cell scratch -
+  dpxl := New(1024)             -> 4.3K once, shared by every console
+  dpbl := New(1024)
+  dpfm := New(256)
+  dpbm := New(256)
+  -> (comparisons, not bare pointers: E's AND is bitwise, and four
+  -> addresses ANDed together came out 0 - the first b8 never went
+  -> direct because of exactly this line)
+  IF (dxt <> NIL) AND (dm32 <> NIL) AND (dpgo <> NIL) AND (dpxl <> NIL) AND (dpbl <> NIL) AND (dpfm <> NIL) AND (dpbm <> NIL) THEN dxtbuild() ELSE dxt := NIL
   IF (ihsigbit >= 0) AND (ihring <> NIL) AND (keymapbase <> NIL)
     ihsig := Shl(1, ihsigbit)
     MOVE.L A4,ihcapa4
@@ -990,6 +1101,7 @@ PROC main()
       IF ihreq
         IF OpenDevice('input.device', 0, ihreq, 0) = 0
           ihdevopen := TRUE       -> B5: matched by killhandler's CloseDevice
+          inputbase := ihreq.device  -> PeekQualifier's base (b7)
           ihis := New(SIZEOF is)
           IF ihis
             ihis.ln.type := NT_INTERRUPT
@@ -1022,13 +1134,23 @@ PROC main()
     IF tport THEN wsig := wsig OR Shl(1, tport.sigbit)
     IF ihon THEN wsig := wsig OR ihsig
     IF wbport THEN wsig := wsig OR Shl(1, wbport.sigbit)  -> ICONIFY: AppMessages
+    IF snport THEN wsig := wsig OR Shl(1, snport.sigbit)  -> 1.2.8b9: screennotify
     wsig := wsig OR arsig       -> 1.2.8b6: the requester's answer
-    Wait(psig OR wsig)
-    -> drain the packet port
+    msigs := Wait(psig OR wsig)
+    -> drain the packet port. (engine.c's drain - the same loop in C -
+    -> measured SLOWER on a stock A1200, 4.10.26: 32.2s vs 30.5s; parked
+    -> until that is understood, see todo.md)
     REPEAT
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
     UNTIL msg = NIL
+    -> 1.2.8b9: a wakeup that brought only packets (a writer's next
+    -> line - most of them, under output) has nothing in the window,
+    -> timer, AppMessage or requester ports: every one of those signals
+    -> is in wsig, and a port is drained whenever its signal arrives.
+    -> Skipping the walk saves ~0.5ms a packet on a stock 020. The
+    -> scrollbar knob catches up on the next tick's full pass.
+    IF (msigs AND wsig) = 0 THEN JUMP mnext
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
     -> drain every console's window port. A raw-events client (Ed) takes
@@ -1147,6 +1269,17 @@ PROC main()
         IF amsg THEN doappmsg(amsg)
       UNTIL amsg = NIL
     ENDIF
+    -> 1.2.8b9: Workbench closing or back (screennotify) - the windows
+    -> go or return BEFORE the reply
+    IF snport
+      REPEAT
+        amsg := GetMsg(snport)
+        IF amsg
+          snmsg(amsg)
+          ReplyMsg(amsg)
+        ENDIF
+      UNTIL amsg = NIL
+    ENDIF
     -> 1.2.8b6: the file requester came back (ardone checks for
     -> itself - arbusy only drops when the helper has really signalled)
     IF arbusy THEN ardone()
@@ -1158,6 +1291,7 @@ PROC main()
       IF c.vson THEN vssync(c)
       c := c.next
     ENDWHILE
+mnext:
   ENDWHILE
   killhandler()                 -> B5: release exec resources, then E's
 ENDPROC                         -> exit (CLEANUPALL) frees the New memory
@@ -1173,7 +1307,27 @@ ENDPROC                         -> exit (CLEANUPALL) frees the New memory
 -> ihis/ihring underneath a still-live handler. CloseDevice before
 -> DeleteIORequest before DeleteMsgPort throughout.
 PROC killhandler()
-  DEF msg:PTR TO mn, c:PTR TO console   -> ICONIFY: stray AppMessages + icons
+  DEF msg:PTR TO mn, c:PTR TO console, i   -> ICONIFY: stray AppMessages + icons
+  -> 1.2.8b9: off the screennotify list first; it refuses while a notice
+  -> is out, so answer those and ask again (KingCON retries the same way)
+  IF snclient
+    i := 0
+    WHILE (snrem() = FALSE) AND (i < 50)
+      WHILE msg := GetMsg(snport) DO ReplyMsg(msg)
+      Delay(2)
+      i++
+    ENDWHILE
+    snclient := NIL
+  ENDIF
+  IF snport
+    WHILE msg := GetMsg(snport) DO ReplyMsg(msg)
+    DeleteMsgPort(snport)
+    snport := NIL
+  ENDIF
+  IF snbase
+    CloseLibrary(snbase)
+    snbase := NIL
+  ENDIF
   IF ihon                       -> the chain handler was added
     ihreq.command := IND_REMHANDLER
     ihreq.data := ihis
@@ -1225,6 +1379,14 @@ PROC killhandler()
   IF diskfontbase
     CloseLibrary(diskfontbase)
     diskfontbase := NIL
+  ENDIF
+  IF p96base                    -> 1.2.8b8: rtgload's, same reasoning
+    CloseLibrary(p96base)
+    p96base := NIL
+  ENDIF
+  IF cybergfxbase
+    CloseLibrary(cybergfxbase)
+    cybergfxbase := NIL
   ENDIF
   -> ICONIFY: RemoveAppIcon every still-iconified console, then drain+reply any
   -> AppMessage in flight before the port dies, free the icon, close the libs.
@@ -1623,6 +1785,18 @@ ENDPROC
 PROC dopkt(pkt:PTR TO dospacket)
   DEF len, old, id:PTR TO infodata, zp:PTR TO LONG, i, sender:PTR TO mp,
       c:PTR TO console
+  -> 1.2.8b9: the common write, accepted by the C engine (wacc in
+  -> engine.c: the conditions under which dowrite's accept is a pure
+  -> copy-and-reply); anything else takes the E path below, unchanged
+  IF pkt.type = ACTION_WRITE
+    IF fastok
+      i := fcall2(16, fxtab, pkt)
+      IF i
+        IF i = 2 THEN armflush()
+        RETURN
+      ENDIF
+    ENDIF
+  ENDIF
   SELECT pkt.type
   CASE ACTION_FINDINPUT;  dofind(pkt)
   CASE ACTION_FINDOUTPUT; dofind(pkt)
@@ -1677,6 +1851,8 @@ PROC dopkt(pkt:PTR TO dospacket)
     ENDIF
     curcon := c
     flushout(c)                 -> S5: a read observes settled output -
+    jsettle()                   -> 1.2.8b8: the prompt is up - at rest
+    blipnow()                   -> 1.2.8b9: and so is the cursor
                                 -> More writes CSI 6n then READS the
                                 -> answer; the flush parses the 6n and
                                 -> queues the report before the read
@@ -1692,6 +1868,11 @@ PROC dopkt(pkt:PTR TO dospacket)
       ReplyPkt(pkt, -1, ERROR_NO_FREE_STORE)
     ENDIF
   CASE ACTION_WAIT_CHAR
+    IF fastok                   -> 1.2.8b9: the C engine's WAIT_CHAR (wchar)
+      i := fcall3(28, fxtab, pctx, pkt)
+      IF i = 1 THEN RETURN
+      IF (i = 2) OR (i = 4) THEN cfresume(i)
+    ENDIF
     c := conbysender(pkt, TRUE)       -> no handle rides this packet
     IF c = NIL
       ReplyPkt(pkt, DOSFALSE, ERROR_OBJECT_NOT_FOUND)
@@ -1701,6 +1882,18 @@ PROC dopkt(pkt:PTR TO dospacket)
     flushout(c)                 -> S5: WAIT_CHAR is conbench's SYNC
                                 -> probe - it must dequeue AFTER the
                                 -> writes it follows, honestly
+    c.bliptick := TRUE          -> 1.2.8b9: a poller is not at rest -
+                                -> the deferred blip waits it out too
+    -> 1.2.8b9: a client that barriers every few lines (WaitForChar after
+    -> each write: conbench's sync-line, a progress loop that polls for
+    -> a key) forces a flush - and so a blit - per line, which pacing
+    -> cannot pool. Four such barriers inside one burst and the automatic
+    -> jump grows to a whole screen less one row: one blit a screenful.
+    -> jsettle puts it back, and the window at rest looks as always.
+    IF c.jauto AND (c.jburst > 0)
+      c.jsync := c.jsync + 1
+      IF c.jsync >= 4 THEN c.jeff := Max(1, c.rows - 1)
+    ENDIF
     ensurewin()
     -> arg1 = timeout in MICROseconds (AROS-verified): input queued =
     -> DOSTRUE now; timeout 0 = DOSFALSE now; else park the packet and
@@ -1846,7 +2039,7 @@ PROC dowrite(pkt:PTR TO dospacket)
   -> ICONIFY: while iconified the console is windowless BY CHOICE - park the
   -> write (blocking the writer) until restore, when flushwq replays it. This
   -> is distinct from the win=NIL error below (a console that never opened).
-  IF curcon.appicon
+  IF curcon.appicon OR curcon.wbgone   -> 1.2.8b9: or Workbench is gone
     IF curcon.wqn < WQMAX
       curcon.wq[curcon.wqn] := pkt
       curcon.wqn := curcon.wqn + 1
@@ -1907,6 +2100,7 @@ PROC dowrite(pkt:PTR TO dospacket)
   IF (curcon.wolen + len) > WOBSZ THEN flushout(curcon)
   CopyMem(pkt.arg2, curcon.wob + curcon.wolen, len)
   curcon.wolen := curcon.wolen + len
+  curcon.jwrote := TRUE         -> 1.2.8b8: not idle
   ReplyPkt(pkt, len, 0)
   IF WODEFER
     IF (curcon.rdn > 0) OR (curcon.wcn > 0)
@@ -1936,12 +2130,32 @@ PROC dorender(buf, len)
     curserase()                 -> raw: the app owns the screen, no blip
     render(buf, len)            -> - but the console owns the block
     cursdraw()                  -> cursor (Ed's only position marker)
+  ELSEIF (curcon.rdn = 0) AND (curcon.srch = FALSE) AND (curcon.pasteq = NIL) AND
+         (curcon.edlast = 0) AND (curcon.ebuf[0] = 0)
+    -> 1.2.8b9: nothing typed, nobody reading - the editor is only the
+    -> blip. Erasing and redrawing it cost ~3ms a flush on a stock 020
+    -> (a Text of the old cell, a complement fill of the new); during
+    -> output nobody can type into it, so it waits for rest: blipnow()
+    -> at the next read, choke point or quiet timer tick.
+    IF (curcon.edext <> 0) OR (curcon.sb = NIL) THEN eraseedit()  -> nothing
+                                -> of the editor on screen = a no-op call
+    render(buf, len)
+    reanchor()
+    curcon.blipdefer := TRUE
   ELSE
     eraseedit()
     render(buf, len)
     reanchor()
     drawedit()
   ENDIF
+ENDPROC
+
+-> 1.2.8b9: the deferred blip, now (see dorender)
+PROC blipnow()
+  IF curcon.blipdefer = FALSE THEN RETURN
+  IF (curcon.win = NIL) OR curcon.rawmode THEN RETURN
+  IF (curcon.viewoff > 0) OR curcon.selon OR (curcon.appicon <> NIL) THEN RETURN
+  drawedit()
 ENDPROC
 
 -> S5: render a console's write-behind buffer. THE choke point - every
@@ -1954,9 +2168,25 @@ ENDPROC
 -> still pulls the view live before it renders (the key paths flush
 -> BEFORE touching viewoff, so this is belt-and-braces).
 PROC flushout(c:PTR TO console)
-  DEF old:PTR TO console
+  DEF old:PTR TO console, i
   IF c = NIL THEN RETURN
-  IF c.wolen = 0 THEN RETURN
+  IF c.wolen = 0
+    IF c.blipdefer AND (c.rdn > 0)  -> 1.2.8b9: a reader is waiting
+      old := curcon
+      curcon := c
+      blipnow()
+      curcon := old
+    ENDIF
+    RETURN
+  ENDIF
+  IF fastok                     -> 1.2.8b9: the whole flush in C (cfout)
+    i := fcall3(24, fxtab, pctx, c)
+    IF i = 1 THEN RETURN
+    IF i >= 2
+      cfresume(i)
+      RETURN
+    ENDIF
+  ENDIF
   IF c.win = NIL
     c.wolen := 0                -> hidden or never-opened: nowhere to
     RETURN                      -> draw - accept + discard, the parked-
@@ -1972,6 +2202,28 @@ PROC flushout(c:PTR TO console)
   curcon := old
 ENDPROC
 
+-> 1.2.8b9: finish a flush the C engine started (cfout's 2 and 4) -
+-> render's remaining bytes and epilogue, dorender's tail, flushout's
+PROC cfresume(r)
+  DEF c:PTR TO console
+  c := curcon                   -> cfout made the flushed console current
+  IF r = 2
+    renderx(c.wob, c.wolen, fxret, FALSE)
+  ELSE
+    IF fxret AND 1 THEN cfstyled(fxret AND 4)
+    IF fxret AND 2 THEN maskscan()
+    dfon := FALSE
+    alteat := FALSE
+    maskon := FALSE
+    c.rp.mask := $FF
+    setsoft(0)
+  ENDIF
+  reanchor()
+  c.blipdefer := TRUE
+  c.wolen := 0
+  curcon := fxold
+ENDPROC
+
 PROC armflush()
   IF ftreq = NIL                -> no timer.device: degrade to the b3
     flushout(curcon)            -> immediate flush, never sit on bytes
@@ -1980,7 +2232,7 @@ PROC armflush()
   IF flusharmed THEN RETURN
   ftreq.io.command := TR_ADDREQUEST
   ftreq.time.secs := 0
-  ftreq.time.micro := WOFLUSHUS
+  ftreq.time.micro := fdelay
   SendIO(ftreq)
   flusharmed := TRUE
 ENDPROC
@@ -2018,6 +2270,7 @@ PROC swaccept()
         acceptreset()
         CopyMem(pkt.arg2, c2.wob + c2.wolen, pkt.arg3)
         c2.wolen := c2.wolen + pkt.arg3
+        c2.jwrote := TRUE
         ReplyPkt(pkt, pkt.arg3, 0)
       ELSE
         sweepstash := pkt       -> can't join (parked window, full
@@ -2033,7 +2286,8 @@ PROC swaccept()
 ENDPROC
 
 PROC flushexpired()
-  DEF c:PTR TO console, again=FALSE, round, work
+  DEF c:PTR TO console, again=FALSE, round, work, old:PTR TO console,
+      t0, el
   -> E4 second draft: the b3 sweep-before-render was a no-op - the
   -> main loop has ALREADY drained the port into the buffers by the
   -> time the timer is seen. The packets that matter arrive WHILE a
@@ -2043,8 +2297,20 @@ PROC flushexpired()
   -> real. Four rounds caps the latency a sustained burst can add to
   -> input handling; a stashed (non-joinable) packet ends the burst
   -> so ordering never waits on it.
+  -> 1.2.8b9: PACED. A flush on a stock A1200 costs 50-100ms (the
+  -> blits and the glyphs share a chip bus the display already holds
+  -> most of), and a 20ms timer then spends most of a burst painting
+  -> lines that the next flush scrolls away. So the next flush waits as
+  -> long as this one took (x1.5, 20..160ms): painting stays under half
+  -> the time and each flush pools more of the burst - past a screenful
+  -> the flush repaints the page instead of blitting it. One round: the
+  -> old render-sweep-render loop paid a blit per single line that bred
+  -> during the render. Interactive output is not paced: a parked read
+  -> or WaitForChar flushes at once (dowrite), so do keys and events.
+  t0 := dpnow()
+  work := FALSE
   round := 0
-  WHILE round < 4
+  WHILE round < 1
     work := FALSE
     c := conlist
     WHILE c
@@ -2052,21 +2318,58 @@ PROC flushexpired()
         swaccept()              -> what arrived during the last render
         flushout(c)
         work := TRUE
+        c.bliptick := TRUE
       ENDIF
       c := c.next
     ENDWHILE
-    IF (work = FALSE) OR (sweepstash <> NIL)
-      round := 4
-    ELSE
-      swaccept()                -> one more look before deciding the
-      round := round + 1        -> burst is over
-    ENDIF
+    round := 1
   ENDWHILE
+  IF work
+    el := dpnow() - t0
+    IF (el > 0) AND (el < 300000)
+      el := Shl(el, 1) + Shr(el, 3)  -> x1.5, EClock ticks -> us
+                                -> (709kHz: x1.41) = x2.12; shifts, as
+                                -> E's Div is 32/16 and would trap
+      fdelay := Max(WOFLUSHUS, Min(el, WOFMAX))
+    ENDIF
+  ELSE
+    fdelay := WOFLUSHUS
+  ENDIF
   c := conlist
   WHILE c
     IF c.wolen > 0
       again := TRUE             -> selon holds, or a burst outran the
     ENDIF                       -> four rounds - next tick collects it
+    -> 1.2.8b9: a deferred blip shows one quiet tick after the output
+    IF c.blipdefer
+      IF c.bliptick OR (c.wolen > 0)
+        again := TRUE
+      ELSE
+        old := curcon
+        curcon := c
+        blipnow()
+        curcon := old
+      ENDIF
+    ENDIF
+    c.bliptick := FALSE
+    -> 1.2.8b8: a jump's blank tail waits for rest - five quiet ticks
+    -> (~0.1s) with nothing written, then jsettle; while it waits the
+    -> timer keeps ticking for it
+    IF c.jslk AND (c.wolen = 0)
+      IF c.jwrote
+        c.jwrote := FALSE
+        c.jidle := 0
+        again := TRUE
+      ELSEIF c.jidle < 5
+        c.jidle := c.jidle + 1
+        again := TRUE
+      ELSE
+        old := curcon
+        curcon := c
+        jsettle()
+        curcon := old
+      ENDIF
+    ENDIF
     c := c.next
   ENDWHILE
   IF again THEN armflush()
@@ -2227,6 +2530,13 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.pnoinfo := TRUE
   ELSEIF StrCmp(tok, 'SHOWINFO')
     curcon.pnoinfo := FALSE
+  ELSEIF StrCmp(tok, 'NODIRECT')
+    curcon.pdirect := FALSE      -> 1.2.8b8: back to Text/ScrollRaster
+  ELSEIF StrCmp(tok, 'DIRECT')
+    curcon.pdirect := TRUE
+  ELSEIF StrCmp(tok, 'DPFORCE')
+    curcon.pdirect := 2          -> 1.2.8b9 test aid: direct always, no
+                                -> measuring (pixel A/B against NODIRECT)
   ELSEIF StrCmp(tok, 'SCROLLBAR')
     -> 1.2.8b5: a scrollbar in the right border (vsmake's note).
     -> Owned, bordered windows only - a borrowed frame (WINDOW0x) and
@@ -2296,11 +2606,16 @@ PROC parseopt(tok:PTR TO CHAR)
     -> n rows in ONE blit and the next n-1 newlines scroll nothing.
     -> The raw value is unclamped here (any n >= 0); gridcalc folds
     -> it to rows-1 where the window is known, so JUMP=999 legally
-    -> means "a page at a time". 0 (the default) = today's behaviour.
+    -> means "a page at a time". 0 or 1 = scroll by one, always.
+    -> 1.2.8b8: unset (-1) = automatic, see jumpok.
     v := 4
     IF tok[v] = "=" THEN v := 5
-    v := tcnum(tok + v)
-    IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
+    IF StrCmp(tok + v, 'AUTO')
+      curcon.pjump := -1         -> 1.2.8b8: back to automatic (an open
+    ELSE                         -> string overruling a config's JUMP=n)
+      v := tcnum(tok + v)
+      IF v >= 0 THEN curcon.pjump := v ELSE matched := FALSE
+    ENDIF
   -> ---- 1.2.7b9: geometry as EDGES, for the config file ----
   -> LEFT/TOP are pwx/pwy under a name; RIGHT/BOTTOM are the edges,
   -> folded into pww/pwh by openwin once there is a screen to measure.
@@ -2468,8 +2783,9 @@ PROC parsecon(bname)
                                         -> default; PASTEEXEC opts out
   curcon.pscrname[0] := 0              -> global array: garbage until set
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
-  curcon.pjump := 0                    -> J1: jump scroll off by default
+  curcon.pjump := -1                   -> 1.2.8b8: automatic (J1 was off)
   curcon.pnoinfo := FALSE              -> 1.2.8b2: icons complete, greyed
+  curcon.pdirect := TRUE               -> 1.2.8b8: direct RTG rows on
   curcon.pscrollbar := FALSE           -> 1.2.8b5: no scrollbar, as shipped
   curcon.ptabmenu := TRUE              -> 1.2.8b4: the menu, and Tab stops
   curcon.ptabfirst := FALSE            -> at the common prefix - as shipped
@@ -2697,6 +3013,7 @@ ENDPROC
 
 -> an AUTO window materializes on the first packet that needs one
 PROC ensurewin()
+  IF curcon.wbgone THEN RETURN  -> 1.2.8b9: the screen is closed - wait
   IF (curcon.win = NIL) AND curcon.autopend THEN openwin()
 ENDPROC
 
@@ -2718,7 +3035,8 @@ PROC gridcalc()
   -> jump a real scroll (n = rows is dffull's business, not a blit's);
   -> 1 = the plain one-line scroll every path always did. Recomputed
   -> here so a resize re-clamps it with everything else.
-  curcon.jeff := curcon.pjump
+  curcon.jauto := curcon.pjump < 0
+  curcon.jeff := IF curcon.jauto THEN Max(2, Shr(curcon.rows, 2)) ELSE curcon.pjump
   IF curcon.jeff > (curcon.rows - 1) THEN curcon.jeff := curcon.rows - 1
   IF curcon.jeff < 1 THEN curcon.jeff := 1
   -> 1.2.3 masked rendering: the floor, probed the way the ROM does it
@@ -2730,6 +3048,7 @@ PROC gridcalc()
   -> pens it describes. penuse seeds deffg; maskcalc folds the floor in
   -> even when the pens did not change.
   curcon.mfloor := IF GetBitMapAttr(curcon.win.rport.bitmap, 12) AND 8 THEN 1 ELSE $FF
+  dpprobe()
   penuse(curcon.deffg, 0)
   maskcalc()
 ENDPROC
@@ -2759,11 +3078,132 @@ PROC diskhelper()
     -> killhandler - the audit3 C7 shape diskfont already wears.
     IF iconbase = NIL THEN iconbase := OpenLibrary('icon.library', 36)
     IF iconbase THEN fhdo := GetDiskObject(fhpath)
+  ELSEIF fhmode = 3
+    snbase := OpenLibrary('screennotify.library', 1)  -> 1.2.8b9
+  ELSEIF fhmode = 2
+    -> 1.2.8b8: P96's own API first - a P96 install need not carry the
+    -> CyberGraphX emulation library (the A1200 rig has none)
+    p96base := OpenLibrary('Picasso96API.library', 2)
+    IF p96base = NIL THEN cybergfxbase := OpenLibrary('cybergraphics.library', 40)
   ELSE
     IF diskfontbase = NIL THEN diskfontbase := OpenLibrary('diskfont.library', 36)
     IF diskfontbase THEN fhfont := OpenDiskFont(fhta)
   ENDIF
   Signal(fhtask, fhsig)         -> ALWAYS - the handler is waiting
+ENDPROC
+
+-> 1.2.8b8: open the RTG library on the helper, once per handler
+PROC rtgload()
+  IF rtgtried THEN RETURN
+  rtgtried := TRUE
+  IF (p96base <> NIL) OR (cybergfxbase <> NIL) THEN RETURN
+  IF fhok = FALSE THEN RETURN
+  fhmode := 2
+  SetSignal(0, fhsig)           -> no stale wakeups
+  IF CreateNewProc([NP_ENTRY, fhstub,
+                    NP_NAME, 'ccon-rtgload',
+                    NP_STACKSIZE, 16384,
+                    NP_COPYVARS, FALSE,
+                    NP_CURRENTDIR, 0,
+                    NP_INPUT, 0,
+                    NP_OUTPUT, 0,
+                    NP_CLOSEINPUT, FALSE,
+                    NP_CLOSEOUTPUT, FALSE,
+                    TAG_DONE, NIL])
+    Wait(fhsig)
+  ENDIF
+ENDPROC
+
+-> 1.2.8b9: screennotify.library on the helper (a disk library, like
+-> the RTG one), then our Workbench client: tried once, at the first
+-> window. Absent library = nothing changes.
+PROC snsetup()
+  DEF b, p, h=NIL
+  IF sntried THEN RETURN
+  sntried := TRUE
+  IF fhok = FALSE THEN RETURN
+  fhmode := 3
+  SetSignal(0, fhsig)
+  IF CreateNewProc([NP_ENTRY, fhstub,
+                    NP_NAME, 'ccon-snload',
+                    NP_STACKSIZE, 16384,
+                    NP_COPYVARS, FALSE,
+                    NP_CURRENTDIR, 0,
+                    NP_INPUT, 0,
+                    NP_OUTPUT, 0,
+                    NP_CLOSEINPUT, FALSE,
+                    NP_CLOSEOUTPUT, FALSE,
+                    TAG_DONE, NIL])
+    Wait(fhsig)
+  ENDIF
+  IF snbase = NIL THEN RETURN
+  snport := CreateMsgPort()
+  IF snport = NIL THEN RETURN
+  b := snbase
+  p := snport
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L p,A0
+  MOVE.L #-128,D0               -> priority, as KingCON registers
+  MOVE.L b,A6
+  JSR -54(A6)                   -> AddWorkbenchClient(port, pri)
+  MOVEM.L (A7)+,D2-D7/A2-A6
+  MOVE.L D0,h
+  snclient := h
+  IF snclient = NIL
+    DeleteMsgPort(snport)
+    snport := NIL
+  ENDIF
+ENDPROC
+
+-> RemWorkbenchClient(handle): FALSE while a notification is out
+PROC snrem()
+  DEF b, h, r=0
+  b := snbase
+  h := snclient
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L h,A0
+  MOVE.L b,A6
+  JSR -60(A6)
+  MOVEM.L (A7)+,D2-D7/A2-A6
+  MOVE.L D0,r
+ENDPROC r
+
+-> a Workbench notification: snm_Type (+20) 3 = WORKBENCH, snm_Value
+-> (+24) FALSE = the screen is about to close, TRUE = it is back. On
+-> the close every CCON window on the Workbench screen goes the way an
+-> iconify sends it (flushed, then hidewin - the session stays: model,
+-> scrollback, edit line, parked writes) BEFORE the reply lets the
+-> screen go; on the reopen they come back where they were and replay
+-> what was written meanwhile. Borrowed windows and windows on other
+-> screens are not ours to close for this.
+PROC snmsg(m:PTR TO LONG)
+  DEF c:PTR TO console, old:PTR TO console, scr:PTR TO screen
+  IF m[5] <> 3 THEN RETURN
+  old := curcon
+  c := conlist
+  WHILE c
+    curcon := c
+    IF m[6] = FALSE
+      IF (c.win <> NIL) AND (c.fwin = FALSE) AND (c.appicon = NIL)
+        scr := c.win.wscreen
+        IF scr.flags AND WBENCHSCREEN
+          flushout(c)
+          hidewin()
+          c.wbgone := TRUE
+        ENDIF
+      ENDIF
+    ELSEIF c.wbgone
+      c.wbgone := FALSE
+      reopenwin()
+      IF c.win
+        flushwq()
+      ELSE
+        c.wbgone := TRUE        -> no window yet: the next notice tries
+      ENDIF
+    ENDIF
+    c := c.next
+  ENDWHILE
+  curcon := old
 ENDPROC
 
 PROC fontload(ta:PTR TO textattr)
@@ -3095,7 +3535,7 @@ ENDPROC
 -> drops line up as arguments. Cooked = the edit line (literal insert,
 -> the paste rules); raw = the client's input queue (Ed types it).
 PROC dodrop(am:PTR TO appmessage)
-  DEF i, wa:PTR TO wbarg, pb[620]:ARRAY OF CHAR, n, k, total, all
+  DEF i, wa:PTR TO wbarg, pb[620]:ARRAY OF CHAR, n, k, total, all, q, mode
   IF curcon.win = NIL THEN RETURN
   -> audit5 A7: dotab's wall - mount-time allocation of the fs plumbing
   -> may have failed (main tolerates it); dropbuild/lockpath would write
@@ -3111,6 +3551,18 @@ PROC dodrop(am:PTR TO appmessage)
   acceptreset()
   IF am.numargs <= 0 THEN RETURN
   wa := am.arglist
+  -> 1.2.8b7, his ask: Ctrl = the drawer only, Alt = the name only.
+  -> The AppMessage has no qualifier field, so the keys are read as
+  -> the drop is handled - held through the release, as they are for
+  -> any drag. One mode for the whole drop (the A11 unit, below).
+  q := IF inputbase THEN PeekQualifier() ELSE 0
+  IF q AND IEQUALIFIER_CONTROL
+    mode := 1
+  ELSEIF q AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT)
+    mode := 2
+  ELSE
+    mode := 0
+  ENDIF
   -> audit5 A11: the DROP is the whole-or-nothing unit, not the icon.
   -> The old per-icon room check could deliver icons 1,2,3,5 of five -
   -> one beep, a silently reordered-by-omission argument list. Raw:
@@ -3122,7 +3574,7 @@ PROC dodrop(am:PTR TO appmessage)
   IF curcon.rawmode
     total := 0
     FOR i := 0 TO am.numargs - 1
-      total := total + dropbuild(wa[i], pb)
+      total := total + dropbuild(wa[i], pb, mode)
     ENDFOR
     IF total = 0 THEN RETURN    -> nothing resolved, nothing owed
     IF inqroom(total) = FALSE
@@ -3132,7 +3584,7 @@ PROC dodrop(am:PTR TO appmessage)
                                 -> forever - honest whole-or-nothing,
                                 -> not a retryable condition)
     FOR i := 0 TO am.numargs - 1
-      n := dropbuild(wa[i], pb)
+      n := dropbuild(wa[i], pb, mode)
       IF n > 0
         IF inqroom(n)           -> the belt (see above)
           FOR k := 0 TO n - 1 DO enqueue(pb[k])
@@ -3143,7 +3595,7 @@ PROC dodrop(am:PTR TO appmessage)
   ELSE
     all := TRUE
     FOR i := 0 TO am.numargs - 1
-      n := dropbuild(wa[i], pb)
+      n := dropbuild(wa[i], pb, mode)
       IF n > 0
         IF pasteinsert(pb, n) = FALSE THEN all := FALSE
       ENDIF
@@ -3163,12 +3615,14 @@ ENDPROC
 -> file, the path still inserts). Insertion is dodrop's - audit5 A11
 -> made the DROP the whole-or-nothing unit, so the caller needs every
 -> argument's length BEFORE the first byte lands anywhere.
-PROC dropbuild(wa:PTR TO wbarg, pb:PTR TO CHAR)
-  DEF tb[560]:ARRAY OF CHAR, p, n, i, isdir,
+PROC dropbuild(wa:PTR TO wbarg, pb:PTR TO CHAR, mode)
+  DEF tb[560]:ARRAY OF CHAR, p, n, i, isdir, pn,
       fl:PTR TO filelock, ol, needq
   IF wa.lock = 0 THEN RETURN 0  -> no lock, no path (left-out volumes)
   IF lockpath(wa.lock, tb, 548) = FALSE THEN RETURN 0
   n := StrLen(tb)
+  pn := n                       -> b7: the parent alone - lockpath's
+                                -> result is already separator-ended
   isdir := FALSE
   IF wa.name
     IF wa.name[0]
@@ -3194,6 +3648,16 @@ PROC dropbuild(wa:PTR TO wbarg, pb:PTR TO CHAR)
         tb[n] := 0
       ENDIF
     ENDIF
+  ENDIF
+  IF mode = 1                   -> Ctrl: the drawer, nothing after it
+    n := pn
+    tb[n] := 0
+  ELSEIF mode = 2               -> Alt: the tail only - the name plus
+    FOR i := 0 TO n - pn - 1    -> the drawer's '/' when it has one
+      tb[i] := tb[pn + i]
+    ENDFOR
+    n := n - pn
+    tb[n] := 0
   ENDIF
   needq := FALSE                -> the shell eats unquoted '=' (the
   FOR i := 0 TO n - 1           -> four-blind-boots lesson) and splits
@@ -3803,6 +4267,7 @@ PROC openwin()
       dri:PTR TO drawinfo,
       pubscr:PTR TO screen, fname[48]:ARRAY OF CHAR, fl, ok,
       gfx:PTR TO gfxbase, dfont:PTR TO textfont, mnode:PTR TO mn, vg
+  snsetup()                     -> 1.2.8b9: Workbench close/reopen notices
   curcon.fwin := FALSE
   curcon.vsminh := 60
   -> M6: with the input.device handler on, keys never touch IDCMP -
@@ -4021,22 +4486,43 @@ PROC openwin()
   -> ceiling if they ever conflict (they cannot today - cols is capped at
   -> 255, so a window tall enough to need 4999 rows does not exist).
   IF v < (curcon.rows + 2) THEN v := curcon.rows + 2
-  curcon.sbmax := v
-  curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
-  curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
-  curcon.ss := New(Mul(curcon.sbmax, curcon.cols))
-  curcon.sw := New(curcon.sbmax)   -> B7: one byte per ROW, not per cell
-  IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL) OR
-     (curcon.sw = NIL)
-    IF curcon.sb THEN Dispose(curcon.sb)
-    IF curcon.sa THEN Dispose(curcon.sa)
-    IF curcon.ss THEN Dispose(curcon.ss)
-    IF curcon.sw THEN Dispose(curcon.sw)
-    curcon.sb := NIL
-    curcon.sa := NIL
-    curcon.ss := NIL
-    curcon.sw := NIL
-  ENDIF
+  -> 1.2.8b8: a model that does not fit is retried at half the
+  -> lines, down to the smallest ring the grid allows, before going
+  -> without. Without a model there is no scrollback AND no deferred
+  -> engine - every line takes the old one-blit-one-Text path. That was
+  -> a stock 2MB A1200 with LINES=2000 (91 cols x 2033 rows x 3 planes
+  -> = 555KB against 645KB chip free after boot): plain-lines ran at
+  -> 57ms a line where the engine does it in a fraction.
+  -> and never more than half of what is free: the model is the
+  -> console's, the rest of the machine needs the other half (the
+  -> first cut of this loop took a stock A1200 down to 68KB free and
+  -> the next program could not load)
+  WHILE (Mul(Mul(v, curcon.cols), 3) + v > Shr(AvailMem(0), 1)) AND (v > (curcon.rows + 2))
+    v := Max(Shr(v, 1), curcon.rows + 2)
+  ENDWHILE
+  REPEAT
+    curcon.sbmax := v
+    curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
+    curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
+    curcon.ss := New(Mul(curcon.sbmax, curcon.cols))
+    curcon.sw := New(curcon.sbmax)   -> B7: one byte per ROW, not per cell
+    IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL) OR
+       (curcon.sw = NIL)
+      IF curcon.sb THEN Dispose(curcon.sb)
+      IF curcon.sa THEN Dispose(curcon.sa)
+      IF curcon.ss THEN Dispose(curcon.ss)
+      IF curcon.sw THEN Dispose(curcon.sw)
+      curcon.sb := NIL
+      curcon.sa := NIL
+      curcon.ss := NIL
+      curcon.sw := NIL
+      IF v > (curcon.rows + 2)
+        v := Max(Shr(v, 1), curcon.rows + 2)
+      ELSE
+        v := 0                   -> even the smallest ring failed
+      ENDIF
+    ENDIF
+  UNTIL (curcon.sb <> NIL) OR (v = 0)
   curcon.sbcols := curcon.cols  -> audit3 C2: record the real stride
   curcon.sbtop := 0
   curcon.sbcnt := 0
@@ -4486,6 +4972,7 @@ PROC doresize()
   DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
       reflowed, wasalt
   IF curcon.win = NIL THEN RETURN
+  curcon.jslk := FALSE          -> 1.2.8b8: geometry changed under it
   -> 1.2.8b5: border gadgets after a resize want the FRAME repainted
   -> under them (the "right only after re-activating" symptom in the
   -> border-gadgets note). First thing, so no early return skips it;
@@ -4835,13 +5322,13 @@ ENDPROC
 PROC maskcalc()
   DEF u, m
   u := curcon.mpens
-  IF u <= 1
-    m := 1                      -> stock's own tiers, verbatim from the
-  ELSEIF u <= 3                 -> ROM's $3c00 routine: pen 1 text, the
-    m := 3                      -> pens-0-3 world, or everything
-  ELSE
-    m := $FF
-  ENDIF
+  -> 1.2.8b9: the EXACT plane set. The ROM's tiers (pens 0-1 -> 1, 0-3
+  -> -> 3, else everything) scrolled all four planes of a 16-colour
+  -> screen for ANSI colours 0-7, which only ever touch three. Every
+  -> pen drawn is ORed into mpens, so a plane outside mpens holds no
+  -> content anywhere in the window - the tiers' own invariant, kept
+  -> with one plane less to move for every colour scroll.
+  m := u AND $FF
   curcon.mmask := m OR curcon.mfloor
   -> b2, THE b1 BUG: penuse can grow the mask MID-PACKET (the first
   -> red run of an ls), but the bracket loaded rp_Mask at render
@@ -4916,16 +5403,35 @@ ENDPROC f OR Shl(curcon.curbg, 4)  -> first cell stores it (rule (a))
 -> when they change (SetSoftStyle is a call per run otherwise).
 -> bit0 italic -> FSF_ITALIC ($4), bit1 underline -> FSF_UNDERLINED
 -> ($1); bit2 inverse is a pen swap at paint time, not a font style.
+-> 1.2.8b9: bit3 bold -> FSF_BOLD ($2), console.device's SGR 1. Bit1,
+-> underline, is NOT asked of the font any more: ulline() draws it. Two
+-> ways the font's own underline failed (FS-UAE, 4.10.26): AskSoftStyle
+-> on the 3.2 Workbench's 8x8 screen font answers $FFFFFFFE - no
+-> algorithmic underline at all - and where there is one it sits a line
+-> under the baseline, which for a font whose baseline is its last line
+-> (MicroKnight7/7) is the next row, painted over there.
 PROC setsoft(sty)
   DEF w
   w := 0
   IF sty AND 1 THEN w := w OR $4
-  IF sty AND 2 THEN w := w OR $1
+  IF sty AND 8 THEN w := w OR $2
   w := w AND curcon.softmask
   IF w <> curcon.cursoft
     SetSoftStyle(curcon.rp, w, curcon.softmask)
     curcon.cursoft := w
   ENDIF
+ENDPROC
+
+-> 1.2.8b9: the underline, drawn here for every font (setsoft's note):
+-> one line of the current APen under n cells from x - a line below the
+-> baseline, as graphics would, or the cell's last line when that is
+-> the baseline itself. ybase is the Text baseline the caller used.
+PROC ulline(sty, x, ybase, n)
+  DEF y
+  IF (sty AND 2) = 0 THEN RETURN
+  y := ybase + 1
+  IF (curcon.baseline + 1) >= curcon.ch THEN y := ybase - curcon.baseline + curcon.ch - 1
+  RectFill(curcon.rp, x, y, x + Mul(n, curcon.cw) - 1, y)
 ENDPROC
 
 -> live-output pens from the SGR state: inverse (SGR 7) swaps
@@ -4942,12 +5448,59 @@ PROC setpens()
   ENDIF
 ENDPROC
 
+-> E4b had three CopyMems from a zero run here (ROM asm, not three
+-> stores per cell in an E loop); 1.2.8b9: one asm pass over the
+-> three planes' rows, and the ring index resolved once instead of
+-> three times - this runs once per scrolled line
 PROC clearrow(r)
-  CopyMem(zerorun, visrow(r), curcon.cols)  -> E4b: ROM asm, not three
-  CopyMem(zerorun, sarow(r), curcon.cols)   -> stores per cell in an E
-  CopyMem(zerorun, ssrow(r), curcon.cols)   -> loop - this runs once per
-  setwrapf(r, 0)                -> B7        scrolled line, ~1ms at
-ENDPROC                         -> chip-ram-effective 14MHz before
+  DEF k:PTR TO console, i, off
+  k := curcon
+  i := k.sbtop + r
+  IF i >= k.sbmax THEN i := i - k.sbmax
+  off := Mul(i, k.cols)
+  zfill3(k.sb + off, k.sa + off, k.ss + off, k.cols)
+  IF (k.sw <> NIL) AND (r >= 0) AND (r < k.rows) THEN PutChar(k.sw + i, 0)
+ENDPROC
+
+-> n bytes of zero at each of a, b, c (any alignment, n < 32768)
+PROC zfill3(a, b, c, n)
+  MOVE.L D2,-(A7)
+  MOVE.L n,D2
+  MOVE.L a,A0
+  BSR.S zf3one
+  MOVE.L b,A0
+  BSR.S zf3one
+  MOVE.L c,A0
+  BSR.S zf3one
+  BRA.S zf3done
+zf3one:
+  MOVE.L D2,D1
+  BEQ.S zf3r
+  MOVE.L A0,D0
+  BTST.L #0,D0
+  BEQ.S zf3ev
+  CLR.B (A0)+
+  SUBQ.L #1,D1
+zf3ev:
+  MOVE.L D1,D0
+  LSR.L #2,D0
+  BEQ.S zf3tl
+  SUBQ.L #1,D0
+zf3lp:
+  CLR.L (A0)+
+  DBRA D0,zf3lp
+zf3tl:
+  AND.W #3,D1
+  BEQ.S zf3r
+  SUBQ.W #1,D1
+zf3bl:
+  CLR.B (A0)+
+  DBRA D1,zf3bl
+zf3r:
+  RTS
+zf3done:
+  MOVE.L (A7)+,D2
+ENDPROC
 
 -> paint one MODEL ring row (by ring index) at pixel row y, in
 -> attr-batched runs - the piece redraw, drawmodelrow and the menu
@@ -5009,6 +5562,7 @@ PROC drawmrow(idx, y)
       setsoft(sy)
       Move(rp, left + Mul(i, cw), ybase)
       Text(rp, rowbuf + i, j - i)
+      ulline(sy, left + Mul(i, cw), ybase, j - i)
     ENDIF
     i := j
   ENDWHILE
@@ -5097,6 +5651,7 @@ PROC curserase()
     setsoft(sy)
     Move(curcon.rp, curcon.left + Mul(curcon.cursx, curcon.cw), curcon.topy + Mul(curcon.cursy, curcon.ch) + curcon.baseline)
     Text(curcon.rp, b, 1)
+    ulline(sy, curcon.left + Mul(curcon.cursx, curcon.cw), curcon.topy + Mul(curcon.cursy, curcon.ch) + curcon.baseline, 1)
     setsoft(0)
   ENDIF
   curcon.cursx := -1
@@ -5224,6 +5779,7 @@ PROC drawselrow(r, lo, hi)
     setsoft(sy)
     Move(rp, left + Mul(i, cw), ybase)
     Text(rp, rowbuf + i, j - i)
+    ulline(sy, left + Mul(i, cw), ybase, j - i)
     i := j
   ENDWHILE
   setsoft(0)
@@ -6066,11 +6622,70 @@ PROC screenscroll() IS screenscrolln(1)
 -> expects "scroll leaves me on the last row" exactly; cooked stream
 -> output (dir, list, type, a compiler) never looks back at the row it
 -> is on. jeff = 1 (JUMP unset/0) short-circuits everything.
+-> 1.2.8b8, automatic (JUMP unset): one row at a time until half a
+-> screen has scrolled since the console was last idle - a command's
+-> few lines of answer never jump - then a quarter screen per blit.
+-> When the output stops, jsettle() slides the text back down so the
+-> last line sits on the bottom row again: at rest the window looks
+-> exactly as scroll-by-one leaves it. Measured why: a per-line render
+-> barrier (conbench sync-line) costs one full-window blit per line,
+-> and on every Amiga the blit is the bill.
 PROC jumpok()
+  curcon.jburst := curcon.jburst + 1
   IF curcon.jeff <= 1 THEN RETURN FALSE
   IF curcon.rawmode THEN RETURN FALSE
   IF curcon.altvalid THEN RETURN FALSE
+  IF curcon.jauto
+    IF (curcon.jburst < Shr(curcon.rows, 1)) AND (curcon.jsync < 4) THEN RETURN FALSE
+  ENDIF                         -> (1.2.8b9: a barrier cadence jumps at once)
+  curcon.jslk := TRUE           -> the caller jumps: blank rows below
 ENDPROC TRUE
+
+-> 1.2.8b8: undo the jump's blank tail - the rows below the cursor are
+-> blank only because a jump scrolled early, so pull that many rows
+-> back out of history (resize's pull-in, verbatim) and move the
+-> pixels down to match. Runs at rest only: a read (the shell's
+-> prompt), or the flush timer finding no output for a few ticks.
+PROC jsettle()
+  DEF k, n, r
+  curcon.jburst := 0
+  IF curcon.jsync               -> 1.2.8b9: the barrier cadence is over -
+    curcon.jsync := 0           -> back to gridcalc's automatic jump
+    IF curcon.jauto THEN curcon.jeff := Min(Max(2, Shr(curcon.rows, 2)), Max(1, curcon.rows - 1))
+  ENDIF
+  IF curcon.jslk = FALSE THEN RETURN
+  curcon.jidle := 0
+  -> passing states keep the tail pending - the next read or quiet
+  -> tick tries again
+  IF (curcon.viewoff > 0) OR curcon.selon OR (curcon.appicon <> NIL) THEN RETURN
+  IF curcon.wolen > 0 THEN RETURN          -> not at rest after all
+  curcon.jslk := FALSE
+  IF (curcon.win = NIL) OR (curcon.sb = NIL) THEN RETURN
+  IF curcon.rawmode OR curcon.altvalid THEN RETURN
+  k := curcon.rows - 1 - curcon.cy
+  IF k > curcon.sbcnt THEN k := curcon.sbcnt
+  IF k <= 0 THEN RETURN
+  eraseedit()
+  n := k
+  WHILE n > 0
+    curcon.sbtop := curcon.sbtop - 1
+    IF curcon.sbtop < 0 THEN curcon.sbtop := curcon.sbmax - 1
+    curcon.sbcnt := curcon.sbcnt - 1
+    curcon.cy := curcon.cy + 1
+    curcon.ancy := curcon.ancy + 1
+    n := n - 1
+  ENDWHILE
+  IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
+  ScrollRaster(curcon.rp, 0, -Mul(k, curcon.ch),
+               curcon.win.borderleft, curcon.win.bordertop,
+               curcon.win.width - curcon.win.borderright - 1,
+               curcon.win.height - curcon.win.borderbottom - 1)
+  FOR r := 0 TO k - 1
+    drawmodelrow(r)
+  ENDFOR
+  vblankscan()
+  drawedit()
+ENDPROC
 
 -> ---------- S2+S3 (perf campaign, 23.7.26): the deferred-blit engine.
 -> srbench (S4) made the numbers hard: on the A1200 target a ScrollRaster
@@ -6125,13 +6740,15 @@ PROC dfstart()
   dfnarrow := FALSE
   dfgen := dfgen + 1            -> E2a: one increment invalidates every
   IF dfgen > 255                -> stale mark; the array sweep happens
-    FOR r := 0 TO DFROWS - 1    -> once per 255 arms, not once per
-      dfd[r] := 0               -> packet
+    FOR r := 0 TO 511           -> once per 255 arms, not once per
+      dfdb[r] := 0              -> packet
     ENDFOR
     dfgen := 1
   ENDIF
   dflo := curcon.rows           -> E2b: empty range (lo > hi)
   dfhi := -1
+  dflost := 0
+  dfvb := curcon.vblank         -> the screen matches the model here
 ENDPROC
 
 PROC dfscroll()
@@ -6151,13 +6768,26 @@ PROC dfscroll()
     dfpend := 0                 -> keeping - switch to rebuild mode
     RETURN
   ENDIF
-  IF dfhi >= 0                  -> E2b: dirt scrolls with the content,
-    FOR r := Max(dflo - 1, 0) TO dfhi - 1  -> but only LIVE dirt - the
-      dfd[r] := dfd[r + 1]      -> old loop walked every row per scroll
-      dfx0[r] := dfx0[r + 1]
-      dfx1[r] := dfx1[r + 1]
-    ENDFOR
-    dfd[dfhi] := 0              -> the vacated top of the range
+  IF (dflo = 0) AND (dfhi >= 0)  -> 1.2.8b8: row 0's dirt is about to
+    IF dfd[0] = dfgen            -> fall off; dpaint still needs its
+      dflost := Max(dflost, dfx1[0] + 1)  -> reach (the stale pixels
+    ENDIF                        -> it covers are still on screen)
+  ENDIF
+  -> E2b: dirt scrolls with the content. 1.2.8b9: by sliding the
+  -> window one entry (O(1)); the new bottom row starts clean, and the
+  -> window copies back to the buffers' start once every DFROWS slides
+  dfo := dfo + 1
+  IF dfo >= DFROWS
+    CopyMem(dfdb + dfo, dfdb, DFROWS)
+    CopyMem(dfx0b + dfo, dfx0b, DFROWS)
+    CopyMem(dfx1b + dfo, dfx1b, DFROWS)
+    dfo := 0
+  ENDIF
+  dfd := dfdb + dfo
+  dfx0 := dfx0b + dfo
+  dfx1 := dfx1b + dfo
+  dfd[curcon.rows - 1] := 0
+  IF dfhi >= 0
     dflo := Max(dflo - 1, 0)
     dfhi := dfhi - 1            -> hi < lo again = range empty
   ENDIF
@@ -6235,43 +6865,1043 @@ PROC dfputc(c)
   curcon.cx := curcon.cx + 1
 ENDPROC
 
+-> ---------- 1.2.8b8: direct rows on RTG ----------
+-> The profile (4.10.26, real A1200 + PiStorm, 8-bit P96 Workbench,
+-> 127x94 window) put 96% of a synced line in ScrollRaster: 10.75ms of
+-> 10.7. A scroll reads the framebuffer back, and on that board reads
+-> are slow; writes are not (a RectFill of the same area: 2.0ms). So on
+-> an RTG screen CCON stops moving pixels and writes rows: the model
+-> already holds every visible cell, and painting the whole grid from
+-> it is write-only. The same writer replaces the Text() calls of dirty
+-> spans - one Text() per colour run was the colour rows' bill.
+->
+-> (The rig's Workbench turned out to be 32-bit B8G8R8A8, not 8-bit -
+-> a pen's pixel there is its colour-map RGB, which is what dppens
+-> builds; the profile figures stand.)
+-> Only where it is provably the same picture: a CLUT bitmap (pixel =
+-> pen) or a 16/32-bit one whose pixel is the pen's colour-map RGB in
+-> the board's layout - exactly what Text/RectFill write - a window whose layer
+-> is ONE unobscured cliprect covering it (nothing on top, nothing off
+-> screen), a fixed font no wider than 8 and no taller than 32. Cells
+-> with italic or underline go to the Text path after the lock drops.
+-> Anything else - planar, hi/true colour, an overlapping window -
+-> returns FALSE and the caller does what it always did.
+
+-> byte -> two longs of $FF/$00 pixel masks, bit 7 = leftmost pixel
+PROC dxtbuild()
+  DEF b, k, hi, lo
+  FOR b := 0 TO 255
+    hi := 0
+    lo := 0
+    FOR k := 0 TO 3
+      hi := Shl(hi, 8)
+      lo := Shl(lo, 8)
+      IF b AND Shl(1, 7 - k) THEN hi := hi OR $FF
+      IF b AND Shl(1, 3 - k) THEN lo := lo OR $FF
+    ENDFOR
+    dxt[Shl(b, 1)] := hi
+    dxt[Shl(b, 1) + 1] := lo
+    FOR k := 0 TO 7
+      dm32[Shl(b, 3) + k] := IF b AND Shl(1, 7 - k) THEN -1 ELSE 0
+    ENDFOR
+  ENDFOR
+ENDPROC
+
+-> may this window go direct at all? (per gridcalc: open, resize, font)
+PROC dpprobe()
+  DEF tf:PTR TO textfont
+  curcon.dpok := FALSE
+  IF curcon.pdirect = FALSE THEN RETURN
+  IF dxt = NIL THEN RETURN
+  IF curcon.mfloor <> $FF
+    -> planar (mfloor 1 = a standard planar bitmap, gridcalc's probe):
+    -> byte stores only, any CPU
+    IF curcon.win.rport.bitmap.depth > 8 THEN RETURN
+  ELSE
+    rtgload()
+    IF (cybergfxbase = NIL) AND (p96base = NIL) THEN RETURN
+    IF (Int(execbase + 296) AND 2) = 0 THEN RETURN  -> AttnFlags: no 020 =
+                                -> no unaligned long stores (the cell
+                                -> writes land wherever the window does)
+  ENDIF
+  dpcalreset()
+  tf := curcon.rp.font
+  IF tf = NIL THEN RETURN
+  IF tf.flags AND FPF_PROPORTIONAL THEN RETURN
+  IF (curcon.cw < 1) OR (curcon.cw > 8) THEN RETURN
+  IF (curcon.ch < 1) OR (curcon.ch > 32) THEN RETURN
+  IF tf.ysize <> curcon.ch THEN RETURN
+  IF dggo(tf) = FALSE THEN RETURN
+  curcon.dpok := TRUE
+ENDPROC
+
+-> the glyph cache: each of 256 codes, ch rows of left-aligned pixel
+-> bits, exactly the bits Text() would lay down in the cell (kern
+-> applied, the font's own fallback glyph outside lochar..hichar, bits
+-> past the cell cut off)
+PROC dggo(tf:PTR TO textfont)
+  DEF c, ci, loc:PTR TO LONG, kern:PTR TO INT, off, w, y, k, x, bits,
+      row:PTR TO CHAR, cd:PTR TO CHAR, ch, cw, nglyph
+  IF (dgtf = tf) AND (dgch = curcon.ch) AND (dgl <> NIL) THEN RETURN TRUE
+  IF dgl = NIL THEN dgl := New(8192)
+  IF dgl = NIL THEN RETURN FALSE
+  ch := curcon.ch
+  cw := curcon.cw
+  loc := tf.charloc
+  kern := tf.charkern
+  cd := tf.chardata
+  IF (loc = NIL) OR (cd = NIL) THEN RETURN FALSE
+  nglyph := tf.hichar - tf.lochar + 1      -> index of the fallback glyph
+  FOR c := 0 TO 255
+    ci := IF (c >= tf.lochar) AND (c <= tf.hichar) THEN c - tf.lochar ELSE nglyph
+    off := Shr(loc[ci], 16) AND $FFFF
+    w := loc[ci] AND $FFFF
+    k := IF kern THEN kern[ci] ELSE 0
+    FOR y := 0 TO ch - 1
+      row := cd + Mul(y, tf.modulo)
+      bits := 0
+      FOR x := 0 TO w - 1
+        IF row[Shr(off + x, 3)] AND Shl(1, 7 - ((off + x) AND 7))
+          IF ((x + k) >= 0) AND ((x + k) < cw) THEN bits := bits OR Shl(1, 7 - (x + k))
+        ENDIF
+      ENDFOR
+      dgl[Mul(c, ch) + y] := bits
+    ENDFOR
+  ENDFOR
+  dgtf := tf
+  dgch := ch
+ENDPROC TRUE
+
+-> paint from the model, straight into the framebuffer: every visible
+-> row as far as dpreach says (all=TRUE, the scroll replacement), every
+-> row in full (all=2, dffull's rebuild), or the dirty spans (FALSE).
+-> FALSE = could not (the caller's old path runs, nothing was drawn).
+PROC dpaint(all)
+  DEF k:PTR TO console, ly:PTR TO layer, cr:PTR TO cliprect, h, base=0,
+      bpr=0, pf=-1, r, x0, x1, sty, bm, styled=FALSE, n
+  k := curcon
+  IF k.dpok = FALSE THEN RETURN FALSE
+  IF k.sb = NIL THEN RETURN FALSE  -> (not in dpprobe: openwin's gridcalc
+                                -> runs before the model is allocated)
+  IF k.viewoff > 0 THEN RETURN FALSE
+  ly := k.rp.layer
+  IF ly = NIL THEN RETURN FALSE
+  bm := k.rp.bitmap
+  IF k.mfloor <> $FF THEN RETURN dpplanar(all, ly, bm)
+  GetRGB32(k.win.wscreen.viewport.colormap, 0, 16, dprgb)  -> before any lock
+  LockLayerRom(ly)
+  cr := ly.cliprect
+  IF cr = NIL
+    UnlockLayerRom(ly)
+    RETURN FALSE
+  ENDIF
+  IF (cr.next <> NIL) OR (cr.obscured <> NIL) OR
+     (cr.minx <> ly.minx) OR (cr.miny <> ly.miny) OR
+     (cr.maxx <> ly.maxx) OR (cr.maxy <> ly.maxy) OR
+     (ly.superbitmap <> NIL)
+    UnlockLayerRom(ly)
+    RETURN FALSE
+  ENDIF
+  IF p96base
+    -> RenderInfo: Memory, BytesPerRow (WORD), pad, RGBFormat (LONG)
+    h := p96lock(bm, dpri)
+    IF h = 0
+      UnlockLayerRom(ly)
+      RETURN FALSE
+    ENDIF
+    base := dpri[0]
+    bpr := Shr(dpri[1], 16)
+    pf := dppens(dpri[2])      -> RGBFTYPE -> bytes per pixel, or -1
+  ELSE
+    h := LockBitMapTagList(bm, [LBMI_BASEADDRESS, {base}, LBMI_BYTESPERROW, {bpr},
+                                LBMI_PIXFMT, {pf}, TAG_DONE])
+    IF h = NIL
+      UnlockLayerRom(ly)
+      RETURN FALSE
+    ENDIF
+    pf := IF pf = 0 THEN dppens(1) ELSE -1  -> cgx road: LUT8 only
+  ENDIF
+  IF (pf < 1) OR (base = 0) OR (bpr <= 0)
+    dpunlock(bm, h)
+    UnlockLayerRom(ly)
+    RETURN FALSE
+  ENDIF
+  dpbpp := pf
+  base := base + Mul(ly.miny, bpr) + Mul(ly.minx, pf)
+  n := 0
+  FOR r := 0 TO k.rows - 1
+    sty := 0
+    IF all = 2                  -> a full rebuild: the old screen is
+      sty := dprow(base, bpr, r, 0, k.cols - 1)  -> unknown, every cell
+    ELSEIF all
+      sty := dprow(base, bpr, r, 0, dpreach(r) - 1)
+    ELSEIF dfd[r] = dfgen
+      x0 := dfx0[r]
+      x1 := dfx1[r]
+      sty := dprow(base, bpr, r, x0, x1)
+    ENDIF
+    IF sty
+      styled := TRUE
+      dpsty[r] := 1
+    ELSE
+      dpsty[r] := 0
+    ENDIF
+  ENDFOR
+  dpunlock(bm, h)
+  UnlockLayerRom(ly)
+  IF styled                     -> italic/underline cells: Text draws
+    FOR r := 0 TO k.rows - 1    -> them, the lock is gone
+      IF dpsty[r]
+        IF all = 2
+          drawmodelcells(r, 0, k.cols - 1)
+        ELSEIF all
+          drawmodelcells(r, 0, dpreach(r) - 1)
+        ELSE
+          drawmodelcells(r, dfx0[r], dfx1[r])
+        ENDIF
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC TRUE
+
+-> Picasso96API has no E module: its two calls by hand, the offsets
+-> read off the 2.495 library's own jump table (4.10.26 - the -48 entry
+-> takes A0 bitmap, A1 buffer, D0 size; -54 A0 bitmap, D0 lock)
+PROC p96lock(bm, ri)
+  DEF r=0, b
+  b := p96base
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L bm,A0
+  MOVE.L ri,A1
+  MOVEQ #12,D0
+  MOVE.L b,A6
+  JSR -48(A6)
+  MOVEM.L (A7)+,D2-D7/A2-A6
+  MOVE.L D0,r
+ENDPROC r
+
+PROC dpunlock(bm, h)
+  DEF b
+  IF p96base = NIL
+    UnLockBitMap(h)
+    RETURN
+  ENDIF
+  b := p96base
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L bm,A0
+  MOVE.L h,D0
+  MOVE.L b,A6
+  JSR -54(A6)
+  MOVEM.L (A7)+,D2-D7/A2-A6
+ENDPROC
+
+-> 1.2.8b8: how far right screen row r must be repainted when the
+-> deferred scroll (dfpend rows) is served by repainting. Pixels right
+-> of the reach are blank before AND after, so they are left alone:
+-> - the row's NEW content: its model extent;
+-> - its OLD pixels: the model row that was on screen row r before the
+->   scroll (ring index sbtop - dfpend + r - history keeps it), which
+->   the engine's invariant says is on screen as the model holds it,
+->   except where marked dirty: its dirt now sits dfpend rows up, or,
+->   if it scrolled off the top, in dflost.
+PROC dpreach(r)
+  DEF k:PTR TO console, w, i, o
+  k := curcon
+  w := mext(k.sbtop + r)
+  i := k.sbtop - dfpend + r
+  IF i < 0 THEN i := i + k.sbmax
+  w := Max(w, mext(i))
+  o := r - dfpend
+  IF o >= 0
+    IF (dfd[o] = dfgen) AND (o >= dflo) AND (o <= dfhi) THEN w := Max(w, dfx1[o] + 1)
+  ELSE
+    w := Max(w, dflost)
+  ENDIF
+  IF w > k.cols THEN w := k.cols
+ENDPROC w
+
+-> one ring row's extent: cells to the last one holding anything (a
+-> glyph, an attribute, a style) - a blank is all three zero
+PROC mext(i)
+  DEF k:PTR TO console, m:PTR TO CHAR, a:PTR TO CHAR, t:PTR TO CHAR, x
+  k := curcon
+  IF i >= k.sbmax THEN i := i - k.sbmax
+  i := Mul(i, k.cols)
+  m := k.sb + i
+  a := k.sa + i
+  t := k.ss + i
+  x := k.cols - 1
+  WHILE x >= 0
+    IF m[x] OR a[x] OR t[x] THEN RETURN x + 1
+    x--
+  ENDWHILE
+ENDPROC 0
+
+-> the 32-bit pixel row, the whole bill of a direct repaint: n cells
+-> of cw pixels, each pixel (mask AND (fg EOR bg)) EOR bg from the
+-> 0/-1 table, four instructions a pixel. Every input is in a register
+-> before A4/A5 are taken over, and nothing E is touched until they
+-> are restored.
+PROC dpasm32(dst, gop, xlp, bbp, n, cw, tbl, glp)
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L dst,A0
+  MOVE.L gop,A2
+  MOVE.L glp,A3
+  MOVE.L tbl,A1
+  MOVE.L n,D7
+  MOVE.L cw,D6
+  MOVE.L xlp,D4
+  MOVE.L bbp,D5
+  MOVEA.L D4,A4
+  MOVEA.L D5,A5
+  SUBQ.L #1,D7
+  SUBQ.L #1,D6
+dpa32c:
+  MOVE.L (A2)+,D0
+  MOVEQ #0,D1
+  MOVE.B 0(A3,D0.L),D1
+  LSL.L #5,D1
+  LEA 0(A1,D1.L),A6
+  MOVE.L (A4)+,D2
+  MOVE.L (A5)+,D3
+  CMP.W #7,D6
+  BNE.S dpa32g
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  DBRA D7,dpa32c
+  BRA.S dpa32x
+dpa32g:
+  MOVE.W D6,D5
+dpa32p:
+  MOVE.L (A6)+,D4
+  AND.L D2,D4
+  EOR.L D3,D4
+  MOVE.L D4,(A0)+
+  DBRA D5,dpa32p
+  DBRA D7,dpa32c
+dpa32x:
+  MOVEM.L (A7)+,D2-D7/A2-A6
+ENDPROC
+
+-> ---------- 1.2.8b8: the planar twin (his hint: colour rows straight
+-> into the bitplanes) ----------
+-> On a planar screen a scroll stays the masked blitter scroll - a CPU
+-> repaint of the window cannot beat the blitter on a stock machine -
+-> so all=TRUE declines. What goes direct is the TEXT: dirty spans and
+-> the form-feed rebuild. Text() costs a call, a template build and a
+-> blit per colour run; this writes a whole row per plane in one pass,
+-> any cell width (7-pixel MicroKnight sits on no byte boundary), and
+-> only the planes in mmask - the mask invariant says every other
+-> plane is zero in the region before and after, so skipping it is the
+-> identity, exactly as for the masked Text() it replaces.
+PROC dpplanar(all, ly:PTR TO layer, bm:PTR TO bitmap)
+  DEF k:PTR TO console, cr:PTR TO cliprect, r, sty, styled=FALSE
+  k := curcon
+  IF all = TRUE THEN RETURN FALSE          -> scrolls: the blitter's
+  WaitBlit()                    -> a queued scroll must land first
+  LockLayerRom(ly)
+  cr := ly.cliprect
+  IF cr = NIL
+    UnlockLayerRom(ly)
+    RETURN FALSE
+  ENDIF
+  IF (cr.next <> NIL) OR (cr.obscured <> NIL) OR
+     (cr.minx <> ly.minx) OR (cr.miny <> ly.miny) OR
+     (cr.maxx <> ly.maxx) OR (cr.maxy <> ly.maxy) OR
+     (ly.superbitmap <> NIL)
+    UnlockLayerRom(ly)
+    RETURN FALSE
+  ENDIF
+  IF fastok AND (k.cw = 8)
+    IF ppsetup(ly, bm)
+      styled := fcall3(8, pctx, fxtab, all)
+      UnlockLayerRom(ly)
+      JUMP dppstyled
+    ENDIF
+  ENDIF
+  FOR r := IF all THEN 0 ELSE Max(dflo, 0) TO IF all THEN k.rows - 1 ELSE Min(dfhi, k.rows - 1)
+    sty := 0
+    IF all = 2
+      sty := dprowp(bm, ly, r, 0, k.cols - 1)
+    ELSEIF dfd[r] = dfgen
+      sty := dprowp(bm, ly, r, dfx0[r], dfx1[r])
+    ENDIF
+    dpsty[r] := IF sty THEN 1 ELSE 0
+    IF sty THEN styled := TRUE
+  ENDFOR
+  UnlockLayerRom(ly)
+dppstyled:
+  IF styled
+    FOR r := IF all THEN 0 ELSE Max(dflo, 0) TO IF all THEN k.rows - 1 ELSE Min(dfhi, k.rows - 1)
+      IF dpsty[r]
+        IF all = 2
+          drawmodelcells(r, 0, k.cols - 1)
+        ELSE
+          drawmodelcells(r, dfx0[r], dfx1[r])
+        ENDIF
+      ENDIF
+    ENDFOR
+  ENDIF
+ENDPROC TRUE
+
+-> 1.2.8b9: the C painter's context for this window (struct pctx):
+-> FALSE when this bitmap does not suit it (planes or rows not long-
+-> aligned, deeper than 8) - the E writer below runs then
+PROC ppsetup(ly:PTR TO layer, bm:PTR TO bitmap)
+  DEF k:PTR TO console, ax, ay, p, cs, bpr, n
+  k := curcon
+  ax := ly.minx + k.left
+  ay := ly.miny + k.topy
+  -> the same window, place, bitmap and font as last time: pctx stands
+  -> (a flush per line - conbench's sync-line - paid ~0.5ms here)
+  IF (pkey[0] = bm) AND (pkey[1] = ax) AND (pkey[2] = ay) AND
+     (pkey[3] = k.ch) AND (pkey[4] = dgtf) AND (pkey[5] = gsh) THEN RETURN TRUE
+  pkey[0] := 0
+  bpr := bm.bytesperrow
+  IF (bpr AND 3) OR (bm.depth > 8) OR (bm.depth < 1) THEN RETURN FALSE
+  FOR p := 0 TO bm.depth - 1
+    IF bm.planes[p] AND 3 THEN RETURN FALSE
+  ENDFOR
+  IF ptmp = NIL THEN ptmp := New(16384)
+  IF ptmp = NIL THEN RETURN FALSE
+  ax := ly.minx + k.left
+  ay := ly.miny + k.topy
+  cs := IF k.ch <= 8 THEN 8 ELSE IF k.ch <= 16 THEN 16 ELSE 32  -> a power of 2:
+                                -> ptrans finds a glyph by shift
+  IF (gsh = NIL) OR (gshtf <> dgtf) OR (gshch <> k.ch) OR (gshs <> (ax AND 7))
+    IF cs > gshcs
+      IF gsh THEN Dispose(gsh)
+      gsh := New(Mul(512, cs))
+      gshcs := IF gsh THEN cs ELSE 0
+    ENDIF
+    IF gsh = NIL THEN RETURN FALSE
+    fcall5(12, gsh, dgl, k.ch, cs, ax AND 7)
+    gshtf := dgtf
+    gshch := k.ch
+    gshs := ax AND 7
+  ENDIF
+  pctx[0] := gsh
+  pctx[1] := cs
+  pctx[2] := k.ch
+  pctx[3] := ax AND 7
+  pctx[4] := Shr(ax, 3)
+  n := Mul(ay, bpr)
+  FOR p := 0 TO 7
+    pctx[5 + p] := IF p < bm.depth THEN bm.planes[p] + n ELSE 0
+  ENDFOR
+  pctx[13] := bpr
+  pctx[14] := bm.depth
+  pctx[15] := dpsty
+  pctx[16] := ptmp
+  pkey[0] := bm
+  pkey[1] := ax
+  pkey[2] := ay
+  pkey[3] := k.ch
+  pkey[4] := dgtf
+  pkey[5] := gsh
+ENDPROC TRUE
+
+-> one model row's cells x0..x1 into the bitplanes in mmask
+PROC dprowp(bm:PTR TO bitmap, ly:PTR TO layer, r, x0, x1)
+  DEF k:PTR TO console, idx, off, styled, y, ch, cw, p, px0, py, bpr,
+      pl, n, mask, b0, go, fgp, bgp, gl
+  k := curcon
+  IF x0 < 0 THEN x0 := 0
+  IF x1 > (k.cols - 1) THEN x1 := k.cols - 1
+  IF x0 > x1 THEN RETURN FALSE
+  ch := k.ch
+  cw := k.cw
+  idx := k.sbtop + r
+  IF idx >= k.sbmax THEN idx := idx - k.sbmax
+  off := Mul(idx, k.cols) + x0
+  n := x1 - x0 + 1
+  go := dpgo                    -> glyph offsets (LONG), then the pens
+  fgp := dpfm                   -> (bytes) - one asm pass for the row
+  bgp := dpbm
+  styled := dpcells(k.sb + off, k.sa + off, k.ss + off, n, ch, k.deffg,
+                    go, fgp, bgp)
+  px0 := ly.minx + k.left + Mul(x0, cw)
+  b0 := px0 AND 7
+  py := ly.miny + k.topy + Mul(r, ch)
+  bpr := bm.bytesperrow
+  mask := k.mmask
+  gl := dgl
+  FOR p := 0 TO bm.depth - 1
+    IF mask AND Shl(1, p)
+      pl := bm.planes[p] + Mul(py, bpr) + Shr(px0, 3)
+      FOR y := 0 TO ch - 1
+        dplinep(pl, b0, go, gl + y, fgp, bgp, n, cw, p)
+        pl := pl + bpr
+      ENDFOR
+    ENDIF
+  ENDFOR
+ENDPROC styled
+
+-> a row's cells in one asm pass, drawmrow's pen rules verbatim: the
+-> glyph offset (char*ch, controls as space), fg and bg (attr 0 + no
+-> style = pen 0 on 0; inverse swaps, fg=bg inverse takes deffg).
+-> Returns TRUE when an italic/underline cell is in the span.
+PROC dpcells(m, a, st, n, ch, deffg, gop, fgp, bgp)
+  DEF r=0
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L m,A0
+  MOVE.L a,A1
+  MOVE.L st,A2
+  MOVE.L gop,A3
+  MOVE.L fgp,A4
+  MOVE.L bgp,A6
+  MOVE.L n,D7
+  MOVE.L ch,D6
+  MOVE.L deffg,D5
+  MOVEQ #0,D4                   -> styled
+  SUBQ.L #1,D7
+dpcel:
+  MOVEQ #0,D0
+  MOVE.B (A0)+,D0               -> char
+  CMP.W #32,D0
+  BCC.S dpcc
+  MOVEQ #32,D0
+dpcc:
+  MULU D6,D0
+  MOVE.L D0,(A3)+               -> glyph offset
+  MOVEQ #0,D1
+  MOVE.B (A1)+,D1               -> attr
+  MOVEQ #0,D2
+  MOVE.B (A2)+,D2               -> style
+  MOVE.B D2,D0
+  AND.B #11,D0                  -> italic, underline, bold (1.2.8b9)
+  BEQ.S dpcn
+  MOVEQ #1,D4
+dpcn:
+  MOVE.B D1,D0
+  OR.B D2,D0
+  BNE.S dpcp
+  CLR.B (A4)+                   -> blank: pen 0 on 0
+  CLR.B (A6)+
+  BRA.S dpcx
+dpcp:
+  MOVE.B D1,D3
+  AND.B #15,D3                  -> fg
+  LSR.B #4,D1
+  AND.B #7,D1                   -> bg
+  BTST.L #2,D2
+  BEQ.S dpcw
+  CMP.B D1,D3                   -> inverse: fg=bg takes deffg first
+  BNE.S dpcs
+  MOVE.B D5,D3
+dpcs:
+  EXG D1,D3
+dpcw:
+  MOVE.B D3,(A4)+
+  MOVE.B D1,(A6)+
+dpcx:
+  DBRA D7,dpcel
+  MOVE.L D4,D0
+  MOVEM.L (A7)+,D2-D7/A2-A6
+  MOVE.L D0,r
+ENDPROC r
+
+-> one pixel line of one plane: n cells of cw bits starting b0 bits
+-> into the byte at dst; each cell's bit is fg's or bg's bit p. The
+-> bits left of b0 and right of the span are kept. Byte stores only -
+-> 68000-safe. (dpline's twin with the plane test folded in - the
+-> per-plane mask arrays were E loops, and on a chip-RAM-only machine
+-> every E instruction is fetched against the display.)
+PROC dplinep(dst, b0, gop, glp, fgp, bgp, n, cw, pb)
+  MOVEM.L D2-D7/A2-A6,-(A7)
+  MOVE.L dst,A0
+  MOVE.L gop,A1
+  MOVE.L glp,A2
+  MOVE.L fgp,A3
+  MOVE.L bgp,A4
+  MOVE.L n,D7
+  MOVE.L cw,D6
+  MOVE.L b0,D5
+  MOVE.L pb,A6                  -> the plane number, kept in A6
+  MOVEQ #0,D4
+  TST.L D5
+  BEQ.S dpqst
+  MOVE.B (A0),D4
+  MOVEQ #8,D0
+  SUB.L D5,D0
+  LSR.L D0,D4
+dpqst:
+  SUBQ.L #1,D7
+dpqc:
+  MOVE.L (A1)+,D0
+  MOVEQ #0,D1
+  MOVE.B 0(A2,D0.L),D1          -> glyph bits, left-aligned
+  MOVE.L A6,D0
+  MOVE.B (A3)+,D2
+  BTST.L D0,D2
+  SNE D2                        -> fg's bit p as $FF/$00
+  MOVE.B (A4)+,D3
+  BTST.L D0,D3
+  SNE D3                        -> bg's
+  AND.B D1,D2
+  NOT.B D1
+  AND.B D3,D1
+  OR.B D2,D1
+  MOVEQ #8,D0
+  SUB.L D6,D0
+  LSR.B D0,D1                   -> the cell's cw bits, low-aligned
+  LSL.L D6,D4
+  OR.L D1,D4
+  ADD.L D6,D5
+  CMP.L #8,D5
+  BLT.S dpqnx
+  SUBQ.L #8,D5
+  MOVE.L D4,D0
+  LSR.L D5,D0
+  MOVE.B D0,(A0)+
+dpqnx:
+  DBRA D7,dpqc
+  TST.L D5
+  BEQ.S dpqx
+  MOVEQ #8,D0
+  SUB.L D5,D0
+  LSL.L D0,D4
+  MOVE.L #$FF,D1
+  LSR.L D5,D1
+  AND.B (A0),D1
+  OR.B D4,D1
+  MOVE.B D1,(A0)
+dpqx:
+  MOVEM.L (A7)+,D2-D7/A2-A6
+ENDPROC
+
+-> P96 RGBFTYPE -> the pen pixel table (from dprgb, filled before the
+-> lock) and the bytes per pixel; -1 = a layout not written here
+-> (24-bit, YUV, ...). Alpha bytes are 0, as P96's own fills leave them
+-> (read off the rig's framebuffer: pen 0 = $AAAAAA00 in B8G8R8A8).
+PROC dppens(fmt)
+  DEF i, r, g, b, v, bpp
+  bpp := -1
+  FOR i := 0 TO 15
+    r := Shr(dprgb[Mul(i, 3)], 24) AND $FF
+    g := Shr(dprgb[Mul(i, 3) + 1], 24) AND $FF
+    b := Shr(dprgb[Mul(i, 3) + 2], 24) AND $FF
+    SELECT fmt
+    CASE 1                      -> CLUT: the pen is the pixel
+      v := i
+      bpp := 1
+    CASE 6                      -> A8R8G8B8
+      v := Shl(r, 16) OR Shl(g, 8) OR b
+      bpp := 4
+    CASE 7                      -> A8B8G8R8
+      v := Shl(b, 16) OR Shl(g, 8) OR r
+      bpp := 4
+    CASE 8                      -> R8G8B8A8
+      v := Shl(r, 24) OR Shl(g, 16) OR Shl(b, 8)
+      bpp := 4
+    CASE 9                      -> B8G8R8A8 (the rig)
+      v := Shl(b, 24) OR Shl(g, 16) OR Shl(r, 8)
+      bpp := 4
+    CASE 10                     -> R5G6B5
+      v := Shl(Shr(r, 3), 11) OR Shl(Shr(g, 2), 5) OR Shr(b, 3)
+      bpp := 2
+    CASE 11                     -> R5G5B5
+      v := Shl(Shr(r, 3), 10) OR Shl(Shr(g, 3), 5) OR Shr(b, 3)
+      bpp := 2
+    CASE 4                      -> R5G6B5PC: the same, bytes swapped
+      v := Shl(Shr(r, 3), 11) OR Shl(Shr(g, 2), 5) OR Shr(b, 3)
+      v := (Shr(v, 8) AND $FF) OR Shl(v AND $FF, 8)
+      bpp := 2
+    CASE 5                      -> R5G5B5PC
+      v := Shl(Shr(r, 3), 10) OR Shl(Shr(g, 3), 5) OR Shr(b, 3)
+      v := (Shr(v, 8) AND $FF) OR Shl(v AND $FF, 8)
+      bpp := 2
+    CASE 12                     -> B5G6R5PC
+      v := Shl(Shr(b, 3), 11) OR Shl(Shr(g, 2), 5) OR Shr(r, 3)
+      v := (Shr(v, 8) AND $FF) OR Shl(v AND $FF, 8)
+      bpp := 2
+    CASE 13                     -> B5G5R5PC
+      v := Shl(Shr(b, 3), 10) OR Shl(Shr(g, 3), 5) OR Shr(r, 3)
+      v := (Shr(v, 8) AND $FF) OR Shl(v AND $FF, 8)
+      bpp := 2
+    DEFAULT
+      RETURN -1
+    ENDSELECT
+    IF bpp = 1 THEN v := Mul(v, $01010101)  -> CLUT: four pixels a long
+    dppen[i] := v
+  ENDFOR
+ENDPROC bpp
+
+-> one model row's cells x0..x1 into the framebuffer. Returns TRUE when
+-> the span holds italic/underline cells (drawn here plain, then
+-> redrawn by Text). Pens exactly as drawmrow/drawmodelcells set them.
+PROC dprow(base, bpr, r, x0, x1)
+  DEF k:PTR TO console, idx, off, m:PTR TO CHAR, a:PTR TO CHAR,
+      stp:PTR TO CHAR, i, c, at, sy, fg, bg, t, styled=FALSE, y, ch, cw,
+      p:PTR TO LONG, q:PTR TO CHAR, mb, xm, bl, go:PTR TO LONG,
+      xl:PTR TO LONG, bb:PTR TO LONG, gl:PTR TO CHAR, tb:PTR TO LONG,
+      line, j, mm
+  k := curcon
+  IF x0 < 0 THEN x0 := 0
+  IF x1 > (k.cols - 1) THEN x1 := k.cols - 1
+  IF x0 > x1 THEN RETURN FALSE
+  ch := k.ch
+  cw := k.cw
+  idx := k.sbtop + r
+  IF idx >= k.sbmax THEN idx := idx - k.sbmax
+  off := Mul(idx, k.cols)
+  m := k.sb + off
+  a := k.sa + off
+  stp := k.ss + off
+  go := dpgo
+  xl := dpxl
+  bb := dpbl
+  gl := dgl
+  tb := dxt
+  FOR i := x0 TO x1
+    c := m[i]
+    IF c < 32 THEN c := 32
+    at := a[i]
+    sy := stp[i]
+    IF sy AND 11 THEN styled := TRUE  -> italic/underline/bold: Text
+    IF (at = 0) AND (sy = 0)
+      fg := 0
+      bg := 0
+    ELSE
+      fg := at AND 15
+      bg := Shr(at, 4) AND 7
+      IF sy AND 4               -> inverse: drawmrow's swap, verbatim
+        IF fg = bg THEN fg := k.deffg
+        t := fg
+        fg := bg
+        bg := t
+      ENDIF
+    ENDIF
+    go[i] := Mul(c, ch)
+    bl := dppen[bg]
+    bb[i] := bl
+    xl[i] := Eor(dppen[fg], bl)
+  ENDFOR
+  line := base + Mul(k.topy + Mul(r, ch), bpr) + Mul(k.left + Mul(x0, cw), dpbpp)
+  IF dpbpp = 4
+    FOR y := 0 TO ch - 1
+      dpasm32(line, go + Shl(x0, 2), xl + Shl(x0, 2), bb + Shl(x0, 2),
+              x1 - x0 + 1, cw, dm32, gl + y)
+      line := line + bpr
+    ENDFOR
+  ELSEIF dpbpp = 2
+    tb := dm32
+    FOR y := 0 TO ch - 1
+      q := line
+      FOR i := x0 TO x1
+        mm := tb + Shl(gl[go[i] + y], 5)
+        xm := xl[i]
+        bl := bb[i]
+        FOR j := 0 TO cw - 1
+          PutInt(q, Eor(And(Long(mm), xm), bl))
+          mm := mm + 4
+          q := q + 2
+        ENDFOR
+      ENDFOR
+      line := line + bpr
+    ENDFOR
+  ELSEIF cw = 8
+    FOR y := 0 TO ch - 1
+      p := line
+      FOR i := x0 TO x1
+        mb := Shl(gl[go[i] + y], 3)
+        mm := tb + mb
+        xm := xl[i]
+        bl := bb[i]
+        p[0] := Eor(And(Long(mm), xm), bl)
+        p[1] := Eor(And(Long(mm + 4), xm), bl)
+        p := p + 8
+      ENDFOR
+      line := line + bpr
+    ENDFOR
+  ELSE
+    FOR y := 0 TO ch - 1
+      q := line
+      FOR i := x0 TO x1
+        mb := gl[go[i] + y]
+        fg := Eor(xl[i], bb[i]) AND $FF
+        bg := bb[i] AND $FF
+        FOR j := 0 TO cw - 1
+          q[j] := IF mb AND Shl(1, 7 - j) THEN fg ELSE bg
+        ENDFOR
+        q := q + cw
+      ENDFOR
+      line := line + bpr
+    ENDFOR
+  ENDIF
+ENDPROC styled
+
+-> the dirty spans of one flush: direct or Text(), measured the same
+-> way (units = cells)
+PROC dfspans()
+  DEF r, n, t, dir, served, job
+  IF dfhi < dflo THEN RETURN
+  -> 1.2.8b9: planar + the C painter: no choosing to do (it is the
+  -> faster one there), so no counting, no EClock, no samples
+  IF fastok AND curcon.dpok AND (curcon.mfloor <> $FF) AND (curcon.cw = 8)
+    IF dpaint(FALSE) THEN RETURN
+  ENDIF
+  n := 0
+  FOR r := dflo TO dfhi
+    IF dfd[r] = dfgen THEN n := n + dfx1[r] - dfx0[r] + 1
+  ENDFOR
+  job := IF n < 40 THEN 0 ELSE 2  -> small spans pay the fixed cost
+  dir := dpwant(job)              -> per flush, large ones per cell -
+  t := dpnow()                    -> measured apart (erase-eol vs plain)
+  served := FALSE
+  IF dir THEN served := dpaint(FALSE)
+  IF served = FALSE
+    FOR r := dflo TO dfhi        -> E2b: scan the dirty RANGE only
+      IF dfd[r] = dfgen
+        drawmodelcells(r, dfx0[r], dfx1[r])
+      ENDIF
+    ENDFOR
+  ENDIF
+  dprec(job, served, dpnow() - t, n)
+ENDPROC
+
+-> ---------- 1.2.8b8: which painter is faster HERE ----------
+-> Measured on three machines, no one answer: on the A1200's PiStorm RTG
+-> the direct writer halves a flush; on a stock A1200 (14MHz 020, chip
+-> RAM only) it is 40% SLOWER than Text() - our code fetches from chip
+-> RAM against the display, the ROM's from ROM, and the blitter does
+-> Text()'s plane work. So each window measures: while young it
+-> alternates the two (pixel-identical - the A/B grabs prove it), times
+-> each with the EClock, and after eight samples of each keeps the
+-> cheaper per unit. Job 0 = text spans (unit: a cell), job 1 = the
+-> scroll (unit: a flush). A new probe (open, resize, font) measures
+-> again.
+PROC dpcalreset()
+  DEF k:PTR TO console, j
+  k := curcon
+  FOR j := 0 TO 2 DO dpjobreset(j)
+  IF k.mfloor <> $FF THEN k.dcal[8] := 2  -> planar scrolls blit
+  k.dpm := -1
+  IF timerbase = NIL            -> nothing to time with: RTG's measured
+    FOR j := 0 TO 2             -> winner, else the ROM
+      IF k.dcal[Shl(j, 3)] = 0 THEN k.dcal[Shl(j, 3)] := IF k.mfloor = $FF THEN 1 ELSE 2
+    ENDFOR
+  ENDIF
+ENDPROC
+
+PROC dpjobreset(j)
+  DEF i, c:PTR TO LONG
+  c := curcon.dcal
+  FOR i := Shl(j, 3) TO Shl(j, 3) + 7 DO c[i] := 0
+ENDPROC
+
+PROC dpnow()
+  DEF ev:eclockval
+  IF timerbase = NIL THEN RETURN 0
+  ReadEClock(ev)
+ENDPROC ev.lo
+
+PROC dpwant(job)
+  DEF k:PTR TO console, sel, pc, m, c:PTR TO LONG
+  k := curcon
+  IF k.dpok = FALSE THEN RETURN FALSE
+  c := k.dcal
+  -> planar text: the writer's cost grows with every plane in the mask,
+  -> Text()'s blitter does them all in one pass - so a choice made with
+  -> one plane (plain text) does not hold for four (colour). A changed
+  -> plane count measures the text jobs again; the mask changes rarely.
+  IF (job <> 1) AND (k.mfloor <> $FF)
+    m := k.mmask AND $FF
+    pc := 0
+    WHILE m
+      IF m AND 1 THEN pc := pc + 1
+      m := Shr(m, 1)
+    ENDWHILE
+    IF pc <> k.dpm
+      k.dpm := pc
+      dpjobreset(0)
+      dpjobreset(2)
+    ENDIF
+  ENDIF
+  IF k.pdirect = 2 THEN RETURN TRUE
+  sel := c[Shl(job, 3)]
+  IF sel = 1 THEN RETURN TRUE
+  IF sel = 2 THEN RETURN FALSE
+ENDPROC (c[Shl(job, 3) + 1] AND 1) = 0
+
+PROC dprec(job, direct, ticks, units)
+  DEF k:PTR TO console, c:PTR TO LONG, b
+  k := curcon
+  IF k.dpok = FALSE THEN RETURN
+  IF units <= 0 THEN RETURN
+  IF ticks < 0 THEN RETURN      -> (EClock low word wrapped mid-flush)
+  c := k.dcal
+  b := Shl(job, 3)
+  IF c[b] <> 0 THEN RETURN
+  c[b + 1] := c[b + 1] + 1
+  IF direct
+    c[b + 2] := c[b + 2] + ticks
+    c[b + 3] := c[b + 3] + units
+    c[b + 6] := c[b + 6] + 1
+  ELSE
+    c[b + 4] := c[b + 4] + ticks
+    c[b + 5] := c[b + 5] + units
+    c[b + 7] := c[b + 7] + 1
+  ENDIF
+  IF (c[b + 6] >= 8) AND (c[b + 7] >= 8)
+    c[b] := IF dpcheaper(c[b + 2], c[b + 3], c[b + 4], c[b + 5]) THEN 1 ELSE 2
+  ENDIF
+ENDPROC
+
+-> td/ud < tt/ut, without a 32/32 divide (E's Div is 32/16): halve
+-> everything until the cross products fit, then compare them
+PROC dpcheaper(td, ud, tt, ut)
+  WHILE (td > $7FFF) OR (ud > $7FFF) OR (tt > $7FFF) OR (ut > $7FFF)
+    td := Shr(td, 1)
+    ud := Shr(ud, 1)
+    tt := Shr(tt, 1)
+    ut := Shr(ut, 1)
+  ENDWHILE
+  IF ud < 1 THEN ud := 1
+  IF ut < 1 THEN ut := 1
+ENDPROC Mul(td, ut) < Mul(tt, ud)
+
 PROC dfflush()
-  DEF r
+  DEF r, dir, t, served, ly
   IF dfon = FALSE THEN RETURN
-  IF dffull
-    redraw()
+  -> 1.2.8b9: the planar painter's flush in C (cflush in engine.c: the
+  -> lock, the cliprect check, the scroll blit, the paint, vblankscan and
+  -> the bookkeeping below). -1 = it did nothing (covered or split
+  -> window): the E path below runs exactly as before
+  IF fastok AND curcon.dpok AND (curcon.mfloor <> $FF) AND (curcon.cw = 8) AND (curcon.viewoff = 0)
+    ly := curcon.rp.layer
+    IF ly AND (curcon.sb <> NIL)
+      IF ppsetup(ly, curcon.rp.bitmap)
+        r := fcall2(20, fxtab, pctx)
+        IF r >= 0
+          IF r AND 1 THEN cfstyled(r AND 4)
+          IF r AND 2 THEN maskscan()
+          RETURN
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDIF
+  IF dffull AND dfvb AND curcon.vblank
+    -> 1.2.8b8: blank before, blank now - the rebuild would paint a
+    -> blank page over a blank page. scroll-nl on a stock A1200 spent
+    -> 176ms a flush doing exactly that (33 rows of RectFill).
+    dffull := FALSE
+    IF dfnarrow
+      maskscan()
+      dfnarrow := FALSE
+    ENDIF
+  ELSEIF dffull
+    IF dpaint(2)                   -> 1.2.8b8: the rebuild, direct;
+      vblankscan()                 -> redraw's own E5 duty kept
+    ELSE
+      redraw()
+    ENDIF
     dffull := FALSE
     IF dfnarrow                    -> b2: the redraw above repainted every
       maskscan()                   -> visible cell at the old mask; the
       dfnarrow := FALSE            -> page is truthful, narrow to it
     ENDIF
   ELSE
-    IF dfpend > 0
-      IF curcon.vblank = FALSE    -> E5: no blit when nothing to move
+    IF (dfpend > 0) AND (curcon.vblank = FALSE)  -> E5: no blit when
+      -> nothing to move. 1.2.8b8: on RTG the blit READS video memory
+      -> and that read is the bill (10.8ms a line on the A1200's P96
+      -> screen; a write-only fill of the same area 2.0ms) - repainting
+      -> every row from the model writes only, and serves every dirty
+      -> mark too. Which is cheaper is the machine's call: dpwant/dprec
+      -> time both while the window is young and keep the winner.
+      IF curcon.mfloor <> $FF     -> 1.2.8b9: planar scrolls are blits,
+        dir := FALSE              -> decided: skip the bookkeeping
+        t := 0
+      ELSE
+        dir := dpwant(1)
+        t := dpnow()
+      ENDIF
+      served := FALSE
+      IF dir THEN served := dpaint(TRUE)
+      IF served
+        dflo := curcon.rows      -> served: skip the dirty scan
+        dfhi := -1
+      ELSE
         ScrollRaster(curcon.rp, 0, Mul(dfpend, curcon.ch),
                      curcon.win.borderleft, curcon.win.bordertop,
                      curcon.win.width - curcon.win.borderright - 1,
                      curcon.win.height - curcon.win.borderbottom - 1)
       ENDIF
       dfpend := 0
-    ENDIF
-    IF dfhi >= dflo                -> E2b: scan the dirty RANGE only
-      FOR r := dflo TO dfhi
-        IF dfd[r] = dfgen
-          drawmodelcells(r, dfx0[r], dfx1[r])
-        ENDIF
-      ENDFOR
+      dfspans()
+      IF curcon.mfloor = $FF THEN dprec(1, served, dpnow() - t, 1)
+    ELSE
+      dfpend := 0
+      dfspans()
     ENDIF
   ENDIF
   dfgen := dfgen + 1               -> E2a: O(1) invalidation of every
   IF dfgen > 255                   -> mark (stale spans after dffull
-    FOR r := 0 TO DFROWS - 1       -> included - the old explicit drop
-      dfd[r] := 0                  -> loop is subsumed)
+    FOR r := 0 TO 511              -> included - the old explicit drop
+      dfdb[r] := 0                 -> loop is subsumed)
     ENDFOR
     dfgen := 1
   ENDIF
   dflo := curcon.rows
   dfhi := -1
+  dflost := 0
+  dfvb := curcon.vblank         -> settled: screen = model again
+ENDPROC
+
+-> after cflush: the italic/underline rows go through Text (the painter
+-> drew them plain), then dfflush's own bookkeeping, which cflush left
+PROC cfstyled(full)
+  DEF r, r0, r1
+  r0 := IF full THEN 0 ELSE Max(dflo, 0)
+  r1 := IF full THEN curcon.rows - 1 ELSE Min(dfhi, curcon.rows - 1)
+  FOR r := r0 TO r1
+    IF dpsty[r]
+      IF full
+        drawmodelcells(r, 0, curcon.cols - 1)
+      ELSEIF dfd[r] = dfgen
+        drawmodelcells(r, dfx0[r], dfx1[r])
+      ENDIF
+    ENDIF
+  ENDFOR
+  dfgen := dfgen + 1
+  IF dfgen > 255
+    FOR r := 0 TO 511 DO dfdb[r] := 0
+    dfgen := 1
+  ENDIF
+  dflo := curcon.rows
+  dfhi := -1
+  dflost := 0
+  dfvb := curcon.vblank
 ENDPROC
 
 PROC outnl()
@@ -6310,6 +7940,7 @@ PROC outchr(c)
   setsoft(curcon.cursty)
   Move(curcon.rp, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline)
   Text(curcon.rp, b, 1)
+  ulline(curcon.cursty, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline, 1)
   IF curcon.sb
     m := visrow(curcon.cy)
     m[curcon.cx] := c
@@ -6340,6 +7971,8 @@ ENDPROC
 PROC csidispatch(c)
   DEF n, i, v
   n := curcon.cpar[0]
+  IF c <> "m" THEN curcon.jslk := FALSE  -> 1.2.8b8: anything but colour
+                                -> may move or fill below the cursor
   IF c = "A"
     IF n < 1 THEN n := 1
     curcon.cy := curcon.cy - n
@@ -6418,23 +8051,25 @@ PROC csidispatch(c)
         curcon.cursty := 0
       ELSEIF v = 1
         curcon.bold := TRUE
+        curcon.cursty := curcon.cursty OR 8   -> 1.2.8b9: and bold letters
       ELSEIF v = 22
         curcon.bold := FALSE
+        curcon.cursty := curcon.cursty AND 7
       ELSEIF v = 3
         -> v1.1 soft styles: italic (3/23), underline (4/24),
         -> inverse (7/27) - the styles stock CON: renders and 1.0
         -> dropped; they live in the model's third plane
         curcon.cursty := curcon.cursty OR 1
       ELSEIF v = 23
-        curcon.cursty := curcon.cursty AND 6
+        curcon.cursty := curcon.cursty AND 14   -> (keeps bit3, bold)
       ELSEIF v = 4
         curcon.cursty := curcon.cursty OR 2
       ELSEIF v = 24
-        curcon.cursty := curcon.cursty AND 5
+        curcon.cursty := curcon.cursty AND 13
       ELSEIF v = 7
         curcon.cursty := curcon.cursty OR 4
       ELSEIF v = 27
-        curcon.cursty := curcon.cursty AND 3
+        curcon.cursty := curcon.cursty AND 11
       ELSEIF (v >= 30) AND (v <= 37)
         curcon.curfg := v - 30
         curcon.cursgr := TRUE
@@ -6783,22 +8418,159 @@ PROC eraseeol()
   ENDIF                         -> margin, so nothing continues it
 ENDPROC
 
+-> ---------- 1.2.8b9: the C engine (engine/engine.c, INCBIN'd below as
+-> engine.bin: position independent, entry table at its start) ----------
+-> fxsetup fills the address table struct fx reads and runs the layout
+-> check: a scratch console with known values, summed by the C side's
+-> own struct (genstruct.py's mirror of OBJECT console). Any mismatch -
+-> a field added here and engine.bin not rebuilt - leaves the engine
+-> off and render() exactly as it was.
+PROC fxsetup()
+  DEF k:PTR TO console, v
+  fastok := FALSE
+  fxtab[0] := {curcon}
+  fxtab[1] := {dfon}
+  fxtab[2] := {dfpend}
+  fxtab[3] := {dffull}
+  fxtab[4] := {dflo}
+  fxtab[5] := {dfhi}
+  fxtab[6] := {dflost}
+  fxtab[7] := {dfgen}
+  fxtab[8] := {alteat}
+  fxtab[9] := {dfnarrow}
+  fxtab[10] := {maskon}
+  fxtab[11] := {dfd}
+  fxtab[12] := {dfx0}
+  fxtab[13] := {dfx1}
+  fxtab[14] := {dfo}
+  fxtab[15] := dfdb
+  fxtab[16] := dfx0b
+  fxtab[17] := dfx1b
+  fxtab[18] := {conlist}
+  fxtab[19] := {flusharmed}
+  fxtab[20] := port
+  fxtab[21] := execbase
+  fxtab[22] := {dfvb}
+  fxtab[23] := gfxbase
+  fxtab[24] := {dgtf}
+  fxtab[25] := {gsh}
+  fxtab[26] := pkey
+  fxtab[27] := {fxret}
+  fxtab[28] := {fxold}
+  fxtab[29] := ftreq
+  fxtab[30] := {fdelay}
+  IF SIZEOF console <> FXCONSIZE THEN RETURN
+  IF (Int(execbase + 296) AND 2) = 0 THEN RETURN  -> AttnFlags: engine.bin
+                                -> is 68020 code (extb, scaled index...)
+  k := New(SIZEOF console)
+  IF k = NIL THEN RETURN
+  k.cx := 1
+  k.sb := 2
+  k.mmask := 3
+  k.vblank := 4
+  k.osct[83] := 5
+  k.cursty := 6
+  k.anstab[7] := 7
+  k.jslk := 8
+  v := fcall1(4, k)
+  Dispose(k)
+  IF v = 454 THEN fastok := TRUE
+ENDPROC
+
+-> frun(fx, buf, i, len): the next index E must take
+PROC frun(x, buf, i, len)
+  DEF r, f
+  f := {engine}
+  MOVE.L len,-(A7)
+  MOVE.L i,-(A7)
+  MOVE.L buf,-(A7)
+  MOVE.L x,-(A7)
+  MOVE.L f,A0
+  JSR (A0)
+  LEA 16(A7),A7
+  MOVE.L D0,r
+ENDPROC r
+
+PROC fcall2(off, a, b)
+  DEF r, f
+  f := {engine} + off
+  MOVE.L b,-(A7)
+  MOVE.L a,-(A7)
+  MOVE.L f,A0
+  JSR (A0)
+  ADDQ.L #8,A7
+  MOVE.L D0,r
+ENDPROC r
+
+PROC fcall3(off, a, b, c)
+  DEF r, f
+  f := {engine} + off
+  MOVE.L c,-(A7)
+  MOVE.L b,-(A7)
+  MOVE.L a,-(A7)
+  MOVE.L f,A0
+  JSR (A0)
+  LEA 12(A7),A7
+  MOVE.L D0,r
+ENDPROC r
+
+PROC fcall5(off, a, b, c, d, e)
+  DEF r, f
+  f := {engine} + off
+  MOVE.L e,-(A7)
+  MOVE.L d,-(A7)
+  MOVE.L c,-(A7)
+  MOVE.L b,-(A7)
+  MOVE.L a,-(A7)
+  MOVE.L f,A0
+  JSR (A0)
+  LEA 20(A7),A7
+  MOVE.L D0,r
+ENDPROC r
+
+-> one-argument entry at offset off of the table
+PROC fcall1(off, a)
+  DEF r, f
+  f := {engine} + off
+  MOVE.L a,-(A7)
+  MOVE.L f,A0
+  JSR (A0)
+  ADDQ.L #4,A7
+  MOVE.L D0,r
+ENDPROC r
+
 -> the 0.1 CTerm renderer's CSI discipline, transplanted and grown
 -> up: consume sequences WHOLE (state survives split writes via
 -> cesc/cpar/cnp), dispatch the full-screen set (csidispatch), drop
 -> the rest silently.
-PROC render(buf, len)
+-> 1.2.8b9: i0/pro let cfresume carry on a render the C engine started
+-> (cfout: the prologue done, the bytes up to i0 rendered)
+PROC render(buf, len) IS renderx(buf, len, 0, TRUE)
+
+PROC renderx(buf, len, i0, pro)
   DEF s:PTR TO CHAR, i=0, j, c, run, fit, m:PTR TO CHAR, j2, at, sty,
       rp:PTR TO rastport, rleft, rcw, rtopy, rch, rbase, rcols  -> audit3 P2
   IF curcon.win = NIL THEN RETURN
+  IF pro
   dfstart()                     -> S3: arm the deferred-blit engine (or
                                 -> not - sb=NIL/oversize runs legacy)
   maskon := TRUE                -> 1.2.3: the masked bracket - render()
   curcon.rp.mask := curcon.mmask  -> is overlay-free (see the maskcalc
                                 -> block), so every blit, fill and glyph
                                 -> in here may skip the untouched planes
+  ENDIF
   s := buf
+  i := i0
   WHILE i < len
+    -> 1.2.8b9: the C engine (engine/engine.c) takes every byte class it
+    -> mirrors and hands back the first one it does not - always at a
+    -> sequence boundary, so the chain below starts that byte fresh
+    IF fastok AND dfon
+      IF curcon.cesc = 0
+        i := frun(fxtab, s, i, len)
+        IF i >= len THEN JUMP rdone
+      ENDIF
+    ENDIF
     c := s[i]
     -> E2e: the printable test comes FIRST - it is the overwhelmingly
     -> common byte class, and it used to sit at the bottom of a ten-
@@ -6904,6 +8676,7 @@ PROC render(buf, len)
         IF fit > run THEN fit := run
         Move(rp, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase)
         Text(rp, s + i, fit)
+        ulline(sty, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase, fit)
         IF curcon.sb
           CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
           IF fit >= 16                    -> E2d, as in the deferred path
@@ -6938,6 +8711,7 @@ PROC render(buf, len)
       ENDWHILE
       ENDIF           -> (closes the S3 dfon fork around the run loop)
     ELSEIF curcon.cesc = 1    -> after ESC: '[' opens a CSI, ']' an OSC
+      IF (c <> "[") AND (c <> "]") THEN curcon.jslk := FALSE  -> 1.2.8b8
       IF c = "["
         csistart()
       ELSEIF c = "]"
@@ -7061,6 +8835,8 @@ PROC render(buf, len)
       -> complaint. list, which does not send ^L, correctly kept scrolling.
       curcon.vblank := TRUE     -> E5: the page is now provably blank -
                                 -> the very state scroll-nl lives in
+      curcon.jslk := FALSE      -> 1.2.8b8: a cleared page is no jump's
+      curcon.jburst := 0        -> tail - never pull history over it
       alteat := FALSE           -> audit5 A10: a new page disarms the
                                 -> eater ("any output disarms"; CSI
                                 -> motion stays armed - ESC8's own
@@ -7101,6 +8877,7 @@ PROC render(buf, len)
       i := i + 1    -> other control bytes
     ENDIF
   ENDWHILE
+rdone:
   dfflush()         -> S3: the packet's one catch-up blit + span repaints
   dfon := FALSE     -> nothing deferred ever survives a render() call
   alteat := FALSE   -> b6: the eater never outlives its own packet
@@ -7401,6 +9178,7 @@ PROC drawmodelcells(r, x0, x1)
       setsoft(sy)
       Move(rp, left + Mul(i, cw), ybase)
       Text(rp, rowbuf + i, j - i)
+      ulline(sy, left + Mul(i, cw), ybase, j - i)
     ENDIF
     i := j
   ENDWHILE
@@ -7423,6 +9201,7 @@ PROC drawedit()
       g:PTR TO CHAR, gn, gcol, gext, cc, sd[80]:STRING,
       oldl, oldext, newext, c0, c1, rr, n2, x0, x1
   IF curcon.win = NIL THEN RETURN
+  curcon.blipdefer := FALSE     -> 1.2.8b9: any draw settles a deferred blip
   -> audit H4: no `ancx >= cols` guard here, DELIBERATELY - eraseedit
   -> has one and this proc must not copy it. ancx = cols is the legal
   -> pending-wrap anchor (a write that ended flush on the margin), and
@@ -8194,6 +9973,17 @@ PROC edjumpr(s:PTR TO CHAR, p, l, path)
   ENDWHILE
 ENDPROC p
 
+-> close the gap between `from` and `upto` (from <= upto, both valid
+-> offsets into s, string length l) - shift the tail down and return
+-> the new length. Ctrl/Alt+Backspace and Ctrl/Alt+Del (1.2.8b7, his
+-> ask) both delete an edjumpl/edjumpr range and call this once.
+PROC edkillto(s:PTR TO CHAR, l, from, upto)
+  DEF k
+  FOR k := upto TO l - 1
+    s[k - (upto - from)] := s[k]
+  ENDFOR
+ENDPROC l - (upto - from)
+
 PROC dovanilla(code, qual)
   DEF s:PTR TO CHAR, l, j, k
   flushout(curcon)              -> S5: the transcript lands before the
@@ -8375,6 +10165,25 @@ PROC dovanilla(code, qual)
       curcon.cpos := 0
       drawedit()
     ENDIF
+  ELSEIF (code = 8) AND (qual AND IEQUALIFIER_CONTROL)
+    -> Ctrl+Backspace (1.2.8b7, his ask): delete the PATH COMPONENT
+    -> before the cursor - edjumpl's path split, the same meaning
+    -> Ctrl already has on the arrows, not Ctrl+W's word-only scan
+    IF curcon.cpos > 0
+      j := edjumpl(s, curcon.cpos, TRUE)
+      SetStr(curcon.ebuf, edkillto(s, l, j, curcon.cpos))
+      curcon.cpos := j
+      drawedit()
+    ENDIF
+  ELSEIF (code = 8) AND (qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT))
+    -> Alt+Backspace: delete the WORD before the cursor - same result
+    -> as Ctrl+W, spelled through edjumpl instead of its own scan
+    IF curcon.cpos > 0
+      j := edjumpl(s, curcon.cpos, FALSE)
+      SetStr(curcon.ebuf, edkillto(s, l, j, curcon.cpos))
+      curcon.cpos := j
+      drawedit()
+    ENDIF
   ELSEIF code = 8
     -> Backspace: delete before the cursor, close the gap
     IF curcon.cpos > 0
@@ -8393,6 +10202,21 @@ PROC dovanilla(code, qual)
     IF curcon.cpos < l
       SetStr(curcon.ebuf, curcon.cpos)
       s[curcon.cpos] := 0
+      drawedit()
+    ENDIF
+  ELSEIF (code = 127) AND (qual AND IEQUALIFIER_CONTROL)
+    -> Ctrl+Del (1.2.8b7, his ask): delete the PATH COMPONENT after
+    -> the cursor. The cursor itself does not move, same as plain Del.
+    IF curcon.cpos < l
+      j := edjumpr(s, curcon.cpos, l, TRUE)
+      SetStr(curcon.ebuf, edkillto(s, l, curcon.cpos, j))
+      drawedit()
+    ENDIF
+  ELSEIF (code = 127) AND (qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT))
+    -> Alt+Del: delete the WORD after the cursor
+    IF curcon.cpos < l
+      j := edjumpr(s, curcon.cpos, l, FALSE)
+      SetStr(curcon.ebuf, edkillto(s, l, curcon.cpos, j))
       drawedit()
     ENDIF
   ELSEIF code = 127
@@ -10606,4 +12430,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b6 (19.9.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b10 (4.10.26) CCON: LTX console handler', 0
+engine:
+  INCBIN 'engine/engine.bin'

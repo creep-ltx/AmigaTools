@@ -16,7 +16,7 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 ### Added
 - **`JUMP=n`, jump scroll.** At the bottom margin a newline scrolls
   `n` rows in one blit and the next `n-1` newlines scroll nothing.
-  Off by default. (1.2.8b1)
+  (1.2.8b1; automatic by default since b8, below)
 - **Ctrl+P repeats the argument before the cursor** — `rename
   longname ` and one key gives the second name to edit. Arguments
   are found the way the shell splits them, so a quoted name is
@@ -33,6 +33,38 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 - **`NOINFO`** keeps `.info` files out of Tab completion until you
   type into the suffix yourself (`foo.<Tab>`); `SHOWINFO` undoes it.
   The default is unchanged: icons complete, greyed. (1.2.8b2)
+- **Jump scroll is automatic.** Long output scrolls a quarter of the
+  window per blitter pass once half a window has gone by without a
+  pause; when it stops, the text slides back so the last line sits on
+  the bottom row again. Short answers never jump. `JUMP0` turns it
+  off, `JUMPn` fixes the step (no slide back), `JUMP=AUTO` restores
+  the default. (1.2.8b8)
+- **Direct drawing.** Text rows can be written straight into the
+  screen's bitmap - bitplanes on a native screen, display memory on a
+  Picasso96 screen - instead of through `Text()` and `ScrollRaster()`,
+  wherever the result is pixel-for-pixel the same (an uncovered window,
+  a fixed font up to 8 pixels wide). Each window times both ways on
+  your machine while it is new and keeps the faster. `NODIRECT` turns
+  it off. (1.2.8b8)
+
+- **Bold** (`ESC[1m`, ended by `ESC[22m` or `ESC[0m`) draws bold
+  letters, the way console.device does. The brighter-colour behaviour
+  on screens that have it is unchanged. Bold survives scrollback,
+  selection and repaint like the other styles. (1.2.8b9)
+- **screennotify.library**: when the Workbench screen closes - a
+  screen mode change, for example - CCON's windows on it close with
+  it and come back when it reopens, where they were, with their
+  scrollback and edit line. A program that writes meanwhile waits and
+  its output appears when the window returns. Without the library
+  nothing changes. (1.2.8b9)
+
+- **Word delete**: Alt+Backspace / Alt+Del delete the word before /
+  after the cursor, Ctrl+Backspace / Ctrl+Del the path component -
+  the same two splits as the Alt/Ctrl+Arrow jumps. (1.2.8b7)
+- **Drop modifiers**: hold Ctrl while dropping an icon on the window
+  to insert only its drawer's path, Alt to insert only its name (a
+  drawer keeps its trailing `/`). Applies to the whole drop; a plain
+  drop is unchanged. (1.2.8b7)
 - **`SCROLLBAR`**: a scrollbar in the window's right border - a
   knob sized to the history, a track that pages, and an arrow pair
   that repeats and accelerates while held. It follows the view
@@ -55,7 +87,28 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
   that entry picked. Both together are KingCON's Tab. Defaults
   unchanged (`TABMENU`, `NOTABFIRST`). (1.2.8b4)
 
+### Fixed
+- **Underline** (`ESC[4m`) did not show with some fonts: on the 3.2
+  Workbench's 8x8 screen font the system offers no underline style at
+  all, and with a font whose baseline is its last line
+  (MicroKnight7/7) the system's underline lands on the next row and
+  is painted over. CCON now draws the underline itself in every font.
+  (1.2.8b9)
+
 ### Changed
+- **Faster output on every Amiga** (1.2.8b8), conbench with SYNC:
+  stock A1200 under FS-UAE, an accelerated A1200 under FS-UAE (030,
+  JIT) and a real A1200 with a PiStorm and a 32-bit Workbench. On
+  the 030: 39.6 s to 10.4 s for the whole run. On the PiStorm: 41.1 s
+  to 18.4 s with jump scroll off.
+- **Scrollback that does not fit is made smaller instead of switched
+  off.** A window whose `LINES` would take more than half of the free
+  memory gets fewer lines. Before, a stock 2 MB A1200 with
+  `LINES=2000` ran without scrollback AND without the fast output
+  engine, several times slower. (1.2.8b8)
+- Blank output (empty lines on an empty window) no longer repaints
+  the empty window, about three times faster on a stock A1200. (1.2.8b8)
+
 - **Ctrl+Left/Right now jump by path component** — spaces, `/` and
   `:` all separate — so a long path is walked a directory at a time.
   The old space-only jump moved to Alt+Left/Right. Ctrl+W still
