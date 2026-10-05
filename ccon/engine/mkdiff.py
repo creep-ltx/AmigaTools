@@ -76,7 +76,7 @@ PROC mkcon(rows, cols, hist, jeff, jauto, wbp)
   k.rows := rows; k.cols := cols
   k.sbmax := rows + hist
   n := Mul(k.sbmax, cols)
-  k.sb := New(n); k.sa := New(n); k.ss := New(n); k.sw := New(k.sbmax)
+  k.sb := New(n); k.sa := New(n); k.ss := New(n); k.sw := New(slsize(k.sbmax))
   k.win := New(200); k.rp := New(100)
   k.deffg := 1; k.curfg := 1; k.mfloor := 1; k.mpens := 1; k.mmask := 1
   k.jeff := Max(1, Min(jeff, rows - 1)); k.jauto := jauto; k.wbpens := wbp; k.can16 := TRUE
@@ -91,7 +91,7 @@ PROC conclone(a:PTR TO console, b:PTR TO console)
   sb := b.sb; sa := b.sa; ss := b.ss; sw := b.sw; win := b.win; rp := b.rp
   CopyMem(a, b, SIZEOF console)
   b.sb := sb; b.sa := sa; b.ss := ss; b.sw := sw; b.win := win; b.rp := rp
-  CopyMem(a.sb, sb, n); CopyMem(a.sa, sa, n); CopyMem(a.ss, ss, n); CopyMem(a.sw, sw, a.sbmax)
+  CopyMem(a.sb, sb, n); CopyMem(a.sa, sa, n); CopyMem(a.ss, ss, n); CopyMem(a.sw, sw, slsize(a.sbmax))
 ENDPROC
 
 -> 0 = same; else a description code
@@ -114,6 +114,20 @@ PROC concmp(a:PTR TO console, b:PTR TO console)
   FOR i := 0 TO n - 1 DO IF p[i] <> q[i] THEN RETURN 40000 + i
   p := a.sw; q := sw
   FOR i := 0 TO a.sbmax - 1 DO IF p[i] <> q[i] THEN RETURN 50000 + i
+ENDPROC 0
+
+-> 1.2.8b11: the written-length rule - every cell from a ring row's
+-> length to the margin is zero in all three planes. 0 = holds.
+PROC slcheck(k:PTR TO console)
+  DEF i, x, n, o
+  FOR i := 0 TO k.sbmax - 1
+    n := Int(slbase(k) + i + i)
+    IF (n < 0) OR (n > k.cols) THEN RETURN 90000 + i
+    o := Mul(i, k.cols)
+    FOR x := n TO k.cols - 1
+      IF Char(k.sb + o + x) OR Char(k.sa + o + x) OR Char(k.ss + o + x) THEN RETURN 91000 + i
+    ENDFOR
+  ENDFOR
 ENDPROC 0
 
 PROC putnum(p, v)
@@ -227,6 +241,8 @@ PROC main()
       nchunks++
       r := concmp(k1, k2)
       IF (r = 0) AND (f1 <> f2) THEN r := 60000
+      IF r = 0 THEN r := slcheck(k1)
+      IF r = 0 THEN IF slcheck(k2) THEN r := 100000 + slcheck(k2)
       IF r = 0
         FOR i := 0 TO 10 DO IF aglob[i] <> bglob[i] THEN IF r = 0 THEN r := 70000 + i
       ENDIF

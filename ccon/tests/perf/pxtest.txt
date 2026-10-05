@@ -1,0 +1,134 @@
+plain line 0: !"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\
+plain line 1: ()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abc
+plain line 2: /0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghij
+plain line 3: 6789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopq
+plain line 4: =>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwx
+plain line 5: DEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!
+plain line 6: KLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'(
+plain line 7: RSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./
+plain line 8: YZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456
+plain line 9: `abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=
+plain line 10: ghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCD
+plain line 11: nopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJK
+plain line 12: uvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQR
+plain line 13: |}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXY
+plain line 14: %&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`
+plain line 15: ,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefg
+plain line 16: 3456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmn
+plain line 17: :;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstu
+plain line 18: ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|
+plain line 19: HIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%
+plain line 20: OPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,
+plain line 21: VWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123
+plain line 22: ]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:
+plain line 23: defghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@A
+plain line 24: klmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGH
+plain line 25: rstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNO
+plain line 26: yz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUV
+plain line 27: "#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]
+plain line 28: )*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcd
+plain line 29: 0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijk
+plain line 30: 789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqr
+plain line 31: >?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxy
+plain line 32: EFGHIJKLMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"
+plain line 33: LMNOPQRSTUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()
+plain line 34: STUVWXYZ[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0
+plain line 35: Z[\]^_`abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./01234567
+plain line 36: abcdefghijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>
+plain line 37: hijklmnopqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDE
+plain line 38: opqrstuvwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKL
+plain line 39: vwxyz{|}~!"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRS
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+[30m[40mcol00[31m[43mcol01[32m[46mcol02[33m[41mcol03[34m[44mcol04[35m[47mcol05[36m[42mcol06[37m[45mcol07[30m[40mcol08[0m
+[30m[41mcol00[31m[44mcol01[32m[47mcol02[33m[42mcol03[34m[45mcol04[35m[40mcol05[36m[43mcol06[37m[46mcol07[30m[41mcol08[0m
+[30m[42mcol00[31m[45mcol01[32m[40mcol02[33m[43mcol03[34m[46mcol04[35m[41mcol05[36m[44mcol06[37m[47mcol07[30m[42mcol08[0m
+[30m[43mcol00[31m[46mcol01[32m[41mcol02[33m[44mcol03[34m[47mcol04[35m[42mcol05[36m[45mcol06[37m[40mcol07[30m[43mcol08[0m
+[30m[44mcol00[31m[47mcol01[32m[42mcol02[33m[45mcol03[34m[40mcol04[35m[43mcol05[36m[46mcol06[37m[41mcol07[30m[44mcol08[0m
+[30m[45mcol00[31m[40mcol01[32m[43mcol02[33m[46mcol03[34m[41mcol04[35m[44mcol05[36m[47mcol06[37m[42mcol07[30m[45mcol08[0m
+[30m[46mcol00[31m[41mcol01[32m[44mcol02[33m[47mcol03[34m[42mcol04[35m[45mcol05[36m[40mcol06[37m[43mcol07[30m[46mcol08[0m
+[30m[47mcol00[31m[42mcol01[32m[45mcol02[33m[40mcol03[34m[43mcol04[35m[46mcol05[36m[41mcol06[37m[44mcol07[30m[47mcol08[0m
+[30m[40mcol00[31m[43mcol01[32m[46mcol02[33m[41mcol03[34m[44mcol04[35m[47mcol05[36m[42mcol06[37m[45mcol07[30m[40mcol08[0m
+[30m[41mcol00[31m[44mcol01[32m[47mcol02[33m[42mcol03[34m[45mcol04[35m[40mcol05[36m[43mcol06[37m[46mcol07[30m[41mcol08[0m
+[30m[42mcol00[31m[45mcol01[32m[40mcol02[33m[43mcol03[34m[46mcol04[35m[41mcol05[36m[44mcol06[37m[47mcol07[30m[42mcol08[0m
+[30m[43mcol00[31m[46mcol01[32m[41mcol02[33m[44mcol03[34m[47mcol04[35m[42mcol05[36m[45mcol06[37m[40mcol07[30m[43mcol08[0m
+[30m[44mcol00[31m[47mcol01[32m[42mcol02[33m[45mcol03[34m[40mcol04[35m[43mcol05[36m[46mcol06[37m[41mcol07[30m[44mcol08[0m
+[30m[45mcol00[31m[40mcol01[32m[43mcol02[33m[46mcol03[34m[41mcol04[35m[44mcol05[36m[47mcol06[37m[42mcol07[30m[45mcol08[0m
+[30m[46mcol00[31m[41mcol01[32m[44mcol02[33m[47mcol03[34m[42mcol04[35m[45mcol05[36m[40mcol06[37m[43mcol07[30m[46mcol08[0m
+[30m[47mcol00[31m[42mcol01[32m[45mcol02[33m[40mcol03[34m[43mcol04[35m[46mcol05[36m[41mcol06[37m[44mcol07[30m[47mcol08[0m
+[30m[40mcol00[31m[43mcol01[32m[46mcol02[33m[41mcol03[34m[44mcol04[35m[47mcol05[36m[42mcol06[37m[45mcol07[30m[40mcol08[0m
+[30m[41mcol00[31m[44mcol01[32m[47mcol02[33m[42mcol03[34m[45mcol04[35m[40mcol05[36m[43mcol06[37m[46mcol07[30m[41mcol08[0m
+[30m[42mcol00[31m[45mcol01[32m[40mcol02[33m[43mcol03[34m[46mcol04[35m[41mcol05[36m[44mcol06[37m[47mcol07[30m[42mcol08[0m
+[30m[43mcol00[31m[46mcol01[32m[41mcol02[33m[44mcol03[34m[47mcol04[35m[42mcol05[36m[45mcol06[37m[40mcol07[30m[43mcol08[0m
+[30m[44mcol00[31m[47mcol01[32m[42mcol02[33m[45mcol03[34m[40mcol04[35m[43mcol05[36m[46mcol06[37m[41mcol07[30m[44mcol08[0m
+[30m[45mcol00[31m[40mcol01[32m[43mcol02[33m[46mcol03[34m[41mcol04[35m[44mcol05[36m[47mcol06[37m[42mcol07[30m[45mcol08[0m
+[30m[46mcol00[31m[41mcol01[32m[44mcol02[33m[47mcol03[34m[42mcol04[35m[45mcol05[36m[40mcol06[37m[43mcol07[30m[46mcol08[0m
+[30m[47mcol00[31m[42mcol01[32m[45mcol02[33m[40mcol03[34m[43mcol04[35m[46mcol05[36m[41mcol06[37m[44mcol07[30m[47mcol08[0m
+[30m[40mcol00[31m[43mcol01[32m[46mcol02[33m[41mcol03[34m[44mcol04[35m[47mcol05[36m[42mcol06[37m[45mcol07[30m[40mcol08[0m
+[30m[41mcol00[31m[44mcol01[32m[47mcol02[33m[42mcol03[34m[45mcol04[35m[40mcol05[36m[43mcol06[37m[46mcol07[30m[41mcol08[0m
+[30m[42mcol00[31m[45mcol01[32m[40mcol02[33m[43mcol03[34m[46mcol04[35m[41mcol05[36m[44mcol06[37m[47mcol07[30m[42mcol08[0m
+[30m[43mcol00[31m[46mcol01[32m[41mcol02[33m[44mcol03[34m[47mcol04[35m[42mcol05[36m[45mcol06[37m[40mcol07[30m[43mcol08[0m
+[30m[44mcol00[31m[47mcol01[32m[42mcol02[33m[45mcol03[34m[40mcol04[35m[43mcol05[36m[46mcol06[37m[41mcol07[30m[44mcol08[0m
+[30m[45mcol00[31m[40mcol01[32m[43mcol02[33m[46mcol03[34m[41mcol04[35m[44mcol05[36m[47mcol06[37m[42mcol07[30m[45mcol08[0m
+[30mA[31mB[32mC[33mD[34mE[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[0m
+[31mB[32mC[33mD[34mE[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[0m
+[32mC[33mD[34mE[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[0m
+[33mD[34mE[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[0m
+[34mE[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[0m
+[35mF[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[0m
+[36mG[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[0m
+[37mH[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[0m
+[30mI[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[0m
+[31mJ[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[0m
+[32mK[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[0m
+[33mL[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[0m
+[34mM[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[0m
+[35mN[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[0m
+[36mO[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[0m
+[37mP[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[36mC[0m
+[30mQ[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[36mC[37mD[0m
+[31mR[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[36mC[37mD[30mE[0m
+[32mS[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[36mC[37mD[30mE[31mF[0m
+[33mT[34mU[35mV[36mW[37mX[30mY[31mZ[32mA[33mB[34mC[35mD[36mE[37mF[30mG[31mH[32mI[33mJ[34mK[35mL[36mM[37mN[30mO[31mP[32mQ[33mR[34mS[35mT[36mU[37mV[30mW[31mX[32mY[33mZ[34mA[35mB[36mC[37mD[30mE[31mF[32mG[0m
+[1mbold[22m [7minverse[27m [7;31;41mfgbg[0m [3mitalic[23m [4munder[24m end
+tab	here	and	there
+backXY
+ ¡¢£¤¥¦§¨©ª«¬­®¯°±²³´µ¶·¸¹º»¼½¾¿ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖ×ØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ
+[1mbold[22m [1;4mbold under[0m [4;3munder italic[0m [1;7mbold inv[0m [1;32;44mbold green on blue[0m
+to be erased: ABCDEFGHIJ[10D[Ktail
+[5;20H[32mpositioned[0m[10;1H[J
+[30mscrolling colour line 0 ########################################[0m
+[31mscrolling colour line 1 ########################################[0m
+[32mscrolling colour line 2 ########################################[0m
+[33mscrolling colour line 3 ########################################[0m
+[34mscrolling colour line 4 ########################################[0m
+[35mscrolling colour line 5 ########################################[0m
+[36mscrolling colour line 6 ########################################[0m
+[37mscrolling colour line 7 ########################################[0m
+[30mscrolling colour line 8 ########################################[0m
+[31mscrolling colour line 9 ########################################[0m
+[32mscrolling colour line 10 ########################################[0m
+[33mscrolling colour line 11 ########################################[0m
+[34mscrolling colour line 12 ########################################[0m
+[35mscrolling colour line 13 ########################################[0m
+[36mscrolling colour line 14 ########################################[0m
+[37mscrolling colour line 15 ########################################[0m
+[30mscrolling colour line 16 ########################################[0m
+[31mscrolling colour line 17 ########################################[0m
+[32mscrolling colour line 18 ########################################[0m
+[33mscrolling colour line 19 ########################################[0m
+[34mscrolling colour line 20 ########################################[0m
+[35mscrolling colour line 21 ########################################[0m
+[36mscrolling colour line 22 ########################################[0m
+[37mscrolling colour line 23 ########################################[0m
+[30mscrolling colour line 24 ########################################[0m
+[30;42mafter ff 0[0m  mixed[36mcyan[0m
+[31;43mafter ff 1[0m  mixed[36mcyan[0m
+[32;44mafter ff 2[0m  mixed[36mcyan[0m
+[33;45mafter ff 3[0m  mixed[36mcyan[0m
+[34;46mafter ff 4[0m  mixed[36mcyan[0m
+[35;47mafter ff 5[0m  mixed[36mcyan[0m
+[36;40mafter ff 6[0m  mixed[36mcyan[0m
+[37;41mafter ff 7[0m  mixed[36mcyan[0m
+[30;42mafter ff 8[0m  mixed[36mcyan[0m
+[31;43mafter ff 9[0m  mixed[36mcyan[0m
+[1;33mbright?[0m done

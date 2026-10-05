@@ -6,8 +6,10 @@ set -e
 cd "$(dirname "$0")"
 T=$HOME/opt/m68k-elf/bin/m68k-elf
 python3 genstruct.py ../ccon-handler.e con.h >/dev/null
+# the console's field offsets for the asm (CON_name = offset), from con.h
+awk '/^  LONG [a-z0-9_]+; \/\* [0-9]+ \*\//{gsub(";","",$2); print "CON_"$2"\t= "$4}' con.h > conoffs.i
 $T-gcc -m68020 -O2 -fno-late-combine-instructions -fno-strict-aliasing -fomit-frame-pointer -ffreestanding -fno-builtin \
-  -fno-tree-loop-distribute-patterns -fno-pic -mpcrel -Wall -c engine.c -o engine.o
+  -fno-tree-loop-distribute-patterns -fno-pic -mpcrel -Wall ${PROF:+-DPROF} -c engine.c -o engine.o
 $T-as -m68020 entry.s -o entry.o
 vasmm68k_mot -Felf -m68020 -quiet -o pgroups.o pgroups.s
 for a in 0 0x4000; do

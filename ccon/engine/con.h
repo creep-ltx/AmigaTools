@@ -211,4 +211,5 @@ struct con {
   LONG bliptick; /* 4168 */
   LONG jsync; /* 4172 */
   LONG wbgone; /* 4176 */
-}; /* size 4180 */
+  LONG ppace; /* 4180 */
+}; /* size 4184 */

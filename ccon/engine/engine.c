@@ -23,6 +23,7 @@
 
 #ifndef EXEC_TYPES_H
 typedef unsigned long ULONG;
+typedef unsigned short UWORD;
 #endif
 
 /* the E globals render() keeps its engine state in, by address -
@@ -45,7 +46,27 @@ struct fx {
     LONG *fxret, *fxold;    /* 27, 28: cfout's hand-over to cfresume */
     UBYTE *ftreq;           /* 29: the flush timer request (non-NIL) */
     LONG *fdelay;           /* 30: its wait (us) */
+    ULONG *cprof;           /* 31: profiling builds only (-DPROF): CCON.prof's
+                               counters; [62] = timer.device base */
 };
+
+/* phase counters for a profiling build (build.sh PROF=1): EClock deltas
+   into cprof[32 + 2i] with a call count beside them - ccstat2 prints them */
+#ifdef PROF
+static ULONG eclk(struct fx *x)
+{
+    ULONG ev[2];
+    register ULONG *a0 __asm__("a0") = ev;
+    register void *a6 __asm__("a6") = (void *)x->cprof[62];
+    __asm__ volatile ("jsr -60(%%a6)" : "+r"(a0), "+r"(a6) : : "d0", "d1", "a1", "memory", "cc");
+    return ev[1];
+}
+#define PT(v) ULONG v = x->cprof ? eclk(x) : 0
+#define PA(i, t0) do { if (x->cprof) { ULONG t_ = eclk(x); x->cprof[32 + 2 * (i)] += t_ - (t0); x->cprof[33 + 2 * (i)]++; } } while (0)
+#else
+#define PT(v)
+#define PA(i, t0)
+#endif
 
 #define DFROWS 256
 #define TRUE (-1)
@@ -67,14 +88,43 @@ extern void abcopy(UBYTE *d, const UBYTE *s, LONG n);
 #define bcopy abcopy
 #define zfill(p, n) bfill(p, 0, n)
 
-/* clearrow */
+/* 1.2.8b11: a ring row's written length (E's slbase): every cell from
+   it to the right margin is zero in all three planes. NULL = no sw
+   plane, lengths unknown (full width). The C writers keep it exact -
+   E's mark their row full - and only the clearing below reads it. */
+static inline UWORD *slp(struct con *k)
+{
+    if (!k->sw) return 0;
+    return (UWORD *)(((ULONG)k->sw + k->sbmax + 1) & ~1UL);
+}
+
+/* the length cells up to x1 of ring row i now reach */
+static inline void slgrow(struct con *k, LONG i, LONG x1)
+{
+    UWORD *l = slp(k);
+    if (l && l[i] <= x1) l[i] = x1 + 1;
+}
+
+/* how many cells of ring row i can be non-zero */
+static inline LONG sllen(struct con *k, LONG i)
+{
+    UWORD *l = slp(k);
+    LONG n = l ? l[i] : k->cols;
+    return n > k->cols ? k->cols : n;
+}
+
+/* clearrow (b11: only the written length) */
 static void clearrow(struct con *k, LONG r)
 {
     LONG i = ringidx(k, r);
-    LONG off = i * k->cols;
-    zfill((UBYTE *)k->sb + off, k->cols);
-    zfill((UBYTE *)k->sa + off, k->cols);
-    zfill((UBYTE *)k->ss + off, k->cols);
+    LONG off = i * k->cols, n = sllen(k, i);
+    UWORD *l = slp(k);
+    if (n > 0) {
+        zfill((UBYTE *)k->sb + off, n);
+        zfill((UBYTE *)k->sa + off, n);
+        zfill((UBYTE *)k->ss + off, n);
+    }
+    if (l) l[i] = 0;
     if (k->sw && r >= 0 && r < k->rows) ((UBYTE *)k->sw)[i] = 0;
 }
 
@@ -188,14 +238,17 @@ static void lfrun(struct fx *x, struct con *k, LONG m)
 {
     LONG cy, rows, cols, jb, sbtop, sbmax, sbcnt, lim, ancy, rawscr, raw, jok, jauto, jeff, jslk;
     UBYTE *sb, *sa, *ss, *sw;
+    UWORD *sl;
+    PT(tl);
     while (m > 0 && !*x->dffull) { dfnl(x, k); m--; }
-    if (m <= 0) return;
+    if (m <= 0) { PA(5, tl); return; }
     cy = k->cy; rows = k->rows; cols = k->cols; jb = k->jburst;
     sbtop = k->sbtop; sbmax = k->sbmax; sbcnt = k->sbcnt; lim = sbmax - rows;
     ancy = k->ancy; rawscr = k->rawscr; raw = k->rawmode | k->altvalid;
     jok = k->jeff > 1 && !k->rawmode && !k->altvalid;
     jauto = k->jauto; jeff = k->jeff; jslk = k->jslk;
     sb = (UBYTE *)k->sb; sa = (UBYTE *)k->sa; ss = (UBYTE *)k->ss; sw = (UBYTE *)k->sw;
+    sl = slp(k);
     while (m-- > 0) {
         LONG i;
         cy++;
@@ -214,9 +267,19 @@ static void lfrun(struct fx *x, struct con *k, LONG m)
                 i = sbtop + rows - 1;
                 if (i >= sbmax) i -= sbmax;
                 off = i * cols;
-                zfill(sb + off, cols);
-                zfill(sa + off, cols);
-                zfill(ss + off, cols);
+                if (sl) {                               /* b11: the written length */
+                    LONG n = sl[i] > cols ? cols : sl[i];
+                    sl[i] = 0;
+                    if (n > 0) {
+                        zfill(sb + off, n);
+                        zfill(sa + off, n);
+                        zfill(ss + off, n);
+                    }
+                } else {
+                    zfill(sb + off, cols);
+                    zfill(sa + off, cols);
+                    zfill(ss + off, cols);
+                }
                 if (sw) sw[i] = 0;
             }
         }
@@ -228,6 +291,7 @@ static void lfrun(struct fx *x, struct con *k, LONG m)
     }
     k->cx = 0; k->cy = cy; k->jburst = jb; k->sbtop = sbtop; k->sbcnt = sbcnt;
     k->ancy = ancy; k->rawscr = rawscr; k->jslk = jslk;
+    PA(5, tl);
 }
 
 /* dfwrapnl */
@@ -278,11 +342,13 @@ static LONG curattr(struct fx *x, struct con *k)
     return f | (k->curbg << 4);
 }
 
-/* render()'s deferred printable run */
+extern void putseg(struct fx *x, struct con *k, const UBYTE *s, LONG fit, LONG at, LONG sty);
+
+/* render()'s deferred printable run (b11: the segment's body is putseg -
+   the model cells, slgrow and dfmark in one asm pass) */
 static void putrun(struct fx *x, struct con *k, const UBYTE *s, LONG run)
 {
-    LONG at, sty, fit, off;
-    UBYTE *m, *a, *t;
+    LONG at, sty, fit;
     k->vblank = FALSE;
     *x->alteat = FALSE;
     at = curattr(x, k);
@@ -291,14 +357,7 @@ static void putrun(struct fx *x, struct con *k, const UBYTE *s, LONG run)
         if (k->cx >= k->cols) dfwrapnl(x, k);
         fit = k->cols - k->cx;
         if (fit > run) fit = run;
-        off = ringidx(k, k->cy) * k->cols + k->cx;
-        m = (UBYTE *)k->sb + off;
-        a = (UBYTE *)k->sa + off;
-        t = (UBYTE *)k->ss + off;
-        bcopy(m, s, fit);
-        bfill(a, at, fit);
-        bfill(t, sty, fit);
-        dfmark(x, k, k->cy, k->cx, k->cx + fit - 1);
+        putseg(x, k, s, fit, at, sty);              /* pgroups.s: the body */
         k->cx += fit;
         s += fit;
         run -= fit;
@@ -308,10 +367,12 @@ static void putrun(struct fx *x, struct con *k, const UBYTE *s, LONG run)
 /* dfputc */
 static void dfputc(struct fx *x, struct con *k, LONG c)
 {
-    LONG off;
+    LONG off, i;
     if (k->cx >= k->cols) dfwrapnl(x, k);
     k->vblank = FALSE;
-    off = ringidx(k, k->cy) * k->cols + k->cx;
+    i = ringidx(k, k->cy);
+    off = i * k->cols + k->cx;
+    slgrow(k, i, k->cx);
     ((UBYTE *)k->sb)[off] = c;
     ((UBYTE *)k->sa)[off] = curattr(x, k);
     ((UBYTE *)k->ss)[off] = k->cursty;
@@ -322,18 +383,24 @@ static void dfputc(struct fx *x, struct con *k, LONG c)
 /* eraseeol, deferred */
 static void eraseeol(struct fx *x, struct con *k)
 {
-    LONG j, off;
+    LONG j, off, i;
+    UWORD *l;
     UBYTE *m, *a, *t;
     if (k->cx >= k->cols) return;
     if (k->sb) {
-        off = ringidx(k, k->cy) * k->cols;
+        i = ringidx(k, k->cy);
+        off = i * k->cols;
         m = (UBYTE *)k->sb + off;
         a = (UBYTE *)k->sa + off;
         t = (UBYTE *)k->ss + off;
-        j = k->cols - k->cx;
-        zfill(m + k->cx, j);
-        zfill(a + k->cx, j);
-        zfill(t + k->cx, j);
+        j = sllen(k, i) - k->cx;                    /* b11: past it is zero already */
+        if (j > 0) {
+            zfill(m + k->cx, j);
+            zfill(a + k->cx, j);
+            zfill(t + k->cx, j);
+            l = slp(k);
+            if (l) l[i] = k->cx;
+        }
         setwrapf(k, k->cy + 1, 0);
         dfmark(x, k, k->cy, k->cx, k->cols - 1);
     }
@@ -356,10 +423,16 @@ static void erasebelow(struct fx *x, struct con *k)
 
 static void rowcopy(struct con *k, LONG from, LONG to)
 {
-    LONG c = k->cols, f = ringidx(k, from) * c, t = ringidx(k, to) * c;
-    bcopy((UBYTE *)k->sb + t, (UBYTE *)k->sb + f, c);
-    bcopy((UBYTE *)k->sa + t, (UBYTE *)k->sa + f, c);
-    bcopy((UBYTE *)k->ss + t, (UBYTE *)k->ss + f, c);
+    LONG fi = ringidx(k, from), ti = ringidx(k, to);
+    LONG c = k->cols, f = fi * c, t = ti * c, nf = sllen(k, fi), nt = sllen(k, ti);
+    UWORD *l = slp(k);
+    if (nt > nf) nf = nt;                               /* b11: the source's zeros */
+    if (nf > 0) {                                       /* cover the target's old cells */
+        bcopy((UBYTE *)k->sb + t, (UBYTE *)k->sb + f, nf);
+        bcopy((UBYTE *)k->sa + t, (UBYTE *)k->sa + f, nf);
+        bcopy((UBYTE *)k->ss + t, (UBYTE *)k->ss + f, nf);
+    }
+    if (l) l[ti] = l[fi];
 }
 
 static void dropwrapf(struct con *k, LONG r0, LONG r1)
@@ -440,12 +513,18 @@ static void inschars(struct fx *x, struct con *k, LONG n)
     if (n < 1) n = 1;
     if (n > k->cols - k->cx) n = k->cols - k->cx;
     if (k->sb) {
-        off = ringidx(k, k->cy) * k->cols;
+        LONG i = ringidx(k, k->cy), e = sllen(k, i);
+        UWORD *l = slp(k);
+        off = i * k->cols;
         m = (UBYTE *)k->sb + off; a = (UBYTE *)k->sa + off; st = (UBYTE *)k->ss + off;
-        for (j = k->cols - 1; j >= k->cx + n; j--) {
-            m[j] = m[j - n]; a[j] = a[j - n]; st[j] = st[j - n];
+        if (e > k->cx) {                                /* b11: cells in use only - */
+            LONG ne = e + n > k->cols ? k->cols : e + n;    /* past e all zero */
+            for (j = ne - 1; j >= k->cx + n; j--) {
+                m[j] = m[j - n]; a[j] = a[j - n]; st[j] = st[j - n];
+            }
+            for (j = k->cx; j <= k->cx + n - 1; j++) { m[j] = 0; a[j] = 0; st[j] = 0; }
+            if (l) l[i] = ne;
         }
-        for (j = k->cx; j <= k->cx + n - 1; j++) { m[j] = 0; a[j] = 0; st[j] = 0; }
         setwrapf(k, k->cy + 1, 0);
         dfmark(x, k, k->cy, k->cx, k->cols - 1);
     }
@@ -460,23 +539,27 @@ static void delchars(struct fx *x, struct con *k, LONG n)
     if (n < 1) n = 1;
     if (n > k->cols - k->cx) n = k->cols - k->cx;
     if (k->sb) {
-        off = ringidx(k, k->cy) * k->cols;
+        LONG i = ringidx(k, k->cy), e = sllen(k, i);
+        UWORD *l = slp(k);
+        off = i * k->cols;
         m = (UBYTE *)k->sb + off; a = (UBYTE *)k->sa + off; st = (UBYTE *)k->ss + off;
-        for (j = k->cx; j <= k->cols - 1 - n; j++) {
-            m[j] = m[j + n]; a[j] = a[j + n]; st[j] = st[j + n];
+        if (e > k->cx) {                                /* b11: cells in use only */
+            LONG ne = e - n > k->cx ? e - n : k->cx;
+            for (j = k->cx; j < ne; j++) {
+                m[j] = m[j + n]; a[j] = a[j + n]; st[j] = st[j + n];
+            }
+            for (j = ne; j < e; j++) { m[j] = 0; a[j] = 0; st[j] = 0; }
+            if (l) l[i] = ne;
         }
-        for (j = k->cols - n; j <= k->cols - 1; j++) { m[j] = 0; a[j] = 0; st[j] = 0; }
         setwrapf(k, k->cy + 1, 0);
         dfmark(x, k, k->cy, k->cx, k->cols - 1);
     }
 }
 
-/* csidispatch's 'm' */
-static void sgr(struct con *k, LONG *par, LONG np)
+/* csidispatch's 'm', one parameter */
+static inline void sgr1(struct con *k, LONG v)
 {
-    LONG i, v;
-    for (i = 0; i <= np; i++) {
-        v = par[i];
+    {
         if (v == 0) {
             k->curfg = k->deffg; k->curbg = 0; k->bold = FALSE;
             k->cursgr = FALSE; k->cursty = 0;
@@ -503,6 +586,13 @@ static void sgr(struct con *k, LONG *par, LONG np)
     }
 }
 
+/* csidispatch's 'm' */
+static void sgr(struct con *k, LONG *par, LONG np)
+{
+    LONG i;
+    for (i = 0; i <= np; i++) sgr1(k, par[i]);
+}
+
 /* the end of the printable run starting at j (render()'s prtbl class:
    32..126 and 160..255). Four plain ASCII bytes per long read first -
    no high bit, none below $20 (hasless), none $7F (haszero of v^$7F) -
@@ -510,11 +600,9 @@ static void sgr(struct con *k, LONG *par, LONG np)
    character, 1024 of the 1705 a 78-character line took (vamos -I) */
 static LONG prscan(const UBYTE *s, LONG j, LONG len)
 {
-    while (j < len && ((ULONG)(s + j) & 3)) {        /* to a long boundary */
-        UBYTE c = s[j];
-        if ((UBYTE)(c - 32) >= 95 && c < 160) return j;
-        j++;
-    }
+    /* b11: no byte steps to a long boundary first - the 020 reads a
+       misaligned long, and those steps were most of a short run's scan
+       (sgr-colour's 8-character runs: 168 of ~500 instructions a line) */
     while (j + 4 <= len) {
         ULONG v = *(const ULONG *)(s + j);
         /* a high bit in any byte of v, of v+$01.. ($7F turns $80) or of
@@ -556,6 +644,26 @@ LONG frun(struct fx *x, const UBYTE *s, LONG i, LONG len)
             LONG par[4], np = 0, fin;
             j = i + 1;
             if (j >= len || s[j] != '[') return i;
+            /* b11: ESC [ d m / ESC [ d d m - one colour or style change,
+               the commonest sequence in coloured output (sgr-perchar: one
+               before every character). The general parse below leaves
+               exactly this behind: cpar = v,0,0,0, cnp 0, not private */
+            if (j + 2 < len && (UBYTE)(s[j + 1] - '0') <= 9) {
+                LONG v = s[j + 1] - '0', e = 0;
+                if (s[j + 2] == 'm') e = j + 3;
+                else if (j + 3 < len && (UBYTE)(s[j + 2] - '0') <= 9 && s[j + 3] == 'm') {
+                    v = v * 10 + (s[j + 2] - '0');
+                    e = j + 4;
+                }
+                if (e) {
+                    k->cpar[0] = v; k->cpar[1] = 0; k->cpar[2] = 0; k->cpar[3] = 0;
+                    k->cnp = 0;
+                    k->cpriv = FALSE;
+                    sgr1(k, v);
+                    i = e;
+                    continue;
+                }
+            }
             j++;
             par[0] = par[1] = par[2] = par[3] = 0;
             for (;;) {
@@ -697,6 +805,9 @@ extern void pplane(ULONG *comb, LONG ng, LONG ch, struct seg *sg, UBYTE *dst, LO
 #define TMP_AT   272        /* bytes before cell 0, 8 after the last */
 #define TMP_ST   544
 #define TMP_CSEG 816        /* colour segments */
+#define TMP_OWNK 13832      /* cs = 8: the owner masks' phase + 1, then 5 longs
+                               (past every other path's area: a font change
+                               must not leave a stale key behind) */
 #define TMP_PSEG 2304       /* one plane's segments */
 #define TMP_COMB 4096       /* the transposed glyph lines */
 #define TMP_TN   12800      /* pfused's pens tables (256 words each), */
@@ -710,6 +821,18 @@ struct pf {
 };
 extern void pfused(struct pf *f);
 extern void pfused1(struct pf *f);
+
+/* 1.2.8b11: pm1/pm (pgroups.s) - pfused1/pfused straight from the model:
+   chars, attrs and styles read in place (styles at attrs + soff), glyph
+   addresses formed from the chars. No copies, no pointer array. */
+struct pm {
+    const UBYTE *chp; LONG ng, ch; const UBYTE *pa; LONG bpr; ULONG ef, el; LONG uni5;
+    ULONG own[5]; const WORD *tn, *ti; LONG k; ULONG e; LONG key, yy;
+    const UBYTE *gl; LONG soff; ULONG pref[4];
+    struct { UBYTE *dst; LONG pbit; ULONG a, x; } pt[8]; LONG end;
+};
+extern void pm(struct pm *f);
+extern void pm1(struct pm *f);
 
 /* a run of groups painted alike: uniform (one attr/style for every
    bit) or a single mixed group (owners c0-1..c0+3 listed) */
@@ -867,6 +990,89 @@ static LONG prow(struct pctx *pc, struct con *k, LONG mask, LONG r, LONG x0, LON
     return styled;
 }
 
+#ifndef OLDPAINT
+/* 1.2.8b11: the 8-line painter's per-flush setup and per-row call. What
+   does not change between the rows of one ppaint - the pens tables, the
+   owner and prefix masks of the bit phase, the plane list, the glyph cache
+   - is set up once (pmsetup); per row prowm only places the span: on a
+   stock 020 the old per-row C setup was ~210 straight-line instructions,
+   ~0.25ms, for every row painted. Returns the planes in the list. */
+static LONG pmsetup(struct pctx *pc, struct con *k, LONG mask, struct pm *f)
+{
+    WORD *tn = (WORD *)((UBYTE *)pc->tmp + TMP_TN), *ti = (WORD *)((UBYTE *)pc->tmp + TMP_TI);
+    LONG *tkey = (LONG *)((UBYTE *)pc->tmp + TMP_TKEY), np = 0, i, p, s = pc->s;
+    ULONG *ok = (ULONG *)((UBYTE *)pc->tmp + TMP_OWNK);
+    if (ok[0] != (ULONG)s + 1) {
+        ULONG mh = 0xFF >> s, ml = ~mh & 0xFF;
+        for (i = 0; i < 5; i++) {
+            ULONG o = 0;
+            if (i >= 1) o |= mh << ((4 - i) * 8);
+            if (i <= 3) o |= ml << ((3 - i) * 8);
+            ok[1 + i] = o;
+        }
+        for (i = 0; i < 4; i++) ok[6 + i] = (i ? ok[5 + i] : 0) | ok[1 + i];
+        ok[0] = s + 1;
+    }
+    for (i = 0; i < 5; i++) f->own[i] = ok[1 + i];
+    for (i = 0; i < 4; i++) f->pref[i] = ok[6 + i];
+    if (*tkey != k->deffg + 0x10000) {
+        for (i = 0; i < 256; i++) {
+            LONG fx, fb;
+            cpen(k, i, 0, &fx, &fb);
+            tn[i] = (fx << 8) | fb;
+            cpen(k, i, 4, &fx, &fb);
+            ti[i] = (fx << 8) | fb;
+        }
+        *tkey = k->deffg + 0x10000;
+    }
+    f->soff = (LONG)k->ss - (LONG)k->sa;
+    f->gl = pc->gl;
+    f->ch = pc->ch;
+    f->bpr = pc->bpr;
+    f->uni5 = s;
+    f->tn = tn;
+    f->ti = ti;
+    for (p = 0; p < pc->depth; p++) {
+        if (!((mask >> p) & 1)) continue;
+        f->pt[np].pbit = p;
+        np++;
+    }
+    f->pt[np].dst = 0;
+    return np;
+}
+
+static LONG prowm(struct pctx *pc, struct con *k, struct pm *f, LONG np, LONG r, LONG x0, LONG x1)
+{
+    LONG n, i, off, J0, B0, B1, q0, q1, rb;
+    const UBYTE *ms;
+    ULONG sor = 0;
+    if (x0 < 0) x0 = 0;
+    if (x1 > k->cols - 1) x1 = k->cols - 1;
+    if (x0 > x1) return 0;
+    n = x1 - x0 + 1;
+    off = ringidx(k, r) * k->cols + x0;
+    J0 = pc->xb + x0;
+    B0 = J0 * 8 + pc->s;
+    B1 = B0 + n * 8;
+    q0 = B0 >> 5;
+    q1 = (B1 - 1) >> 5;
+    f->ng = q1 - q0 + 1;
+    f->ef = 0xFFFFFFFF >> (B0 - 32 * q0);
+    f->el = (B1 - 32 * q1) >= 32 ? 0xFFFFFFFF : ~(0xFFFFFFFF >> (B1 - 32 * q1));
+    i = 4 * q0 - J0;                            /* group 0's c0, from x0 */
+    f->chp = (const UBYTE *)k->sb + off + i;
+    f->pa = (const UBYTE *)k->sa + off + i - 1;
+    rb = r * f->ch * f->bpr + q0 * 4;
+    for (i = 0; i < np; i++) f->pt[i].dst = pc->pl[f->pt[i].pbit] + rb;
+    if (np == 1) pm1(f);
+    else if (np) pm(f);
+    ms = (const UBYTE *)k->ss + off;
+    for (i = 0; i + 4 <= n; i += 4) sor |= *(const ULONG *)(ms + i);
+    for (; i < n; i++) sor |= ms[i];
+    return (sor & 0x0B0B0B0B) ? 1 : 0;      /* italic, underline, bold: Text */
+}
+#endif
+
 /* dpplanar's row loop: every row in full (all = 2) or the dirty spans */
 LONG ppaint(struct pctx *pc, struct fx *x, LONG all)
 {
@@ -878,11 +1084,30 @@ LONG ppaint(struct pctx *pc, struct fx *x, LONG all)
         r0 = *x->dflo < 0 ? 0 : *x->dflo;
         r1 = *x->dfhi > k->rows - 1 ? k->rows - 1 : *x->dfhi;
     }
+#ifndef OLDPAINT
+    if (pc->cs == 8) {
+        struct pm *f = (struct pm *)((UBYTE *)pc->tmp + TMP_PSEG);
+        LONG np = pmsetup(pc, k, mask, f);
+        for (r = r0; r <= r1; r++) {
+            sty = 0;
+            if (all == 2) sty = prowm(pc, k, f, np, r, 0, k->cols - 1);
+            else if ((*x->dfd)[r] == (UBYTE)*x->dfgen)
+                sty = prowm(pc, k, f, np, r, (*x->dfx0)[r], (*x->dfx1)[r]);
+            pc->sty[r] = sty;
+            if (sty) styled = 1;
+        }
+        return styled;
+    }
+#endif
     for (r = r0; r <= r1; r++) {
         sty = 0;
         if (all == 2) sty = prow(pc, k, mask, r, 0, k->cols - 1);
-        else if ((*x->dfd)[r] == (UBYTE)*x->dfgen)
+        else if ((*x->dfd)[r] == (UBYTE)*x->dfgen) {
             sty = prow(pc, k, mask, r, (*x->dfx0)[r], (*x->dfx1)[r]);
+#ifdef PROF
+            if (x->cprof) { x->cprof[48]++; x->cprof[49] += (*x->dfx1)[r] - (*x->dfx0)[r] + 1; x->cprof[50] += mask; }
+#endif
+        }
         pc->sty[r] = sty;
         if (sty) styled = 1;
     }
@@ -911,7 +1136,20 @@ static void putmsg(void *sys, void *port, void *msg)
     __asm__ volatile ("jsr -366(%%a6)" : "+r"(a0), "+r"(a1), "+r"(a6) : : "d0", "d1", "memory", "cc");
 }
 
+#ifdef PROF
+static LONG wacc0(struct fx *x, struct dpkt *pkt);
 LONG wacc(struct fx *x, struct dpkt *pkt)
+{
+    LONG r;
+    PT(t7);
+    r = wacc0(x, pkt);
+    PA(7, t7);
+    return r;
+}
+static LONG wacc0(struct fx *x, struct dpkt *pkt)
+#else
+LONG wacc(struct fx *x, struct dpkt *pkt)
+#endif
 {
     struct con *k = (struct con *)pkt->arg1, *c;
     LONG len = pkt->arg3;
@@ -1002,8 +1240,10 @@ LONG cflush(struct fx *x, struct pctx *pc)
     void *gfx = x->gfxbase;
     if (!*x->dfon) return 0;
     if (!ly) return -1;
+    PT(tw);
     gwaitblit(gfx);                                     /* a queued scroll lands first */
     gcall_lock(gfx, ly, 0);
+    PA(4, tw);
     cr = *(UBYTE **)(ly + 8);
     if (!cr || *(UBYTE **)cr || *(LONG *)(cr + 8)
         || *(LONG *)(cr + 16) != *(LONG *)(ly + 16) || *(LONG *)(cr + 20) != *(LONG *)(ly + 20)
@@ -1015,7 +1255,9 @@ LONG cflush(struct fx *x, struct pctx *pc)
         *x->dffull = FALSE;
         if (*x->dfnarrow) { res |= 2; *x->dfnarrow = FALSE; }
     } else if (*x->dffull) {
+        PT(tf);
         sty = ppaint(pc, x, 2);
+        PA(3, tf);
         vblankscan(k);
         *x->dffull = FALSE;
         if (*x->dfnarrow) { res |= 2; *x->dfnarrow = FALSE; }
@@ -1023,11 +1265,21 @@ LONG cflush(struct fx *x, struct pctx *pc)
     } else {
         if (*x->dfpend > 0 && !k->vblank) {
             WORD w = *(WORD *)(win + 8), h = *(WORD *)(win + 10);
+
+            PT(ts);
+#ifdef PROF
+            if (x->cprof) x->cprof[51] += *x->dfpend;
+#endif
             gscroll(gfx, rp, *x->dfpend * k->ch, win[54], win[55], w - win[56] - 1, h - win[57] - 1);
             gwaitblit(gfx);
+            PA(1, ts);
         }
         *x->dfpend = 0;
-        if (*x->dfhi >= *x->dflo && ppaint(pc, x, FALSE)) res |= 1;
+        if (*x->dfhi >= *x->dflo) {
+            PT(tp);
+            if (ppaint(pc, x, FALSE)) res |= 1;
+            PA(2, tp);
+        }
     }
     gcall_lock(gfx, ly, 1);
     if (res & 1) return res;                            /* E Texts the styled rows */
@@ -1087,7 +1339,11 @@ static LONG cfout(struct fx *x, struct pctx *pc, struct con *c)
     *x->dfvb = c->vblank;
     *x->maskon = TRUE;
     rp[24] = c->mmask;
-    i = frun(x, (const UBYTE *)c->wob, 0, c->wolen);
+    {
+        PT(tr);
+        i = frun(x, (const UBYTE *)c->wob, 0, c->wolen);
+        PA(0, tr);
+    }
     if (i < c->wolen) { *x->fxret = i; return 2; }
     r = cflush(x, pc);
     if (r < 0) { *x->fxret = c->wolen; return 2; }
@@ -1104,7 +1360,18 @@ static LONG cfout(struct fx *x, struct pctx *pc, struct con *c)
     return 1;
 }
 
+#ifdef PROF
+LONG cfout_e(struct fx *x, struct pctx *pc, struct con *c)
+{
+    LONG r;
+    PT(t6);
+    r = cfout(x, pc, c);
+    PA(6, t6);
+    return r;
+}
+#else
 LONG cfout_e(struct fx *x, struct pctx *pc, struct con *c) { return cfout(x, pc, c); }
+#endif
 
 /* ACTION_WAIT_CHAR: conbysender's first two lookups, the flush, and the
    no-wait answers. 0 = E does it all; 1 = replied; 2/4 = flushed partly,
@@ -1200,6 +1467,31 @@ void *drain(struct fx *x)
     }
 }
 
+/* E's maskscan's cell loop (1.2.8b11): the pens every attr on screen
+   uses, OR (a AND 15) OR (a >> 4 AND 7) over the cells. OR distributes
+   over the bytes, so it ORs whole longs and folds once; and cells past a
+   row's written length are zero, so it stops there. In E the loop was
+   one E statement a cell - ~45ms a call on a stock 020, and a form feed
+   (clear-page: every page) asks for one at the next flush. */
+LONG mscan(struct con *k)
+{
+    ULONG acc = 0;
+    LONG r, i, n;
+    UWORD *l = slp(k);
+    for (r = 0; r < k->rows; r++) {
+        LONG ri = ringidx(k, r);
+        const UBYTE *a = (const UBYTE *)k->sa + ri * k->cols;
+        n = l ? l[ri] : k->cols;
+        if (n > k->cols) n = k->cols;
+        for (i = 0; i + 4 <= n; i += 4) acc |= *(const ULONG *)(a + i);
+        for (; i < n; i++) acc |= a[i];
+    }
+    acc |= acc >> 16;
+    acc |= acc >> 8;
+    acc &= 0xFF;
+    return (acc & 15) | ((acc >> 4) & 7);
+}
+
 /* the layout check: the handler fills a scratch console with known
    values and asks for this sum; a mismatch keeps the engine off */
 LONG fcheck(struct con *k)
@@ -1207,3 +1499,4 @@ LONG fcheck(struct con *k)
     return k->cx + k->sb * 3 + k->mmask * 5 + k->vblank * 7 + k->osct[83] * 11
          + k->cursty * 13 + k->anstab[7] * 17 + k->jslk * 19;
 }
+

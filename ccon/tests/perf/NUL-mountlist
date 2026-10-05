@@ -1,0 +1,6 @@
+NUL0:
+    Handler = RAM:nullc-handler
+    StackSize = 4096
+    Priority = 5
+    GlobVec = -1
+#

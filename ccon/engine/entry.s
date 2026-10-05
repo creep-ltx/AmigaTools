@@ -1,5 +1,5 @@
 | engine.bin's entry table: the handler calls offset 0 (frun), 4 (fcheck),
-| 8 (ppaint), 12 (gshift), 16 (wacc), 20 (cflush), 24 (cfout_e), 28 (wchar), 32 (drain)
+| 8 (ppaint), 12 (gshift), 16 (wacc), 20 (cflush), 24 (cfout_e), 28 (wchar), 32 (drain), 36 (mscan)
 	.text
 	.globl _start
 _start:
@@ -12,3 +12,4 @@ _start:
 	bra.w	cfout_e
 	bra.w	wchar
 	bra.w	drain
+	bra.w	mscan

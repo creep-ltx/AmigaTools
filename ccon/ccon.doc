@@ -295,6 +295,16 @@
              classic one-line scroll, so full-screen programs are
              pixel-identical whatever JUMP says.
 
+  PACE=FAST  How long streamed output pools before the screen is
+  PACE=NORMAL updated. NORMAL (the default): the next update waits
+             1.5 times what the last one cost, 20 to 160 ms. FAST:
+             2.5 times, and never under 40 ms while output keeps
+             coming - fewer, bigger updates, so fewer scroll blits
+             and repaints (about 4% faster through conbench on a
+             stock A1200). The price: during a flood the screen
+             updates a little less often. Typed keys, prompts and
+             WaitForChar are never paced.
+
   NODIRECT   Draw only through graphics.library. By default CCON
   DIRECT     may also write text rows straight into the screen's
              bitmap - bitplanes on a native screen, display memory

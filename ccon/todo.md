@@ -6593,3 +6593,155 @@ delete and drop modifiers (done 1.2.8b7) - and three new:
   memory flat after the first reopen; with Clock open CloseWorkBench = 0
   and the CCON windows came straight back (the TRUE-on-failure path).
   Previous build kept as L:ccon-handler-1.2.8b9 there.
+
+## 1.2.8b11 - row lengths and a model-direct painter (4.10.26)
+
+Profiled first (CCON.prof + new C-side EClock counters, built only with
+`PROF=1 engine/build.sh`; ccstat3 in the session scratchpad prints them):
+on the stock A1200 every packet costs the handler ~0.45-0.7ms outside the
+C engine, and conbench itself plus DOS ("idle") is ~12s of the run - the
+same for any console. Of the rest, the biggest single piece was
+scroll-nl's newline run: 1.63s of 2.5, zero-filling recycled rows.
+
+- Row lengths (sl): one word per ring row, in the sw allocation after the
+  wrap bytes (slbase; slsize = sbmax*3+2). Rule: every cell from a row's
+  length to the margin is zero in all three planes. clearrow/lfrun zero
+  only that much; eraseeol zeroes only what was written past cx; rowcopy,
+  inschars and delchars move only the cells in use. E's writers mark
+  their row full width (slfull: renderx, outchr, dfputc, the four row-
+  copy loops, ins/delchars, altpop, drawedit; reflowring = slall) - always
+  true; the C engine keeps it exact. Harness: fxdiff checks the rule on
+  every ring row after every chunk, E and C runs (planted bug: caught at
+  chunk 1); 8 seeds x 7200, 0 mismatches.
+- Painter (pm1/pm in pgroups.s): pfused1/pfused reading the model in
+  place - chars as one long per group, attrs/styles in place (styles at
+  attrs + soff), glyph addresses formed in registers (gl, 2c*8) - no
+  padded copies, no pointer array. Edge groups read a cell past each
+  span end; those pixels are outside the edge mask. Differential test
+  pcmp (scratchpad: random rows, phases, offsets, depths, spans, old vs
+  new into memory planes, under vamos and on the 020): 6000 trials, 0
+  differences. ptest2 per row: plain 1.96 -> 1.67ms, mixed 2.71 -> 2.46,
+  3 planes 5.37 -> 4.89.
+- Tried and dropped (measured slower or not worth it):
+  - serve: the whole Wait/accept/reply round in C - 32.0 vs 31.2s (the
+    same result drain had). The per-packet cost is exec's, not E's loop.
+  - prow8/prun8: C builds a run list, asm draws - the C loop alone cost
+    1.13ms a plain row (C runs from chip like everything else).
+- Traps: the slab flag must not be read off the glyph cache address (its
+  alignment is not ours - vamos handed out 4-aligned memory and the
+  differential test went nondeterministic); ptest2 loaded only 16K of a
+  17K blob and crashed the machine (now 32K); `pkill -f name` from a
+  command whose own text contains name kills that shell.
+
+Results:
+- Stock A1200 (FS-UAE, 77x30, SCALE 1 REPS 3 SYNC, same-day control):
+  b10 31.18 -> b11 29.00 (rows) -> 28.84 (rows + painter). scroll-nl
+  2.50 -> 1.50, insdel-line 1.14 -> 0.56, insdel-char 1.20 -> 1.02,
+  cursor 2.32 -> 2.10, clear 2.00 -> 1.88, eeol 2.00 -> 1.90.
+- Real A1200 + PiStorm (97x72, SCALE 10, XC1:/XC2: mounts from RAM:,
+  alternating): b10 8.50/8.54 -> b11 8.36/8.38. Most of that run is the
+  per-write round trip (bytewise ~62us a write).
+- Painter 3-plane rows: per sgr line pm spends ~2,260 instructions on
+  mixed-group colour masks (owner lookups per plane) - halvable, worth
+  ~0.5s of the stock run.
+
+### b11, continued: toward the floor (4.10.26 night)
+
+The floor, measured: a null DOS handler (scratchpad nullc.c - answers
+every packet at once, draws nothing) under the same conbench run. Stock
+A1200 (SCALE 1, 77x24 since it cannot answer the size probe): 12.26s, ~12.4
+adjusted for vt-frame's 30 rows. Real A1200 + PiStorm (SCALE 10): ~6.9s.
+CCON b11: 28.84 / 8.37 - so on the PiStorm only ~1.5s is CCON's own; on
+stock ~16s.
+
+Cost model learned on stock (Hires 16 colours, chip-only): straight-line
+code ~1.3us an instruction (every fetch a chip access), cached loops cheap
+per instruction but ~2.5-3us per data access. Count accesses in loops,
+instructions on paths. (Knowledge: amiga/graphics-and-performance.md.)
+
+Kept (all harness-green: fxdiff 8 seeds; painter pcmp 6000 trials):
+- putseg (pgroups.s): putrun's segment body - copy, two fills, row
+  length, dfmark - in one asm pass (conoffs.i generated from con.h by
+  build.sh). btest bulk: plain 4.85 -> 4.3 us/byte, sgr 5.87 -> 4.25.
+- prscan: no byte steps to a long boundary (the 020 reads misaligned).
+- pm/pm1 TWOC: a mixed group with two colours gets its masks from two pens
+  lookups + a prefix mask (PM_PREF) instead of 5 lookups a plane. ptest2
+  3 planes 4.88 -> 4.50 ms a row.
+- pm register path: no edge, 8 lines, 2-3 planes, every X = 0 - masks and
+  destinations in registers (F3TWO/F2TWO).
+- owner masks cached per bit phase (TMP_OWNK) - no measurable gain, kept.
+
+Dropped after measuring (A/B, alternating rounds):
+- newline precount (dffull from the start when the batch holds a screen of
+  LFs): scroll-nl -0.12 but wrap-long +0.18, vt-frame +0.15 - the count
+  reads the batch byte by byte (~3us a byte).
+- style-0 fill skip past the row length: no measurable gain.
+- styles ORed in the painter instead of C's scan: slower (+128us/row at
+  3 planes) - the C scan was a cached loop, the asm added memory RMWs.
+
+A/B on stock (3 rounds b11 vs b12e, then 2 rounds b13a vs b13p):
+  b11 28.74, b12e 28.19, b13a 28.21, b13p 26.99 (pace experiment, below).
+
+Pace experiment (b13p, NOT in the tree): next flush waits 2.5x the last
+flush's cost instead of 1.5x (cap unchanged 160ms): -1.2s on stock (sgr
+6.77 -> 6.15, perchar -0.19, cursor -0.16, scroll-nl -0.12). The price:
+during a flood the screen updates ~every 0.23s instead of ~0.18s. Keys,
+prompts and WaitForChar are not paced. His decision.
+
+More kept (4.10.26 night, after the notes above), each A/B'd:
+- pmsetup/prowm: the painter's per-flush setup (pens tables, owner and
+  prefix masks, plane list, glyph cache) built once per ppaint; per row
+  only the span is placed. b13a 28.21 -> b13b 27.79.
+- mscan (engine entry 36): E's maskscan cell loop as long ORs folded once,
+  stopping at each row's length - ~45ms of E a call on stock, and a form
+  feed asks for one at the next flush. clear-page 1.79 -> 1.55, insdel-line
+  0.56 -> 0.45; b13b 28.10 -> b13n 27.24 (same-night pair).
+- wsigok: the main loop's wait mask rebuilt only after a pass that did
+  more than fast-path writes (dopkt's other packets, any event wakeup).
+  bytewise 2.23 -> 1.98, sgr 6.72 -> 6.43, scroll-nl 1.47 -> 1.34;
+  b13n ~27.2 -> b13c ~26.6. So E's per-wakeup overhead IS real (~100us).
+
+More dropped:
+- serve (packet loop in C), retested properly (3 rounds): bytewise 2.26 ->
+  2.44, sgr +0.28 - really slower, and wsigok shows E's loop costs time,
+  so the reason is still open (not the loop's E statements).
+- the fast write inline in the main loop (no dopkt/fcall2 call): +-0.
+- width-limited scroll (blit only the columns that can hold pixels):
+  pixel-correct (pxab3 + slowtype: blit path forced, planted half-width
+  caught) but sgr unchanged and sync-line +0.13 (the width scan per flush).
+  srbench on stock: ScrollRaster 53ms, the same without its clear 52ms,
+  3 planes 27ms, 1 plane 14ms - planes are the cost, not width or clear.
+- short-span attr strip (edge groups uniform): the C strip cost more than
+  the painter saved.
+
+Test-tool notes: pxab with long output needs JUMP0 (jump timing makes the
+final screen differ run to run) and slowtype (a line + Delay(1) - else most
+flushes are full repaints and a scroll bug never shows). Both in the
+session scratchpad, with pxscroll2.txt in FS-UAE T:.
+
+Real A1200 + PiStorm (SCALE 10, XC mounts, 3 alternating): b11 8.48/8.44/
+8.40 -> b13c 8.30/8.30/8.30 (floor ~6.9).
+- deferred row clear (a scroll leaves the recycled row pending; the next
+  text written to it zeroes only around itself): model-exact (fxdiff 8
+  seeds + planted bug) but SLOWER - block-4k 1.03 -> 1.10, block-32k 0.81
+  -> 0.86, clear-page +0.06. A full-row zfill in a cached loop is cheaper
+  than the extra C bookkeeping (calls, ring lookups) on every row.
+  (Code kept in the session scratchpad: engine.c.b14b.)
+
+Night totals, stock A1200, same night, 3 alternating rounds each:
+  b11 28.84 -> b13c 26.27 (-2.57s, -8.9%)
+  b13c 26.21 -> b13cq 25.00 with the pacing option (x2.5, 40ms floor)
+Real A1200 + PiStorm: b11 8.44 avg -> b13c 8.30 (floor ~6.9).
+
+### 1.2.8b12 (5.10.26 morning)
+- PACE=FAST/NORMAL option (console field ppace, FXCONSIZE 4184; flush-
+  expired uses x2.5 + WOFLUSHFAST 40ms if any flushed console has it;
+  the idle case keeps WOFLUSHUS 20ms). Stock same window: 26.32 -> 25.14.
+- Installed on his A1200: L:ccon-handler = 1.2.8b12 (b11 kept as
+  L:ccon-handler-1.2.8b11), PACE section added to L:ccon.cfg with
+  PACE=FAST active (old cfg kept as L:ccon.cfg.bak-b11). Rebooted, runs.
+- Repo ccon.cfg: PACE section (commented, ;PACE=NORMAL). ccon.doc +
+  changelog updated.
+- Open: tests/cfgtest.e still mirrors an older parseopt (no DIRECT/
+  NODIRECT/PACE); clear-page moves ~0.1s with unrelated code changes
+  (layout sensitivity, not chased).

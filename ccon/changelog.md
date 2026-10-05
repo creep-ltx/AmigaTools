@@ -96,6 +96,15 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
   (1.2.8b9)
 
 ### Changed
+- **Faster again** (1.2.8b11-b12), conbench SYNC SCALE 1 on a stock
+  A1200 under FS-UAE: 28.8 s to 26.1 s; real A1200 with a PiStorm
+  (SCALE 10): 8.4 s to 8.3 s. Rows remember how far they were written
+  (scrolls, erases and insert/delete touch only the used cells), the
+  text path and the painter read and write the screen model in fewer
+  passes, and the handler's main loop does less work per write.
+- **PACE=FAST** (new option): screen updates during a flood of output
+  come less often and carry more - 26.1 s to 25.1 s on a stock A1200.
+  PACE=NORMAL, the default, keeps the earlier behaviour. (1.2.8b12)
 - **Faster output on every Amiga** (1.2.8b8), conbench with SYNC:
   stock A1200 under FS-UAE, an accelerated A1200 under FS-UAE (030,
   JIT) and a real A1200 with a PiStorm and a 32-bit Workbench. On

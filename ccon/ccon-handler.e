@@ -142,13 +142,14 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> clamped to 255 (gridcalc), rows is not - a
                         -> window taller than DFROWS rows just runs the
                         -> legacy immediate path (dfstart declines)
-      FXCONSIZE=4180,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
+      FXCONSIZE=4184,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
       WOBSZ=16384,      -> S5 write-behind buffer, bytes per console.
                         -> (1.2.8b9: 4096 -> 16384, so a paced flush
                         -> can pool several screens of a burst)
                         -> Writes larger than this stay fully
                         -> synchronous (flush, render, reply after)
       WOFMAX=160000,    -> 1.2.8b9: the paced flush's longest wait
+      WOFLUSHFAST=40000, -> 1.2.8b12: PACE=FAST's shortest wait under output
       WOFLUSHUS=20000,  -> S5 flush latency: one PAL frame. Sparse
                         -> output lands within 20ms (imperceptible);
                         -> burst producers fill ~15-25 lines per flush,
@@ -538,6 +539,7 @@ OBJECT console
   wbgone                        -> 1.2.8b9: window closed because the
                                 -> Workbench screen is closing
                                 -> (screennotify.library); reopens with it
+  ppace                         -> 1.2.8b12: PACE=FAST (TRUE) / NORMAL
 ENDOBJECT
 
 DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
@@ -751,7 +753,7 @@ DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
     -> 1.2.8b9: the C engine's view of the globals above, by address
     -> (struct fx in engine.c - same order), and its on/off switch: on
     -> only when fxsetup's layout check agrees with genstruct.py
-    fxtab[32]:ARRAY OF LONG, fastok=FALSE, fxret=0, fxold=NIL,
+    fxtab[32]:ARRAY OF LONG, fastok=FALSE, fxret=0, fxold=NIL, wsigok=FALSE,
     -> the planar painter's context (struct pctx in engine.c) and its
     -> pre-shifted glyph cache, rebuilt when font, height or phase move
     pctx[24]:ARRAY OF LONG, gsh=NIL:PTR TO CHAR, gshtf=NIL, gshch=0,
@@ -1125,6 +1127,13 @@ PROC main()
   -> current packet/event drain finishes, then the loop falls out to
   -> killhandler() below.
   WHILE dieing = FALSE
+    -> 1.2.8b11: the mask is rebuilt only after a pass that did more than
+    -> take writes through the fast path (wsigok, cleared by dopkt's other
+    -> packets and by any wakeup a non-packet signal caused): windows,
+    -> ports and helpers only come and go on those. Under output the loop
+    -> is Wait, one write, Wait - and the rebuild was ~100us of E a pass on
+    -> a stock 020 (bytewise 2.23 -> 1.98s)
+    IF wsigok = FALSE
     wsig := 0
     c := conlist                  -> M10b: every console's UserPort
     WHILE c                       -> joins the wait mask
@@ -1136,10 +1145,14 @@ PROC main()
     IF wbport THEN wsig := wsig OR Shl(1, wbport.sigbit)  -> ICONIFY: AppMessages
     IF snport THEN wsig := wsig OR Shl(1, snport.sigbit)  -> 1.2.8b9: screennotify
     wsig := wsig OR arsig       -> 1.2.8b6: the requester's answer
+    wsigok := TRUE
+    ENDIF
     msigs := Wait(psig OR wsig)
-    -> drain the packet port. (engine.c's drain - the same loop in C -
-    -> measured SLOWER on a stock A1200, 4.10.26: 32.2s vs 30.5s; parked
-    -> until that is understood, see todo.md)
+    -> drain the packet port. (Doing this round in C - engine.c's drain
+    -> here, or the whole Wait/accept/reply loop as 1.2.8b11's serve -
+    -> measured SLOWER on a stock A1200 both times: 32.2 vs 30.5s, then
+    -> 32.0 vs 31.2s. The per-packet cost is exec's - GetMsg, the reply,
+    -> the task switch - not E's loop; see todo.md b11)
     REPEAT
       msg := GetMsg(port)
       IF msg THEN dopkt(msg.ln.name)
@@ -1151,6 +1164,7 @@ PROC main()
     -> Skipping the walk saves ~0.5ms a packet on a stock 020. The
     -> scrollbar knob catches up on the next tick's full pass.
     IF (msigs AND wsig) = 0 THEN JUMP mnext
+    wsigok := FALSE             -> b11: an event pass - rebuild the mask
     -> drain the captured input events (M6)
     IF ihon THEN ihdrain()
     -> drain every console's window port. A raw-events client (Ed) takes
@@ -1797,6 +1811,7 @@ PROC dopkt(pkt:PTR TO dospacket)
       ENDIF
     ENDIF
   ENDIF
+  wsigok := FALSE               -> b11: not a fast write - rebuild the mask
   SELECT pkt.type
   CASE ACTION_FINDINPUT;  dofind(pkt)
   CASE ACTION_FINDOUTPUT; dofind(pkt)
@@ -2287,7 +2302,7 @@ ENDPROC
 
 PROC flushexpired()
   DEF c:PTR TO console, again=FALSE, round, work, old:PTR TO console,
-      t0, el
+      t0, el, fast=FALSE
   -> E4 second draft: the b3 sweep-before-render was a no-op - the
   -> main loop has ALREADY drained the port into the buffers by the
   -> time the timer is seen. The packets that matter arrive WHILE a
@@ -2316,6 +2331,7 @@ PROC flushexpired()
     WHILE c
       IF (c.wolen > 0) AND (c.selon = FALSE)
         swaccept()              -> what arrived during the last render
+        IF c.ppace THEN fast := TRUE  -> 1.2.8b12: PACE=FAST
         flushout(c)
         work := TRUE
         c.bliptick := TRUE
@@ -2327,10 +2343,15 @@ PROC flushexpired()
   IF work
     el := dpnow() - t0
     IF (el > 0) AND (el < 300000)
+      IF fast                   -> 1.2.8b12 PACE=FAST: x2.5 = ticks x3.5
+        el := Shl(el, 2) - Shr(el, 1)
+        fdelay := Max(WOFLUSHFAST, Min(el, WOFMAX))
+      ELSE
       el := Shl(el, 1) + Shr(el, 3)  -> x1.5, EClock ticks -> us
                                 -> (709kHz: x1.41) = x2.12; shifts, as
                                 -> E's Div is 32/16 and would trap
       fdelay := Max(WOFLUSHUS, Min(el, WOFMAX))
+      ENDIF
     ENDIF
   ELSE
     fdelay := WOFLUSHUS
@@ -2601,6 +2622,23 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'PACE', 4)
+    -> 1.2.8b12: how long output pools between screen updates. NORMAL:
+    -> the next flush waits 1.5x what the last one cost (20..160ms).
+    -> FAST: 2.5x, and never under 40ms while output keeps coming -
+    -> fewer, bigger flushes (fewer scroll blits and repaints), at the
+    -> price of the screen updating less often during a flood (about
+    -> every 0.23s instead of 0.18s on a stock A1200). Keys, prompts
+    -> and WaitForChar are not paced either way.
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    IF StrCmp(tok + v, 'FAST')
+      curcon.ppace := TRUE
+    ELSEIF StrCmp(tok + v, 'NORMAL')
+      curcon.ppace := FALSE
+    ELSE
+      matched := FALSE
+    ENDIF
   ELSEIF StrCmp(tok, 'JUMP', 4)
     -> J1 (1.2.8): jump scroll - at the bottom margin an LF scrolls
     -> n rows in ONE blit and the next n-1 newlines scroll nothing.
@@ -2784,6 +2822,7 @@ PROC parsecon(bname)
   curcon.pscrname[0] := 0              -> global array: garbage until set
   curcon.plines := 0                   -> v1.1: LINES/FONT re-ground per
   curcon.pjump := -1                   -> 1.2.8b8: automatic (J1 was off)
+  curcon.ppace := FALSE                -> 1.2.8b12: PACE=NORMAL
   curcon.pnoinfo := FALSE              -> 1.2.8b2: icons complete, greyed
   curcon.pdirect := TRUE               -> 1.2.8b8: direct RTG rows on
   curcon.pscrollbar := FALSE           -> 1.2.8b5: no scrollbar, as shipped
@@ -4505,7 +4544,7 @@ PROC openwin()
     curcon.sb := New(Mul(curcon.sbmax, curcon.cols))
     curcon.sa := New(Mul(curcon.sbmax, curcon.cols))
     curcon.ss := New(Mul(curcon.sbmax, curcon.cols))
-    curcon.sw := New(curcon.sbmax)   -> B7: one byte per ROW, not per cell
+    curcon.sw := New(slsize(curcon.sbmax))   -> B7: one byte per ROW (+ b11's lengths)
     IF (curcon.sb = NIL) OR (curcon.sa = NIL) OR (curcon.ss = NIL) OR
        (curcon.sw = NIL)
       IF curcon.sb THEN Dispose(curcon.sb)
@@ -4832,7 +4871,7 @@ PROC reflowring(ocols, orows)
   nsb := New(Mul(curcon.sbmax, curcon.cols))
   nsa := New(Mul(curcon.sbmax, curcon.cols))
   nss := New(Mul(curcon.sbmax, curcon.cols))
-  nsw := New(curcon.sbmax)
+  nsw := New(slsize(curcon.sbmax))
   IF (nsb = NIL) OR (nsa = NIL) OR (nss = NIL) OR (nsw = NIL)
     IF nsb THEN Dispose(nsb)
     IF nsa THEN Dispose(nsa)
@@ -4924,6 +4963,7 @@ PROC reflowring(ocols, orows)
   curcon.ss := nss
   curcon.sw := nsw
   curcon.sbcols := curcon.cols  -> audit3 C2: the new planes' real stride
+  slall()                       -> b11: the copied rows' lengths unknown
   -> the newest `rows` dest rows are the screen; the rest is history,
   -> capped by what the ring can still hold behind it
   IF rftot < curcon.rows THEN rftot := curcon.rows
@@ -5270,6 +5310,34 @@ PROC swrow(r)
   IF i >= curcon.sbmax THEN i := i - curcon.sbmax
 ENDPROC curcon.sw + i
 
+-> 1.2.8b11: each ring row's WRITTEN LENGTH (one word a row, in the sw
+-> allocation after the sbmax wrap bytes - slbase). Every cell from it
+-> to the right margin is zero in all three planes, so clearrow zeroes
+-> only that much: a scroll recycles the oldest history row, and that is
+-> nearly always short or blank (a bare newline costed three full rows
+-> of chip-RAM stores, ~136us on a stock 020). E's writers mark their
+-> row full width (slfull) - always true, never the fastest; the C
+-> engine keeps it exact. Only the clearing reads it. New() zeroes the
+-> allocation, which is right: a new model is all zero.
+PROC slsize(n) IS Mul(n, 3) + 2
+PROC slbase(k:PTR TO console) IS And(k.sw + k.sbmax + 1, -2)
+
+PROC slfull(r)
+  DEF i
+  IF curcon.sw = NIL THEN RETURN
+  i := curcon.sbtop + r
+  IF i >= curcon.sbmax THEN i := i - curcon.sbmax
+  IF i < 0 THEN i := i + curcon.sbmax
+  PutInt(slbase(curcon) + i + i, curcon.cols)
+ENDPROC
+
+PROC slall()
+  DEF p, i
+  IF curcon.sw = NIL THEN RETURN
+  p := slbase(curcon)
+  FOR i := 0 TO curcon.sbmax - 1 DO PutInt(p + i + i, curcon.cols)
+ENDPROC
+
 PROC setwrapf(r, v)
   DEF p:PTR TO CHAR
   IF curcon.sw = NIL THEN RETURN
@@ -5368,7 +5436,9 @@ ENDPROC
 PROC maskscan()
   DEF r, i, a:PTR TO CHAR, u, v
   u := curcon.deffg OR fgpen() OR curcon.curbg
-  IF curcon.sb
+  IF curcon.sb AND fastok
+    u := u OR fcall1(36, curcon)  -> 1.2.8b11: engine.c's mscan - the same
+  ELSEIF curcon.sb              -> answer from long reads, ~45ms -> ~2ms
     FOR r := 0 TO curcon.rows - 1
       a := sarow(r)
       FOR i := 0 TO curcon.cols - 1
@@ -5453,12 +5523,19 @@ ENDPROC
 -> three planes' rows, and the ring index resolved once instead of
 -> three times - this runs once per scrolled line
 PROC clearrow(r)
-  DEF k:PTR TO console, i, off
+  DEF k:PTR TO console, i, off, n, p
   k := curcon
   i := k.sbtop + r
   IF i >= k.sbmax THEN i := i - k.sbmax
   off := Mul(i, k.cols)
-  zfill3(k.sb + off, k.sa + off, k.ss + off, k.cols)
+  n := k.cols
+  IF k.sw                       -> 1.2.8b11: only the written length
+    p := slbase(k) + i + i
+    n := Int(p)
+    PutInt(p, 0)
+    IF (n < 0) OR (n > k.cols) THEN n := k.cols
+  ENDIF
+  IF n > 0 THEN zfill3(k.sb + off, k.sa + off, k.ss + off, n)
   IF (k.sw <> NIL) AND (r >= 0) AND (r < k.rows) THEN PutChar(k.sw + i, 0)
 ENDPROC
 
@@ -6536,6 +6613,7 @@ PROC altpop()
     CopyMem(curcon.altm + Mul(r, curcon.cols), visrow(r), curcon.cols)
     CopyMem(curcon.alta + Mul(r, curcon.cols), sarow(r), curcon.cols)
     CopyMem(curcon.alts + Mul(r, curcon.cols), ssrow(r), curcon.cols)
+    slfull(r)
   ENDFOR
   -> B7: the snapshot predates the wrap plane and carries no flags of
   -> its own, so whatever sits in sw now describes the RAW session's
@@ -6855,6 +6933,7 @@ PROC dfputc(c)
   DEF m:PTR TO CHAR
   IF curcon.cx >= curcon.cols THEN dfwrapnl()
   curcon.vblank := FALSE        -> E5: see the printable run
+  slfull(curcon.cy)
   m := visrow(curcon.cy)
   m[curcon.cx] := c
   m := sarow(curcon.cy)
@@ -7942,6 +8021,7 @@ PROC outchr(c)
   Text(curcon.rp, b, 1)
   ulline(curcon.cursty, curcon.left + Mul(curcon.cx, curcon.cw), curcon.topy + Mul(curcon.cy, curcon.ch) + curcon.baseline, 1)
   IF curcon.sb
+    slfull(curcon.cy)
     m := visrow(curcon.cy)
     m[curcon.cx] := c
     m := sarow(curcon.cy)
@@ -8194,6 +8274,7 @@ PROC inslines(n)
       CopyMem(visrow(r - n), visrow(r), curcon.cols)
       CopyMem(sarow(r - n), sarow(r), curcon.cols)
       CopyMem(ssrow(r - n), ssrow(r), curcon.cols)
+      slfull(r)
     ENDFOR
     FOR r := curcon.cy TO curcon.cy + n - 1
       clearrow(r)
@@ -8217,6 +8298,7 @@ PROC dellines(n)
       CopyMem(visrow(r + n), visrow(r), curcon.cols)
       CopyMem(sarow(r + n), sarow(r), curcon.cols)
       CopyMem(ssrow(r + n), ssrow(r), curcon.cols)
+      slfull(r)
     ENDFOR
     FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
@@ -8243,6 +8325,7 @@ PROC scrollup(n)
       CopyMem(visrow(r + n), visrow(r), curcon.cols)
       CopyMem(sarow(r + n), sarow(r), curcon.cols)
       CopyMem(ssrow(r + n), ssrow(r), curcon.cols)
+      slfull(r)
     ENDFOR
     FOR r := curcon.rows - n TO curcon.rows - 1
       clearrow(r)
@@ -8266,6 +8349,7 @@ PROC scrolldown(n)
       CopyMem(visrow(r - n), visrow(r), curcon.cols)
       CopyMem(sarow(r - n), sarow(r), curcon.cols)
       CopyMem(ssrow(r - n), ssrow(r), curcon.cols)
+      slfull(r)
     ENDFOR
     FOR r := 0 TO n - 1
       clearrow(r)
@@ -8288,6 +8372,7 @@ PROC inschars(n)
   IF n > (curcon.cols - curcon.cx) THEN n := curcon.cols - curcon.cx
   y := curcon.topy + Mul(curcon.cy, curcon.ch)
   IF curcon.sb
+    slfull(curcon.cy)
     m := visrow(curcon.cy)
     a := sarow(curcon.cy)
     stp := ssrow(curcon.cy)
@@ -8323,6 +8408,7 @@ PROC delchars(n)
   IF n > (curcon.cols - curcon.cx) THEN n := curcon.cols - curcon.cx
   y := curcon.topy + Mul(curcon.cy, curcon.ch)
   IF curcon.sb
+    slfull(curcon.cy)
     m := visrow(curcon.cy)
     a := sarow(curcon.cy)
     stp := ssrow(curcon.cy)
@@ -8405,6 +8491,7 @@ PROC eraseeol()
     SetAPen(curcon.rp, curcon.deffg)        -> black, same as this fill did
   ENDIF
   IF curcon.sb
+    slfull(curcon.cy)
     m := visrow(curcon.cy)
     a := sarow(curcon.cy)
     stp := ssrow(curcon.cy)
@@ -8458,6 +8545,7 @@ PROC fxsetup()
   fxtab[27] := {fxret}
   fxtab[28] := {fxold}
   fxtab[29] := ftreq
+  fxtab[31] := NIL
   fxtab[30] := {fdelay}
   IF SIZEOF console <> FXCONSIZE THEN RETURN
   IF (Int(execbase + 296) AND 2) = 0 THEN RETURN  -> AttnFlags: engine.bin
@@ -8608,6 +8696,7 @@ PROC renderx(buf, len, i0, pro)
           IF curcon.cx >= curcon.cols THEN dfwrapnl()
           fit := curcon.cols - curcon.cx
           IF fit > run THEN fit := run
+          slfull(curcon.cy)
           CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
           -> E2d: long mirror fills ride exec's CopyMem (ROM asm) from
           -> a prefilled run buffer; short ones keep the direct loop -
@@ -8678,6 +8767,7 @@ PROC renderx(buf, len, i0, pro)
         Text(rp, s + i, fit)
         ulline(sty, rleft + Mul(curcon.cx, rcw), rtopy + Mul(curcon.cy, rch) + rbase, fit)
         IF curcon.sb
+          slfull(curcon.cy)
           CopyMem(s + i, visrow(curcon.cy) + curcon.cx, fit)
           IF fit >= 16                    -> E2d, as in the deferred path
             IF at <> atrunv
@@ -9237,6 +9327,7 @@ PROC drawedit()
     Move(curcon.rp, curcon.left + Mul(xc, curcon.cw), curcon.topy + Mul(r, curcon.ch) + curcon.baseline)
     Text(curcon.rp, s + i, n)
     IF curcon.sb
+      slfull(r)
       CopyMem(s + i, visrow(r) + xc, n)
       a := sarow(r) + xc
       stp := ssrow(r) + xc
@@ -12430,6 +12521,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b10 (4.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b12 (5.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'
