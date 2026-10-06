@@ -337,3 +337,16 @@ vamos dplinetest
 
 A control that breaks the right-edge merge fails at once (checked
 when written).
+
+## a8test.e - runs on the Amiga (or FS-UAE over wasabi), Audit8 J1 + J4
+
+`a8test OPENSPEC`, e.g. `a8test XC1:0/0/640/150/a8/NOFONT`. Opens its
+own window and checks, by reading the cursor back (CSI 6n):
+- J4: `WaitForChar(fh, 500000)` waits ~25 ticks (b12: 0-1).
+- J1: 300 X's wrapped in `ESC[31m`..`ESC[0m`, cut into 7-byte writes,
+  end where 300 plain X's do (b12: they do not, or the report is lost).
+
+The window must use an 8-pixel font (the C flush runs only then - hence
+NOFONT where the cfg sets MicroKnight7). Mount the old build beside the
+new one and run both: the check must be able to fail. On a 2 MB stock
+machine, one build per boot. Build: `ecompile a8test.e a8test`.

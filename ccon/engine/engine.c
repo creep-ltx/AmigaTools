@@ -1159,7 +1159,7 @@ LONG wacc(struct fx *x, struct dpkt *pkt)
     if (!c) return 0;
     if (k->selon || k->appicon || !k->win || !k->wob || k->sbsrch || k->sello >= 0
         || k->viewoff != 0 || k->tcactive || k->rdn > 0 || k->wcn > 0) return 0;
-    if (len < 0 || k->wolen + len > WOBSZ) return 0;
+    if (len < 0 || len > WOBSZ - k->wolen) return 0;   /* not wolen + len: wraps (Audit8 J14) */
     *x->curcon = k;
     k->breaktask = ((LONG *)pkt->port)[4];          /* mp_SigTask */
     bcopy((UBYTE *)k->wob + k->wolen, (const UBYTE *)pkt->arg2, len);
@@ -1312,7 +1312,9 @@ static LONG cfout(struct fx *x, struct pctx *pc, struct con *c)
     struct con *old = *x->curcon;
     UBYTE *rp = (UBYTE *)c->rp, *ly, *eb = (UBYTE *)c->ebuf;
     LONG *pk = x->pkey, i, r;
-    if (c->wolen <= 0 || !c->win || c->viewoff || c->rawmode || c->rdn > 0
+    /* cesc: a sequence the last flush left half parsed (Audit8 J1) - frun
+       starts every buffer at state 0, so only E may finish it */
+    if (c->wolen <= 0 || c->cesc || !c->win || c->viewoff || c->rawmode || c->rdn > 0
         || c->srch || c->pasteq || c->edlast || (eb && eb[0]) || c->edext
         || !c->sb || c->rows > DFROWS || c->cursoft || !c->dpok
         || c->mfloor == 0xFF || c->cw != 8 || !rp) return 0;

@@ -94,6 +94,30 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
   (MicroKnight7/7) the system's underline lands on the next row and
   is painted over. CCON now draws the underline itself in every font.
   (1.2.8b9)
+- **Colour codes split across two writes** could be printed as text,
+  and the console then misread the output after them (a stray scroll
+  or erase, a cursor report that never came). Seen when a program
+  writes its escape sequences in pieces. (1.2.8b13, Audit8 J1)
+- **The empty-Tab requester (TABREQ)** never inserted the file you
+  picked, and the handler could not be unloaded afterwards. (b13, J2)
+- **WaitForChar timeouts** lost everything under a second: a half
+  second wait came back after a few milliseconds. Present since the
+  first CCON. (b13, J4)
+- **Ctrl+H** is backspace again; Ctrl+Backspace keeps deleting a path
+  part. (b13, J15)
+- **Windows on a custom public screen** no longer close when the
+  Workbench closes. (b13, J16)
+- **Tab while scrolled back** returns to the live view first instead
+  of drawing over the old text; **the scrollbar** no longer snaps back
+  when output is still arriving. (b13, J12, J18)
+- **Parked output** of a hidden window (iconified, or while the
+  Workbench is closed) could be thrown away by a key pressed at that
+  moment. (b13, J11)
+- Robustness (b13): a Tab menu left open when the window goes away
+  (J7); a jump step larger than a resized window (J5); the raw-mode
+  block cursor that sometimes was not erased (J10); a write length
+  that could overflow (J14); a library base used before it was set
+  (J19).
 
 ### Changed
 - **Faster again** (1.2.8b11-b12), conbench SYNC SCALE 1 on a stock

@@ -6745,3 +6745,46 @@ Real A1200 + PiStorm: b11 8.44 avg -> b13c 8.30 (floor ~6.9).
 - Open: tests/cfgtest.e still mirrors an older parseopt (no DIRECT/
   NODIRECT/PACE); clear-page moves ~0.1s with unrelated code changes
   (layout sensitivity, not chased).
+
+## 1.2.8b13 - Audit8 batch 1 (6.10.26)
+
+The one- and two-line fixes from Audit8 (audit.md, bottom), all in one
+build: J1, J2, J4, J5, J7, J10, J11, J12, J14, J15, J16, J18, J19.
+fxdiff 7200/0 after the change. $VER 1.2.8b13 (6.10.26).
+
+Proven on FS-UAE A1200-Stock-net (headless cage, XC1 = b13, XC2 = b12,
+`tests/a8test`, a fresh boot per run, NOFONT window = topaz 8):
+- J4: WaitForChar(0.5 s) b12 0-1 ticks, b13 25 ticks (3 of 3, 4 runs).
+- J1: 300 X's in ESC[31m..ESC[0m cut into 7-byte writes vs 300 plain:
+  b12 FAILS (5/9 vs 4/70 once, the cursor report swallowed once), b13
+  matches (4/70 both runs).
+- Traps found on the way: the C flush (cfout) only runs with an 8-px
+  font (the FS-UAE drive's L:ccon.cfg has FONT=MicroKnight7/7, so a
+  default window never reaches it - use NOFONT); with a pause long
+  enough for the cursor blip to draw, cfout stands aside (edext), so
+  J1 needs a continuous stream; on the 2 MB stock config two handlers
+  + four windows ran out of memory - one build per boot.
+- OPEN, noticed: in one run the FIRST window of a handler opened in
+  MicroKnight7 and the second (same spec) in topaz 8 - order, not
+  build. Check whether later windows ignore the cfg's FONT=.
+
+Boot checklist (his A1200):
+- [ ] J2: `newshell CCON:TABREQ` (or TABREQ in the cfg), Tab on an
+      empty prompt, pick a file, OK: the name is typed in. Again: works
+      the second time. Then Assign/unmount as usual - no refusal.
+- [ ] J15: type `abc`, Ctrl+H deletes one letter. `dh0:work/foo`,
+      Ctrl+Backspace deletes `foo`.
+- [ ] J12: scroll back with the scrollbar, press Tab: view jumps to
+      the bottom, menu/completion drawn normally.
+- [ ] J18: `list sys: all`, click the scrollbar's up arrow while it
+      runs: the view stays scrolled back until the next output line
+      arrives (then it snaps live, as before).
+- [ ] J16: only if you use a custom public screen: a CCON window on it
+      stays open when Prefs changes the Workbench mode.
+- [ ] J7: Tab menu open, iconify the window (RAmiga+I), restore: no
+      crash, menu gone, prompt fine.
+- [ ] J10: Ed in a CCON window, move around: no leftover cursor blocks.
+- [ ] J4: any program that waits for a key with a timeout behaves as
+      on stock CON:.
+- [ ] Everyday: shell, `type` of an ANSI file, Ed, More, history,
+      selection - nothing changed.

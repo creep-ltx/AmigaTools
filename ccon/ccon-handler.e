@@ -809,7 +809,10 @@ DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
     -> own inactive-cursor pattern) - AreaPtrn data the blitter reads,
     -> so it MUST live in chip RAM (AllocMem, freed in killhandler).
     -> NIL is survivable: inactive windows just keep a solid cursor.
-    gpat=NIL:PTR TO INT
+    gpat=NIL:PTR TO INT,
+    -> Audit8 J15: the raw key behind the vanilla byte dovanilla is
+    -> handed, -1 = not known (IDCMP VANILLAKEY carries no raw code)
+    vkraw=-1
 
 
 PROC main()
@@ -826,6 +829,9 @@ PROC main()
     RETURN 5
   ENDIF
 
+  inputbase := NIL               -> Audit8 J19: a module global with no
+                                -> initialiser; set only when input.device
+                                -> opens, and PeekQualifier trusts it
   proc := FindTask(NIL)
   port := proc.msgport            -> embedded OBJECT -> its address
   msg := wbmessage
@@ -1296,7 +1302,7 @@ PROC main()
     ENDIF
     -> 1.2.8b6: the file requester came back (ardone checks for
     -> itself - arbusy only drops when the helper has really signalled)
-    IF arbusy THEN ardone()
+    IF arbusy THEN ardone(msigs)
     -> 1.2.8b5: knobs follow their models - LAST, so whatever this
     -> pass rendered or scrolled (packets, keys, the deferred flush
     -> on the timer port) is what the knob shows when we go to sleep
@@ -1718,7 +1724,9 @@ PROC armtimer(us)
   IF us < 1 THEN us := 1
   treq.io.command := TR_ADDREQUEST
   treq.time.secs := Div(us, 1000000)
-  treq.time.micro := Mod(us, 1000000)
+  -> Audit8 J4: not Mod - E-VO's Mod divides by the divisor's low word
+  -> only (1000000 -> 16960), so every timeout lost its fraction
+  treq.time.micro := us - Mul(treq.time.secs, 1000000)
   SendIO(treq)
   timerarmed := TRUE
 ENDPROC
@@ -2278,7 +2286,8 @@ PROC swaccept()
         ReplyPkt(pkt, -1, ERROR_OBJECT_NOT_FOUND)  -> dopkt's own answer
       ELSEIF (c2.selon = FALSE) AND (c2.appicon = NIL) AND
              (c2.wob <> NIL) AND (c2.win <> NIL) AND
-             (pkt.arg3 >= 0) AND ((c2.wolen + pkt.arg3) <= WOBSZ)
+             (pkt.arg3 >= 0) AND (pkt.arg3 <= (WOBSZ - c2.wolen))
+             -> Audit8 J14: not wolen + arg3, which wraps near 2^31
         curcon := c2            -> the accept-time state resets, exactly
         sender := pkt.port      -> dowrite's: break owner (packet-side,
         c2.breaktask := sender.sigtask  -> stays here), then the bundle
@@ -2398,6 +2407,10 @@ ENDPROC
 
 PROC flushwq()
   DEF i
+  -> Audit8 J11: hidden, dowrite re-parks each one at the tail; the loop
+  -> chased it to WQMAX, whose overflow arm accepts and DISCARDS. They
+  -> wait for the reopen, which clears these first and replays them
+  IF curcon.appicon OR curcon.wbgone THEN RETURN
   i := 0
   WHILE i < curcon.wqn
     dowrite(curcon.wq[i])              -> FIFO: writers resume in order
@@ -3225,7 +3238,9 @@ PROC snmsg(m:PTR TO LONG)
     IF m[6] = FALSE
       IF (c.win <> NIL) AND (c.fwin = FALSE) AND (c.appicon = NIL)
         scr := c.win.wscreen
-        IF scr.flags AND WBENCHSCREEN
+        -> Audit8 J16: the type is a 4-bit field - CUSTOMSCREEN ($F)
+        -> has WBENCHSCREEN's bit 0 set too
+        IF (scr.flags AND $000F) = WBENCHSCREEN
           flushout(c)
           hidewin()
           c.wbgone := TRUE
@@ -3435,9 +3450,11 @@ ENDPROC TRUE
 -> The pick goes in exactly as a dropped icon does (dodrop's cooked
 -> arm): settle output, the accept bundle, insert whole, one paint.
 -> A raw-mode window gets the bytes on its input queue instead.
-PROC ardone()
+PROC ardone(msigs)
   DEF pb[620]:ARRAY OF CHAR, n, i, p, needq, c:PTR TO console, k
-  IF (SetSignal(0, 0) AND arsig) = 0 THEN RETURN
+  -> Audit8 J2: Wait() clears the signals it returns, so the helper's
+  -> signal is usually in msigs and no longer in SetSignal's answer
+  IF ((msigs OR SetSignal(0, 0)) AND arsig) = 0 THEN RETURN
   SetSignal(0, arsig)
   arbusy := FALSE
   c := arcon
@@ -4024,6 +4041,9 @@ ENDPROC
 -> here without caring which of them Intuition felt like sending.
 PROC vsdrag()
   DEF v
+  -> Audit8 J18: settle pending output first, as keys and the wheel
+  -> do - else the next flush tick's snaplive undoes the scroll
+  flushout(curcon)
   IF (curcon.vson = FALSE) OR (curcon.sbcnt <= 0) THEN RETURN
   v := curcon.sbcnt - Div(Mul(curcon.vspi.vertpot AND $FFFF, curcon.sbcnt) + $7FFF, $FFFF)
   IF v <> curcon.viewoff
@@ -4033,6 +4053,7 @@ PROC vsdrag()
 ENDPROC
 
 PROC vsstep(n)
+  flushout(curcon)              -> Audit8 J18, as vsdrag
   IF (curcon.rawmode = FALSE) AND curcon.tcactive THEN tcclose()
   scrollview(n)
 ENDPROC
@@ -4098,6 +4119,9 @@ PROC hidewin()
   IF curcon.fwin THEN RETURN
   curcon.armed := FALSE                  -> chain ignores a windowless console
   curcon.cursx := -1
+  -> Audit8 J7: the Tab menu is paint only, and the paint goes with the
+  -> window - left open, a later tcclose drew through rp = NIL
+  tcdrop()
   curcon.selon := FALSE
   curcon.sello := -1
   curcon.selhi := -1
@@ -5113,6 +5137,10 @@ PROC doresize()
   IF curcon.sb
     IF curcon.rows > (curcon.sbmax - 2) THEN curcon.rows := curcon.sbmax - 2
     IF curcon.rows < 1 THEN curcon.rows := 1
+    -> Audit8 J5: gridcalc clamped the jump step to the rows BEFORE this
+    -> lowered them; a step >= rows puts the next newline's cy below 0
+    IF curcon.jeff > (curcon.rows - 1) THEN curcon.jeff := curcon.rows - 1
+    IF curcon.jeff < 1 THEN curcon.jeff := 1
   ENDIF
   IF curcon.sb
     IF curcon.cols <> oc
@@ -5707,7 +5735,9 @@ PROC curserase()
   DEF m:PTR TO CHAR, a:PTR TO CHAR, stp:PTR TO CHAR, c, at, sy,
       fg, bg, t, b[2]:ARRAY OF CHAR
   IF curcon.cursx < 0 THEN RETURN
-  IF curcon.win AND curcon.sb
+  -> Audit8 J10: was `win AND sb` - bitwise, FALSE for two addresses
+  -> with no bit in common, and the block was never erased
+  IF (curcon.win <> NIL) AND (curcon.sb <> NIL)
     m := visrow(curcon.cursy)
     a := sarow(curcon.cursy)
     stp := ssrow(curcon.cursy)
@@ -10256,7 +10286,11 @@ PROC dovanilla(code, qual)
       curcon.cpos := 0
       drawedit()
     ENDIF
-  ELSEIF (code = 8) AND (qual AND IEQUALIFIER_CONTROL)
+  ELSEIF (code = 8) AND (qual AND IEQUALIFIER_CONTROL) AND
+         ((vkraw = $41) OR (vkraw = -1))
+    -> Audit8 J15: only the Backspace key ($41) - Ctrl+H is backspace in
+    -> every console; it falls to the plain branch below. (Raw code
+    -> unknown = the IDCMP fallback: Ctrl+Backspace's meaning wins)
     -> Ctrl+Backspace (1.2.8b7, his ask): delete the PATH COMPONENT
     -> before the cursor - edjumpl's path split, the same meaning
     -> Ctrl already has on the arrows, not Ctrl+W's word-only scan
@@ -10453,6 +10487,8 @@ PROC dorawkey(code, qual)
       sbexit()                      -> reaches dovanilla's sbsrch gate
       snaplive()                    -> and completion needs the live
     ENDIF                           -> prompt visible, not a scrolled one
+    snaplive()                      -> Audit8 J12: and a plain scrolled
+                                    -> view (the scrollbar's) too
     dotab(sh, qual AND (IEQUALIFIER_LALT OR IEQUALIFIER_RALT))
     RETURN TRUE
   ENDIF
@@ -10842,7 +10878,11 @@ PROC ihkey(e:PTR TO ihev)
     -> cooked: only single-byte images reach the line editor -
     -> Intuition's VANILLAKEY delivered exactly those; multi-byte
     -> images are F-key CSI strings and were never cooked input
-    IF n = 1 THEN dovanilla(ihmap[0], q)
+    IF n = 1
+      vkraw := cd                 -> Audit8 J15: Ctrl+H vs Ctrl+Backspace
+      dovanilla(ihmap[0], q)
+      vkraw := -1
+    ENDIF
   ENDIF
 ENDPROC
 
@@ -12521,6 +12561,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b12 (5.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b13 (6.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'
