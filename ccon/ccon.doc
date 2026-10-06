@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.7
+                               CCON: 1.2.8
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -56,7 +56,7 @@
     - copy and paste with the stock console, both directions,
       with double-click word and triple-click line selection
     - SGR colour with a careful ANSI/Workbench pen separation,
-      plus real italic/underline/inverse soft styles
+      plus real bold/italic/underline/inverse styles
     - FONT and LINES per window: your own font and scrollback
       depth, or Font Prefs' default font if you don't ask
     - fullscreen programs work: Ed with working menus, More -
@@ -86,7 +86,18 @@
   Memory: each window allocates its scrollback model at open time,
   roughly 120K at 80 columns and the default 512 lines (LINES=n
   scales it directly, up to 5000). Plenty on an expanded machine;
-  mind it on a 2MB one.
+  mind it on a 2MB one - there the model never takes more than
+  half of the free memory and is made smaller until it fits.
+
+  CPU: any 680x0. On a 68020 or better, the busiest output paths
+  run as compiled C inside the handler (much faster on a stock
+  A1200); a 68000 uses the handler's own E code for everything.
+
+  Optional libraries, used when present:
+    asl.library            the file requester behind TABREQ
+                           (section 9)
+    screennotify.library   lets windows close and come back when
+                           the Workbench screen closes (section 15)
 
 
 3. INSTALLATION
@@ -262,7 +273,8 @@
              fit the cell model). Example: FONTmicroknight/8.
 
   LINESn     How many lines of scrollback THIS window keeps
-             (default 512, floor 100, ceiling 5000). Raise it for
+             (default 512, floor 100 - less on a machine short of
+             memory, see section 2 - ceiling 5000). Raise it for
              a deep transcript, lower it on a tight machine - see
              section 18 for the cost per line.
              The ring is always kept a little larger than the
@@ -303,7 +315,10 @@
              and repaints (about 4% faster through conbench on a
              stock A1200). The price: during a flood the screen
              updates a little less often. Typed keys, prompts and
-             WaitForChar are never paced.
+             WaitForChar are never paced. All windows share one
+             update clock, so FAST only applies while every window
+             that is receiving output asked for it - a FAST window
+             never slows down its neighbours.
 
   NODIRECT   Draw only through graphics.library. By default CCON
   DIRECT     may also write text rows straight into the screen's
@@ -542,7 +557,7 @@
                       they do for Alt/Ctrl+Left/Right)
     Esc               clear the line
     Return            commit the line
-    Up / Down         walk the history (32 entries; the half-typed
+    Up / Down         walk the history (200 entries; the half-typed
                       line is stashed and comes back)
     Ctrl+W            delete the word before the cursor
     Ctrl+U            delete from line start to the cursor
@@ -959,6 +974,16 @@
   It works from a shell prompt and from a fullscreen program like Ed
   alike - the shortcut is caught before the client ever sees the key.
 
+  WHEN THE WORKBENCH CLOSES (1.2.8) - for a screen-mode or font
+  change in Prefs - CCON: windows on it close with it and come back
+  when it reopens, the same way: scrollback, half-typed line and
+  output that arrived meanwhile all intact. If the new screen gives
+  the window a different size (other borders, or a smaller screen
+  the window no longer fits), the scrollback is rewrapped to the
+  new width. Needs screennotify.library in LIBS: (Aminet); without
+  it the Workbench simply cannot close while a CCON: window is open,
+  as with the stock console.
+
   The icon is built into the handler - nothing extra to install. Each
   iconified window gets its own "CCON" icon on the Workbench.
 
@@ -1042,8 +1067,11 @@
   Each window's display is backed by a scrollback model (512
   lines by default, LINES=n for more up to 5000) with one
   attribute byte per cell
-  plus a style byte for SGR 3/4/7 (italic, underline, inverse -
-  inverse is a pen swap at paint time, never a stored colour).
+  plus a style byte for SGR 1/3/4/7 (bold, italic, underline,
+  inverse - inverse is a pen swap at paint time, never a stored
+  colour; bold is the font drawn one pixel wider; underline is
+  drawn by CCON: itself, so it shows in every font, including ones
+  whose own underline would land on the next row).
   Redraws, scrollback, selection repaints, menu restores and the
   Ctrl+R prompt restore all read from it.
 
@@ -1106,7 +1134,11 @@
 
   - The scrollback model costs about 120K per window at 80 columns
     and the default 512 lines (LINESn scales this up to 5000,
-    or down to a floor of 100).
+    or down to a floor of 100; less than that only when memory is
+    short).
+  - Bold letters are drawn one pixel wider; a glyph that uses its
+    cell's last pixel column can leave that pixel behind when the
+    cell is later redrawn plain.
   - A window is at most 255 text columns wide. On a very wide
     screen in a small font the columns past 255 are unused.
   - Growing a window taller than its own LINESn ring leaves the

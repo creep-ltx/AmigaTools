@@ -1,1 +1,34 @@
 .claude/settings.local.json
+
+# ccon build output (Audit8 D6): the engine's intermediates - engine.bin
+# and ccon-handler themselves ship and stay tracked
+ccon/engine/conoffs.i
+ccon/engine/engine-0.bin
+ccon/engine/engine-0.elf
+ccon/engine/engine.o
+ccon/engine/entry.o
+ccon/engine/pgroups.o
+ccon/engine/fxdiff
+ccon/engine/fxdiff.e
+# compiled test harnesses: each is NAME.e built to NAME (the extensionless
+# ccon-b* files are Execute scripts and stay tracked)
+ccon/tests/a8test
+ccon/tests/ccdie
+ccon/tests/ccinfo0
+ccon/tests/cfgtest
+ccon/tests/defertest
+ccon/tests/dplinetest
+ccon/tests/edanchortest
+ccon/tests/edargtest
+ccon/tests/ederasetest
+ccon/tests/fpwtest
+ccon/tests/hidpentest
+ccon/tests/histdeduptest
+ccon/tests/hordertest
+ccon/tests/ikeys
+ccon/tests/masktest
+ccon/tests/reflowtest
+ccon/tests/sbmaxtest
+ccon/tests/sbresizetest
+ccon/tests/srbench
+__pycache__/

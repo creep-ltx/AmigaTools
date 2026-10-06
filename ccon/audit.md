@@ -938,6 +938,15 @@ behaviour and stays), J21 (proven on the A1200: b16 completes from an
 ADDed C: directory, b15 does not), J22, J25 (FAST only when every
 flushed console asked for it), J26. Not done: J27 (bold smear, needs a
 pixel look), J28 (harmless). L1's two stale Div comments corrected.
+**Batch 5 shipped as 1.2.8b17** - J29/J30 (build.sh checks FXCONSIZE,
+WOBSZ/DFROWS/INQMAX and the LINKED image's sections; each check shown
+failing on a plant - the first section check itself missed `.sdata`
+and was fixed), J31 (drain removed, entry 32 = moveq #0,d0 / rts),
+fxdiff's split mode (a planted J1 fails at the first split chunk),
+D1/D2 (re-copied; tests/syncheck.py now enforces it; cfgtest 176/176
+with the 1.2.8 switches), D3/D4 (ccon.cfg, ccon.doc), D5 (tests
+README), D6 (.gitignore). **Audit8 is closed** except J23's stale-pens
+half and J27 (bold smear), both cosmetic and written down.
 
 Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
 drift within this section only. Confidence: **C** = confirmed by

@@ -6910,3 +6910,26 @@ unchanged (beep), `copy "a**` -> `copy "a**" "a**`.
 Installed on his A1200 6.10.26 (b15 kept as L:ccon-handler-1.2.8b15),
 rebooted, Version 1.2.8b16, a8test green; RAM: cleaned, C: assign back
 to AmigaOS:C only.
+
+## 1.2.8b17 - Audit8 batch 5: tests, build, docs (6.10.26)
+
+- tests/syncheck.py: verbatim copies vs the handler. Found and fixed:
+  cfgtest's parseopt (pre-1.2.8; +7 console fields, +16 checks ->
+  176/176) and dplinetest's dpcells (AND 3 -> AND 11; still PASS).
+  The README's "build step that diffs them" never existed.
+- engine/mkdiff.py: every second chunk rendered as two calls cut at a
+  random byte. 3 seeds x 7200 chunks clean; planted control (cesc
+  guard removed) mismatches at the first split chunk.
+- engine/build.sh: FXCONSIZE vs con.h, WOBSZ/DFROWS/INQMAX vs
+  engine.c, no allocated section but .text in the linked ELF. Plants:
+  each caught (the first ELF check parsed readelf's "[ 2]" wrong and
+  missed .sdata - fixed, then caught).
+- J31: drain() + getmsg/sendio removed; entry slot 32 returns 0.
+- Docs: ccon.cfg (LINES halving, JUMP=AUTO default, DIRECT section),
+  ccon.doc (1.2.8 header, requirements: CPU + optional libraries,
+  LINES, 200 history, Workbench closing in section 15, bold/underline,
+  PACE sharing, limitations), tests/README (syncheck, fxdiff, a table
+  for the rest), .gitignore (engine intermediates, test binaries).
+- Left: cutils/{Install,vinstall,vinstall.e} untracked - not CCON's,
+  not touched.
+- fxdiff 7200/0 on b17.

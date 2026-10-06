@@ -1442,49 +1442,10 @@ LONG wchar(struct fx *x, struct pctx *pc, struct dpkt *pkt)
     return 1;
 }
 
-/* ---------- the packet port, drained (1.2.8b9) ----------
-   The main loop's GetMsg/dopkt pass for the packet the port holds most:
-   ACTION_WRITE goes through wacc (and armflush's SendIO when the flush
-   timer is idle) without coming back to E. Returns the first message it
-   does not take - E's dopkt gets it - or 0 when the port is empty. */
-
-static void *getmsg(void *sys, void *port)
-{
-    register void *a0 __asm__("a0") = port;
-    register void *a6 __asm__("a6") = sys;
-    register void *d0 __asm__("d0");
-    __asm__ volatile ("jsr -372(%%a6)" : "=r"(d0), "+r"(a0), "+r"(a6) : : "d1", "a1", "memory", "cc");
-    return d0;
-}
-
-static void sendio(void *sys, void *io)
-{
-    register void *a1 __asm__("a1") = io;
-    register void *a6 __asm__("a6") = sys;
-    __asm__ volatile ("jsr -462(%%a6)" : "+r"(a1), "+r"(a6) : : "d0", "d1", "a0", "memory", "cc");
-}
-
-void *drain(struct fx *x)
-{
-    for (;;) {
-        UBYTE *msg = getmsg(x->sysbase, x->port);
-        struct dpkt *pkt;
-        LONG r;
-        if (!msg) return 0;
-        pkt = *(struct dpkt **)(msg + 10);              /* ln_Name */
-        if (pkt->type != 8) return msg;                 /* ACTION_WRITE */
-        r = wacc(x, pkt);
-        if (!r) return msg;
-        if (r == 2) {                                   /* armflush */
-            UBYTE *io = x->ftreq;
-            *(WORD *)(io + 28) = 9;                     /* TR_ADDREQUEST */
-            *(LONG *)(io + 32) = 0;                     /* secs */
-            *(LONG *)(io + 36) = *x->fdelay;            /* micro */
-            sendio(x->sysbase, io);
-            *x->flusharmed = TRUE;
-        }
-    }
-}
+/* (1.2.8b9's drain - the main loop's GetMsg pass in C - lived here. It
+   measured slower than E's loop and was never called; Audit8 J31 found
+   it testing the wrong packet type (8, LOCATE_OBJECT, for ACTION_WRITE
+   87) and removed it. Entry 32 now returns 0 in entry.s.) */
 
 /* E's maskscan's cell loop (1.2.8b11): the pens every attr on screen
    uses, OR (a AND 15) OR (a >> 4 AND 7) over the cells. OR distributes

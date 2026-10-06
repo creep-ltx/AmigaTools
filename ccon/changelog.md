@@ -143,6 +143,13 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 - Robustness (b16): completion no longer follows a background program
   that has already ended (J13); WaitForChar with a reader waiting draws
   its cursor at once (J26).
+- Housekeeping (b17, Audit8 batch 5): the documentation and the
+  example config describe 1.2.8 (automatic jump scroll, the memory
+  limit on history, DIRECT/NODIRECT, the Workbench closing, bold,
+  200 history entries, what needs a 68020 or an optional library);
+  the build refuses an engine that disagrees with the handler; the
+  test harnesses are checked against the handler's code; the unused
+  `drain` routine is gone from the C engine.
 - Robustness (b14): the fast painter forgets the old screen when a
   window closes or changes size, so it can never draw into memory the
   old screen gave back (J8); shutdown no longer frees a port the screen

@@ -105,7 +105,7 @@ dpcc:
   MOVEQ #0,D2
   MOVE.B (A2)+,D2               -> style
   MOVE.B D2,D0
-  AND.B #3,D0
+  AND.B #11,D0                  -> italic, underline, bold (1.2.8b9)
   BEQ.S dpcn
   MOVEQ #1,D4
 dpcn:

@@ -4,6 +4,8 @@ main renamed and dfflush swapped for a bookkeeping-only stub, plus a
 driver that feeds random output through render() twice - E only, then
 with the C engine - and compares every model byte, every console field,
 the engine globals and a digest of what each flush would have painted.
+Every second chunk is rendered as two calls cut at a random byte
+(Audit8), so split sequences are compared as well.
 Run: engine/mkdiff.py && ecompile engine/fxdiff.e engine/fxdiff LARGE ADDBUF=1
      && vamos -C 68020 engine/fxdiff [seeds]"""
 import sys
@@ -195,9 +197,21 @@ PROC genchunk(maxn)
   ENDWHILE
 ENDPROC n
 
+-> Audit8: every second chunk goes in as TWO render calls cut at a
+-> random byte, so sequences split across writes (E finishing what C
+-> handed back, at cesc <> 0) are compared too - the J1 class
+PROC rsplit(len, cut)
+  IF cut <= 0
+    render(hbuf, len)
+  ELSE
+    render(hbuf, cut)
+    render(hbuf + cut, len - cut)
+  ENDIF
+ENDPROC
+
 PROC main()
   DEF k1:PTR TO console, k2:PTR TO console, cfg, it, len, f1, f2, r,
-      rows, cols, s0, nchunks=0, bad=0, i
+      rows, cols, s0, nchunks=0, bad=0, i, cut
   FOR i := 0 TO 255
     prtbl[i] := IF ((i >= 32) AND (i <= 126)) OR (i >= 160) THEN 1 ELSE 0
     zerorun[i] := 0
@@ -220,6 +234,7 @@ PROC main()
     conclone(k1, k2)
     FOR it := 1 TO 300
       len := genchunk(IF Mod(it, 3) = 0 THEN 20 ELSE 300)
+      cut := IF (Mod(it, 2) = 0) AND (len > 1) THEN 1 + hrnd(len - 1) ELSE 0
       gsave(sglob, sdb)
       CopyMem(atrun, satr, 256); CopyMem(styrun, satr + 256, 256)
       IF (arg[0] = "v") AND (cfg = 19) AND (it = 214)
@@ -228,14 +243,14 @@ PROC main()
         WriteF('\n')
       ENDIF
       curcon := k1; fastok := FALSE; frec := 0
-      render(hbuf, len)
+      rsplit(len, cut)
       f1 := frec
       gsave(aglob, adb)
       grest(sglob, sdb)
       CopyMem(satr, atrun, 256); CopyMem(satr + 256, styrun, 256)
       IF (arg[0] = "v") AND (cfg = 19) THEN WriteF('it \d C\n', it)
       curcon := k2; fastok := TRUE; frec := 0
-      render(hbuf, len)
+      rsplit(len, cut)
       f2 := frec
       gsave(bglob, sdb)
       nchunks++
@@ -250,7 +265,7 @@ PROC main()
         FOR i := 0 TO 1535 DO IF adb[i] <> sdb[i] THEN IF r = 0 THEN r := 80000 + i
       ENDIF
       IF r
-        WriteF('MISMATCH cfg \d (\dx\d) chunk \d code \d\n  bytes:', cfg, cols, rows, it, r)
+        WriteF('MISMATCH cfg \d (\dx\d) chunk \d code \d cut \d\n  bytes:', cfg, cols, rows, it, r, cut)
         WriteF('  E: jburst \d cx \d cy \d jslk \d sbtop \d  C: jburst \d cx \d cy \d jslk \d sbtop \d\n', k1.jburst, k1.cx, k1.cy, k1.jslk, k1.sbtop, k2.jburst, k2.cx, k2.cy, k2.jslk, k2.sbtop)
         FOR i := 0 TO len - 1 DO WriteF(' \d', hbuf[i])
         WriteF('\n  E sb:')

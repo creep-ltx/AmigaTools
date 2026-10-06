@@ -34,6 +34,8 @@ OBJECT con
   waitmode, closegad, pauto, pnoborder, pnodrag, pnodepth, pnosize,
   pbackdrop, pinactive, pasteexec, wbpens, deffg, fwptr, plines,
   pjump,                        -> J1 (1.2.8): JUMP=n
+  pnoinfo, pscrollbar, ptabmenu, ptabfirst, ptabreq,  -> 1.2.8b2-b6
+  pdirect, ppace,               -> 1.2.8b8, b12
   pfontsize, pfontexp,
   pwx, pwy, pww, pwh, pwr, pwb,
   pdirs, phid, pghost, pcfgdef,
@@ -180,6 +182,50 @@ PROC parseopt(tok:PTR TO CHAR)
     curcon.wbpens := TRUE
   ELSEIF StrCmp(tok, 'NOWBPENS')
     curcon.wbpens := FALSE
+  ELSEIF StrCmp(tok, 'NOINFO')
+    -> 1.2.8b2: Tab completion skips .info files (tcscanone's note).
+    -> SHOWINFO is the way back, for an open string to overrule a
+    -> NOINFO in L:ccon.cfg. Not a bare INFO: an unmatched token in
+    -> the title slot IS the title, and "Info" is a window title
+    -> somebody's script is using right now.
+    curcon.pnoinfo := TRUE
+  ELSEIF StrCmp(tok, 'SHOWINFO')
+    curcon.pnoinfo := FALSE
+  ELSEIF StrCmp(tok, 'NODIRECT')
+    curcon.pdirect := FALSE      -> 1.2.8b8: back to Text/ScrollRaster
+  ELSEIF StrCmp(tok, 'DIRECT')
+    curcon.pdirect := TRUE
+  ELSEIF StrCmp(tok, 'DPFORCE')
+    curcon.pdirect := 2          -> 1.2.8b9 test aid: direct always, no
+                                -> measuring (pixel A/B against NODIRECT)
+  ELSEIF StrCmp(tok, 'SCROLLBAR')
+    -> 1.2.8b5: a scrollbar in the right border (vsmake's note).
+    -> Owned, bordered windows only - a borrowed frame (WINDOW0x) and
+    -> a NOBORDER window have no border of ours to put it in.
+    curcon.pscrollbar := TRUE
+  ELSEIF StrCmp(tok, 'NOSCROLLBAR')
+    curcon.pscrollbar := FALSE
+  ELSEIF StrCmp(tok, 'NOTABMENU')
+    -> 1.2.8b4: several matches never open the menu; Tab and Shift+Tab
+    -> cycle the candidates in the line itself (dotab's note)
+    curcon.ptabmenu := FALSE
+  ELSEIF StrCmp(tok, 'TABMENU')
+    curcon.ptabmenu := TRUE
+  ELSEIF StrCmp(tok, 'TABFIRST')
+    -> 1.2.8b4: the first Tab inserts the first match instead of
+    -> stopping at the common prefix - KingCON's feel. Says nothing
+    -> about the menu: with TABMENU it opens with entry one picked.
+    curcon.ptabfirst := TRUE
+  ELSEIF StrCmp(tok, 'NOTABFIRST')
+    curcon.ptabfirst := FALSE
+  ELSEIF StrCmp(tok, 'TABREQ')
+    -> 1.2.8b6: Tab with nothing typed in the word = an ASL file
+    -> requester, the pick inserted at the cursor (tabreq's note).
+    -> The third of the three switches, and independent like them: a
+    -> word with anything in it completes exactly as before.
+    curcon.ptabreq := TRUE
+  ELSEIF StrCmp(tok, 'NOTABREQ')
+    curcon.ptabreq := FALSE
   ELSEIF StrCmp(tok, 'PEN', 3)
     -> PENn: the default text pen (CTerm sends PEN7 with its
     -> ANSI palette, where pen 1 is ANSI red)
@@ -216,6 +262,23 @@ PROC parseopt(tok:PTR TO CHAR)
     IF tok[v] = "=" THEN v := 6
     v := tcnum(tok + v)
     IF v >= 0 THEN curcon.plines := v ELSE matched := FALSE
+  ELSEIF StrCmp(tok, 'PACE', 4)
+    -> 1.2.8b12: how long output pools between screen updates. NORMAL:
+    -> the next flush waits 1.5x what the last one cost (20..160ms).
+    -> FAST: 2.5x, and never under 40ms while output keeps coming -
+    -> fewer, bigger flushes (fewer scroll blits and repaints), at the
+    -> price of the screen updating less often during a flood (about
+    -> every 0.23s instead of 0.18s on a stock A1200). Keys, prompts
+    -> and WaitForChar are not paced either way.
+    v := 4
+    IF tok[v] = "=" THEN v := 5
+    IF StrCmp(tok + v, 'FAST')
+      curcon.ppace := TRUE
+    ELSEIF StrCmp(tok + v, 'NORMAL')
+      curcon.ppace := FALSE
+    ELSE
+      matched := FALSE
+    ENDIF
   ELSEIF StrCmp(tok, 'JUMP', 4)
     -> J1 (1.2.8): jump scroll - at the bottom margin an LF scrolls
     -> n rows in ONE blit and the next n-1 newlines scroll nothing.
@@ -693,6 +756,13 @@ PROC ground()
   cc.pscrname[0] := 0
   cc.plines := 0
   cc.pjump := -1                -> 1.2.8b8: automatic (J1 was off)
+  cc.ppace := FALSE             -> the 1.2.8 switches, at parsecon's
+  cc.pnoinfo := FALSE           -> defaults (Audit8 D2)
+  cc.pdirect := TRUE
+  cc.pscrollbar := FALSE
+  cc.ptabmenu := TRUE
+  cc.ptabfirst := FALSE
+  cc.ptabreq := FALSE
   cc.pfontname[0] := 0
   cc.pfontsize := 0
   cc.pfontexp := FALSE
@@ -821,6 +891,47 @@ PROC main()
   ground()
   opt('JUMPAUTO')
   checkn('JUMPAUTO spelling', cc.pjump, -1)
+
+  -> Audit8 D2: the 1.2.8 switches, file and open string, each undone
+  -> by its inverse (the copy of parseopt above predated all of them)
+  ground()
+  feed(['PACE=FAST'], 1, 'DEFAULT')
+  checkn('PACE=FAST lands', cc.ppace, TRUE)
+  opt('PACENORMAL')
+  checkn('PACENORMAL undoes it', cc.ppace, FALSE)
+  ground()
+  feed(['PACE=SLOW'], 1, 'DEFAULT')
+  checkn('PACE=garbage refused', cc.ppace, FALSE)
+  ground()
+  feed(['NOINFO'], 1, 'DEFAULT')
+  checkn('NOINFO lands', cc.pnoinfo, TRUE)
+  opt('SHOWINFO')
+  checkn('SHOWINFO undoes it', cc.pnoinfo, FALSE)
+  ground()
+  opt('NODIRECT')
+  checkn('NODIRECT', cc.pdirect, FALSE)
+  opt('DIRECT')
+  checkn('DIRECT', cc.pdirect, TRUE)
+  opt('DPFORCE')
+  checkn('DPFORCE is 2', cc.pdirect, 2)
+  ground()
+  feed(['SCROLLBAR'], 1, 'DEFAULT')
+  checkn('SCROLLBAR lands', cc.pscrollbar, TRUE)
+  opt('NOSCROLLBAR')
+  checkn('NOSCROLLBAR undoes it', cc.pscrollbar, FALSE)
+  ground()
+  opt('NOTABMENU')
+  checkn('NOTABMENU', cc.ptabmenu, FALSE)
+  opt('TABMENU')
+  checkn('TABMENU', cc.ptabmenu, TRUE)
+  opt('TABFIRST')
+  checkn('TABFIRST', cc.ptabfirst, TRUE)
+  opt('NOTABFIRST')
+  checkn('NOTABFIRST', cc.ptabfirst, FALSE)
+  opt('TABREQ')
+  checkn('TABREQ', cc.ptabreq, TRUE)
+  opt('NOTABREQ')
+  checkn('NOTABREQ', cc.ptabreq, FALSE)
 
   WriteF('--- C: comments, trimming, blanks ---\n')
   ground()

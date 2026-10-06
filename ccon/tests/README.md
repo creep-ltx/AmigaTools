@@ -262,10 +262,12 @@ scan. The section proves both halves, the bug and the clamp.
 
 ## cfgtest.e - runs on Linux
 
-The 1.2.7 config campaign, 153 checks over **nineteen procs copied
-verbatim** from the handler. A build step diffs them byte-for-byte
-against `ccon-handler.e`, so a drift between the harness and the real
-code is a failure rather than a silent lie.
+The 1.2.7 config campaign, now 176 checks over **nineteen procs copied
+verbatim** from the handler (Audit8 added the 1.2.8 switches: PACE,
+NOINFO/SHOWINFO, DIRECT/NODIRECT/DPFORCE, SCROLLBAR, the TAB*
+family). `syncheck.py` (below) compares the copies with
+`ccon-handler.e`, so a drift between the harness and the real code is
+a failure rather than a silent lie - run it after touching any of them.
 
 ```
 ecompile cfgtest.e cfgtest
@@ -362,3 +364,57 @@ go through MapANSI (the active keymap); `{tab} {ret} {esc} {bs} {del}
 checklist on the real machine from Linux:
 `wasabi run 'RAM:ikeys "{s-bs}list sys:c{ret}"'`. Build: `ecompile
 ikeys.e ikeys`.
+
+## syncheck.py - runs on Linux: are the verbatim copies still verbatim?
+
+`tests/syncheck.py` compares every PROC that cfgtest, dplinetest,
+edargtest, hidpentest and histdeduptest share with the handler
+(comments and blank lines ignored) and exits 1 on any drift; procs a
+harness adapts on purpose (edargtest's edrepeat, histdeduptest's
+historder) are listed, not failed. Written for Audit8, which found
+cfgtest's parseopt and dplinetest's dpcells silently out of date - the
+"build step" this README promised had never existed. The other
+harnesses (edanchortest, ederasetest, sbresizetest, reflowtest, ...)
+are transcribed MODELS of the release their header names, kept as the
+record of an investigation, and are not held to it.
+
+## engine/mkdiff.py + fxdiff - runs on Linux: the C engine against E
+
+`engine/mkdiff.py` builds `engine/fxdiff.e`: the whole handler with
+`main` renamed and the painters stubbed, plus a driver that feeds
+random output through `render()` twice - E only, then with the C engine
+- and compares every model byte, console field and flush digest.
+Every second chunk goes in as two calls cut at a random byte (Audit8),
+so sequences split across writes are compared too; a planted control
+(E's `cesc = 0` guard removed) fails at the first split chunk.
+
+```
+python3 engine/mkdiff.py
+ecompile engine/fxdiff.e engine/fxdiff LARGE ADDBUF=1
+vamos -C 68020 -m 8192 engine/fxdiff 7      # the seed; prints N chunks, 0 mismatches
+```
+
+`-m 8192` matters: vamos's default memory runs out. What it does NOT
+reach: `cfout`, `cflush`, `wacc`, `wchar` and the painters - those were
+checked on FS-UAE with `a8test` and marker builds (todo.md, b13-b15).
+
+`engine/build.sh` refuses to ship an engine that is not position
+independent, holds any allocated section besides `.text`, or disagrees
+with the handler on FXCONSIZE, WOBSZ, DFROWS or INQMAX.
+
+## The rest, in one line each
+
+Each file's header has the full story; build E files with `ecompile
+NAME.e NAME`, run the Linux ones with `vamos NAME`.
+
+| File | Runs on | What it shows |
+|---|---|---|
+| `ccinfo0.e` | Amiga, from a CCON: shell | audit5 A2: ACTION_DISK_INFO with a NIL InfoData is refused, not written through |
+| `edargtest.e` | Linux | Ctrl+P's argument finder and repeat, the Alt/Ctrl word jumps and deletes (42 checks; Audit8 J20 added the trailing-`*` cases) |
+| `ederasetest.e` | Linux | eraseedit's blip-only fast path is pixel-identical to the old full-row repaint |
+| `fpwtest.e` | Amiga | how fast glyphs can be written into a stock A1200's planes: Text() against three asm shapes |
+| `histdeduptest.e` | Linux | history keeps each command once (newest wins) and walks this console's own commands first |
+| `hordertest.e` | Linux | E-VO codegen probe: hoisted vs nested member-array reads (the 1.2.7 "miscompile" theory, disproved) |
+| `masktest.e` | Linux | the plane-mask invariant, simulated plane by plane, with controls that must corrupt |
+| `sbresizetest.e` | Linux | audit B2: the ring invariant when a resize grows the window (a model of 1.2b3) |
+| `srbench.e` | Amiga | the raw graphics primitives CCON's render path is built from, timed on the real screen |
