@@ -6962,3 +6962,9 @@ rebooted, Version 1.3.0b18, a8test green on a fresh boot; RAM: cleaned.
 (First try failed unseen: wasabi now wants `put --force` for L: and
 `reboot --yes`, the && chain stopped, and this line was written before
 it was true - corrected after the real install.)
+
+His own L:ccon.cfg (6.10.26): HIDDEN=21 added to [DEFAULT] - pen 21 is
+85,85,85, his dark grey (b17's derived pen was 224 = 87,87,87, an
+obtained shared pen; 21 sits in the low palette). Backup on the Amiga:
+L:ccon.cfg.bak-1.3.0b18. Checked: hidden entries draw 85,85,85. The
+shipped default stays the shine pen.
