@@ -6844,3 +6844,14 @@ A real screen-mode change could not be made to shrink the window on
 FS-UAE: ScreenMode USE with a lores/320 or hires/400 SCRM came back
 as a screen wider than the display (autoscroll), so the window kept
 its size - the marker build was the reliable route.
+
+Installed on his A1200 6.10.26 over wasabi (b13 kept as
+L:ccon-handler-1.2.8b13), rebooted, Version 1.2.8b14. Checked there:
+a8test green; a filled shell window iconified and restored is
+pixel-identical (grab diff of the window = none); the same with Ed
+open - Ed's page back identical, Esc Q quits, transcript back, typing
+works. `ScreenMode FROM ENV:Sys/ScreenMode.prefs USE` (same mode) left
+the window identical but it is NOT known whether the Workbench really
+closed - not counted as a test of the screennotify path.
+Not driven on the real machine: an actual mode change (his RTG prefs
+were not touched).
