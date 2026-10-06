@@ -829,6 +829,7 @@ PROC main()
     RETURN 5
   ENDIF
 
+  pkey[0] := 0                   -> Audit8 J8: no painter context yet
   inputbase := NIL               -> Audit8 J19: a module global with no
                                 -> initialiser; set only when input.device
                                 -> opens, and PeekQualifier trusts it
@@ -1337,7 +1338,17 @@ PROC killhandler()
       Delay(2)
       i++
     ENDWHILE
-    snclient := NIL
+    IF i < 50 THEN snclient := NIL
+  ENDIF
+  -> Audit8 J24: still registered after 50 tries - screennotify may yet
+  -> PutMsg here. Leave the port (and the library) alive, set to ignore,
+  -> so a late notice lands in valid memory and signals no one: a small
+  -> leak in a case that should never happen, instead of a write into
+  -> freed memory later
+  IF snclient
+    snport.flags := PA_IGNORE
+    snport := NIL
+    snbase := NIL
   ENDIF
   IF snport
     WHILE msg := GetMsg(snport) DO ReplyMsg(msg)
@@ -3074,6 +3085,7 @@ ENDPROC
 -> there, or the columns drift off the owner's art.
 PROC gridcalc()
   DEF i
+  pkey[0] := 0                  -> Audit8 J8: geometry may have moved
   i := MARGIN
   IF curcon.fwin THEN i := 0
   curcon.left := curcon.win.borderleft + i
@@ -3549,6 +3561,7 @@ PROC doappmsg(am:PTR TO appmessage)
       c.appicon := NIL
       oldcur := curcon
       curcon := c
+      c.winact := TRUE               -> Audit8 J23: a restore activates
       reopenwin()                    -> window back, repainted from the model
       IF curcon.win
         flushwq()                    -> replay writes parked while hidden
@@ -4161,6 +4174,9 @@ PROC hidewin()
   CloseWindow(curcon.win)
   curcon.win := NIL
   curcon.rp := NIL
+  pkey[0] := 0                  -> Audit8 J8: pctx holds this screen's
+                                -> plane addresses - a new screen's BitMap
+                                -> can land at the same address
 ENDPROC
 
 -> ICONIFY restore: reopen the window at its saved geometry and repaint the
@@ -4171,7 +4187,8 @@ ENDPROC
 PROC reopenwin()
   DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
-      dri:PTR TO drawinfo, vg
+      dri:PTR TO drawinfo, vg, oc, orows, changed, wasalt=FALSE,
+      evb[8]:ARRAY OF LONG, e:PTR TO ihev
   IF curcon.win THEN RETURN
   idc := IDCMP_CLOSEWINDOW
   IF ihon = FALSE THEN idc := idc OR IDCMP_RAWKEY OR IDCMP_VANILLAKEY OR IDCMP_MENUPICK
@@ -4186,7 +4203,11 @@ PROC reopenwin()
      WA_WIDTH, curcon.pww, WA_HEIGHT, curcon.pwh,
      WA_DRAGBAR, IF curcon.pnodrag THEN FALSE ELSE TRUE,
      WA_DEPTHGADGET, IF curcon.pnodepth THEN FALSE ELSE TRUE,
-     WA_ACTIVATE, TRUE,
+     WA_ACTIVATE, curcon.winact,  -> Audit8 J23: only the one that was
+                                  -> active (a Workbench reopen brings
+                                  -> them all back; restore sets it)
+     WA_AUTOADJUST, TRUE,         -> Audit8 J9: fit a smaller screen
+                                  -> rather than fail to open at all
      WA_CLOSEGADGET, curcon.closegad,
      WA_ICONIFYGADGET, TRUE,     -> 1.2.6b1: V47 draws + reports it
                                  -> (CLOSEWINDOW Code=1); older
@@ -4271,36 +4292,27 @@ PROC reopenwin()
     -> colour to dodge it (the boot-screen collision)
     curcon.ovhid := hidpen(curcon.anscm)
   ENDIF
+  -> Audit8 J9: the reopened window need not be the one we closed - a
+  -> screen-mode change brings different borders, or Intuition shrinks
+  -> a window the new screen cannot hold - and this used to drop the
+  -> whole model on any column change (the audit3 C2 belt) and leave
+  -> the cursor below a shorter grid. Now: unchanged grid = nothing to
+  -> do (Ed's page stays up); changed = exactly doresize's model work
+  -> (regrid: reflow, clamp, cursor fix-ups; reflow failure still
+  -> degrades to no scrollback, never a wrong-stride model).
+  oc := curcon.cols
+  orows := curcon.rows
   gridcalc()
-  -> audit3 C2, the belt. The pw* snapshot in hidewin() means the restored
-  -> window is the one we closed, so gridcalc() should derive exactly the
-  -> grid the model was built for. "Should" has been wrong in this file
-  -> before, and the screen underneath us can genuinely move while we are
-  -> iconified (a Prefs screen-mode change, or our public screen closing so
-  -> the reopen lands somewhere with different borders). If the grid and the
-  -> planes disagree, EVERY model access from here on is a wrong-stride
-  -> index into a real allocation - so drop the model instead and run this
-  -> console without scrollback, which is precisely what openwin() does on a
-  -> failed allocation and what doresize() does on a failed reflow. Losing
-  -> the transcript is a bad day; indexing past the plane is a corrupt heap.
-  IF curcon.sb
-    IF curcon.cols <> curcon.sbcols
-      Dispose(curcon.sb)
-      Dispose(curcon.sa)
-      Dispose(curcon.ss)
-      Dispose(curcon.sw)
-      curcon.sb := NIL
-      curcon.sa := NIL
-      curcon.ss := NIL
-      curcon.sw := NIL          -> all four or none (B7)
-      curcon.sbtop := 0
-      curcon.sbcnt := 0
-      curcon.viewoff := 0
-      curcon.cy := 0
-      curcon.cx := 0
-      curcon.ancx := 0
-      curcon.ancy := 0
+  changed := (curcon.cols <> oc) OR (curcon.rows <> orows)
+  IF changed
+    curcon.jslk := FALSE
+    curcon.viewoff := 0
+    IF curcon.altvalid
+      IF altpop() THEN wasalt := TRUE  -> model half only, as doresize
+      altdrop()
     ENDIF
+    dropeditmirror()
+    regrid(oc, orows)
   ENDIF
   -> clear the inner rect and repaint the kept model, cursor, edit line
   SetAPen(curcon.rp, 0)
@@ -4314,7 +4326,19 @@ PROC reopenwin()
                                 -> real pens - scan before the repaint
   redraw()
   settitle()
+  IF wasalt THEN altsave()      -> Audit8 J9: as doresize, at the new grid
   IF curcon.rawmode THEN cursdraw() ELSE drawedit()
+  IF changed AND (curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW))
+    e := evb                    -> a raw client (Ed) redraws for the new
+    e.cls := IECLASS_SIZEWINDOW -> size, as it does after doresize
+    e.sub := 0
+    e.code := 0
+    e.qual := 0
+    e.addr := curcon.win
+    e.secs := 0
+    e.mics := 0
+    ihreport(e)
+  ENDIF
   -> 1.2.6b3: the restored window is a drop target again
   IF (curcon.fwin = FALSE) AND (curcon.appwin = NIL)
     IF wbensure() THEN curcon.appwin := AddAppWindowA(0, curcon, curcon.win, wbport, NIL)
@@ -4780,6 +4804,7 @@ PROC closewin()
   ENDIF
   curcon.win := NIL
   curcon.rp := NIL
+  pkey[0] := 0                  -> Audit8 J8, as hidewin
   curcon.fwin := FALSE
   IF curcon.tf
     CloseFont(curcon.tf)
@@ -5033,8 +5058,7 @@ ENDPROC TRUE
 -> for class 12 (Ed does, CSI 12{) gets the report and
 -> re-measures itself.
 PROC doresize()
-  DEF oc, r, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, k,
-      reflowed, wasalt
+  DEF oc, evb[8]:ARRAY OF LONG, e:PTR TO ihev, orows, wasalt
   IF curcon.win = NIL THEN RETURN
   curcon.jslk := FALSE          -> 1.2.8b8: geometry changed under it
   -> 1.2.8b5: border gadgets after a resize want the FRAME repainted
@@ -5104,7 +5128,6 @@ PROC doresize()
   curcon.selon := FALSE                -> a drag dies with the old grid
   curcon.cursx := -1                   -> a full repaint follows anyway
   curcon.viewoff := 0
-  reflowed := FALSE
   -> B7: take the editor's mirrored cells OUT of the model before the
   -> reflow reads it. drawedit() mirrors the edit line into the ring,
   -> so without this the reflow would carry those cells as if they were
@@ -5117,6 +5140,62 @@ PROC doresize()
   dropeditmirror()
   oc := curcon.cols
   orows := curcon.rows          -> audit B2: the grow block below needs
+  regrid(oc, orows)             -> Audit8 J9: shared with reopenwin()
+  SetAPen(curcon.rp, 0)                -> clear the inner window (margins
+  RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,  -> included), then
+           curcon.win.width - curcon.win.borderright - 1,    -> repaint from the
+           curcon.win.height - curcon.win.borderbottom - 1)  -> model
+  SetAPen(curcon.rp, curcon.deffg)
+  maskscan()                    -> b2: reflow can pull coloured HISTORY
+                                -> into the visible rows (widening shows
+                                -> more of the past) - rescan before the
+                                -> repaint, in both directions
+  redraw()
+  settitle()
+  -> audit5 A6: the snapshot runs BEFORE the raw/cooked paint block.
+  -> For a cooked alt-screen client, drawedit() mirrors the edit line
+  -> into the model - snapshotting after it archived our own editor's
+  -> cells as phantom transcript on the eventual ?47l (the b7 wound
+  -> class, self-inflicted). Raw clients (More, Ed - the only real
+  -> alt users) never noticed: cursdraw is pixels-only. Hoisted, NOT
+  -> reordered-within-the-arm: drawedit's edroom can scroll and
+  -> desync altsbtop.
+  IF wasalt
+    altsave()                   -> b7: re-arm the snapshot AT THE NEW
+                                -> geometry (rawscr resets inside); the
+                                -> reflowed transcript stays on the
+                                -> glass until the client's class-12
+                                -> repaint covers it - honest, brief,
+                                -> and nothing of the client's page
+                                -> ever touches the ring
+  ENDIF
+  IF curcon.rawmode
+    cursdraw()
+  ELSE
+    drawedit()
+  ENDIF
+  IF curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW)
+    e := evb
+    e.cls := IECLASS_SIZEWINDOW
+    e.sub := 0
+    e.code := 0
+    e.qual := 0
+    e.addr := curcon.win
+    e.secs := 0
+    e.mics := 0
+    ihreport(e)
+  ENDIF
+  flushwq()                     -> any writers parked by a dying drag
+ENDPROC
+
+-> Audit8 J9: the grid half of doresize, shared with reopenwin(), which
+-> used to drop the whole model on any column change and never pulled the
+-> cursor back into a shorter window. oc/orows = the grid the model was
+-> built for. Rebuilds the grid (gridcalc), clamps rows to the ring,
+-> reflows to new columns (or degrades to no scrollback), and fixes up
+-> the cursor and anchor for a height change. Model only - no painting.
+PROC regrid(oc, orows)
+  DEF r, k, reflowed=FALSE
   gridcalc()                    -> to know how many rows were gained
   -> audit3 C1, the other direction. openwin() floors sbmax at rows + 2 for
   -> the geometry it opened with, but GROWING the window past that height
@@ -5212,51 +5291,6 @@ PROC doresize()
   IF curcon.ancx > (curcon.cols - 1) THEN curcon.ancx := curcon.cols - 1
   IF curcon.ancy > (curcon.rows - 1) THEN curcon.ancy := curcon.rows - 1
   ENDIF                                -> (reflowed = FALSE)
-  SetAPen(curcon.rp, 0)                -> clear the inner window (margins
-  RectFill(curcon.rp, curcon.win.borderleft, curcon.win.bordertop,  -> included), then
-           curcon.win.width - curcon.win.borderright - 1,    -> repaint from the
-           curcon.win.height - curcon.win.borderbottom - 1)  -> model
-  SetAPen(curcon.rp, curcon.deffg)
-  maskscan()                    -> b2: reflow can pull coloured HISTORY
-                                -> into the visible rows (widening shows
-                                -> more of the past) - rescan before the
-                                -> repaint, in both directions
-  redraw()
-  settitle()
-  -> audit5 A6: the snapshot runs BEFORE the raw/cooked paint block.
-  -> For a cooked alt-screen client, drawedit() mirrors the edit line
-  -> into the model - snapshotting after it archived our own editor's
-  -> cells as phantom transcript on the eventual ?47l (the b7 wound
-  -> class, self-inflicted). Raw clients (More, Ed - the only real
-  -> alt users) never noticed: cursdraw is pixels-only. Hoisted, NOT
-  -> reordered-within-the-arm: drawedit's edroom can scroll and
-  -> desync altsbtop.
-  IF wasalt
-    altsave()                   -> b7: re-arm the snapshot AT THE NEW
-                                -> geometry (rawscr resets inside); the
-                                -> reflowed transcript stays on the
-                                -> glass until the client's class-12
-                                -> repaint covers it - honest, brief,
-                                -> and nothing of the client's page
-                                -> ever touches the ring
-  ENDIF
-  IF curcon.rawmode
-    cursdraw()
-  ELSE
-    drawedit()
-  ENDIF
-  IF curcon.evmask AND Shl(1, IECLASS_SIZEWINDOW)
-    e := evb
-    e.cls := IECLASS_SIZEWINDOW
-    e.sub := 0
-    e.code := 0
-    e.qual := 0
-    e.addr := curcon.win
-    e.secs := 0
-    e.mics := 0
-    ihreport(e)
-  ENDIF
-  flushwq()                     -> any writers parked by a dying drag
 ENDPROC
 
 -> the close gadget, V47-faithful three ways (1.2.5b5, the Ed
@@ -12561,6 +12595,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b13 (6.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b14 (6.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'

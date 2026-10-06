@@ -6816,3 +6816,31 @@ test/SCROLLBAR/TABREQ"` window:
 - J18: clicks during `list sys:c`: still scrolled back 2 s later.
 Not run: J16 (needs a custom public screen), J11 (a timing race), and
 "everyday" beyond the above. Test window closed, RAM: cleaned after.
+
+## 1.2.8b14 - Audit8 batch 2: windows that come back (6.10.26)
+
+- J9: doresize's model half moved to `regrid(oc, orows)` (gridcalc,
+  ring clamp, reflow or degrade, cursor/anchor fix-ups). reopenwin
+  calls it when the grid changed (with doresize's alt pop/save and
+  dropeditmirror, a SIZEWINDOW report for raw clients); an unchanged
+  grid does nothing, so Ed's page survives a plain restore. The audit3
+  C2 "drop the model" belt is gone - regrid degrades only if the
+  reflow itself fails. WA_AUTOADJUST on the reopen.
+- J23: reopen activates only if winact (restore from the icon sets
+  it). The stale-pens half (attr plane keeps old pen numbers after a
+  depth change) is NOT done - cosmetic, left open.
+- J8: pkey[0] := 0 at startup, in gridcalc, hidewin, closewin.
+- J24: if RemWorkbenchClient never succeeds, snport is set PA_IGNORE
+  and leaked with the library instead of freed.
+- fxdiff 7200/0; a8test green on FS-UAE stock.
+
+Proof of J9 (FS-UAE stock, headless): marker builds of b13 and b14
+whose hidewin shrinks pww by 200; `list sys:c`, `echo MARKER-BEFORE`,
+RAmiga+I, double-click the AppIcon (wasabi mouse at 38,265 - the
+mouse uses grab's DOUBLED row space on a non-laced screen), type
+`echo MARKER-AFTER`. b13: window back EMPTY, typing not visible. b14:
+listing rewrapped to the narrower width, both markers, prompt live.
+A real screen-mode change could not be made to shrink the window on
+FS-UAE: ScreenMode USE with a lores/320 or hires/400 SCRM came back
+as a screen wider than the display (autoscroll), so the window kept
+its size - the marker build was the reliable route.

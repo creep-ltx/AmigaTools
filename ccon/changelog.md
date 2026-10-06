@@ -113,6 +113,17 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 - **Parked output** of a hidden window (iconified, or while the
   Workbench is closed) could be thrown away by a key pressed at that
   moment. (b13, J11)
+- **A window that comes back at a different size** - after a
+  Workbench screen-mode change, or restored from its icon onto a
+  changed screen - keeps its history, rewrapped to the new width, and
+  its prompt inside the window. It used to come back empty, and slower
+  for the rest of its life. Windows that no longer fit are fitted to
+  the screen instead of failing to reopen, and only the window that
+  was active is activated again. (1.2.8b14, Audit8 J9, J23)
+- Robustness (b14): the fast painter forgets the old screen when a
+  window closes or changes size, so it can never draw into memory the
+  old screen gave back (J8); shutdown no longer frees a port the screen
+  notifier may still use (J24).
 - Robustness (b13): a Tab menu left open when the window goes away
   (J7); a jump step larger than a resized window (J5); the raw-mode
   block cursor that sometimes was not erased (J10); a write length
