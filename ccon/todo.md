@@ -6776,22 +6776,43 @@ ticks, J1 matches (b12 there: J4 0-1 ticks; J1 cannot fail on RTG -
 cfout is planar only). The keyboard checks below still need him.
 
 Boot checklist (his A1200):
-- [ ] J2: `newshell CCON:TABREQ` (or TABREQ in the cfg), Tab on an
+- [x] J2 (6.10.26, remotely, see below): `newshell CCON:TABREQ` (or TABREQ in the cfg), Tab on an
       empty prompt, pick a file, OK: the name is typed in. Again: works
       the second time. Then Assign/unmount as usual - no refusal.
-- [ ] J15: type `abc`, Ctrl+H deletes one letter. `dh0:work/foo`,
+- [x] J15: type `abc`, Ctrl+H deletes one letter. `dh0:work/foo`,
       Ctrl+Backspace deletes `foo`.
-- [ ] J12: scroll back with the scrollbar, press Tab: view jumps to
+- [x] J12: scroll back with the scrollbar, press Tab: view jumps to
       the bottom, menu/completion drawn normally.
-- [ ] J18: `list sys: all`, click the scrollbar's up arrow while it
+- [x] J18 (rough timing over the network - a sanity check): `list sys: all`, click the scrollbar's up arrow while it
       runs: the view stays scrolled back until the next output line
       arrives (then it snaps live, as before).
 - [ ] J16: only if you use a custom public screen: a CCON window on it
       stays open when Prefs changes the Workbench mode.
-- [ ] J7: Tab menu open, iconify the window (RAmiga+I), restore: no
+- [x] J7 (iconify + restore; the SetMode-while-hidden crash route not driven): Tab menu open, iconify the window (RAmiga+I), restore: no
       crash, menu gone, prompt fine.
-- [ ] J10: Ed in a CCON window, move around: no leftover cursor blocks.
-- [ ] J4: any program that waits for a key with a timeout behaves as
+- [x] J10 (no trail seen; the old bug was address-dependent, so not a proof): Ed in a CCON window, move around: no leftover cursor blocks.
+- [x] J4 (a8test on the live handler): any program that waits for a key with a timeout behaves as
       on stock CON:.
 - [ ] Everyday: shell, `type` of an ANSI file, Ed, More, history,
       selection - nothing changed.
+
+Checklist run REMOTELY on his A1200 6.10.26 (he was away): keys typed
+with tests/ikeys (raw key events into input.device - wasabi has no key
+command, by design), clicks with `wasabi mouse`, results read from
+`wasabi grab` screenshots of a `NewShell "CCON:40/40/900/400/Audit8
+test/SCROLLBAR/TABREQ"` window:
+- J15: `abc` + Ctrl+H = `ab`; `list dh0:work/foo` + Ctrl+Backspace =
+  `list dh0:work/`.
+- J12: `list sys:c`, six clicks on the scrollbar's up arrow (prompt out
+  of view), Tab: view back at the bottom, completion menu drawn cleanly
+  under the prompt.
+- J7: menu open, RAmiga+I, the CCON AppIcon double-clicked: window back,
+  menu gone, prompt intact, Up recalls history (so tcactive was clear).
+- J2: Tab on an empty prompt opened "Insert a file name"; mungwall.doc
+  + OK typed `AmigaOS:mungwall.doc`; a second time test.jpg typed
+  `AmigaOS:test.jpg`.
+- J10: Ed on a 5-line file, ~20 cursor moves: one block, no leftovers;
+  Esc Q quits cleanly.
+- J18: clicks during `list sys:c`: still scrolled back 2 s later.
+Not run: J16 (needs a custom public screen), J11 (a timing race), and
+"everyday" beyond the above. Test window closed, RAM: cleaned after.

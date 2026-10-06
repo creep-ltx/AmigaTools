@@ -350,3 +350,15 @@ The window must use an 8-pixel font (the C flush runs only then - hence
 NOFONT where the cfg sets MicroKnight7). Mount the old build beside the
 new one and run both: the check must be able to fail. On a 2 MB stock
 machine, one build per boot. Build: `ecompile a8test.e a8test`.
+
+## ikeys.e - runs on the Amiga: type keys into the active window
+
+`ikeys "TEXT"` writes raw key events into input.device, so everything -
+CCON's input handler included - sees real keystrokes. Plain characters
+go through MapANSI (the active keymap); `{tab} {ret} {esc} {bs} {del}
+{up} {down} {left} {right} {space}`, with prefixes `c-` Ctrl, `s-` Shift,
+`a-` Alt, `la-`/`ra-` left/right Amiga (`{c-h}`, `{s-bs}`, `{ra-i}`), and
+`{wN}` waits N ticks. With `wasabi mouse` and `wasabi grab` it drives a
+checklist on the real machine from Linux:
+`wasabi run 'RAM:ikeys "{s-bs}list sys:c{ret}"'`. Build: `ecompile
+ikeys.e ikeys`.
