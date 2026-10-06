@@ -6883,3 +6883,6 @@ Evidence (FS-UAE stock, headless, XC mounts):
   The shrink case itself rests on the arithmetic, not a run.
 - On his A1200 (RTG): two windows in topaz 8 / topaz 11 never showed
   the bug with b14 either - RTG output there goes through Text().
+Installed on his A1200 6.10.26 (b14 kept as L:ccon-handler-1.2.8b14),
+rebooted, Version 1.2.8b15, a8test green; two windows (topaz 8 with a
+listing, topaz 11) drawn correctly; test windows closed, RAM: cleaned.
