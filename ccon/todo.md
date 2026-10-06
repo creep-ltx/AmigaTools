@@ -6933,3 +6933,6 @@ to AmigaOS:C only.
 - Left: cutils/{Install,vinstall,vinstall.e} untracked - not CCON's,
   not touched.
 - fxdiff 7200/0 on b17.
+Installed on his A1200 6.10.26 (b16 kept as L:ccon-handler-1.2.8b16),
+rebooted, Version 1.2.8b17, a8test green, a listing + Ctrl+P drawn
+normally; RAM: cleaned.
