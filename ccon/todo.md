@@ -6907,3 +6907,6 @@ On his A1200 (b16 as XC1: beside the live b15): Alt+Tab `zzc` with
 `Assign C: RAM:cx ADD` -> `zzcmdtest` on b16, nothing on b15 (assign
 removed after); Ctrl+P `rename foo ` -> `rename foo foo`, `copy "a*`
 unchanged (beep), `copy "a**` -> `copy "a**" "a**`.
+Installed on his A1200 6.10.26 (b15 kept as L:ccon-handler-1.2.8b15),
+rebooted, Version 1.2.8b16, a8test green; RAM: cleaned, C: assign back
+to AmigaOS:C only.
