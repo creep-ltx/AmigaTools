@@ -920,6 +920,11 @@ mismatches. So the committed binaries are the source, and `frun`
 matches `render()` for every input fxdiff generates — the findings
 below are all in places fxdiff does not reach.
 
+**Status (6.10.26): batch 1 shipped as 1.2.8b13** - J1, J2, J4, J5,
+J7, J10, J11, J12, J14, J15, J16, J18, J19 fixed; J1 and J4 proven on
+FS-UAE stock with `tests/a8test` (b12 fails, b13 passes), the rest
+await the boot checklist in todo.md.
+
 Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
 drift within this section only. Confidence: **C** = confirmed by
 tracing or measurement, **P** = plausible, not reproduced.
