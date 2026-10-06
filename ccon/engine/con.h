@@ -212,4 +212,6 @@ struct con {
   LONG jsync; /* 4172 */
   LONG wbgone; /* 4176 */
   LONG ppace; /* 4180 */
-}; /* size 4184 */
+  LONG drishine; /* 4184 */
+  LONG oldtab[8]; /* 4188 */
+}; /* size 4220 */

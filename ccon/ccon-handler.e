@@ -142,7 +142,7 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> clamped to 255 (gridcalc), rows is not - a
                         -> window taller than DFROWS rows just runs the
                         -> legacy immediate path (dfstart declines)
-      FXCONSIZE=4184,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
+      FXCONSIZE=4220,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
       WOBSZ=16384,      -> S5 write-behind buffer, bytes per console.
                         -> (1.2.8b9: 4096 -> 16384, so a paced flush
                         -> can pool several screens of a burst)
@@ -540,6 +540,12 @@ OBJECT console
                                 -> Workbench screen is closing
                                 -> (screennotify.library); reopens with it
   ppace                         -> 1.2.8b12: PACE=FAST (TRUE) / NORMAL
+  drishine,                     -> 1.3.0b18: the screen's SHINEPEN role,
+                                -> the hidden-entry default (not obtained:
+                                -> DrawInfo pens are never released), -1
+  oldtab[8]:ARRAY OF LONG       -> 1.3.0b18 (Audit8 J23): anstab as it was
+                                -> when the window closed - reopenwin
+                                -> re-translates the cells that used it
 ENDOBJECT
 
 DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
@@ -4143,6 +4149,7 @@ PROC hidewin()
   curcon.sello := -1
   curcon.selhi := -1
   -> ANSI pens go back to the screen with the window (reopenwin re-obtains)
+  FOR i := 0 TO 7 DO curcon.oldtab[i] := curcon.anstab[i]  -> 1.3.0b18 J23
   IF curcon.anscm
     FOR i := 0 TO 7
       IF curcon.anstab[i] >= 0 THEN ReleasePen(curcon.anscm, curcon.anstab[i])
@@ -4188,6 +4195,41 @@ ENDPROC
 -> here every console field is preserved and only the window is rebuilt. This
 -> mirrors openwin's window-open/font/pen/metrics setup (font + model are
 -> kept, so they are reused, not reloaded/reallocated). setidcmp fixes idc.
+-> 1.3.0b18, Audit8 J23: the window came back on a screen whose palette
+-> may differ (a depth or mode change) - the translated ANSI pens it
+-> obtained now are not the ones the model's cells were written with.
+-> Cells carrying attr bit 7 (curattr: a translated fg) get their fg
+-> translated again from the ANSI colour the old pen stood for; if the
+-> new screen translates that colour no longer, the cell takes the raw
+-> pen fgpen would give it now (the colour number itself, bit 7 off).
+-> Nothing to do - and no walk - when the two tables agree.
+PROC retranslate()
+  DEF i, same=TRUE, map[16]:ARRAY OF CHAR, n, a:PTR TO CHAR, v, p
+  IF curcon.sa = NIL THEN RETURN
+  FOR i := 0 TO 7
+    IF curcon.oldtab[i] <> curcon.anstab[i] THEN same := FALSE
+  ENDFOR
+  IF same THEN RETURN
+  -> old pen -> new attr fg byte (bit 7 kept when still translated);
+  -> 255 = this pen was not a translation (leave the cell alone)
+  FOR i := 0 TO 15 DO map[i] := 255
+  FOR i := 7 TO 0 STEP -1       -> lowest ANSI colour wins a shared pen
+    p := curcon.oldtab[i]
+    IF (p >= 0) AND (p <= 15)
+      map[p] := IF curcon.anstab[i] >= 0 THEN curcon.anstab[i] OR $80 ELSE i
+    ENDIF
+  ENDFOR
+  a := curcon.sa
+  n := Mul(curcon.sbmax, curcon.sbcols)
+  FOR i := 0 TO n - 1
+    v := a[i]
+    IF v AND $80
+      p := map[v AND 15]
+      IF p <> 255 THEN a[i] := (v AND $70) OR p
+    ENDIF
+  ENDFOR
+ENDPROC
+
 PROC reopenwin()
   DEF idc, pubscr:PTR TO screen, scrn:PTR TO screen, i, v,
       pr:PTR TO CHAR, pg:PTR TO CHAR, pb:PTR TO CHAR,
@@ -4244,6 +4286,7 @@ PROC reopenwin()
   curcon.ovgrey := -1
   curcon.ovhid := -1
   curcon.drifill := -1
+  curcon.drishine := -1          -> 1.3.0b18
   FOR i := 0 TO 7
     curcon.anstab[i] := -1
   ENDFOR
@@ -4290,12 +4333,17 @@ PROC reopenwin()
     dri := GetScreenDrawInfo(scrn)
     IF dri
       IF dri.numpens > FILLPEN THEN curcon.drifill := dri.pens[FILLPEN]
+      IF dri.numpens > SHINEPEN THEN curcon.drishine := dri.pens[SHINEPEN]  -> 1.3.0b18
       FreeScreenDrawInfo(scrn, dri)
     ENDIF
     -> 1.2.7b6: AFTER drifill on purpose - the scan needs the dir
     -> colour to dodge it (the boot-screen collision)
-    curcon.ovhid := hidpen(curcon.anscm)
+    -> 1.3.0b18: the SHINE role first (white on a stock 4-colour
+    -> Workbench); the palette scan only when shine is no answer
+    IF shineok(curcon.anscm) = FALSE THEN curcon.drishine := -1
+    IF curcon.drishine < 0 THEN curcon.ovhid := hidpen(curcon.anscm)
   ENDIF
+  retranslate()                 -> 1.3.0b18, Audit8 J23
   -> Audit8 J9: the reopened window need not be the one we closed - a
   -> screen-mode change brings different borders, or Intuition shrinks
   -> a window the new screen cannot hold - and this used to drop the
@@ -4639,6 +4687,7 @@ PROC openwin()
   curcon.ovgrey := -1
   curcon.ovhid := -1
   curcon.drifill := -1
+  curcon.drishine := -1          -> 1.3.0b18
   FOR i := 0 TO 7
     curcon.anstab[i] := -1             -> E global arrays start as garbage
   ENDFOR
@@ -4675,11 +4724,15 @@ PROC openwin()
     dri := GetScreenDrawInfo(scrn)
     IF dri
       IF dri.numpens > FILLPEN THEN curcon.drifill := dri.pens[FILLPEN]
+      IF dri.numpens > SHINEPEN THEN curcon.drishine := dri.pens[SHINEPEN]  -> 1.3.0b18
       FreeScreenDrawInfo(scrn, dri)
     ENDIF
     -> 1.2.7b6: AFTER drifill on purpose - the scan needs the dir
     -> colour to dodge it (the boot-screen collision)
-    curcon.ovhid := hidpen(curcon.anscm)
+    -> 1.3.0b18: the SHINE role first (white on a stock 4-colour
+    -> Workbench); the palette scan only when shine is no answer
+    IF shineok(curcon.anscm) = FALSE THEN curcon.drishine := -1
+    IF curcon.drishine < 0 THEN curcon.ovhid := hidpen(curcon.anscm)
   ENDIF
   curcon.curfg := curcon.deffg
   curcon.curbg := 0
@@ -5530,10 +5583,24 @@ PROC fgpen()
 ENDPROC curcon.curfg
 
 PROC curattr()
-  DEF f
+  DEF f, t=0
   f := fgpen()
   penuse(f, curcon.curbg)       -> 1.2.3: a pen is masked-in BEFORE the
-ENDPROC f OR Shl(curcon.curbg, 4)  -> first cell stores it (rule (a))
+                                -> first cell stores it (rule (a))
+  -> 1.3.0b18 (Audit8 J23): attr bit 7 = this fg is a TRANSLATED pen
+  -> (fgpen's anstab arm, the same tests in the same order), so a
+  -> reopen on a changed palette can translate the cell again. Every
+  -> reader masks the fg (AND 15) and bg (Shr 4 AND 7): bit 7 is free
+  IF curcon.bold
+    IF curcon.curfg < 8
+      IF curcon.wbpens = FALSE
+        IF curcon.cursgr
+          IF curcon.anstab[curcon.curfg] >= 0 THEN t := $80
+        ENDIF
+      ENDIF
+    ENDIF
+  ENDIF
+ENDPROC f OR Shl(curcon.curbg, 4) OR t
 
 -> v1.1 soft styles: point the rastport at a cell's style bits only
 -> when they change (SetSoftStyle is a call per run otherwise).
@@ -12203,6 +12270,7 @@ ENDPROC tcisinfo(n, l)
 PROC menupen(flag)
   IF flag AND 2                 -> hidden-class grey
     IF curcon.phid >= 0 THEN RETURN curcon.phid
+    IF curcon.drishine >= 0 THEN RETURN curcon.drishine  -> 1.3.0b18
     IF curcon.ovhid >= 0 THEN RETURN curcon.ovhid
     RETURN curcon.deffg         -> no dimming grey exists: visible,
   ENDIF                         -> merely undimmed
@@ -12274,6 +12342,46 @@ ENDPROC best
 -> scanned pen or a same-colour twin, either serves. The background
 -> readback stays as belt: on a busy shared pen list the obtain can
 -> still hand back something else entirely.
+-> 1.3.0b18: hidden entries default to the screen's SHINEPEN role. The
+-> b6 scan below picks the pen nearest the background/text midpoint
+-> that is at least 48 (taxicab, byte guns) from both - about 16 levels
+-> a gun, which on many palettes is a grey you can barely see (his
+-> report from other people's screens: hidden files invisible on fewer
+-> or more colours than his). SHINE is the role Palette prefs keeps
+-> visible against the window background on every palette; on the
+-> stock 4-colour Workbench it is pen 2, white - grey ground, black
+-> text, white hidden, blue (FILL) directories. It is taken when it
+-> stands well clear of both background and text (96 each: readable,
+-> and not mistakable for a plain entry) and of the dir colour (48);
+-> otherwise the scan, as before. HIDDEN=n still pins any pen.
+PROC shineok(cm:PTR TO colormap)
+  DEF p, n, c[3]:ARRAY OF LONG
+  p := curcon.drishine
+  IF (p < 0) OR (cm = NIL) THEN RETURN FALSE
+  n := cm.count
+  IF curcon.rp.bitmap
+    IF n > Shl(1, curcon.rp.bitmap.depth) THEN n := Shl(1, curcon.rp.bitmap.depth)
+  ENDIF
+  IF p >= n THEN RETURN FALSE
+  IF p = curcon.deffg THEN RETURN FALSE
+  IF pendist(cm, p, 0) < 96 THEN RETURN FALSE
+  IF curcon.deffg < n
+    IF pendist(cm, p, curcon.deffg) < 96 THEN RETURN FALSE
+  ENDIF
+  IF (curcon.drifill > 0) AND (curcon.drifill < n)
+    IF pendist(cm, p, curcon.drifill) < 48 THEN RETURN FALSE
+  ENDIF
+ENDPROC TRUE
+
+-> taxicab distance between two pens' colours, top byte of each gun
+PROC pendist(cm:PTR TO colormap, p, q)
+  DEF a[3]:ARRAY OF LONG, b[3]:ARRAY OF LONG
+  GetRGB32(cm, p, 1, a)
+  GetRGB32(cm, q, 1, b)
+ENDPROC Abs((Shr(a[0], 24) AND $FF) - (Shr(b[0], 24) AND $FF)) +
+        Abs((Shr(a[1], 24) AND $FF) - (Shr(b[1], 24) AND $FF)) +
+        Abs((Shr(a[2], 24) AND $FF) - (Shr(b[2], 24) AND $FF))
+
 PROC hidpen(cm:PTR TO colormap)
   DEF tab:PTR TO LONG, n, k, i, v, d,
       bgc[3]:ARRAY OF LONG, fgc[3]:ARRAY OF LONG,
@@ -12703,6 +12811,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b17 (6.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.3.0b18 (6.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'

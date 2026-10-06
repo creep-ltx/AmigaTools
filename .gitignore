@@ -32,3 +32,4 @@ ccon/tests/sbmaxtest
 ccon/tests/sbresizetest
 ccon/tests/srbench
 __pycache__/
+ccon/tests/boldtest

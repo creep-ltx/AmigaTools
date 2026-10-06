@@ -11,7 +11,11 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 
 ---
 
-## [1.2.8] — unreleased (draft)
+## [1.3.0] — unreleased (draft)
+
+Its betas ran as 1.2.8b1 to 1.2.8b17 before the release was renamed
+1.3.0 (6.10.26); the beta numbers carry on (1.3.0b18, ...).
+
 
 ### Added
 - **`JUMP=n`, jump scroll.** At the bottom margin a newline scrolls
@@ -143,6 +147,16 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 - Robustness (b16): completion no longer follows a background program
   that has already ended (J13); WaitForChar with a reader waiting draws
   its cursor at once (J26).
+- **Hidden entries in the Tab menu** (h-bit and .info) now take the
+  screen's own shine colour - white on a stock Workbench - instead of
+  a grey picked from the palette, which on some palettes and depths
+  came out barely different from the background. A screen whose
+  shine colour is too close to the background or the text still gets
+  a scanned shade; `HIDDEN=n` pins any pen. (1.3.0b18)
+- **Coloured output after a screen depth or palette change** keeps
+  its colours: the `ls`-style colours a window printed are translated
+  again for the new screen when the window comes back. (b18, Audit8
+  J23)
 - Housekeeping (b17, Audit8 batch 5): the documentation and the
   example config describe 1.2.8 (automatic jump scroll, the memory
   limit on history, DIRECT/NODIRECT, the Workbench closing, bold,

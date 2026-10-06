@@ -1,5 +1,5 @@
 ==========================================================================
-                               CCON: 1.2.8
+                               CCON: 1.3.0
             a console handler with output scrollback and a
                    modern line editor, for AmigaOS.
 ==========================================================================
@@ -356,10 +356,14 @@
 
              Left unset - which is nearly always right - CCON: takes
              these FROM YOUR SCREEN: directories follow the screen's
-             own fill-pen role, and the other two are chosen by
-             scanning the palette for a pen that stays readable
-             against the background while still reading as dimmer
-             than the text. Fixed numbers looked wrong on a
+             own fill-pen role and hidden entries its shine-pen role
+             (on a stock 4-colour Workbench: blue folders, white
+             hidden entries on the grey background, black files) -
+             roles Palette prefs keeps readable on any palette and
+             depth. Only when the shine pen sits too close to the
+             background or the text does CCON: scan the palette for
+             a readable in-between shade instead, as the ghost
+             always does. Fixed numbers looked wrong on a
              CyberGraphX screen, wrong again on a dark terminal
              palette and wrong a third time on the boot shell, which
              is why they are derived at all. Pin one only if you know
@@ -647,8 +651,9 @@
   and Shift arrows keep their usual meanings (scrollback by line and
   by page, section 11) and close the menu first.
 
-  Menu colours mirror the ls scheme: directories blue, hidden-class
-  entries (h-bit or .info) grey. Those two, and the ghost, can be
+  Menu colours mirror the ls scheme: directories in the screen's
+  fill colour (blue on a stock Workbench), hidden-class entries (h-bit
+  or .info) in its shine colour (white). Those two, and the ghost, can be
   pinned to pen numbers in L:ccon.cfg with DIRS, HIDDEN and GHOST
   (section 6) - though the colours CCON: derives from your screen
   are usually the better answer.
@@ -974,7 +979,7 @@
   It works from a shell prompt and from a fullscreen program like Ed
   alike - the shortcut is caught before the client ever sees the key.
 
-  WHEN THE WORKBENCH CLOSES (1.2.8) - for a screen-mode or font
+  WHEN THE WORKBENCH CLOSES (1.3.0) - for a screen-mode or font
   change in Prefs - CCON: windows on it close with it and come back
   when it reopens, the same way: scrollback, half-typed line and
   output that arrived meanwhile all intact. If the new screen gives
@@ -1136,9 +1141,6 @@
     and the default 512 lines (LINESn scales this up to 5000,
     or down to a floor of 100; less than that only when memory is
     short).
-  - Bold letters are drawn one pixel wider; a glyph that uses its
-    cell's last pixel column can leave that pixel behind when the
-    cell is later redrawn plain.
   - A window is at most 255 text columns wide. On a very wide
     screen in a small font the columns past 255 are unused.
   - Growing a window taller than its own LINESn ring leaves the

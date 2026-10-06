@@ -337,9 +337,11 @@ static LONG fgpen(struct con *k)
 /* curattr */
 static LONG curattr(struct fx *x, struct con *k)
 {
-    LONG f = fgpen(k);
+    LONG f = fgpen(k), t = 0;
     penuse(x, k, f, k->curbg);
-    return f | (k->curbg << 4);
+    /* attr bit 7: a translated (anstab) fg - E's curattr, 1.3.0b18 */
+    if (k->bold && k->curfg < 8 && !k->wbpens && k->cursgr && k->anstab[k->curfg] >= 0) t = 0x80;
+    return f | (k->curbg << 4) | t;
 }
 
 extern void putseg(struct fx *x, struct con *k, const UBYTE *s, LONG fit, LONG at, LONG sty);

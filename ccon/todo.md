@@ -6936,3 +6936,24 @@ to AmigaOS:C only.
 Installed on his A1200 6.10.26 (b16 kept as L:ccon-handler-1.2.8b16),
 rebooted, Version 1.2.8b17, a8test green, a listing + Ctrl+P drawn
 normally; RAM: cleaned.
+
+## 1.3.0b18 - the rename, hidden-entry colour, J23, J27 (6.10.26)
+
+His call: the release is 1.3.0 (betas keep counting: b18 on). And the
+hidden-entry colour: others report the derived grey invisible on
+fewer or more colours than his; default to the first-pens look.
+- Hidden entries (menupen flag 2): phid pin -> drishine (DrawInfo
+  SHINEPEN, accepted by shineok: >= 96 taxicab from pen 0 and from
+  deffg, >= 48 from drifill, inside the displayable pens) -> ovhid
+  (the b6 scan, now only run when shine is refused) -> deffg. Stock
+  4-colour WB: grey ground, black files, white hidden, blue dirs.
+  On his A1200 the old derived pen was a dark grey (87,87,87); b18
+  draws white (255,255,255). HIDDEN=n pins his grey back if wanted.
+  cfgtest +3 (179/179); syncheck caught the stale menupen copy first.
+- J23: console fields drishine + oldtab[8] (FXCONSIZE 4220, build.sh
+  agrees); curattr sets attr bit 7 for an anstab-translated fg (E and
+  engine.c); hidewin saves anstab; reopenwin -> retranslate().
+  Marker build proof on FS-UAE (see audit.md).
+- J27: not reproduced on the A1200 (tests/boldtest.e, topaz 8 and
+  MicroKnight 8); doc limitation withdrawn.
+- fxdiff 7200/0 on seeds 7 and 8.

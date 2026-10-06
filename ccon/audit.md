@@ -947,6 +947,16 @@ D1/D2 (re-copied; tests/syncheck.py now enforces it; cfgtest 176/176
 with the 1.2.8 switches), D3/D4 (ccon.cfg, ccon.doc), D5 (tests
 README), D6 (.gitignore). **Audit8 is closed** except J23's stale-pens
 half and J27 (bold smear), both cosmetic and written down.
+**After the close (1.3.0b18, 6.10.26):** J23's stale-pens half FIXED -
+attr bit 7 marks a translated fg (E and C curattr alike, fxdiff clean),
+hidewin keeps anstab in oldtab, reopenwin's retranslate() rewrites the
+marked cells when the table changed; a marker build that records a
+rotated table shifted every bold colour by one on restore, the real
+build left them alone (FS-UAE 16 colours). J27 NOT REPRODUCED on the
+A1200: bold topaz 8 and MicroKnight 8 stay inside their cells (the
+glyphs leave the last column empty, the smear fills it) and a row
+overwritten plain is pixel-identical to a plain one (tests/boldtest);
+the ccon.doc limitation added in b17 was withdrawn.
 
 Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
 drift within this section only. Confidence: **C** = confirmed by

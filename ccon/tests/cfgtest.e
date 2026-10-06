@@ -42,7 +42,7 @@ OBJECT con
   pcfgsect[40]:ARRAY OF CHAR,
   wtitlebase:PTR TO CHAR,
   piconpath[104]:ARRAY OF CHAR,
-  drifill, ovhid, ovgrey, can16,
+  drifill, ovhid, ovgrey, can16, drishine,
   anstab[8]:ARRAY OF LONG,
   tcc[80]:ARRAY OF LONG,
   tcpool:PTR TO CHAR,
@@ -421,6 +421,7 @@ ENDPROC
 PROC menupen(flag)
   IF flag AND 2                 -> hidden-class grey
     IF curcon.phid >= 0 THEN RETURN curcon.phid
+    IF curcon.drishine >= 0 THEN RETURN curcon.drishine  -> 1.3.0b18
     IF curcon.ovhid >= 0 THEN RETURN curcon.ovhid
     RETURN curcon.deffg         -> no dimming grey exists: visible,
   ENDIF                         -> merely undimmed
@@ -782,6 +783,7 @@ PROC ground()
   -> not parsecon's to ground - openwin derives these from the screen;
   -> the tests set them where a derived value is what's under test
   cc.drifill := -1
+  cc.drishine := -1             -> 1.3.0b18: no shine role unless set
   cc.ovhid := -1
   cc.ovgrey := -1
   cc.can16 := FALSE
@@ -1145,6 +1147,19 @@ PROC main()
   ground()
   cc.deffg := 7
   checkn('no scan, no pin: visible, merely undimmed', menupen(2), 7)
+  -> 1.3.0b18: the SHINE role comes before the scan, after the pin
+  ground()
+  cc.drishine := 2
+  cc.ovhid := 9
+  checkn('shine (pen 2 on a stock WB) outranks the scan', menupen(2), 2)
+  ground()
+  feed(['HIDDEN=5'], 1, 'DEFAULT')
+  cc.drishine := 2
+  checkn('a HIDDEN pin still outranks shine', menupen(2), 5)
+  ground()
+  cc.drishine := 2
+  cc.drifill := 3
+  checkn('shine never colours a directory', menupen(1), 3)
   ground()
   feed(['GHOST=6'], 1, 'DEFAULT')
   cc.wbpens := TRUE
