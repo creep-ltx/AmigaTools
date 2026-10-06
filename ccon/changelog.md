@@ -128,6 +128,21 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
   output is drawn no longer gets the text at its old place: the fast
   painter steps aside to the system's clipped drawing then. (b15, J6,
   J17)
+- **Alt+Tab** finds commands in every directory of a multi-directory
+  C: (`Assign C: Work:C ADD`), and stops reading directories once its
+  list is full - a big or network Path no longer holds up every
+  window. (1.2.8b16, Audit8 J21)
+- **Ctrl+P** beeps instead of producing a broken line when an open
+  quote ends in a lone `*` (which would escape the closing quote).
+  (b16, J20)
+- **Jump scroll** slides back after output that ends with a harmless
+  sequence (cursor on/off, a status request), waits while the Tab menu
+  is open, and leaves a Ctrl+L clear alone. (b16, J22)
+- **PACE=FAST** no longer slows the updates of other windows. (b16,
+  J25)
+- Robustness (b16): completion no longer follows a background program
+  that has already ended (J13); WaitForChar with a reader waiting draws
+  its cursor at once (J26).
 - Robustness (b14): the fast painter forgets the old screen when a
   window closes or changes size, so it can never draw into memory the
   old screen gave back (J8); shutdown no longer frees a port the screen

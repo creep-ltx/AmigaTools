@@ -69,6 +69,17 @@ PROC edrepeat()
   st, en, open := edlastarg(s, cpos)
   IF st < 0 THEN RETURN FALSE
   n := en - st
+  -> Audit8 J20: an open quote whose last character is a lone `*`
+  -> (an odd run of them) - the closing quote added below would be
+  -> escaped by it and close nothing. Whole or nothing: beep.
+  IF open
+    j := 0
+    WHILE ((cpos - 1 - j) > st) AND (s[cpos - 1 - j] = "*") DO j++
+    IF j AND 1
+      beeps++
+      RETURN FALSE
+    ENDIF
+  ENDIF
   sepn := 0
   IF open
     sepn := 2
@@ -196,6 +207,12 @@ PROC main()
       'rename foo foo bar', 14)
   rep('mid-word: the word so far', 'rename foobar', 10,
       'rename foo foobar', 14)
+  beeps := 0
+  rep('open quote ending in a lone * beeps (J20)', 'copy "a*', -1, 'copy "a*', 8)
+  jmp('... and it beeped', beeps, 1)
+  rep('open quote ending in ** is fine (J20)', 'copy "a**', -1,
+      'copy "a**" "a**', 15)
+  rep('open quote ending in *** beeps (J20)', 'copy "a***', -1, 'copy "a***', 10)
   rep('empty line does nothing', '', -1, '', 0)
   rep('only spaces does nothing', '   ', -1, '   ', 3)
   rep('cursor at 0 does nothing', 'dir', 0, 'dir', 0)

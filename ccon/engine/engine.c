@@ -1417,6 +1417,9 @@ LONG wchar(struct fx *x, struct pctx *pc, struct dpkt *pkt)
         for (p = (struct con *)*x->conlist; p; p = (struct con *)p->next)
             if (p->breaktask == (LONG)t) { c = p; break; }
     if (!c) return 0;
+    /* Audit8 J26: nothing to flush, but a reader is waiting for its
+       deferred blip - E's flushout draws it (blipnow); hand over */
+    if (c->wolen <= 0 && c->blipdefer && c->rdn > 0) return 0;
     if (c->wolen > 0) {
         r = cfout(x, pc, c);
         if (!r) return 0;

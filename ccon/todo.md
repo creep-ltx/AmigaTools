@@ -6886,3 +6886,24 @@ Evidence (FS-UAE stock, headless, XC mounts):
 Installed on his A1200 6.10.26 (b14 kept as L:ccon-handler-1.2.8b14),
 rebooted, Version 1.2.8b15, a8test green; two windows (topaz 8 with a
 listing, topaz 11) drawn correctly; test windows closed, RAM: cleaned.
+
+## 1.2.8b16 - Audit8 batch 4: keys and smaller things (6.10.26)
+
+- J13 taskalive(): tcclient follows breaktask only if exec still lists
+  it (TaskReady/TaskWait under Forbid).
+- J20 edrepeat beeps when the open quote ends in an odd run of `*`;
+  edargtest +4 checks (42/42). The mid-word quote rule is kept.
+- J21 tcscancmd walks C:'s AssignList (up to 8 extra locks, copied
+  under LockDosList, scanned after); tcscanone and the Path walk stop
+  once tcmore is set.
+- J22 csidispatch keeps jslk for m p n q h l; jsettle waits while
+  tcactive; Ctrl+L clears jslk.
+- J25 FAST pacing only if every flushed console has ppace.
+- J26 engine wchar hands WAIT_CHAR to E when only the blip is owed.
+- L1 comments: Div is 32-bit in E-VO.
+- tests/ikeys: {q} types a double quote.
+- fxdiff 7200/0.
+On his A1200 (b16 as XC1: beside the live b15): Alt+Tab `zzc` with
+`Assign C: RAM:cx ADD` -> `zzcmdtest` on b16, nothing on b15 (assign
+removed after); Ctrl+P `rename foo ` -> `rename foo foo`, `copy "a*`
+unchanged (beep), `copy "a**` -> `copy "a**" "a**`.

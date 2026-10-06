@@ -2322,7 +2322,7 @@ ENDPROC
 
 PROC flushexpired()
   DEF c:PTR TO console, again=FALSE, round, work, old:PTR TO console,
-      t0, el, fast=FALSE
+      t0, el, fast=FALSE, slow=FALSE
   -> E4 second draft: the b3 sweep-before-render was a no-op - the
   -> main loop has ALREADY drained the port into the buffers by the
   -> time the timer is seen. The packets that matter arrive WHILE a
@@ -2351,7 +2351,7 @@ PROC flushexpired()
     WHILE c
       IF (c.wolen > 0) AND (c.selon = FALSE)
         swaccept()              -> what arrived during the last render
-        IF c.ppace THEN fast := TRUE  -> 1.2.8b12: PACE=FAST
+        IF c.ppace THEN fast := TRUE ELSE slow := TRUE  -> 1.2.8b12: PACE=FAST
         flushout(c)
         work := TRUE
         c.bliptick := TRUE
@@ -2363,13 +2363,17 @@ PROC flushexpired()
   IF work
     el := dpnow() - t0
     IF (el > 0) AND (el < 300000)
-      IF fast                   -> 1.2.8b12 PACE=FAST: x2.5 = ticks x3.5
+      -> Audit8 J25: one timer serves every console, so FAST pacing only
+      -> when every console in this flush asked for it - a PACE=FAST
+      -> window must not slow down its neighbours' updates
+      IF fast AND (slow = FALSE)  -> 1.2.8b12 PACE=FAST: x2.5 = ticks x3.5
         el := Shl(el, 2) - Shr(el, 1)
         fdelay := Max(WOFLUSHFAST, Min(el, WOFMAX))
       ELSE
       el := Shl(el, 1) + Shr(el, 3)  -> x1.5, EClock ticks -> us
-                                -> (709kHz: x1.41) = x2.12; shifts, as
-                                -> E's Div is 32/16 and would trap
+                                -> (709kHz: x1.41) = x2.12; shifts. (Not
+                                -> for Div's sake: E-VO's Div is 32-bit,
+                                -> its Mod is the 16-bit one - Audit8 L1)
       fdelay := Max(WOFLUSHUS, Min(el, WOFMAX))
       ENDIF
     ENDIF
@@ -6800,6 +6804,9 @@ PROC jsettle()
   -> passing states keep the tail pending - the next read or quiet
   -> tick tries again
   IF (curcon.viewoff > 0) OR curcon.selon OR (curcon.appicon <> NIL) THEN RETURN
+  IF curcon.tcactive THEN RETURN  -> Audit8 J22: the Tab menu owns rows
+                                  -> below the cursor; the scroll would
+                                  -> move its pixels under tcclose
   IF curcon.wolen > 0 THEN RETURN          -> not at rest after all
   curcon.jslk := FALSE
   IF (curcon.win = NIL) OR (curcon.sb = NIL) THEN RETURN
@@ -7952,7 +7959,8 @@ PROC dprec(job, direct, ticks, units)
   ENDIF
 ENDPROC
 
--> td/ud < tt/ut, without a 32/32 divide (E's Div is 32/16): halve
+-> td/ud < tt/ut, without a divide (written when E's Div was thought 32/16; it is
+-> 32-bit in E-VO - Audit8 L1 - but the shifts stand): halve
 -> everything until the cross products fit, then compare them
 PROC dpcheaper(td, ud, tt, ut)
   WHILE (td > $7FFF) OR (ud > $7FFF) OR (tt > $7FFF) OR (ut > $7FFF)
@@ -8146,8 +8154,13 @@ ENDPROC
 PROC csidispatch(c)
   DEF n, i, v
   n := curcon.cpar[0]
-  IF c <> "m" THEN curcon.jslk := FALSE  -> 1.2.8b8: anything but colour
-                                -> may move or fill below the cursor
+  -> 1.2.8b8: anything that may move or fill below the cursor cancels
+  -> the slide-back. Audit8 J22: not the harmless ones - colour (m),
+  -> cursor on/off (SPACE p), the status and window-bounds requests
+  -> (n, q) and the modes (h, l) - a cooked program ending its output
+  -> with one of those left the prompt halfway up the window
+  IF (c <> "m") AND (c <> "p") AND (c <> "n") AND (c <> "q") AND
+     (c <> "h") AND (c <> "l") THEN curcon.jslk := FALSE
   IF c = "A"
     IF n < 1 THEN n := 1
     curcon.cy := curcon.cy - n
@@ -10101,6 +10114,17 @@ PROC edrepeat()
   st, en, open := edlastarg(s, curcon.cpos)
   IF st < 0 THEN RETURN
   n := en - st
+  -> Audit8 J20: an open quote whose last character is a lone `*`
+  -> (an odd run of them) - the closing quote added below would be
+  -> escaped by it and close nothing. Whole or nothing: beep.
+  IF open
+    j := 0
+    WHILE ((curcon.cpos - 1 - j) > st) AND (s[curcon.cpos - 1 - j] = "*") DO j++
+    IF j AND 1
+      DisplayBeep(NIL)
+      RETURN
+    ENDIF
+  ENDIF
   sepn := 0
   IF open
     sepn := 2
@@ -10460,6 +10484,9 @@ PROC dovanilla(code, qual)
     -> Ctrl+L (readline): clear the screen, keep the line - the
     -> visible rows scroll into HISTORY (Shift+Up brings them back;
     -> nothing is destroyed), the prompt row lands at the top
+    curcon.jslk := FALSE          -> Audit8 J22: and stays there - a
+                                  -> pending slide-back would pull the
+                                  -> cleared rows straight back
     eraseedit()
     WHILE curcon.cy > 0
       screenscroll()
@@ -11131,10 +11158,32 @@ PROC tcclient()
     t := sender.sigtask
   ELSEIF curcon.breaktask
     t := curcon.breaktask
+    -> Audit8 J13: the last WRITER, which may be a `run` job that has
+    -> since exited - its task memory is gone, and Alt+Tab walks its
+    -> CLI path and sends packets to what it finds there. Only a task
+    -> exec still lists is followed.
+    IF taskalive(t) = FALSE THEN t := NIL
   ENDIF
   IF t = NIL THEN RETURN NIL
   IF t.ln.type <> NT_PROCESS THEN RETURN NIL
 ENDPROC t
+
+-> Audit8 J13: is t a live task? exec's ready and waiting lists, under
+-> Forbid (execbase+406 TaskReady, +420 TaskWait - the module is not
+-> included here, the offsets are the documented ones). The handler
+-> itself is running, so it is never the one asked about.
+PROC taskalive(t)
+  DEF n:PTR TO ln, h, found=FALSE
+  Forbid()
+  FOR h := 0 TO 1
+    n := Long(execbase + (IF h = 0 THEN 406 ELSE 420))
+    WHILE n.succ
+      IF n = t THEN found := TRUE
+      n := n.succ
+    ENDWHILE
+  ENDFOR
+  Permit()
+ENDPROC found
 
 -> resolve the word's directory part into fsdirport + fsdirlock;
 -> fsdirfree marks a lock WE made (tcfreelock returns it). Returns
@@ -11867,6 +11916,9 @@ PROC tcscanone(port:PTR TO mp, lock, pfx:PTR TO CHAR, plen)
   IF res = 0 THEN RETURN
   IF fsfib.direntrytype <= 0 THEN RETURN   -> a file, not a directory
   WHILE fscall(port, ACTION_EXAMINE_NEXT, lock, Shr(fsfib, 2), 0)
+    -> Audit8 J21: the list is full - every further EXAMINE_NEXT only
+    -> keeps every window waiting (a big or network Path directory)
+    IF curcon.tcmore THEN RETURN
     tcfibname(nbuf)
     l := StrLen(nbuf)
     IF l > 0
@@ -11949,7 +12001,8 @@ PROC tcscancmd(pfx:PTR TO CHAR, plen)
       cli:PTR TO commandlineinterface, pnb, pn:PTR TO pathnode,
       fl:PTR TO filelock, port:PTR TO mp,
       dl:PTR TO doslibrary, rn:PTR TO rootnode, di:PTR TO dosinfo,
-      bn:PTR TO CHAR, nb[40]:ARRAY OF CHAR, l, i
+      bn:PTR TO CHAR, nb[40]:ARRAY OF CHAR, l, i,
+      cdl:PTR TO doslist, al:PTR TO assignlist, extra[8]:ARRAY OF LONG, n
   curcon.tcn := 0
   curcon.tcpu := 0
   curcon.tcmore := FALSE
@@ -11995,12 +12048,36 @@ PROC tcscancmd(pfx:PTR TO CHAR, plen)
     tcscanone(curcon.fsdirport, curcon.fsdirlock, pfx, plen)
     tcfreelock()
   ENDIF
+  -> Audit8 J21: the rest of a multi-directory C: (Assign C: x ADD) -
+  -> tcresolve took only the first. The locks are copied out under the
+  -> DOS list lock and scanned after it is dropped (no packets while it
+  -> is held), the same borrowing tcresolve does with the first one.
+  n := 0
+  cdl := LockDosList(LDF_READ OR LDF_ASSIGNS)
+  cdl := FindDosEntry(cdl, 'C', LDF_ASSIGNS)
+  IF cdl
+    IF cdl.type = DLT_DIRECTORY
+      al := cdl.list
+      WHILE (al <> NIL) AND (n < 8)
+        IF al.lock
+          extra[n] := al.lock
+          n++
+        ENDIF
+        al := al.next
+      ENDWHILE
+    ENDIF
+  ENDIF
+  UnLockDosList(LDF_READ OR LDF_ASSIGNS)
+  FOR i := 0 TO n - 1
+    fl := Shl(extra[i], 2)
+    IF fl.task AND (curcon.tcmore = FALSE) THEN tcscanone(fl.task, extra[i], pfx, plen)
+  ENDFOR
   proc := tcclient()
   IF proc = NIL THEN RETURN
   IF proc.cli = 0 THEN RETURN
   cli := Shl(proc.cli, 2)
   pnb := cli.commanddir
-  WHILE pnb
+  WHILE (pnb <> 0) AND (curcon.tcmore = FALSE)   -> J21: stop when full
     pn := Shl(pnb, 2)
     IF pn.lock
       fl := Shl(pn.lock, 2)
@@ -12626,6 +12703,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b15 (6.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b16 (6.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'

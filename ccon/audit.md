@@ -932,6 +932,12 @@ paint; a marker build showed b14 painting window A with window B's
 cache, b15 never), J6 + J17 (fit and position re-checked under the
 layer lock, in C and E; a marker + planted-refusal control showed no
 false refusals on a normal window).
+**Batch 4 shipped as 1.2.8b16** - J13, J20 (trailing `*` only; the
+mid-word-quote half is the deliberate, tested `dh0:"my dir"/x`
+behaviour and stays), J21 (proven on the A1200: b16 completes from an
+ADDed C: directory, b15 does not), J22, J25 (FAST only when every
+flushed console asked for it), J26. Not done: J27 (bold smear, needs a
+pixel look), J28 (harmless). L1's two stale Div comments corrected.
 
 Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
 drift within this section only. Confidence: **C** = confirmed by

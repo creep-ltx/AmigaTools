@@ -9,6 +9,7 @@
 ->   a prefix on any of those or on a single character:
 ->     c- Ctrl   s- Shift   a- Alt   la- left Amiga   ra- right Amiga
 ->     e.g. {c-h} {c-bs} {s-tab} {a-tab} {ra-i} {c-a-left}
+->   {q}    a double quote (the command line cannot carry one)
 ->   {wN}   wait N ticks (50 = 1 s)
 -> Every key is a down and an up event, 2 ticks apart.
 ->
@@ -113,7 +114,11 @@ PROC main()
         ENDLOOP
 pdone:
         code := named(t)
-        IF (code < 0) AND (StrLen(t) = 1)
+        IF StrCmp(t, 'q')         -> {q} = a double quote, which the
+          mq := 0                 -> shell line itself cannot carry
+          code := mapchar(34, {mq})
+          q := q OR mq
+        ELSEIF (code < 0) AND (StrLen(t) = 1)
           mq := 0
           code := mapchar(t[0], {mq})
           q := q OR mq
