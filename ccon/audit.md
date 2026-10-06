@@ -901,3 +901,302 @@ looking there first next time rather than last.
 **boot-verified 11.8.26** ("All green") — including the field-4 title
 case F1 had broken, which is the one the b15 checklist had ticked
 without exercising.
+
+---
+
+# Audit8 — the 1.2.8 delta: the C engine and b1–b12 (6.10.26, vs 1.2.8b12 @0e45b7b)
+
+Read-only pass over everything since tag `ccon-1.2.7`: ~3,300 lines of
+E, `engine.c` (1,500), `pgroups.s` (1,800), the build and the
+differential harness. Five parallel read passes (the C engine; its E
+glue; b1–b6 features; b7–b12 features; whole-file sweeps + ledger +
+docs/tests), then the top findings re-checked against the cited lines
+before being written down. Nothing in the source was changed.
+
+Rebuilt in /tmp as a baseline: `engine.bin`, `con.h` and the
+`ccon-handler` binary are all **byte-identical** to the committed ones;
+`fxdiff` (needs `vamos -C 68020 -m 8192`) gives 7200 chunks, 0
+mismatches. So the committed binaries are the source, and `frun`
+matches `render()` for every input fxdiff generates — the findings
+below are all in places fxdiff does not reach.
+
+Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
+drift within this section only. Confidence: **C** = confirmed by
+tracing or measurement, **P** = plausible, not reproduced.
+
+## Findings — fix before 1.2.8
+
+**J1 — a sequence split across two flushes is painted as text, and
+poisons the next E render.** *(wrong output, C)*
+`cfout` (engine.c:1315-1318) has no `c->cesc` test, and engine.c never
+reads `cesc`; `frun` starts the buffer fresh at byte 0 (:1344). E only
+calls `frun` at `cesc = 0` (8655-8660), but `flushout` → `cfout`
+(2195) and `wchar` → `cfout` (engine.c:1404) skip that guard.
+Writer sends `ESC [ 3`, flush tick, writer sends `1mRED…` → `1mRED`
+is drawn as text, `cesc` stays 2, and the next E render eats the
+prompt's digits into `cpar` and runs `S` as a CSI final (scroll 31).
+With an OSC split, everything later goes into the title. Likely with
+chunked ANSI writers whenever the paced timer flushes between writes.
+fxdiff cannot see it (whole items per chunk). Fix: `|| c->cesc` in
+cfout's bail list. Add a split-sequence mode to `mkdiff.py`.
+
+**J2 — TABREQ: the requester's answer is always lost, and the handler
+can never unload afterwards.** *(hang/wrong behaviour, C)*
+`Wait()` (1150) clears the signals it returns, `arsig` included (in
+the mask, 1147). `ardone` (3440) then polls `SetSignal(0,0)`, finds
+nothing, returns; `arbusy` stays TRUE for good: nothing inserted,
+every later empty Tab beeps, ACTION_DIE refused (2018). Works only
+if the helper signals between `Wait` returning and `ardone`. The b6
+boot checklist is unticked. Fix: test `msigs AND arsig` as well.
+
+**J3 — one glyph cache serves every console.** *(wrong output, C)*
+`dgtf/dgch/dgl` are globals (551-553), rebuilt only by `dggo` via
+`dpprobe`, which runs only from `gridcalc` (3090) — at open/resize of
+*that* console. `dpaint`, `dprowp`, `ppsetup` and `cfout`'s key all
+trust the global. Console A (screen font) then B with `FONT=xen/8`:
+A paints with B's glyphs; with different heights (8 vs 11) A is
+garbled (stride mismatch; stays inside the 8 KB buffer, no crash).
+Fix: re-`dggo(curcon.rp.font)` when `dgtf`/`dgch` differ before every
+direct paint, or key the cache per console.
+
+**J4 — WAIT_CHAR timeouts lose their sub-second part.** *(wrong
+behaviour, C — measured; since M4 @c96c863)*
+`armtimer` 1721: `Mod(us, 1000000)`. E-VO's `Mod` uses the divisor's
+low word only (1000000 AND $FFFF = 16960): `Mod(50000,1000000)` =
+16080 under vamos. `WaitForChar(fh, 500000)` waits ~8 ms. `Div` (1720)
+is a full 32-bit divide and is right. Fix: `us - Mul(secs, 1000000)`.
+
+**J5 — after a resize the jump step can exceed the rows: negative
+cursor row, heap writes.** *(corruption, C by reading)*
+`gridcalc` clamps `jeff` to `rows-1` (3078-3080) *before* `doresize`
+lowers `rows` to `sbmax-2` (5114); `jeff` is never re-clamped. The
+next bottom newline sets `cy := rows - jeff` < 0 (E 6892/7992,
+engine.c:224/259) and `lfrun` writes `sw[negative]` — before the ring
+allocations when `sbtop < -cy`. Reach: `LINES=100 JUMP=98+` and a tall
+RTG window, or the auto step after the b8 memory halving left the ring
+near `rows+2`. Fix: re-clamp `jeff` after 5114 (or move the `sbmax`
+clamp into `gridcalc`).
+
+**J6 — the direct painters do not clip to the window; a shrink
+paints outside it.** *(wrong output, C)*
+`doresize` flushes (5020-5021) before `gridcalc`, with the old
+`cols/rows`. `cfout`'s key has no size, the one-cliprect test still
+passes, and `ppaint/prowm` paint the old grid over the new border,
+the size gadget and whatever was uncovered. `dpplanar` and RTG
+`dpaint` have the same hole; `Text()` always clipped. Not memory
+corruption (inside the screen bitmap). Fix: under the layer lock,
+require the grid to fit the layer minus borders, else fall back.
+
+**J7 — completion menu left open across `hidewin`; a SetMode then
+draws through a NIL RastPort.** *(crash, C path / rare trigger)*
+`hidewin` (4095-4140) sets `rp := NIL` but never `tcdrop`s.
+`ACTION_SCREEN_MODE` raw (1934-1945) → `tcclose` → `drawmodelrow` →
+`drawmrow` (5592) → `SetAPen/Move/Text` on NIL. Tab menu open, the
+Workbench closes (b9 screennotify) or the window iconifies, a second
+client of that console sends SetMode. Without the packet: after
+reopen `tcactive` is still set and a changed row count makes `tcclose`
+paint below the grid. Fix: `tcdrop()` in `hidewin`, as `doresize` does.
+
+**J8 — the painter context `pkey`/`pctx` is never invalidated.**
+*(corruption, P)*
+Written only in `ppsetup` (7368, 7405); no clear in `hidewin`,
+`closewin`, `snmsg`, `gridcalc` or `reopenwin`. `pctx` holds absolute
+plane pointers. Workbench changes mode (b9 hides and reopens the
+windows at the same place, same font): if the new BitMap struct lands
+at the freed old address — likely with first-fit and an equal-size
+allocation — the key matches and `cfout` paints into the old screen's
+freed chip planes. Fix: `pkey[0] := 0` in `hidewin`/`closewin`/
+`gridcalc`, and once at startup.
+
+**J9 — screen-mode reopen: scrollback dropped, and a shorter window
+leaves the cursor below the grid.** *(wrong behaviour, C)*
+`reopenwin` disposes the whole model if `cols <> sbcols` (4263) —
+different border widths or Intuition shrinking the window (no
+`WA_AutoAdjust`, 4166-4186) — so the changelog's "come back … with
+their scrollback" fails, and with `sb = NIL` the console loses the C
+engine and direct paint for life. If OpenWindow fails, `wbgone` stays
+set and writers stay parked until the next Workbench reopen. With
+fewer rows but the same cols, none of `doresize`'s shrink fixups
+(5144-5185) run: `cy/ancy = rows`, the edit line paints over the
+bottom border and the mirror overwrites the oldest history row until
+the next newline. Fix: share `doresize`'s reflow and shrink code with
+`reopenwin`.
+
+**J10 — `curserase` ANDs two pointers.** *(wrong output, C — since
+0.12)*
+5710: `IF curcon.win AND curcon.sb` — bitwise; two valid addresses
+with no common bit test FALSE, the raw block cursor is never erased
+but `cursx := -1`: Ed leaves complement blocks, and masked renders
+leave plane droppings (breaks the plane-mask invariant). More likely
+on chip-only machines. Fix: `(win <> NIL) AND (sb <> NIL)`.
+
+**J11 — a key drained while the window is hidden throws away the
+parked writes.** *(data loss, C effect / narrow race)*
+`ihkey` 10801 calls `flushwq` with no `win`/`wbgone`/`appicon` check;
+`dowrite` re-parks each packet at the tail (2057-2065) until WQMAX,
+whose overflow arm replies "accepted" and drops the data, then
+`wqn := 0`. Trigger: typing as the Workbench closes or the window
+iconifies. Fix: require `curcon.win <> NIL`, or snapshot `wqn`.
+
+**J12 — Tab / Alt+Tab while scrolled back paint over the scrolled
+view.** *(wrong output, C — root pre-1.2.8)*
+The `$42` branch (10450-10458) calls `snaplive` only under `sbsrch`;
+the general one (10557) comes later. `drawedit`, the menu and `tcclose`
+then paint live rows into a scrolled screen. The b5 scrollbar makes
+the scrolled state an everyday mouse action. Fix: `snaplive()` there
+when `viewoff > 0`.
+
+**J13 — Alt+Tab/TABREQ can follow a dead process.** *(crash, P)*
+`tcclient` (11020-11032) falls back to `breaktask` when no read is
+queued — the last *writer*, which may be a `run` job that has exited.
+`tcscancmd` then walks `proc.cli → commanddir → pathnode` (11893-11906)
+and PutMsg()s to the result; `tabreq` locks `proc.currentdir` (3402).
+Plain Tab had a smaller exposure since M5b. Fix: no completion that
+needs the client's CLI unless a read is queued (or validate the task
+against the system task lists under Forbid).
+
+**J14 — write-accept length overflow.** *(corruption, C — very
+unlikely trigger)*
+`wacc` (engine.c:1162) `k->wolen + len > WOBSZ` and `swaccept` (2281)
+`(wolen + arg3) <= WOBSZ` wrap for `len` near 2^31; `abcopy` then
+copies far past `wob`. `dowrite` tests `len > WOBSZ` first (the audit4
+D1 shape). Fix: `len > WOBSZ - wolen` in both.
+
+## Findings — smaller
+
+- **J15 Ctrl+H deletes a path component.** (C) `dovanilla` 10259
+  matches vanilla 8 + Control, which is Ctrl+H as much as
+  Ctrl+Backspace. Test the raw code `$41`.
+- **J16 Custom screens count as the Workbench.** (C) `snmsg` 3228:
+  `scr.flags AND WBENCHSCREEN` — `CUSTOMSCREEN` is `$000F`. Use
+  `(flags AND SCREENTYPE) = WBENCHSCREEN`.
+- **J17 Painter geometry checked outside the layer lock.** (P)
+  `cfout` checks `pk` (engine.c:1321), runs all of `frun` unlocked,
+  then `cflush` locks (1245) and paints at the cached position. An
+  opaque move landing in between paints at the old place. Re-check
+  `pk[1..2]` after `LockLayerRom`.
+- **J18 Scrollbar scrolls skip the flush.** (C) `vsstep`/`vsdrag`
+  (4025-4038) call `scrollview` without `flushout`; the next flush
+  tick's `snaplive` yanks the view back. `flushout(curcon)` first.
+- **J19 `inputbase` is set only inside the input-chain setup** (1106)
+  and never initialised otherwise; the b7 drop modifiers call
+  `PeekQualifier` when it is non-zero (3597). Set it NIL early.
+- **J20 Ctrl+P quoting.** (C) A trailing `*` inside quotes (`copy
+  "a*`) makes the inserted closing quote an escaped one (9973-9978,
+  10027-10030). (P) a `"` mid-word opens a quote, unlike ReadItem;
+  `FROM=x` repeats with its keyword.
+- **J21 Alt+Tab** reads only the first directory of a multi-directory
+  `C:` assign (11094-11098), and keeps scanning after the 80-entry
+  list is full (11759-11790) — on a big or network Path that freezes
+  every window for the length of the scan. Break on `tcmore`. Note:
+  audit2 P6 (no fscall timeout) now also covers every Path volume.
+- **J22 Jump-scroll slide-back** is cancelled by harmless CSIs
+  (cursor on/off, DSR, window bounds, modes: 8054, 8804); and
+  `jsettle` (6727-6770) does not refuse while `tcactive` (P: menu
+  debris), and undoes a Ctrl+L made during a pending jump.
+- **J23 Reopen keeps old pens** in the attr plane after a depth or
+  palette change (4195-4242; P, cosmetic), and `WA_ACTIVATE TRUE`
+  makes the last reopened window the active one.
+- **J24 `killhandler`** (1327-1345): if `RemWorkbenchClient` fails 50
+  times, `snport` is deleted and the library closed while still
+  registered. Keep them instead.
+- **J25 PACE is per console but its effect is global** — one global
+  `fdelay` (581); one `PACE=FAST` window paces the others for a burst.
+- **J26 `wchar` skips the waiting-reader blip** that E's `flushout`
+  draws at `wolen = 0` (engine.c:1404-1409 vs 2186-2193). (P, cosmetic)
+- **J27 Bold smear** reaches 1 px into the next cell (or the border on
+  the last column) and is left behind when the cell is redrawn plain.
+  Also unconfirmed: whether ROM `Text()` advances by `tf_BoldSmear`
+  per char on a multi-char bold run — worth a pixel A/B.
+- **J28 The painter reads up to 4 bytes outside the ring** at row 0 /
+  the last row (engine.c:1062-1064, pgroups.s GCHARS); read-only and
+  masked, harmless without an MMU.
+
+## Maintenance
+
+- **J29 The E↔C contract is only partly checked.** `FXCONSIZE` (145)
+  is hand-written; `fcheck` probes 8 fields but not `blipdefer`,
+  `bliptick`, `jsync`, which the engine uses after `osct`; `WOBSZ`,
+  `DFROWS`, `INQMAX`, the `fxtab` order and the `pctx` layout are
+  agreed by hand (all agree today). Have build.sh emit FXCONSIZE and
+  the constants from one source; probe the last field.
+- **J30 build.sh's no-data check** greps the `.o` section names only;
+  `.sdata`/`.sbss`/COMMON would pass and `objcopy -j .text` would
+  silently drop them. Check the linked ELF for any allocated section
+  other than `.text`. (Today's build is clean.)
+- **J31 `drain` (entry 32) is dead** and tests packet type 8
+  (LOCATE_OBJECT) where ACTION_WRITE is 87, and calls `sendio` without
+  a NULL check. Delete it or fix it before reviving.
+- **fxdiff's reach:** covers `frun` and all it calls; does not cover
+  `cfout`, `cflush`, `wacc`, `wchar`, the painters, split sequences or
+  `?`-private sequences — which is where J1, J6, J14 and J17 live.
+
+## Ledger
+
+- **L1 (from J4):** audit1 "P2 Mod/Div ✓" and Audit6's "no new
+  Mod/DIVS hazards" are stale — `armtimer`'s `Mod` was missed by every
+  pass. The comments at 2350 and 7860 ("E's Div is 32/16") are wrong
+  about `Div` (harmless).
+- Every other row re-checked against 1.2.8b12 still holds, including
+  where the C engine took the code over: Audit6 F1 (`rawscr` counted
+  in C `dfscroll`/`lfrun`), A10 (`alteat` cleared on all three render
+  exits), the plane-mask invariant (except J10, pre-existing),
+  flush-before-observe (except J18), D1 (`wacc` `len < 0`), D3, C1
+  (survives the b8 halving), A1/A2/A6/A7/A11, Audit7 F1/F2, and F3's
+  stack note (C frames < 1 KB; `savehistfile` still the deepest).
+
+## Docs and tests drift
+
+- **D1** `tests/dplinetest.e:108` has `AND.B #3,D0`; the handler has
+  `#11` (b9 bold) — no longer the verbatim copy the README claims.
+- **D2** `tests/cfgtest.e`'s `parseopt` lacks every 1.2.8 option
+  (NOINFO…NOTABREQ, PACE, JUMP, DIRECT/NODIRECT/DPFORCE): the byte-diff
+  step has not been run since 1.2.8 (or fails).
+- **D3** `ccon.cfg`: JUMP "0 (the default) is off" — the default is
+  automatic since b8, `JUMP=AUTO` missing; LINES "floored at 100" no
+  longer always true after the b8 halving; DIRECT/NODIRECT missing.
+- **D4** `ccon.doc`: history "32 entries" (545) vs `HISTMAX` 200;
+  LINES floor (264, 1107); b9 screennotify, bold and the own underline
+  undocumented; requirements (76) omit 68020 for the C engine,
+  asl.library for TABREQ, optional screennotify.library; header still
+  1.2.7. `ccon.readme`/`README.md` 1.2.7-era (expected pre-release).
+- **D5** `tests/README.md` never mentions `mkdiff.py`/`fxdiff` (the one
+  test of engine.bin against E, and its `-m 8192` need), nor ccinfo0,
+  edargtest, ederasetest, fpwtest, histdeduptest, hordertest,
+  masktest, sbresizetest, srbench.
+- **D6** `.gitignore` covers none of the build output: `engine/*.o`,
+  `engine-0.*`, `conoffs.i`, `fxdiff*`, the compiled tests, and
+  `cutils/{Install,vinstall,vinstall.e}`.
+
+## Verified clean (highlights)
+
+`frun` vs `render()` byte class by byte class (and fxdiff 0/7200);
+the flush timer lifecycle (one SendIO under `flusharmed`, AbortIO +
+WaitIO before teardown); the C side never reads the packet port;
+`wacc` refuses exactly where `acceptreset` would act; `cfout`/
+`cfresume` hand-over and `curcon` restore; b11 row lengths on both
+sides (every non-zero writer `slfull`s; reflow `slall`s; `slsize`
+bounds); the asm ABI (saves, library offsets, struct offsets, every
+entry gated on 68020 by `fastok`); PIC/no-data today; the resident
+walk under Forbid; Ctrl+P bounds; word jumps; JUMP parse and the
+1-row case; scrollbar gadget lifecycle and divide-by-zero guards; the
+ASL helper's buffers and its own process; close/reopen order and
+per-window IDCMP; every ACTION_* replied once; `New`/`Dispose` and
+signal/library pairing. E-VO pads `CHAR` data to even, so the INCBIN
+stays aligned whatever the version string's length.
+
+## Verdict
+
+The C engine itself is sound: it matches E wherever fxdiff can look,
+and the binaries are reproducible. The trouble is again at the seams,
+and specifically at the seams of *state the C side caches or skips*:
+`cesc` across flushes (J1), the glyph cache and `pkey` across consoles
+and screens (J3, J8), the window size and position across a resize or
+move (J6, J17). The b9 Workbench closing is the other cluster (J7–J9,
+J11, J16): `hidewin`/`reopenwin` were written as a lighter cousin of
+`closewin`/`doresize` and miss what those do. Suggested order: J1, J2,
+J4 (one-liners, high reach); J3, J5, J10, J14 (small); then the
+`hidewin`/`reopenwin` batch (J7, J8, J9, J11, J16) as one piece;
+then J6/J17 (clip and re-check under the lock); then the rest.
+Extend fxdiff with split sequences and a `cfout` driver so J1's class
+is caught by the harness next time.
