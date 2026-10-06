@@ -6957,3 +6957,5 @@ fewer or more colours than his; default to the first-pens look.
 - J27: not reproduced on the A1200 (tests/boldtest.e, topaz 8 and
   MicroKnight 8); doc limitation withdrawn.
 - fxdiff 7200/0 on seeds 7 and 8.
+Installed on his A1200 6.10.26 (b17 kept as L:ccon-handler-1.2.8b17),
+rebooted, Version 1.3.0b18, a8test green; RAM: cleaned.
