@@ -927,6 +927,11 @@ await the boot checklist in todo.md.
 **Batch 2 shipped as 1.2.8b14** - J8, J9, J23 (activation; the stale
 pens half is left), J24. J9 proven on FS-UAE with marker builds that
 reopen 200 px narrower: b13 comes back empty, b14 rewrapped and live.
+**Batch 3 shipped as 1.2.8b15** - J3 (dgsync before every direct
+paint; a marker build showed b14 painting window A with window B's
+cache, b15 never), J6 + J17 (fit and position re-checked under the
+layer lock, in C and E; a marker + planted-refusal control showed no
+false refusals on a normal window).
 
 Fresh series **J1..** for code, **L** for ledger, **D** reused for docs
 drift within this section only. Confidence: **C** = confirmed by

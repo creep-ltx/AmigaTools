@@ -6855,3 +6855,31 @@ the window identical but it is NOT known whether the Workbench really
 closed - not counted as a test of the screennotify path.
 Not driven on the real machine: an actual mode change (his RTG prefs
 were not touched).
+
+## 1.2.8b15 - Audit8 batch 3: the direct painters (6.10.26)
+
+- J3: `dgsync()` - the global glyph cache must be the current
+  console's font and height before any direct paint (dpaint,
+  ppsetup); rebuilt by dggo if not, dpok dropped if it cannot be.
+- J6: `dpfits(ly)` under the layer lock in dpaint (RTG) and dpplanar,
+  and the same test in engine.c cflush: left + cols*cw must fit
+  layer width - borderright (rows likewise), else Text(). Note: a
+  borrowed GZZ window (fwin) would fail this always - speed only.
+- J17: cflush re-checks pkey[1..2] against the layer's position after
+  LockLayerRom.
+- fxdiff 7200/0, a8test green.
+
+Evidence (FS-UAE stock, headless, XC mounts):
+- J3: windows A (topaz 8) and B (topaz 11), DPFORCE, `list sys:c` in A
+  after B opened. No visible garbling with b14 either - but a marker
+  build (ppsetup sets the title when dgtf/dgch differ from the
+  console's) titled A "MISMATCH-pp" on b14 and never on b15. Why the
+  wrong cache did not show on the glass is NOT known.
+- J6: a mouse drag of the size gadget did not resize (coordinates or
+  drag on FS-UAE - not chased). Instead: a b15 marker build that moves
+  the cursor when cflush refuses passed a8test (no false refusal on a
+  normal window), and the same build with the test forced true FAILED
+  a8test (the path is live) - so the fit check costs nothing normally.
+  The shrink case itself rests on the arithmetic, not a run.
+- On his A1200 (RTG): two windows in topaz 8 / topaz 11 never showed
+  the bug with b14 either - RTG output there goes through Text().

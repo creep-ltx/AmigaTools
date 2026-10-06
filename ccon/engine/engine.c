@@ -1251,6 +1251,20 @@ LONG cflush(struct fx *x, struct pctx *pc)
         gcall_lock(gfx, ly, 1);
         return -1;
     }
+    {
+        /* Audit8 J6: no clip here - the grid must fit the window's inner
+           box (a resize flushes with the old cols/rows into the shrunk
+           window). J17: pctx was built before the lock - a window moved
+           since paints at the old place. Either way: E's Text path. */
+        LONG lx = *(WORD *)(ly + 16), lyy = *(WORD *)(ly + 18);
+        LONG lw = *(WORD *)(ly + 20) - lx + 1, lh = *(WORD *)(ly + 22) - lyy + 1;
+        LONG *pk = x->pkey;
+        if (k->left + k->cols * k->cw > lw - win[56] || k->topy + k->rows * k->ch > lh - win[57]
+            || pk[1] != lx + k->left || pk[2] != lyy + k->topy) {
+            gcall_lock(gfx, ly, 1);
+            return -1;
+        }
+    }
     if (*x->dffull && *x->dfvb && k->vblank) {
         *x->dffull = FALSE;
         if (*x->dfnarrow) { res |= 2; *x->dfnarrow = FALSE; }

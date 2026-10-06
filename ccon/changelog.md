@@ -120,6 +120,14 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
   for the rest of its life. Windows that no longer fit are fitted to
   the screen instead of failing to reopen, and only the window that
   was active is activated again. (1.2.8b14, Audit8 J9, J23)
+- **Two windows in different fonts** no longer share one set of
+  letter shapes in the fast painter: each window's own font is used.
+  (1.2.8b15, Audit8 J3)
+- **Shrinking a window while output streams** no longer paints text
+  over its border and size gadget, and a window moved at the moment
+  output is drawn no longer gets the text at its old place: the fast
+  painter steps aside to the system's clipped drawing then. (b15, J6,
+  J17)
 - Robustness (b14): the fast painter forgets the old screen when a
   window closes or changes size, so it can never draw into memory the
   old screen gave back (J8); shutdown no longer frees a port the screen

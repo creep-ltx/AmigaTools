@@ -7082,6 +7082,35 @@ ENDPROC
 -> bits, exactly the bits Text() would lay down in the cell (kern
 -> applied, the font's own fallback glyph outside lochar..hichar, bits
 -> past the cell cut off)
+-> Audit8 J3: the glyph cache is ONE global, built by dpprobe for the
+-> console being opened or resized - and then used by every console's
+-> direct paint. A second window in another font left the first one
+-> painting the second one's glyphs (garbled when the heights differ:
+-> wrong row stride). Every direct painter asks this first: the cache
+-> must be the current console's font and height, rebuilt if not
+-> (dggo returns at once when it already is); if it cannot be, the
+-> console stops painting direct (Text() takes over).
+-> Audit8 J6: direct painting has no clip - Text() did. The grid must
+-> fit inside the window's inner box, or the paint lands on the border,
+-> the size gadget and whatever is beside the window: doresize flushes
+-> with the OLD cols/rows into the already-shrunk window. Not fitting =
+-> leave it to Text(), which clips. (Called under the layer lock.)
+PROC dpfits(ly:PTR TO layer)
+  DEF k:PTR TO console
+  k := curcon
+  IF k.win = NIL THEN RETURN FALSE
+  IF (k.left + Mul(k.cols, k.cw)) > (ly.maxx - ly.minx + 1 - k.win.borderright) THEN RETURN FALSE
+  IF (k.topy + Mul(k.rows, k.ch)) > (ly.maxy - ly.miny + 1 - k.win.borderbottom) THEN RETURN FALSE
+ENDPROC TRUE
+
+PROC dgsync()
+  IF curcon.dpok = FALSE THEN RETURN FALSE
+  IF curcon.rp = NIL THEN RETURN FALSE
+  IF (dgtf = curcon.rp.font) AND (dgch = curcon.ch) AND (dgl <> NIL) THEN RETURN TRUE
+  IF dggo(curcon.rp.font) THEN RETURN TRUE
+  curcon.dpok := FALSE
+ENDPROC FALSE
+
 PROC dggo(tf:PTR TO textfont)
   DEF c, ci, loc:PTR TO LONG, kern:PTR TO INT, off, w, y, k, x, bits,
       row:PTR TO CHAR, cd:PTR TO CHAR, ch, cw, nglyph
@@ -7124,6 +7153,7 @@ PROC dpaint(all)
       bpr=0, pf=-1, r, x0, x1, sty, bm, styled=FALSE, n
   k := curcon
   IF k.dpok = FALSE THEN RETURN FALSE
+  IF dgsync() = FALSE THEN RETURN FALSE  -> Audit8 J3
   IF k.sb = NIL THEN RETURN FALSE  -> (not in dpprobe: openwin's gridcalc
                                 -> runs before the model is allocated)
   IF k.viewoff > 0 THEN RETURN FALSE
@@ -7141,7 +7171,7 @@ PROC dpaint(all)
   IF (cr.next <> NIL) OR (cr.obscured <> NIL) OR
      (cr.minx <> ly.minx) OR (cr.miny <> ly.miny) OR
      (cr.maxx <> ly.maxx) OR (cr.maxy <> ly.maxy) OR
-     (ly.superbitmap <> NIL)
+     (ly.superbitmap <> NIL) OR (dpfits(ly) = FALSE)
     UnlockLayerRom(ly)
     RETURN FALSE
   ENDIF
@@ -7381,7 +7411,7 @@ PROC dpplanar(all, ly:PTR TO layer, bm:PTR TO bitmap)
   IF (cr.next <> NIL) OR (cr.obscured <> NIL) OR
      (cr.minx <> ly.minx) OR (cr.miny <> ly.miny) OR
      (cr.maxx <> ly.maxx) OR (cr.maxy <> ly.maxy) OR
-     (ly.superbitmap <> NIL)
+     (ly.superbitmap <> NIL) OR (dpfits(ly) = FALSE)
     UnlockLayerRom(ly)
     RETURN FALSE
   ENDIF
@@ -7423,6 +7453,7 @@ ENDPROC TRUE
 PROC ppsetup(ly:PTR TO layer, bm:PTR TO bitmap)
   DEF k:PTR TO console, ax, ay, p, cs, bpr, n
   k := curcon
+  IF dgsync() = FALSE THEN RETURN FALSE  -> Audit8 J3
   ax := ly.minx + k.left
   ay := ly.miny + k.topy
   -> the same window, place, bitmap and font as last time: pctx stands
@@ -12595,6 +12626,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.2.8b14 (6.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.2.8b15 (6.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'
