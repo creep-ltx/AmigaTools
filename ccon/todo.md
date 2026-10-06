@@ -6768,6 +6768,13 @@ Proven on FS-UAE A1200-Stock-net (headless cage, XC1 = b13, XC2 = b12,
   MicroKnight7 and the second (same spec) in topaz 8 - order, not
   build. Check whether later windows ignore the cfg's FONT=.
 
+Installed on his A1200 6.10.26 over wasabi (he was away, approved):
+backup L:ccon-handler-1.2.8b12 made on the machine, b13 staged as
+L:ccon-handler-1.2.8b13 and copied over L:ccon-handler, rebooted,
+`Version` 1.2.8b13. a8test on the live CCON: (RTG WB): J4 25/25/25
+ticks, J1 matches (b12 there: J4 0-1 ticks; J1 cannot fail on RTG -
+cfout is planar only). The keyboard checks below still need him.
+
 Boot checklist (his A1200):
 - [ ] J2: `newshell CCON:TABREQ` (or TABREQ in the cfg), Tab on an
       empty prompt, pick a file, OK: the name is typed in. Again: works
