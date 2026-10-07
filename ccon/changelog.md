@@ -11,7 +11,7 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 
 ---
 
-## [1.3.0] — 2026-10-07 (archive ltx-cc130.lha; tag and Aminet upload to follow)
+## [1.3.0] — 2026-10-07 (tag `ccon-1.3.0`; Aminet util/shell/ltx-ccon.lha)
 
 Its betas ran as 1.2.8b1 to 1.2.8b17 before the release was renamed
 1.3.0 (6.10.26); the beta numbers carry on (1.3.0b18, ...).

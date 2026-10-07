@@ -6988,3 +6988,6 @@ green. Archive + Aminet readme for his check on the NAS:
 Aminet pair (his rule): ltx-ccon.lha / ltx-ccon.readme = byte copies of
 ltx-cc130.*, next to them in Releases/CCon, NAS:Downloads/ccon-1.3.0 and
 ~/Documents/Amiga/Download. ltx-cc130.* stays the local + GitHub name.
+Uploaded to Aminet 8.10.26 (his go-ahead): ltx-ccon.lha (98790) +
+ltx-ccon.readme (18194) via anonymous FTP (curl -T) to main.aminet.net/new,
+226 both; both listed in /new. Replaces util/shell/ltx-ccon.lha (1.2.7).
