@@ -6985,3 +6985,6 @@ Installed on his A1200 7.10.26: L:ccon-handler = 1.3.0 (the archive's
 own binary; b18 kept as L:ccon-handler-1.3.0b18), rebooted, a8test
 green. Archive + Aminet readme for his check on the NAS:
 /mnt/nas/home/Downloads/ccon-1.3.0/ (= NAS:Downloads/ccon-1.3.0 on the A1200).
+Aminet pair (his rule): ltx-ccon.lha / ltx-ccon.readme = byte copies of
+ltx-cc130.*, next to them in Releases/CCon, NAS:Downloads/ccon-1.3.0 and
+~/Documents/Amiga/Download. ltx-cc130.* stays the local + GitHub name.
