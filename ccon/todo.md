@@ -6981,3 +6981,7 @@ A1200 with C:lha (LhA 2.15) - Linux /usr/bin/lha is now Lhasa,
 list/extract only. Verified: extracts byte-identical to staging, all
 CRCs OK. Copies in ~/Documents/Amiga/Download/. Not done: the tag,
 the GH release, Aminet, README.md.
+Installed on his A1200 7.10.26: L:ccon-handler = 1.3.0 (the archive's
+own binary; b18 kept as L:ccon-handler-1.3.0b18), rebooted, a8test
+green. Archive + Aminet readme for his check on the NAS:
+/mnt/nas/home/Downloads/ccon-1.3.0/ (= NAS:Downloads/ccon-1.3.0 on the A1200).
