@@ -7,11 +7,11 @@ mounted as the system `CON:`/`RAW:`.
 
 Beta build numbers (e.g. 1.2b16) are in parentheses as references.
 Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
-1.2.4, 1.2.5, 1.2.6 and 1.2.7 are released and tagged.
+1.2.4, 1.2.5, 1.2.6 and 1.2.7 are released and tagged; 1.3.0 is built.
 
 ---
 
-## [1.3.0] — unreleased (draft)
+## [1.3.0] — 2026-10-07 (archive ltx-cc130.lha; tag and Aminet upload to follow)
 
 Its betas ran as 1.2.8b1 to 1.2.8b17 before the release was renamed
 1.3.0 (6.10.26); the beta numbers carry on (1.3.0b18, ...).

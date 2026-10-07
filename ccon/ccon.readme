@@ -20,18 +20,23 @@ FEATURES
     AND land on your prompt live, same as history search already
     does; Return/Tab/typing hand the live prompt straight back
     with the found line ready to edit or run, n/N re-walk the
-    same matches if you scroll back again later
+    same matches if you scroll back again later; SCROLLBAR adds a
+    real scrollbar to the window border - knob, paging track and
+    arrows that speed up while held
 
-  - Fast: on a real A1200 with a PiStorm accelerator, five times
-    faster overall than stock CON: with render barriers on (the
-    honest measure), and faster on nearly every test. Output
-    renders model-first (at most one scroll blit per write, none
-    for a screenful or a blank scroll), writes are answered ahead
+  - Fast, on a stock A1200 too: on a 68020 or better the busiest
+    output paths run as compiled C inside the handler, text rows
+    go straight into the screen - bitplanes on a native screen,
+    display memory on RTG - wherever that gives the identical
+    picture, and colour costs little more than plain text, so ls
+    lists as quickly as list. Long output jump-scrolls a quarter
+    window per blit and slides back to the bottom row when it
+    stops. Output renders model-first, writes are answered ahead
     of the pixels (a frame at most, the stock console's own
     bargain), rendering is plane-masked - plain text moves one
-    bitplane in four, the 3.2 console.device's own trick - and the
-    full-screen editing sequences batch like ordinary output, so
-    Ed scrolls like butter (conbench, also in this collection)
+    bitplane in four - and the full-screen editing sequences batch
+    like ordinary output, so Ed scrolls like butter (conbench,
+    also in this collection)
 
   - A window per open, stock CON: fashion; the full stock option
     set (AUTO, WAIT, SCREEN, WINDOW0xADDR, NOBORDER, ...) per window
@@ -54,6 +59,12 @@ FEATURES
     half-typed line and all; its own icon is built into the
     handler. Works over a fullscreen client (Ed) too
 
+  - Windows ride along with the Workbench: when it closes for a
+    screen mode or font change, CCON: windows close with it and
+    come back when it reopens - scrollback and half-typed line
+    intact, rewrapped if the new screen sizes the window
+    differently (needs screennotify.library)
+
   - Drag and drop: Workbench icons dropped on the window become
     their full paths at the cursor, as if typed - files as
     Volume:dir/file, drawers with a trailing /, disks as
@@ -61,7 +72,8 @@ FEATURES
     each so several icons line up as ready arguments; cooked
     mode inserts into the edit line, a raw fullscreen client
     (Ed) gets typed input, and a drop that cannot fit beeps and
-    arrives not at all rather than truncated
+    arrives not at all rather than truncated; hold Ctrl while
+    dropping for only the drawer's path, Alt for only the name
 
   - The cursor dresses like the ROM's: block cursor and editor
     blip drawn in complement mode (console.device's own
@@ -71,14 +83,20 @@ FEATURES
 
   - fish-style autosuggestions: history's continuation as grey
     ghost text; Right accepts, Ctrl+Right/Tab take it word by word;
-    the ghost (and the menu's blue/grey) shows on any screen depth,
+    the ghost (and the menu's colours) show on any screen depth,
     32+ colours and RTG included
 
   - zsh-style Tab completion with a candidate menu you can walk
     with the arrow keys as well as cycle - Esc backs out and
     leaves the word exactly as it was; device, volume and assign
     names complete too, so du<Tab> reaches DUMP:, offered
-    alongside what the directory holds rather than instead of it
+    alongside what the directory holds rather than instead of it;
+    Alt+Tab completes a COMMAND from the resident list, C: and
+    the shell's Path, from any directory. KingCON's Tab is a
+    switch away (NOTABMENU, TABFIRST), TABREQ puts an ASL file
+    requester on Tab at an empty word, and NOINFO keeps .info
+    files out of the way; hidden and .info entries show in the
+    screen's own highlight colour, readable on any palette
 
   - bash-style Ctrl+R incremental history search - the prompt
     becomes an inverse (search: ...) banner and is restored
@@ -87,7 +105,9 @@ FEATURES
   - readline line surgery: Ctrl+W/U/K - with Shift+Backspace and
     Shift+Del as the Amiga spellings of kill-to-start and
     kill-to-end - and Ctrl+L clearing into HISTORY (Shift+Up
-    undoes the clear)
+    undoes the clear); Ctrl+P repeats the argument before the
+    cursor, quoted names whole (rename longname <Ctrl+P>); Alt
+    jumps and deletes by word, Ctrl by path component
 
   - Copy & paste with the stock console family, both directions
     (IFF FTXT); drag, double-click word, triple-click line;
@@ -99,7 +119,8 @@ FEATURES
 
   - SGR colour with the ANSI/Workbench pen separation: ls is
     genuinely blue everywhere, Ed is never red - plus real
-    italic/underline/inverse soft styles
+    bold/italic/underline/inverse styles, the underline drawn by
+    CCON: itself so it shows in every font
 
   - FONT and LINES per window: pick your own font/size (loaded
     from disk if needed) or scrollback depth; unset FONT follows
@@ -155,6 +176,52 @@ LIMITATIONS
 
 
 HISTORY
+
+  1.3.0
+    - The speed release, for every Amiga: the busiest output
+      paths run as compiled C inside the handler on a 68020 or
+      better, and text rows are written straight into the screen
+      wherever that gives the identical picture. Colour now costs
+      little more than plain text. On a stock A1200 the benchmark
+      suite runs four times faster than 1.2.7; on a real A1200
+      with a PiStorm, five times
+
+    - Jump scroll: long output scrolls a quarter window per blit
+      once it is clearly a flood, and slides back so the last line
+      sits on the bottom row when it stops; JUMPn fixes the step,
+      JUMP0 turns it off. PACE=FAST pools a flood into fewer,
+      bigger updates
+
+    - The KingCON everyday keys: Ctrl+P repeats the argument
+      before the cursor; Alt+Tab completes a command from the
+      resident list, C: and the Path; Alt+arrows and
+      Alt+Backspace/Del work by word, Ctrl by path component
+
+    - SCROLLBAR, a real scrollbar in the window border; TABREQ,
+      an ASL file requester on Tab at an empty word; NOTABMENU
+      and TABFIRST for KingCON's Tab; NOINFO; Ctrl or Alt held
+      during an icon drop for only its drawer or only its name
+
+    - Bold letters for SGR 1, and an underline CCON: draws itself
+      so it shows in fonts that have none of their own
+
+    - Windows close and return with the Workbench screen (a
+      screen mode or font change), scrollback intact and
+      rewrapped if the window comes back another size
+
+    - Hidden and .info entries in the completion menu take the
+      screen's own highlight colour - white on a stock
+      Workbench - where the old derived grey could all but vanish
+      on some palettes; HIDDEN=n still pins your own
+
+    - A sixth source audit closed before release. The oldest
+      catch: a WaitForChar timeout had lost everything under a
+      second since 1.0. Also fixed: colour codes split across
+      two writes could print as text, the Tab requester never
+      delivered its pick, two windows in different fonts could
+      share letter shapes, and a window shrunk while output
+      streamed could paint over its own border
+
 
   1.2.7
     - Defaults in a file: L:ccon.cfg holds the options you would

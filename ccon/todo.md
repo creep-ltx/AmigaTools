@@ -6968,3 +6968,16 @@ His own L:ccon.cfg (6.10.26): HIDDEN=21 added to [DEFAULT] - pen 21 is
 obtained shared pen; 21 sits in the low palette). Backup on the Amiga:
 L:ccon.cfg.bak-1.3.0b18. Checked: hidden entries draw 85,85,85. The
 shipped default stays the shine pen.
+
+## 1.3.0 - the release build (7.10.26)
+
+$VER 1.3.0 (7.10.26), fxdiff 7200/0, syncheck clean. ccon.readme: the
+1.3.0 features and history entry (his voice to reword). Staged in
+~/Documents/Releases/CCon/CCon_v1.3.0/ on the 1.2.7 layout (icons
+copied from 1.2.7); file_id.diz: only the title's version changed
+(1.2.7 copy at /tmp only); ltx-cc130.readme = 1.2.7's Aminet header
+(Short/Version bumped) + the new readme. ltx-cc130.lha built on the
+A1200 with C:lha (LhA 2.15) - Linux /usr/bin/lha is now Lhasa,
+list/extract only. Verified: extracts byte-identical to staging, all
+CRCs OK. Copies in ~/Documents/Amiga/Download/. Not done: the tag,
+the GH release, Aminet, README.md.
