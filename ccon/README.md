@@ -10,23 +10,54 @@ can bolt it on). Around that core: a window per open, a modern
 line editor, and a shell feel that fingers trained on
 fish/bash/zsh recognize at once.
 
-**Status: 1.2.7.** Every milestone boot-verified on AmigaOS 3.2 —
-and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.2.7 is **the
-configuration release**: a defaults file, `L:ccon.cfg`, so the
-options you always want no longer have to be retyped on every open
-string. It is entirely optional — a missing file is not an error —
-and it introduced no second parser and no second vocabulary, because
-every key in it *is* an open-string option, under one rule:
-**built-in default < `L:ccon.cfg` < the open string**. Named
-`[sections]` give a window a profile (`CONFIG=tall`), `TITLE=` and
-`ICON=` set the window's name and its own AppIcon, and the file can
-pin the colours CCON: otherwise derives from your screen. Alongside
-it the completion menu learned two things: **device names complete**
-(`du<Tab>` reaches `DUMP:`), and the menu can be **walked with the
-arrow keys**, with Esc aborting cleanly instead of leaving whatever
-you last stepped past in the line.
+**Status: 1.3.0.** Every milestone boot-verified on AmigaOS 3.2 —
+and, since 1.2.4, on real hardware (A1200 + PiStorm). 1.3.0 is **the
+speed release**, for every Amiga rather than just accelerated ones:
+the busiest output paths run as compiled C inside the E handler on a
+68020 or better, text rows are written straight into the screen
+wherever that gives the identical picture, and colour costs little
+more than plain text — `ls` lists as quickly as `list`. Around it,
+the everyday keys long-time KingCON users reach for (**Ctrl+P**
+repeats an argument, **Alt+Tab** completes a command, word and
+path-component jumps and deletes), automatic **jump scroll**, a real
+**scrollbar**, **bold**, windows that **ride along with the
+Workbench** through a screen-mode change, and an eighth source audit
+closed before release. 1.2.7 before it was the configuration release:
+`L:ccon.cfg`, under one rule — **built-in default < `L:ccon.cfg` <
+the open string**.
 
 ## Speed
+
+**1.3.0 on a stock A1200** (emulated: 14 MHz 68020, 2 MB chip RAM
+only, 16-colour Workbench, 77×30 window, barriers on), against the
+last build that still drew the 1.2.7 way:
+
+| test | 1.2.7's renderer | 1.3.0 |
+|---|---|---|
+| colour text, `ls`-style | 21.38 s | 6.42 s |
+| a colour on every character | 8.08 s | 3.06 s |
+| plain lines | 8.80 s | 1.60 s |
+| blank lines scrolling | 16.04 s | 1.34 s |
+| clearing the page | 9.74 s | 1.60 s |
+| **full suite** | **101.3 s** | **26.3 s** |
+
+Almost four times faster overall. A console that answers every
+packet and draws nothing scores 12.3 s on the same suite, so most of
+what remains is the operating system's own message passing, not
+drawing. On the real A1200 with a PiStorm (127×94, ten times the
+text) the suite went from 41.1 s to 12.5 s with direct drawing and
+automatic jump scroll alone; measured later in a 97×72 window, 1.3.0's
+engine runs it in 8.3 s against 6.9 s for the do-nothing console.
+
+How: a C engine (`engine/`) mirrors the E renderer statement for
+statement for the byte classes that make up nearly all output and
+hands everything else back, checked against the E original by a
+differential harness byte for byte; a painter writes whole rows into
+the bitplanes or the RTG framebuffer from the scrollback model,
+every cell in its own colour in one pass; and jump scroll moves a
+quarter window per blit during a flood.
+
+### 1.2.2–1.2.4
 
 Measured, not vibed: the 1.2.2–1.2.4 engine was built across one
 benchmarked campaign, and [conbench](../conbench/) — written for it,
@@ -95,6 +126,20 @@ the real prompt comes back from the scrollback model:
 
 ## Highlights
 
+- **New in 1.3.0**: **Ctrl+P** repeats the argument before the
+  cursor, quoted names whole; **Alt+Tab** completes a command from
+  the resident list, `C:` (every directory of a multi-directory
+  assign) and the shell's Path; Alt+arrows/Backspace/Del work by
+  word and Ctrl+ by path component; **`SCROLLBAR`**; **automatic
+  jump scroll** that slides back to the bottom row when output
+  stops; **`TABREQ`** (an ASL requester on Tab at an empty word,
+  running beside the handler so no window blocks), `NOTABMENU` and
+  `TABFIRST` for KingCON's Tab, `NOINFO`; Ctrl or Alt held during
+  an icon drop for only the drawer or only the name; **bold**, and
+  an underline CCON draws itself so it shows in every font; windows
+  that close and come back with the Workbench (screennotify.library),
+  scrollback rewrapped if the new screen sizes them differently;
+  hidden completion entries in the screen's own highlight colour.
 - **Scrollback**: 512 lines per window by default (`LINES=n` up to
   5000), attribute AND style planes included — Shift/Ctrl+arrows
   and the mouse wheel, working over raw-mode programs too, except
@@ -161,7 +206,7 @@ the real prompt comes back from the scrollback model:
   WB-pen programs like Ed mean) while bold+3x — ANSI colour intent,
   the `ls` scheme — is translated by colour through ObtainBestPen.
   `ls` is genuinely blue everywhere; Ed is never red — plus real
-  italic/underline/inverse soft styles.
+  bold/italic/underline/inverse styles.
 - **Fullscreen programs work**: Ed with working menus (picks travel
   the same IECLASS_MENULIST route as on stock CON: — read out of
   Ed's disassembled parser), block cursor, class-12 resize
@@ -200,7 +245,11 @@ design notes. A running handler keeps its seglist: after updating
 
 ## Files
 
-- `ccon-handler.e` — the source, Amiga E, one file.
+- `ccon-handler.e` — the source, Amiga E, one file — plus
+  `engine/`, the C engine it carries inside (`engine.c`, the
+  hand-written `pgroups.s` painter, `build.sh` and the
+  `mkdiff.py` differential harness), built into `engine.bin` and
+  INCBINed.
 - `ccon-handler` — prebuilt AmigaOS binary.
 - `CCON-mountlist` — one mountlist, four device stanzas (`CCON:`,
   `CRAW:`, and the experimental `CON:`/`RAW:` takeover pair) for
@@ -208,9 +257,12 @@ design notes. A running handler keeps its seglist: after updating
 - `ccon.readme` — short-form readme for the release archive.
 - `ccon.doc` — the full plain-text manual (Amiga-width lines).
 - [`changelog.md`](changelog.md) — the version history, 0.1 to now.
-- `ltx-cc11.lha` — the 1.1 release archive (`L/`, `DEVS/`, docs);
-  later releases ship their archive as a GitHub release asset and
-  on Aminet instead of in the tree.
+- Release archives (`ltx-cc130.lha` for 1.3.0) ship as GitHub
+  release assets and on Aminet, not in the tree.
+- `tests/` — the Linux and Amiga harnesses (`tests/README.md`),
+  including `syncheck.py`, which holds the harnesses' verbatim
+  copies to the handler.
+- `audit.md` — the source audits, every finding and its fate.
 - `todo.md` — the complete build history: every milestone, every
   verified protocol fact, every disassembly finding, every latent
   bug the boots flushed out. The project's lab notebook.
@@ -218,8 +270,14 @@ design notes. A running handler keeps its seglist: after updating
 ## Building
 
 ```
+engine/build.sh                      # the C engine -> engine/engine.bin
 evo ccon-handler.e LARGE ADDBUF=1
 ```
+
+`build.sh` needs `m68k-elf-gcc` and `vasm`; it refuses to ship an
+engine that is not position independent, holds any data, or
+disagrees with the handler on the console's layout. The committed
+`engine.bin` builds the handler without it.
 
 `LARGE` became necessary with the M10 console object: member
 indirection pushed references past the small model's 32k range.
@@ -337,3 +395,30 @@ accounting gap in the fullscreen-snapshot machinery and the
 campaign's own comment rot, same-day. Six beta builds, b4–b9,
 every one boot-verified. The full trail is in `audit.md` and
 `todo.md`.
+
+## Since 1.2.7
+
+Speed for the machine most people actually own. Profiling a stock
+A1200 showed E's code costing about 30 µs per printable byte and
+100 µs per escape byte, every instruction fetched over the chip bus
+the display already holds — so the hot paths moved into C, compiled
+position-independent and carried inside the E binary, and a painter
+started writing rows straight into the bitplanes (and, on RTG, into
+the framebuffer, because reading a graphics card back is the slow
+direction). Each step was measured on FS-UAE's cycle-exact stock
+A1200 and on the real PiStorm machine, and kept only if it won on
+both. Alongside, a KingCON user's mail of everyday keys became Ctrl+P,
+Alt+Tab and the word keys, and screennotify.library let windows ride
+out a Workbench screen-mode change.
+
+Then the eighth source audit (`audit.md`, Audit8): five parallel
+read passes over everything since 1.2.7, the C engine included,
+thirty-one findings, every one fixed or closed in five batches. Some
+were only visible to a test that could fail: a WaitForChar timeout
+that had lost everything under a second since 1.0, colour codes
+split across two writes printing as text, two windows in different
+fonts sharing one glyph cache. Where a bug could not be made to show
+on the glass, a marker build proved the state instead, and every new
+check was paired with a planted fault it had to catch. Betas ran as
+1.2.8b1–b17 before the release was renamed 1.3.0.
+
