@@ -214,7 +214,7 @@ HISTORY
       Workbench - where the old derived grey could all but vanish
       on some palettes; HIDDEN=n still pins your own
 
-    - A sixth source audit closed before release. The oldest
+    - An eighth source audit closed before release. The oldest
       catch: a WaitForChar timeout had lost everything under a
       second since 1.0. Also fixed: colour codes split across
       two writes could print as text, the Tab requester never
