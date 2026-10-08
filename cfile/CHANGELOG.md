@@ -106,6 +106,46 @@ exactly like the filesystem ops — and a marked file-plus-icon pair
 is handled once. Works on both the deferred (commit-on-exit) and
 direct roads.
 
+**The safety release inside the release (b52, 8–9.10.26).** A full
+audit of the code (`audit-2026-10.md`) found ways to lose files, and
+b52 closes them — tested on the A1200:
+
+- *Saving never empties the old file first.* Copying over a file,
+  editor saves, icon writes, `cfile.config`, the mount list and a
+  pack over an archive all write beside the old file and swap it in
+  only when the new one is whole. A full disk or `Esc` leaves the
+  old file exactly as it was.
+- *Links are links.* Deleting a soft link to a folder — or a folder
+  that holds one — used to empty the folder it pointed to. Now the
+  link itself goes and nothing behind it is touched; soft links to
+  files list as files.
+- *Archives are written on a copy and checked.* A commit builds the
+  new archive beside the old one, checks every lha/lzx result and
+  then lists the result against what it should hold; only a perfect
+  match replaces the original. On any failure the archive is left as
+  it was and the staged changes move to a `CFile-rescued-N` folder
+  beside it, with a message saying where. A file merged over an
+  existing archive member is really replaced now (lha and lzx skip a
+  name that is already present — and say all is well). Moving out of
+  an archive deletes only members proven on disk. `DIRECT` mode runs
+  through the same checked road.
+- *`T` keeps your tooltypes.* Saving a tooltype edit wrote the icon
+  with none at all (b51 was never boot-tested; this is why).
+- *The editor no longer adds a blank line* at the end of a file on
+  every save.
+- *Memory and crashes.* The folder-watch request was 4 bytes too
+  small, so every watch wrote past it; cleanup now runs on every
+  exit, also after an error; the console's tab, damaged icons,
+  damaged CD images, very long editor lines and too-small screens
+  are all handled.
+- *Commands can be stopped.* `Esc` breaks a running `:` command,
+  pack or unpack at once, and a silent one no longer freezes CFile.
+- *Smaller things:* rename prompts take names up to the screen's
+  width (up to 107) and never cut a long name; folders over 500
+  entries say `first 500`; unprotect clears only the delete bit;
+  quit ejects only images CFile itself mounted; hex offsets have
+  eight digits; a damaged DMS keeps no image.
+
 ## 0.4 (2026-07-23)
 
 Getting around and finding things — go straight to a path, keep ten
