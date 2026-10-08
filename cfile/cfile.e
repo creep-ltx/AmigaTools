@@ -247,6 +247,7 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     edcap=0,    -> its allocated slots: EDMAXL to start, DOUBLING
                 -> forever after (the 8192-line cap died in 0.5b44)
     edcur=0, edcol=0, edvtop=0, edxoff=0, edmod=FALSE, ednew=FALSE,
+    edlastlf=TRUE,    -> b52: the loaded file ended in a newline (edsave keeps it so)
     -> "inside an archive": a third pane mode beside real-dir and the
     -> volume list. arcpath[p] holds the real .lha (empty = not inside);
     -> arcsub[p] is where we are within it (empty = archive root). The
@@ -270,7 +271,10 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     -> BENCH mode: temporary perf-campaign instrument (perf-roadmap.md
     -> phase 0). `cfile BENCH <dir> [file] [needle]` - see dobench()
     benchmode=FALSE, bdir[300]:STRING, bfile[300]:STRING,
-    bneedle[80]:STRING
+    bneedle[80]:STRING,
+    -> teardown(): tornd = already ran; paneready = initpanes() finished,
+    -> so the per-pane arrays hold real values (they start as garbage)
+    tornd=FALSE, paneready=FALSE
 
 -> the global arrays are NOT zero-initialised (E globals live in the
 -> uncleared stack allocation), so every pane field is set explicitly
@@ -284,7 +288,7 @@ PROC initpanes()
     IF (isopath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (isosub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (npath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
-    IF (nreq[p] := New(44)) = NIL THEN Raise("MEM")    -> notifyrequest
+    IF (nreq[p] := New(SIZEOF notifyrequest)) = NIL THEN Raise("MEM")
     nact[p] := FALSE
     isoroot[p] := 0
     isorootsz[p] := 0
@@ -327,6 +331,7 @@ PROC initpanes()
   ENDIF
   IF (pipebuf := New(PIPESZ)) = NIL THEN Raise("MEM")
   nport := CreateMsgPort()    -> NIL = no auto-refresh, F5 still works
+  paneready := TRUE
 ENDPROC
 
 -> the bookmark slots, allocated before loadconfig so it can fill them from
@@ -2445,7 +2450,8 @@ ENDPROC
 
 PROC readdir(p)
   DEF lock=NIL, fib=NIL:PTR TO fileinfoblock,
-      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata
+      s[1]:ARRAY OF eascan, sc:PTR TO eascan, ed:PTR TO exalldata, isd,
+      lpath[CPATHLEN]:STRING
   ecount[p] := 0
   efail[p] := FALSE
   clearmarks(p)
@@ -2467,7 +2473,13 @@ PROC readdir(p)
       easbegin(sc, lock)
       ed := easnext(sc)
       WHILE ed
-        addentry(p, ed.name, ed.type > 0, ed.size,
+        isd := ed.type > 0
+        IF ed.type = ST_SOFTLINK
+          -> b52: a soft link says nothing about what it points at;
+          -> ask (one Lock, links only) so a link to a file is a file
+          IF buildfull(lpath, ppath[p], ed.name) THEN isd := pathtype(lpath) = 2
+        ENDIF
+        addentry(p, ed.name, isd, ed.size,
                  Mul(ed.days, 1440) + ed.mins)
         ed := easnext(sc)
       ENDWHILE
@@ -2648,8 +2660,10 @@ PROC renotify(p)
   StrCopy(npath[p], ppath[p])
   r := nreq[p]
   z := r
-  FOR k := 0 TO 10
-    z[k] := 0    -> StartNotify wants a clean request every time
+  -> StartNotify wants a clean request every time. 48 bytes, not 44:
+  -> nr_Handler sits at 44 and the old New(44) let DOS write past it.
+  FOR k := 0 TO Shr(SIZEOF notifyrequest, 2) - 1
+    z[k] := 0
   ENDFOR
   r.name := npath[p]
   r.userdata := p
@@ -4007,11 +4021,97 @@ PROC parentdir()
   selectbyname(p)    -> re-select the directory we just came out of
 ENDPROC
 
+-> FALSE when the joined path would not fit: dst is then left as the
+-> bare dir, so a caller that walks on would act on the PARENT - every
+-> tree walker checks this
 PROC buildfull(dst, dir, name)
+  DEF ok
   StrCopy(dst, dir)
-  AddPart(dst, name, CPATHLEN - 4)
+  ok := AddPart(dst, name, CPATHLEN - 4)
+  SetStr(dst, StrLen(dst))
+ENDPROC ok <> FALSE
+
+-> ---- safe writes (0.5b52): never empty the old file first ---------
+-> A save or an overwrite used to Open the target NEWFILE, which
+-> empties it at once - a full disk or an Esc then left neither the old
+-> file nor the new one. Now the new bytes go to a scratch name in the
+-> SAME directory and swapin() trades it for the old file at the end.
+
+-> a scratch name beside `path` (same directory, so the swap is a
+-> same-volume Rename): "CFile<tag><task>.tmp", short enough for OFS
+PROC sidename(dst, path:PTR TO CHAR, tag)
+  DEF nm[24]:STRING
+  StrCopy(dst, path, PathPart(path) - path)
+  StringF(nm, 'CFile\c\h.tmp', tag, FindTask(NIL))
+  AddPart(dst, nm, StrMax(dst))
   SetStr(dst, StrLen(dst))
 ENDPROC
+
+-> put the finished file `tmp` in place of `path`. The old file is
+-> renamed aside and deleted only once the new one is in, so a failure
+-> at any step leaves the old file where it was. keep = carry the old
+-> file's protection bits and comment (a save; a copy brings its own).
+-> A write-protected old file is refused, as NEWFILE refused it before.
+-> FALSE = nothing changed; the caller deletes tmp.
+PROC swapin(tmp, path, keep)
+  DEF old[CPATHLEN]:STRING, cmt[84]:STRING, fib:PTR TO fileinfoblock,
+      lock, had=FALSE, prot=0, ok=FALSE
+  IF (fib := AllocDosObject(DOS_FIB, NIL)) = NIL THEN RETURN FALSE
+  IF (lock := Lock(path, SHARED_LOCK))
+    IF Examine(lock, fib)
+      IF fib.direntrytype < 0
+        had := TRUE
+        prot := fib.protection
+        StrCopy(cmt, fib.comment)
+      ENDIF
+    ENDIF
+    UnLock(lock)
+  ENDIF
+  FreeDosObject(DOS_FIB, fib)
+  IF had
+    IF prot AND FIBF_WRITE THEN RETURN FALSE
+    sidename(old, path, "o")
+    DeleteFile(old)    -> our own leftover from a crashed run, if any
+    IF Rename(path, old) = FALSE THEN RETURN FALSE
+  ENDIF
+  IF Rename(tmp, path)
+    ok := TRUE
+    IF had
+      IF keep
+        SetProtection(path, prot)
+        IF EstrLen(cmt) THEN SetComment(path, cmt)
+      ENDIF
+      SetProtection(old, 0)    -> a delete-protected original still goes
+      DeleteFile(old)
+    ENDIF
+  ELSEIF had
+    Rename(old, path)    -> put the old one back
+  ENDIF
+ENDPROC ok
+
+-> open a save target: the scratch name when `path` already holds a
+-> file (fills tmp, sets ^swap TRUE), else path itself. NIL = failed.
+PROC safeopen(path, tmp, swap:PTR TO LONG)
+  swap[] := pathtype(path) = 1
+  IF swap[]
+    sidename(tmp, path, "n")
+  ELSE
+    StrCopy(tmp, path)
+  ENDIF
+ENDPROC Open(tmp, NEWFILE)
+
+-> finish what safeopen began: close (a buffered handler reports its
+-> last write error HERE), then swap in. ok = every write succeeded.
+-> FALSE = the old file is untouched and the scratch is gone.
+PROC safeclose(fh, path, tmp, swap, ok, keep)
+  IF Close(fh) = FALSE THEN ok := FALSE
+  IF ok
+    IF swap
+      IF swapin(tmp, path, keep) = FALSE THEN ok := FALSE
+    ENDIF
+  ENDIF
+  IF ok = FALSE THEN DeleteFile(tmp)
+ENDPROC ok
 
 -> 0 = does not exist, 1 = file, 2 = directory
 PROC pathtype(path)
@@ -4098,12 +4198,15 @@ PROC arcbreak()
 ENDPROC
 
 PROC copyfile(src, dst)
-  DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0, chunk
+  DEF fhs=NIL, fhd=NIL, n=0, w, ok=TRUE, err=0, chunk, swap=FALSE,
+      tmp[CPATHLEN]:STRING
   IF (fhs := Open(src, OLDFILE)) = NIL
     faultmsg('cannot read the source')
     RETURN FALSE
   ENDIF
-  IF (fhd := Open(dst, NEWFILE)) = NIL
+  -> b52: an existing target is not emptied up front - the copy lands
+  -> beside it and replaces it only when complete
+  IF (fhd := safeopen(dst, tmp, {swap})) = NIL
     Close(fhs)
     faultmsg('cannot write the target')
     RETURN FALSE
@@ -4149,10 +4252,14 @@ PROC copyfile(src, dst)
       ENDIF
     ENDIF
   UNTIL (n <= 0) OR (ok = FALSE)
-  Close(fhd)
   Close(fhs)
-  IF ok = FALSE
-    DeleteFile(dst)    -> no partial targets
+  IF ok
+    IF safeclose(fhd, dst, tmp, swap, TRUE, FALSE) = FALSE
+      faultmsg('cannot write the target')    -> the old target stays
+      RETURN FALSE
+    ENDIF
+  ELSE
+    safeclose(fhd, dst, tmp, swap, FALSE, FALSE)    -> no partial targets
     IF abort = FALSE THEN showfault('copy failed', err)   -> cancel: no error
     RETURN FALSE
   ENDIF
@@ -4212,6 +4319,51 @@ ENDPROC
 
 -> ---- recursive helpers ---------------------------------------------
 
+-> b52: links. ST_SOFTLINK (3) and ST_LINKDIR (4) are BOTH > 0, so the
+-> walkers used to take a link for a directory - and Lock() follows a
+-> link, so deleting a folder that held a link to Work: emptied Work:.
+-> Now: delete walks into real directories only (a link is removed as
+-> itself), copy follows hard-linked directories but not soft links
+-> (they skip - recreating them is the half-broken corner of 3.x),
+-> and search walks real directories only. An empty name never walks
+-> (AddPart(path, '') is the parent: a walk that never ends).
+PROC walkdel(ed:PTR TO exalldata)
+ENDPROC (ed.type = ST_USERDIR) AND (ed.name[0] <> 0)
+
+PROC walkcopy(ed:PTR TO exalldata)
+  IF ed.name[0] = 0 THEN RETURN FALSE
+ENDPROC (ed.type = ST_USERDIR) OR (ed.type = ST_LINKDIR)
+
+-> TRUE if the LAST part of path is a link (soft or hard), not the
+-> object itself: Lock() follows a link, so the locked object then sits
+-> in another directory or under another name. A wrong TRUE is safe
+-> (deltree then refuses a real, full directory: "not empty").
+PROC islink(path:PTR TO CHAR)
+  DEF l, pl, par, fib:PTR TO fileinfoblock, link=TRUE, pp[CPATHLEN]:STRING,
+      fp:PTR TO CHAR
+  fp := FilePart(path)
+  IF fp[0] = 0 THEN RETURN FALSE    -> a volume root
+  IF (l := Lock(path, SHARED_LOCK)) = NIL THEN RETURN FALSE
+  StrCopy(pp, path, PathPart(path) - path)
+  IF (pl := Lock(pp, SHARED_LOCK))
+    IF (par := ParentDir(l))
+      IF SameLock(par, pl) = LOCK_SAME
+        IF (fib := AllocDosObject(DOS_FIB, NIL))
+          IF Examine(l, fib)
+            IF (fib.direntrytype = ST_USERDIR) OR (fib.direntrytype < 0)
+              IF nccmp(fib.filename, FilePart(path)) = 0 THEN link := FALSE
+            ENDIF
+          ENDIF
+          FreeDosObject(DOS_FIB, fib)
+        ENDIF
+      ENDIF
+      UnLock(par)
+    ENDIF
+    UnLock(pl)
+  ENDIF
+  UnLock(l)
+ENDPROC link
+
 -> pre-scan a directory tree: counts every entry into statfiles and
 -> sums file bytes into statbytes (progress denominators only, so
 -> errors are simply ignored)
@@ -4226,7 +4378,7 @@ PROC treestat(path, depth)
     ed := easnext(sc)
     WHILE (ed <> NIL) AND (checkabort() = FALSE)   -> Esc stops the pre-scan too
       statfiles := statfiles + 1
-      IF ed.type > 0
+      IF walkcopy(ed)
         StrCopy(child, path)
         AddPart(child, ed.name, CPATHLEN - 4)
         SetStr(child, StrLen(child))
@@ -4294,7 +4446,7 @@ PROC findwalk(dir, depth, pat, parsed, isglob, res:PTR TO LONG, cnt:PTR TO LONG)
           cnt[0] := cnt[0] + 1
         ENDIF
       ENDIF
-      IF (ed.type > 0) AND (cnt[0] < FINDMAX)
+      IF walkdel(ed) AND (cnt[0] < FINDMAX)
         StrCopy(child, full)
         findwalk(child, depth + 1, pat, parsed, isglob, res, cnt)
       ENDIF
@@ -4362,15 +4514,15 @@ PROC copytree(src, dst, depth)
     easbegin(sc, lock)
     ed := easnext(sc)
     WHILE (ed <> NIL) AND ok    -> plain flags: safe despite E's eager AND
-      StrCopy(csrc, src)
-      AddPart(csrc, ed.name, CPATHLEN - 4)
-      SetStr(csrc, StrLen(csrc))
-      StrCopy(cdst, dst)
-      AddPart(cdst, ed.name, CPATHLEN - 4)
-      SetStr(cdst, StrLen(cdst))
-      IF ed.type > 0
+      IF (buildfull(csrc, src, ed.name) AND
+          buildfull(cdst, dst, ed.name)) = FALSE
+        faultmsg('the path is too long')    -> b52: never act on the parent
+        ok := FALSE
+      ELSEIF walkcopy(ed)
         ok := copytree(csrc, cdst, depth + 1)
-      ELSE
+      ELSEIF ed.type = ST_SOFTLINK
+        gfails := gfails + 1    -> b52: a soft link is not followed
+      ELSEIF ed.name[0]
         ok := copyfile(csrc, cdst)
       ENDIF
       IF ok THEN ed := easnext(sc)
@@ -4410,6 +4562,18 @@ PROC deltree(path, depth, tick)
     gfails := gfails + 1
     RETURN FALSE
   ENDIF
+  -> b52: the top of a delete may itself be a link (a pane entry, or a
+  -> moved folder's source): remove the link, never walk into it.
+  -> Deeper levels are safe already - walkdel() only enters real dirs.
+  IF depth = 0
+    IF islink(path)
+      IF zap(path, tick) THEN RETURN TRUE
+      StringF(pm, 'cannot delete "\s"', FilePart(path))
+      faultmsg(pm)
+      gfails := gfails + 1
+      RETURN FALSE
+    ENDIF
+  ENDIF
   IF (child := String(CPATHLEN)) = NIL THEN RETURN FALSE
   names := New(DTCHUNK * 4)
   dirsb := New(DTCHUNK)
@@ -4444,7 +4608,7 @@ PROC deltree(path, depth, tick)
           IF ncol < DTCHUNK
             IF (names[ncol] := String(StrLen(ed.name)))
               StrCopy(names[ncol], ed.name)
-              dirsb[ncol] := IF ed.type > 0 THEN 1 ELSE 0
+              dirsb[ncol] := IF walkdel(ed) THEN 1 ELSE 0
               ncol := ncol + 1
               sawany := TRUE
             ELSE
@@ -4466,10 +4630,13 @@ PROC deltree(path, depth, tick)
       IF checkabort()
         abort := TRUE
       ELSE
-        StrCopy(child, path)
-        AddPart(child, names[i], CPATHLEN - 4)
-        SetStr(child, StrLen(child))
-        IF dirsb[i]
+        IF buildfull(child, path, names[i]) = FALSE
+          -> b52: a failed join leaves child = path, and the old code
+          -> then deleted down the SAME directory again
+          faultmsg('the path is too long')
+          gfails := gfails + 1
+          ok := FALSE
+        ELSEIF dirsb[i]
           ok := deltree(child, depth + 1, tick)
         ELSE
           IF (ok := zap(child, TRUE))
@@ -4650,25 +4817,43 @@ ENDPROC 1
 -> transfer ONE resolved entry - file I/O only, never a prompt.
 -> Returns 1 done, -1 failed (message stored).
 PROC transferone(p, q, name, tname, isdir, ismove, samevol)
-  DEF src[310]:STRING, dst[310]:STRING, t
-  buildfull(src, ppath[p], name)
-  buildfull(dst, ppath[q], tname)
+  DEF src[310]:STRING, dst[310]:STRING, tmp[CPATHLEN]:STRING, t
+  IF (buildfull(src, ppath[p], name) AND
+      buildfull(dst, ppath[q], tname)) = FALSE
+    faultmsg('the path is too long')
+    RETURN -1
+  ENDIF
   IF ismove
-    IF samevol
-      t := pathtype(dst)
-      IF t > 0
-        -> Rename cannot land on an existing name; o/force said
-        -> replace (a merge of directories cannot Rename: a full
-        -> target reports "not empty" here)
-        IF zap(dst, FALSE) = FALSE
-          faultmsg('cannot replace the target')
-          RETURN -1
-        ENDIF
-      ENDIF
+    t := 0
+    IF samevol THEN t := pathtype(dst)
+    IF samevol AND (t = 0)
       IF Rename(src, dst) = FALSE
         faultmsg('cannot move')
         RETURN -1
       ENDIF
+    ELSEIF samevol AND (t = 1) AND (isdir = FALSE)
+      -> b52: Rename cannot land on an existing name. The old target
+      -> used to be deleted FIRST - a failed Rename then lost it. Now
+      -> the source is renamed beside it and swapped in, old kept on
+      -> any failure.
+      sidename(tmp, dst, "m")
+      IF Rename(src, tmp) = FALSE
+        faultmsg('cannot move')
+        RETURN -1
+      ENDIF
+      IF swapin(tmp, dst, FALSE) = FALSE
+        Rename(tmp, src)    -> back where it came from
+        faultmsg('cannot replace the target')
+        RETURN -1
+      ENDIF
+    ELSEIF isdir AND (t = 2)
+      -> a merge into an existing directory: Rename cannot do it (the
+      -> target is not empty), so merge by copy, then drop the source
+      IF copytree(src, dst, 0) = FALSE THEN RETURN -1
+      IF deltree(src, 0, FALSE) = FALSE THEN RETURN -1
+    ELSEIF samevol
+      faultmsg('cannot replace the target')    -> a file/dir clash
+      RETURN -1
     ELSE
       IF isdir
         IF copytree(src, dst, 0) = FALSE THEN RETURN -1
@@ -4783,7 +4968,7 @@ PROC arccachetree(p, disk, mprefix, depth)
     StrCopy(mem, mprefix)
     StrAdd(mem, '/')
     StrAdd(mem, ed.name)
-    IF ed.type > 0
+    IF walkcopy(ed)
       arccacheput(p, mem, 0, TRUE)
       StrCopy(child, disk)
       AddPart(child, ed.name, CPATHLEN - 4)
@@ -6531,9 +6716,10 @@ PROC doxfer(ismove, force)
   -> one volume or two? (decides Rename vs copy+delete for the run)
   la := Lock(ppath[p], SHARED_LOCK)
   lb := Lock(ppath[q], SHARED_LOCK)
+  samevol := FALSE    -> b52: only both locks AND one volume say Rename
   IF la
     IF lb
-      IF SameLock(la, lb) < 0 THEN samevol := FALSE
+      IF SameLock(la, lb) >= 0 THEN samevol := TRUE
     ENDIF
   ENDIF
   IF la THEN UnLock(la)
@@ -6613,6 +6799,7 @@ PROC doxfer(ismove, force)
     ENDIF
   ENDIF
   -> phase 3: transfer, no questions left to ask (Esc stops it)
+  gfails := 0    -> b52: copytree counts the soft links it leaves out
   FOR s := 0 TO nsel - 1
     IF (haderr = FALSE) AND (abort = FALSE)
       i := ridx[s]
@@ -6641,6 +6828,9 @@ PROC doxfer(ismove, force)
     showmsg(mb)
   ELSEIF haderr
     remsg()
+  ELSEIF gfails > 0
+    StringF(mb, '\d soft link(s) inside were not copied', gfails)
+    showmsg(mb)
   ENDIF
   abort := FALSE    -> clear it so a later internal copy/delete is not aborted
 ENDPROC
@@ -7098,7 +7288,7 @@ ENDPROC
 -> icon type, default tool, tooltypes (t pages through them; T opens
 -> the whole list in the editor since 0.5b51 - save writes the icon)
 PROC infowindow()
-  DEF p, i, xx, yy, r, k, mask, isdir, done=FALSE, changed,
+  DEF okt, tswap=FALSE, ttmp[CPATHLEN]:STRING, p, i, xx, yy, r, k, mask, isdir, done=FALSE, changed,
       fpath[310]:STRING, lock=NIL, fib=NIL:PTR TO fileinfoblock,
       dtb[26]:ARRAY OF CHAR, dt:PTR TO datetime,
       db[20]:ARRAY OF CHAR, tb[20]:ARRAY OF CHAR,
@@ -7349,7 +7539,17 @@ PROC infowindow()
           Close(fh2)
           StringF(ettl, '\s tooltypes', enames[i])
           r2 := editfile('T:CFile-tt', ettl)
+          okt := FALSE
           IF r2 = 1
+            -> b52: editfile frees its lines on the way out (edfree, so
+            -> ednum = 0) - the b51 code read them AFTER that and wrote
+            -> the icon with no tooltypes at all. Read the saved list
+            -> back first.
+            IF (okt := edload('T:CFile-tt')) = FALSE
+              showmsg('tooltypes not saved - the icon is unchanged')
+            ENDIF
+          ENDIF
+          IF okt
             -> assemble prefix + fresh block + suffix, ONE Write
             ntt2 := 0
             nsz := tres[0] + (isz - tres[1])
@@ -7391,15 +7591,20 @@ PROC infowindow()
               IF (isz - tres[1]) > 0
                 CopyMem(ibuf + tres[1], nbuf + o2, isz - tres[1])
               ENDIF
-              IF (fh2 := Open(sfi, NEWFILE))
-                IF Write(fh2, nbuf, nsz) < nsz THEN faultmsg('icon write failed')
-                Close(fh2)
+              -> b52: beside the icon, then swapped in - a failed write
+              -> leaves the old icon whole
+              IF (fh2 := safeopen(sfi, ttmp, {tswap}))
+                IF safeclose(fh2, sfi, ttmp, tswap,
+                             Write(fh2, nbuf, nsz) = nsz, TRUE) = FALSE
+                  faultmsg('icon write failed - the icon is unchanged')
+                ENDIF
               ELSE
                 faultmsg('cannot write icon')
               ENDIF
               Dispose(nbuf)
               nbuf := NIL
             ENDIF
+            edfree()
           ENDIF
           DeleteFile('T:CFile-tt')
           IF r2 >= 0 THEN done := TRUE    -> the editor owned the screen
@@ -9078,6 +9283,20 @@ PROC edload(path)
       i := le + 1
     ENDWHILE
   ENDIF
+  IF ok
+    -> b52: a file ending in LF used to load with one extra, empty last
+    -> line, and edsave ends EVERY line with LF - so each save grew the
+    -> file by a blank line. The final LF is the last line's own; a file
+    -> without one is saved without one, so an unedited save is exact.
+    edlastlf := TRUE    -> an empty or new file gets the usual one
+    IF n > 0 THEN edlastlf := bp[n - 1] = 10
+    IF edlastlf AND (n > 0) AND (ednum > 1)
+      IF EstrLen(edl[ednum - 1]) = 0
+        DisposeLink(edl[ednum - 1])
+        ednum := ednum - 1
+      ENDIF
+    ENDIF
+  ENDIF
   IF buf THEN Dispose(buf)
   IF ok = FALSE THEN edfree()
 ENDPROC ok
@@ -9089,9 +9308,12 @@ ENDPROC ok
 -> packets per save. Byte-identical output harness-proven (b2test.e:
 -> exact-fit, one-over, giant-line, empty-line).
 PROC edsave(path)
-  DEF fh, i, ok=TRUE, used=0, l, wb:PTR TO CHAR
+  DEF fh, i, ok=TRUE, used=0, l, wb:PTR TO CHAR, nl, swap=FALSE,
+      tmp[CPATHLEN]:STRING
   IF samefile(path, 'PROGDIR:cfile.config') THEN wantreload := TRUE
-  IF (fh := Open(path, NEWFILE)) = NIL
+  -> b52: written beside the file and swapped in at the end - a full
+  -> disk no longer leaves a cut-off Startup-Sequence
+  IF (fh := safeopen(path, tmp, {swap})) = NIL
     faultmsg('cannot save')
     RETURN FALSE
   ENDIF
@@ -9099,6 +9321,11 @@ PROC edsave(path)
   FOR i := 0 TO ednum - 1
     IF ok
       l := EstrLen(edl[i])
+      nl := 1
+      IF i = (ednum - 1)
+        IF edlastlf = FALSE THEN nl := 0
+        IF (ednum = 1) AND (l = 0) THEN nl := 0    -> empty stays empty
+      ENDIF
       IF (used + l + 1) > cbufsz
         IF used > 0
           IF Write(fh, wb, used) < used THEN ok := FALSE
@@ -9109,14 +9336,14 @@ PROC edsave(path)
         IF (l + 1) > cbufsz
           -> a line longer than the whole buffer: write it direct
           IF Write(fh, edl[i], l) < l THEN ok := FALSE
-          IF ok
+          IF ok AND nl
             IF Write(fh, '\n', 1) < 1 THEN ok := FALSE
           ENDIF
         ELSE
           CopyMem(edl[i], wb + used, l)
           used := used + l
           wb[used] := 10
-          used := used + 1
+          used := used + nl
         ENDIF
       ENDIF
     ENDIF
@@ -9126,8 +9353,10 @@ PROC edsave(path)
       IF Write(fh, wb, used) < used THEN ok := FALSE
     ENDIF
   ENDIF
-  Close(fh)
-  IF ok = FALSE THEN faultmsg('write failed')
+  IF safeclose(fh, path, tmp, swap, ok, TRUE) = FALSE
+    ok := FALSE
+    faultmsg('write failed - the file on disk is unchanged')
+  ENDIF
 ENDPROC ok
 
 -> the editor itself. Returns -1 = could not load (message shown),
@@ -10446,7 +10675,7 @@ PROC grepwalk(dir, depth, needle, root, scanbuf:PTR TO CHAR,
       StrCopy(full, dir)
       AddPart(full, ed.name, CPATHLEN - 4)
       SetStr(full, StrLen(full))
-      IF ed.type > 0
+      IF walkdel(ed)
         StrCopy(child, full)
         grepwalk(child, depth + 1, needle, root, scanbuf, paths, disp, cnt)
       ELSEIF (ed.size > 0) AND (ed.size <= VIEWMAX)
@@ -12069,8 +12298,49 @@ PROC dobench()
   Close(fh)
 ENDPROC
 
+-> everything main() must let go of, on the normal road AND after an
+-> exception: pending archive edits, mounted images, notify watches,
+-> libraries, the screen. Runs once (a second call is a no-op), so a
+-> Raise inside it cannot loop. full=FALSE (an exception) skips the
+-> config save - a half-run session must not rewrite cfile.config.
+PROC teardown(full)
+  DEF k, nm
+  IF tornd THEN RETURN
+  tornd := TRUE
+  IF paneready
+    arccommit(0)    -> flush any pane still inside a modified archive
+    arccommit(1)
+    daunmountall()  -> let go of every disk image we mounted
+    FOR k := 0 TO 1
+      IF nact[k]
+        EndNotify(nreq[k])
+        nact[k] := FALSE
+      ENDIF
+    ENDFOR
+  ENDIF
+  IF nport
+    WHILE (nm := GetMsg(nport)) DO ReplyMsg(nm)    -> none left in flight
+    DeleteMsgPort(nport)
+    nport := NIL
+  ENDIF
+  closeui()    -> before mpblank: the window still points at it
+  IF mpblank
+    FreeMem(mpblank, 12)
+    mpblank := NIL
+  ENDIF
+  IF datatypesbase THEN CloseLibrary(datatypesbase)
+  datatypesbase := NIL
+  IF ptreplaybase THEN CloseLibrary(ptreplaybase)
+  ptreplaybase := NIL
+  IF iconbase THEN CloseLibrary(iconbase)
+  iconbase := NIL
+  IF full
+    IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
+  ENDIF
+  dropassigns()
+ENDPROC
+
 PROC main() HANDLE
-  DEF k
   ensureassigns()
   initbookmarks()    -> before loadconfig, which may fill the slots
   loadconfig()
@@ -12087,37 +12357,20 @@ PROC main() HANDLE
   ELSE
     eventloop()
   ENDIF
-  arccommit(0)    -> flush any pane still inside a modified archive
-  arccommit(1)
-  daunmountall()  -> let go of every disk image we mounted
-  FOR k := 0 TO 1
-    IF nact[k]
-      EndNotify(nreq[k])
-      nact[k] := FALSE
-    ENDIF
-  ENDFOR
-  IF nport
-    DeleteMsgPort(nport)
-    nport := NIL
-  ENDIF
-  IF datatypesbase THEN CloseLibrary(datatypesbase)
-  IF ptreplaybase THEN CloseLibrary(ptreplaybase)
-  IF iconbase THEN CloseLibrary(iconbase)
-  IF mpblank
-    FreeMem(mpblank, 12)
-    mpblank := NIL
-  ENDIF
-  closeui()
-  IF benchmode = FALSE THEN saveconfig()    -> a bench run never rewrites config
-  dropassigns()
+  teardown(TRUE)
 EXCEPT DO
-  closeui()
+  IF exception THEN teardown(FALSE)
   SELECT exception
+    CASE 0
+      -> the normal road: teardown already ran
     CASE "UI"
       WriteF('CFile: cannot open UI (\s)\n', exceptioninfo)
       rc := 20
     CASE "MEM"
       WriteF('CFile: out of memory\n')
+      rc := 20
+    DEFAULT
+      WriteF('CFile: stopped by an internal error\n')
       rc := 20
   ENDSELECT
   CleanUp(rc)
@@ -12208,4 +12461,4 @@ progart: CHAR 46,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,45,45,45,45,45,45,45,45,45,45,45,45,45,45
   CHAR 45,45,180
 
-version: CHAR '$VER: CFile 0.5b51 (1.8.26) E build',0
+version: CHAR '$VER: CFile 0.5b52 (8.10.26) E build',0
