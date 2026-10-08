@@ -80,6 +80,8 @@ MODULE 'intuition/intuition','intuition/screens',
 
 -> b52: archiver command lines - the buffer, and where a batch flushes
 CONST CMDMAX=1400, BATCHAT=600,
+      EDLMAX=32766,  -> b52: the longest editor line (String()'s ceiling)
+      HEXASC=60,     -> b52: the hex view's text column (8-digit offsets)
       NAMEMAX=107    -> b52: the longest name a rename prompt takes (FFS)
 CONST CPATHLEN=300, MAXENT=500, CBUFSZ=16384, PIPESZ=4096,
       EABUFSZ=16384,  -> I3: ExAll batch buffer, dozens of entries/trip
@@ -278,10 +280,12 @@ DEF enames[1000]:ARRAY OF LONG,   -> entry names, MAXENT slots per pane
     -> teardown(): tornd = already ran; paneready = initpanes() finished,
     -> so the per-pane arrays hold real values (they start as garbage)
     tornd=FALSE, paneready=FALSE,
+    etrunc[2]:ARRAY OF CHAR,    -> b52: the pane's listing hit MAXENT
     -> rcwrap()/rcresult(): the script, its result file, the launch line
     rcscr[40]:STRING, rcval[40]:STRING, rccmd[60]:STRING, rcon=FALSE,
     commitmsg[360]:STRING,   -> the last failed archive commit, for quit
     liverc=0,                -> livepipe: the last command's return code
+    wlbad=FALSE,             -> wline/passraw: a write came up short
     -> apopen/apread: the pipe reader's packet, port and handle
     apport=NIL:PTR TO mp, appkt=NIL, apfh=0, apbusy=FALSE, apbroke=FALSE,
     -> b52: every scratch name and pipe carries this CFile's task address
@@ -304,6 +308,7 @@ PROC initpanes()
     IF (isosub[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (npath[p] := String(CPATHLEN)) = NIL THEN Raise("MEM")
     IF (nreq[p] := New(SIZEOF notifyrequest)) = NIL THEN Raise("MEM")
+    etrunc[p] := FALSE
     nact[p] := FALSE
     isoroot[p] := 0
     isorootsz[p] := 0
@@ -435,7 +440,13 @@ PROC slurpfh(fh, cnt:PTR TO LONG)
   ENDIF
   IF sz > 0
     n := Read(fh, buf, sz)
-    IF n < 0 THEN n := 0
+    IF n <> sz
+      -> b52: a failed read used to look like an EMPTY file - and the
+      -> config writer then replaced cfile.config with the defaults
+      Dispose(buf)
+      cnt[0] := -1
+      RETURN NIL
+    ENDIF
   ENDIF
   cnt[0] := n
 ENDPROC buf
@@ -466,6 +477,17 @@ PROC loadconfig()
     IF l > 298 THEN l := 298
     IF l > 0 THEN StrCopy(line, s + i, l)
     i := j + 1
+    -> b52: a config saved on another machine may end its lines CR LF and
+    -> separate with tabs - the CR used to stay in the value ("SYS:\r")
+    l := EstrLen(line)
+    WHILE (l > 0) AND ((line[l - 1] = 13) OR (line[l - 1] = 32) OR
+                       (line[l - 1] = 9))
+      l--
+    ENDWHILE
+    SetStr(line, l)
+    FOR j := 0 TO l - 1
+      IF line[j] = 9 THEN line[j] := 32
+    ENDFOR
     -> split into KEY and value on the first space
     IF EstrLen(line) > 0
       c := line[0]
@@ -584,8 +606,13 @@ PROC parseargs()
   ENDWHILE
 ENDPROC
 
+-> b52: a short write is remembered (wlbad) - a save that lost a line
+-> must not replace the old file
 PROC wline(fh, s)
-ENDPROC Write(fh, s, EstrLen(s))
+  DEF n
+  n := Write(fh, s, EstrLen(s))
+  IF n <> EstrLen(s) THEN wlbad := TRUE
+ENDPROC n
 
 -> SAVEDIRS ON: remember where the panes stand for the next start.
 -> Only the LEFT/RIGHT lines are rewritten - everything else in the
@@ -596,14 +623,6 @@ PROC savepane(fh, keyname, p)
   StringF(line, '\s \s\n', keyname,
           IF EstrLen(ppath[p]) = 0 THEN '(volumes)' ELSE ppath[p])
   wline(fh, line)
-ENDPROC
-
--> write a config line through verbatim, restoring the newline slurpfh stripped
-PROC passline(fh, line)
-  DEF b[302]:STRING
-  StrCopy(b, line)
-  StrAdd(b, '\n')
-  wline(fh, b)
 ENDPROC
 
 -> SAVEBOOKMARKS ON: write a BOOKMARK<d> line for each set slot. Old
@@ -621,17 +640,21 @@ ENDPROC
 
 PROC saveconfig()
   DEF fh, buf=NIL, n=0, i, j, l, sp, c, s:PTR TO CHAR,
-      line[300]:STRING, key[20]:STRING, wl=FALSE, wr=FALSE
+      line[300]:STRING, key[20]:STRING, wl=FALSE, wr=FALSE, swap=FALSE,
+      tmp[CPATHLEN]:STRING, ls
   IF (savedirs = FALSE) AND (savebmarks = FALSE) THEN RETURN
   IF fh := Open('PROGDIR:cfile.config', OLDFILE)
     buf := slurpfh(fh, {n})
     Close(fh)
   ENDIF
-  -> the file exists but could not be read (cnt -1: too big to allocate):
-  -> do NOT open it NEWFILE, which would truncate it to just the defaults.
-  -> Leave the original untouched.
+  -> the file exists but could not be read (cnt -1: too big to allocate,
+  -> or a read error): do NOT rewrite it, which would leave just the
+  -> defaults. Leave the original untouched.
   IF n < 0 THEN RETURN
-  IF (fh := Open('PROGDIR:cfile.config', NEWFILE)) = NIL
+  -> b52: written beside the old one and swapped in - a full disk or a
+  -> reset mid-write no longer leaves a cut-off config
+  wlbad := FALSE
+  IF (fh := safeopen('PROGDIR:cfile.config', tmp, {swap})) = NIL
     IF buf THEN Dispose(buf)
     RETURN
   ENDIF
@@ -663,9 +686,11 @@ PROC saveconfig()
         j := j + 1
       ENDWHILE
       l := j - i
+      ls := i    -> b52: the raw line - passed through whole, not cut at 298
       IF l > 298 THEN l := 298
       StrCopy(line, '')
       IF l > 0 THEN StrCopy(line, s + i, l)
+      l := j - i
       i := j + 1
       StrCopy(key, '')
       IF EstrLen(line) > 0
@@ -685,16 +710,16 @@ PROC saveconfig()
       -> pass through untouched. Old BOOKMARK lines are dropped (the current
       -> set is written fresh at the end when SAVEBOOKMARKS is on).
       IF StrCmp(key, 'LEFT')
-        IF savedirs THEN savepane(fh, 'LEFT', 0) ELSE passline(fh, line)
+        IF savedirs THEN savepane(fh, 'LEFT', 0) ELSE passraw(fh, s + ls, l)
         wl := TRUE
       ELSEIF StrCmp(key, 'RIGHT')
-        IF savedirs THEN savepane(fh, 'RIGHT', 1) ELSE passline(fh, line)
+        IF savedirs THEN savepane(fh, 'RIGHT', 1) ELSE passraw(fh, s + ls, l)
         wr := TRUE
       ELSEIF (EstrLen(key) = 9) AND StrCmp(key, 'BOOKMARK', 8) AND
              (key[8] >= "0") AND (key[8] <= "9")
         -> drop it
-      ELSE
-        passline(fh, line)
+      ELSEIF (i < n) OR (l > 0)    -> no phantom empty line after the last LF
+        passraw(fh, s + ls, l)
       ENDIF
     ENDWHILE
   ENDIF
@@ -703,8 +728,14 @@ PROC saveconfig()
     IF wr = FALSE THEN savepane(fh, 'RIGHT', 1)
   ENDIF
   IF savebmarks THEN savebookmarks(fh)
-  Close(fh)
+  safeclose(fh, 'PROGDIR:cfile.config', tmp, swap, wlbad = FALSE, TRUE)
   IF buf THEN Dispose(buf)
+ENDPROC
+
+-> one config line through unchanged, its own bytes plus the LF
+PROC passraw(fh, s, l)
+  IF l > 0 THEN IF Write(fh, s, l) <> l THEN wlbad := TRUE
+  IF Write(fh, '\n', 1) <> 1 THEN wlbad := TRUE
 ENDPROC
 
 -> write one setting block: a ";" explanation, the KEY value, a blank line
@@ -998,6 +1029,11 @@ PROC isodnext(s:PTR TO isoscan)
       s.pos := s.avail    -> padding: the rest of this sector is dead
     ELSEIF (s.pos + len) > s.avail
       s.err := TRUE       -> a record cannot straddle: broken image
+      RETURN FALSE
+    ELSEIF (len < 34) OR ((33 + b[32]) > len)
+      -> b52: a record too short for its own fixed part, or a name
+      -> running past the record - read past the sector buffer before
+      s.err := TRUE
       RETURN FALSE
     ELSE
       s.pos := s.pos + len
@@ -1361,7 +1397,7 @@ ENDPROC res = 0
 -> entries (rebooted since) cost a few fast eject failures and are
 -> cleared by the first successful delete.
 PROC damsync()
-  DEF fh, k, any=FALSE, nl[2]:ARRAY OF CHAR
+  DEF fh, k, any=FALSE, swap=FALSE, tmp[CPATHLEN]:STRING
   FOR k := 0 TO DAMAX - 1
     IF EstrLen(damdev[k]) > 0 THEN any := TRUE
   ENDFOR
@@ -1369,21 +1405,19 @@ PROC damsync()
     DeleteFile('PROGDIR:cfile.mounts')
     RETURN
   ENDIF
-  IF (fh := Open('PROGDIR:cfile.mounts', NEWFILE)) = NIL THEN RETURN
-  nl[0] := 10
+  -> b52: beside the old list and swapped in - a short write used to
+  -> shift the four-lines-per-mount layout and pair the wrong files
+  IF (fh := safeopen('PROGDIR:cfile.mounts', tmp, {swap})) = NIL THEN RETURN
+  wlbad := FALSE
   FOR k := 0 TO DAMAX - 1
     IF EstrLen(damdev[k]) > 0
-      Write(fh, damdev[k], EstrLen(damdev[k]))
-      Write(fh, nl, 1)
-      Write(fh, damfile[k], EstrLen(damfile[k]))
-      Write(fh, nl, 1)
-      Write(fh, damback[k], EstrLen(damback[k]))
-      Write(fh, nl, 1)
-      Write(fh, damname[k], EstrLen(damname[k]))
-      Write(fh, nl, 1)
+      passraw(fh, damdev[k], EstrLen(damdev[k]))
+      passraw(fh, damfile[k], EstrLen(damfile[k]))
+      passraw(fh, damback[k], EstrLen(damback[k]))
+      passraw(fh, damname[k], EstrLen(damname[k]))
     ENDIF
   ENDFOR
-  Close(fh)
+  safeclose(fh, 'PROGDIR:cfile.mounts', tmp, swap, wlbad = FALSE, TRUE)
 ENDPROC
 
 PROC damload()
@@ -1467,10 +1501,17 @@ PROC damfinddev(path:PTR TO CHAR, dev)
         j++
       ENDWHILE
       IF ok
-        -> the device: the row's leading "DAn" + ":"
+        -> the device: the row's leading "DA" + its unit digits + ":"
+        -> (b52: every digit - "DA\c" took one, so DA10: became DA1:)
         IF (buf[ls] = "D") AND (buf[ls + 1] = "A")
-          StrCopy(dev, '')
-          StringF(dev, 'DA\c:', buf[ls + 2])
+          StrCopy(dev, 'DA')
+          j := ls + 2
+          WHILE (j < (ls + l)) AND (buf[j] >= "0") AND (buf[j] <= "9")
+            StrAdd(dev, buf + j, 1)
+            j++
+          ENDWHILE
+          StrAdd(dev, ':')
+          IF EstrLen(dev) < 4 THEN ok := FALSE
         ELSE
           ok := FALSE
         ENDIF
@@ -1486,17 +1527,27 @@ ENDPROC ok
 -> a DAn: path and the next start would beg "insert DA3: in any
 -> drive" for a volume that no longer exists (his find, 30.7.26).
 PROC daunmountall()
-  DEF k, p
+  DEF k, p, dev[16]:STRING
   FOR p := 0 TO 1
     k := damunder(p)
     IF k >= 0 THEN StrCopy(ppath[p], damback[k])
   ENDFOR
   FOR k := 0 TO DAMAX - 1
     IF EstrLen(damdev[k]) > 0
-      IF daeject(damdev[k])
+      -> b52: the unit must still hold OUR image - an entry carried over
+      -> from an earlier session may name a unit the user has since
+      -> filled with a disk of their own, and that one is not ours to
+      -> eject. Not mounted any more: just forget it.
+      IF damfinddev(damfile[k], dev)
+        IF nccmp(dev, damdev[k]) <> 0 THEN StrCopy(damdev[k], dev)
+        IF daeject(damdev[k])
+          SetStr(damdev[k], 0)
+        ENDIF    -> a failed eject KEEPS its entry: cfile.mounts hands
+                 -> it to the next session instead of orphaning the unit
+      ELSE
         SetStr(damdev[k], 0)
-      ENDIF    -> a failed eject KEEPS its entry: cfile.mounts hands
-    ENDIF      -> it to the next session instead of orphaning the unit
+      ENDIF
+    ENDIF
   ENDFOR
   damsync()
 ENDPROC
@@ -1602,7 +1653,7 @@ ENDPROC
 -> machine no longer exists.
 PROC docreateadf(p, dpath, tname)
   DEF lbl[110]:STRING, cmd[CPATHLEN+140]:STRING, res=-1, n=0,
-      dev[20]:STRING
+      dev[20]:STRING, k
   IF dacheck() = FALSE THEN RETURN
   IF pathtype(dpath) > 0
     showmsg('that name already exists')
@@ -1636,7 +1687,18 @@ PROC docreateadf(p, dpath, tname)
     faultmsg('could not create the image')
     RETURN
   ENDIF
-  daeject(dev)    -> neutral state: created, formatted, let go of
+  -> neutral state: created, formatted, let go of. b52: an eject that
+  -> fails is recorded like any mount, so quit (or the next session)
+  -> lets go of it - it used to be left mounted and in no table.
+  IF daeject(dev) = FALSE
+    IF (k := damfree()) >= 0
+      StrCopy(damdev[k], dev)
+      StrCopy(damfile[k], dpath)
+      StrCopy(damback[k], ppath[p])
+      StrCopy(damname[k], tname)
+      damsync()
+    ENDIF
+  ENDIF
   StrCopy(prevname, tname)
   refreshpane(p, TRUE)
   showmsg('image created - Enter mounts it')
@@ -1760,7 +1822,10 @@ ENDPROC
 PROC addentry(p, name, isdir, size, date)
   DEF i
   i := ecount[p]
-  IF i >= MAXENT THEN RETURN
+  IF i >= MAXENT
+    etrunc[p] := TRUE    -> b52: the border says so (it was silent)
+    RETURN
+  ENDIF
   IF i >= ealloc[p]
     IF (enames[(p * MAXENT) + i] := String(108)) = NIL THEN Raise("MEM")
     ealloc[p] := i + 1
@@ -2082,8 +2147,11 @@ ENDPROC
 PROC runcapture(dir, cmd, outfile)
   DEF dlock=NIL, old=NIL, res=-1, fout=NIL, fin=NIL
   IF dir
-    dlock := Lock(dir, SHARED_LOCK)
-    IF dlock THEN old := CurrentDir(dlock)
+    -> b52: a folder that will not lock means the command does not run -
+    -> it used to run in CFile's own directory instead (an extract
+    -> landing in the wrong place, an add picking up the wrong files)
+    IF (dlock := Lock(dir, SHARED_LOCK)) = NIL THEN RETURN -1
+    old := CurrentDir(dlock)
   ENDIF
   fin := Open('NIL:', OLDFILE)
   fout := Open(outfile, NEWFILE)
@@ -2728,6 +2796,7 @@ ENDPROC
 
 PROC readpane(p)
   pfreeok[p] := FALSE    -> free space may have changed; re-ask Info()
+  etrunc[p] := FALSE
   IF inarchive(p)
     readarcdir(p)
   ELSEIF iniso(p)
@@ -2745,7 +2814,7 @@ ENDPROC
 -> anything missing or proportional falls back to ROM Topaz/8
 PROC openfont()
   DEF l, i, sl=-1, sz, t[12]:STRING, s:PTR TO CHAR
-  NEW ta
+  IF ta = NIL THEN NEW ta    -> b52: one textattr, reused (it leaked per change)
   ta.style := 0
   ta.flags := 0
   IF EstrLen(cfgfont) > 0
@@ -2993,8 +3062,9 @@ PROC openui()
   nrows := winh / ch
   IF nrows > 120 THEN nrows := 120
   IF (ncols < 80) OR (nrows < 18)
-    -> the frame cannot fit at this size: retreat to Topaz/8
-    IF StrCmp(fullfont, 'topaz.font') = FALSE
+    -> the frame cannot fit at this size: retreat to Topaz/8 (b52: also
+    -> from a big Topaz - topaz/11 used to skip the retreat)
+    IF (StrCmp(fullfont, 'topaz.font') = FALSE) OR (ta.ysize <> 8)
       CloseFont(tf)
       tf := NIL
       StrCopy(cfgfont, '')
@@ -3004,6 +3074,11 @@ PROC openui()
       IF ncols > 200 THEN ncols := 200
       nrows := winh / ch
       IF nrows > 120 THEN nrows := 120
+    ENDIF
+    -> b52: still too small even in Topaz/8 - the frame art would be
+    -> drawn outside its buffers, so stop here with a clear word
+    IF (ncols < 80) OR (nrows < 18)
+      Throw("UI", 'the screen is too small - CFile needs 80x18 characters')
     ENDIF
   ENDIF
   x0 := (winw - Mul(ncols, cw)) / 2
@@ -3060,9 +3135,14 @@ PROC applyfont()
   panewr := ncols - divcol - 3
   bordy   := top + (5 * ch)
   panetop := top + (6 * ch)
+  -> b52: NIL each pointer as it goes - a Raise inside composeframes
+  -> used to leave them pointing at freed memory for the cleanup
   IF framebuf THEN Dispose(framebuf)
+  framebuf := NIL
   IF viewbuf THEN Dispose(viewbuf)
+  viewbuf := NIL
   IF promptbuf THEN Dispose(promptbuf)
+  promptbuf := NIL
   composeframes()
   IF cmodel    -> the scrollback's row width changed with the grid
     Dispose(cmodel)
@@ -3110,13 +3190,22 @@ PROC setansipal()
 ENDPROC
 
 PROC closeui()
+  DEF k
   IF win
     CloseWindow(win)
     win := NIL
   ENDIF
   IF scr
     IF ownscr
-      CloseScreen(scr)
+      -> b52: private first, so no new visitor can arrive, then wait a
+      -> little for one still open (a console a command opened here) -
+      -> CloseScreen fails while any window is on it
+      PubScreenStatus(scr, PSNF_PRIVATE)
+      k := 0
+      WHILE (CloseScreen(scr) = FALSE) AND (k < 50)
+        Delay(10)
+        k++
+      ENDWHILE
     ELSE
       UnlockPubScreen(NIL, scr)
     ENDIF
@@ -3261,6 +3350,12 @@ PROC panefield(p, dst)
   -> free space to show inside one); the edits commit on leaving it
   IF arcdirty(p)
     StrCopy(dst, 'modified')
+    RETURN
+  ENDIF
+  -> b52: a folder with more entries than a pane holds shows only the
+  -> first MAXENT - say so instead of the free space
+  IF etrunc[p]
+    StrCopy(dst, 'first 500')
     RETURN
   ENDIF
   IF (fb := freebytes(p)) >= 0
@@ -4589,6 +4684,12 @@ PROC copytree(src, dst, depth)
     showmsg('directory tree too deep')
     RETURN FALSE
   ENDIF
+  -> b52: the source must be readable BEFORE the target is made - a
+  -> failed copy used to leave an empty folder behind
+  IF pathtype(src) <> 2
+    faultmsg('cannot read the source')
+    RETURN FALSE
+  ENDIF
   lk := CreateDir(dst)
   IF lk
     UnLock(lk)
@@ -4808,13 +4909,21 @@ ENDPROC ok
 -> (transfers: the user already chose overwrite/move, DOpus's
 -> unprotect=1 cases).
 PROC zap(path, ask)
-  DEF err, k, pm[130]:STRING
+  DEF err, k, pm[130]:STRING, prot=-1, lock, fib:PTR TO fileinfoblock
   IF DeleteFile(path) THEN RETURN TRUE
   err := IoErr()
   IF err = ERROR_OBJECT_NOT_FOUND THEN RETURN TRUE
-  IF err = ERROR_DIRECTORY_NOT_EMPTY THEN RETURN FALSE  -> no bit fixes that
-  IF err = ERROR_OBJECT_IN_USE THEN RETURN FALSE  -> and no unprotect prompt
-                                                 -> for a file something holds
+  -> b52: only the d bit can be fixed here. A write-protected disk, a
+  -> file in use, a full directory - no prompt, no bit fiddling.
+  IF err <> ERROR_DELETE_PROTECTED THEN RETURN FALSE
+  IF (fib := AllocDosObject(DOS_FIB, NIL))
+    IF (lock := Lock(path, SHARED_LOCK))
+      IF Examine(lock, fib) THEN prot := fib.protection
+      UnLock(lock)
+    ENDIF
+    FreeDosObject(DOS_FIB, fib)
+  ENDIF
+  IF prot = -1 THEN RETURN FALSE
   IF ask
     IF unprotall = FALSE
       StringF(pm, '"\s" is protected - unprotect? (y)es (n)o (a)ll',
@@ -4830,8 +4939,11 @@ PROC zap(path, ask)
       ENDIF
     ENDIF
   ENDIF
-  SetProtection(path, 0)    -> whatever bit is in the way, clear the lot
+  -> clear just the d bit; if the delete still fails, put every bit back
+  -> (the old SetProtection(path, 0) wiped s/p/a/h for good)
+  SetProtection(path, prot AND Eor(FIBF_DELETE, -1))
   IF DeleteFile(path) THEN RETURN TRUE
+  SetProtection(path, prot)
 ENDPROC FALSE
 
 -> guards shared by every operation on the current selection; returns
@@ -7225,7 +7337,7 @@ PROC ttlocate(b:PTR TO CHAR, size, res:PTR TO LONG)
   IF rdlong(b, 50)                         -> default tool string
     IF (off + 4) > size THEN RETURN FALSE
     l := rdlong(b, off)
-    IF (l < 0) OR ((off + 4 + l) > size) THEN RETURN FALSE
+    IF (l < 0) OR (l > (size - off - 4)) THEN RETURN FALSE    -> b52: no wrap
     off := off + 4 + l
   ENDIF
   res[0] := off
@@ -7238,7 +7350,7 @@ PROC ttlocate(b:PTR TO CHAR, size, res:PTR TO LONG)
     FOR j := 1 TO nent
       IF (off + 4) > size THEN RETURN FALSE
       l := rdlong(b, off)
-      IF (l < 0) OR ((off + 4 + l) > size) THEN RETURN FALSE
+      IF (l < 0) OR (l > (size - off - 4)) THEN RETURN FALSE    -> b52: no wrap
       off := off + 4 + l
     ENDFOR
   ENDIF
@@ -7777,23 +7889,25 @@ PROC hexrow(buf, len, off, rb)
   r := rb
   s := buf
   hx := '0123456789abcdef'
-  FOR i := 0 TO 5    -> six hex digits of offset
-    r[i] := hx[Shr(off, (5 - i) * 4) AND $F]
+  -> b52: eight hex digits - the viewer streams files of any size now,
+  -> and six wrapped back to 000000 at 16MB
+  FOR i := 0 TO 7
+    r[i] := hx[Shr(off, (7 - i) * 4) AND $F]
   ENDFOR
-  r[6] := ":"
+  r[8] := ":"
   n := len - off
   IF n > 16 THEN n := 16
   FOR i := 0 TO 15
     IF i < n
       c := s[off + i]
-      r[8 + (i * 3)] := hx[Shr(c, 4)]
-      r[9 + (i * 3)] := hx[c AND $F]
+      r[10 + (i * 3)] := hx[Shr(c, 4)]
+      r[11 + (i * 3)] := hx[c AND $F]
     ENDIF
-    IF i < 16 THEN r[10 + (i * 3)] := 32
+    IF i < 16 THEN r[12 + (i * 3)] := 32
   ENDFOR
   FOR i := 0 TO n - 1
     c := s[off + i]
-    r[58 + i] := IF ((c >= 32) AND (c <= 126)) OR (c >= 160) THEN c ELSE "."
+    r[HEXASC + i] := IF ((c >= 32) AND (c <= 126)) OR (c >= 160) THEN c ELSE "."
   ENDFOR
 ENDPROC
 
@@ -8042,7 +8156,7 @@ PROC viewrow(buf, len, off, mode, r)
       hexrow(buf, len, off, rb)
       n := len - off
       IF n > 16 THEN n := 16
-      w := 58 + n
+      w := HEXASC + n
       IF w > ncols THEN w := ncols
     ELSE
       off := textrow(buf, len, off, rb, {w})
@@ -8497,8 +8611,19 @@ ENDPROC
 -> then drop the temp. Read-only: an 'e' in the viewer does nothing.
 PROC arcviewsel(p, sel)
   DEF nm:PTR TO CHAR, member[CPATHLEN]:STRING, cmd[CMDMAX]:STRING,
-      out[CPATHLEN]:STRING, res, ty
+      out[CPATHLEN]:STRING, res, ty, vdir[40]:STRING, mb[80]:STRING,
+      fb[12]:STRING
   nm := enames[(p * MAXENT) + sel]
+  -> b52: the member goes through T: - normally RAM. One bigger than
+  -> the free memory would fill it and fail half way: say so first.
+  IF esize[(p * MAXENT) + sel] > (AvailMem(0) - 262144)
+    fmtbytes(fb, esize[(p * MAXENT) + sel])
+    StringF(mb, 'too big to view from the archive (\s) - copy it out', fb)
+    showmsg(mb)
+    RETURN
+  ENDIF
+  StrCopy(vdir, tvs)
+  SetStr(vdir, EstrLen(vdir) - 1)    -> T:CFile-v<task>, no slash
   StrCopy(member, arcsub[p])
   IF EstrLen(member) > 0 THEN StrAdd(member, '/')
   StrAdd(member, nm)
@@ -8517,6 +8642,7 @@ PROC arcviewsel(p, sel)
   res := runcapture(NIL, cmd, tout)
   DeleteFile(tout)
   IF (res = -1) OR (pathtype(out) <> 1)
+    arcwipe(vdir)
     showmsg('could not extract that file')
     RETURN
   ENDIF
@@ -8527,14 +8653,14 @@ PROC arcviewsel(p, sel)
     IF viewfile(out, nm, 0, FALSE) = 1
       -> 'e' in the viewer: edit this member in place (arcedit works on
       -> the same selection, re-extracting into its own scratch)
-      DeleteFile(out)
+      arcwipe(vdir)
       arcedit(p)
       RETURN
     ENDIF
   ELSE
     viewfile(out, nm, 1, FALSE)
   ENDIF
-  DeleteFile(out)
+  arcwipe(vdir)    -> b52: the subfolders went too (they were left in T:)
 ENDPROC
 
 -> ---- the datatypes picture viewer (probe rounds 1-6, 30.7.26) ----
@@ -8928,6 +9054,7 @@ PROC dtviewpic(path, name, tour)
   ENDIF
   DisposeDTObject(o)
   CloseScreen(scr)
+  IF win THEN ActivateWindow(win)    -> b52: the keys come back to CFile
   drawall()
 ENDPROC r
 
@@ -8946,8 +9073,9 @@ PROC isoviewsel(p, sel)
     StrCopy(out, tvs)
     StrAdd(out, nm)
   ELSE
-    StrCopy(out, isopath[p])
-    StrAdd(out, '.vtmp')
+    -> b52: a scratch name of our own beside the image - "<image>.vtmp"
+    -> could be a user's file, and it was deleted unasked
+    sidename(out, isopath[p], "v")
   ENDIF
   makepath(out)
   DeleteFile(out)
@@ -9167,9 +9295,14 @@ PROC edgrow(idx, need)
   mx := StrMax(cur)
   IF mx >= need THEN RETURN TRUE
   IF mx < EDLINIT THEN mx := EDLINIT
+  -> b52: String() refuses 32767 bytes and up (vamos-proven), so the
+  -> doubling 30720 -> 61440 failed and a long line read as "out of
+  -> memory". Lines are capped at EDLMAX, and the loader says so.
+  IF need > EDLMAX THEN RETURN FALSE
   REPEAT
     mx := mx + mx
   UNTIL mx >= need
+  IF mx > EDLMAX THEN mx := EDLMAX
   IF (ns := String(mx)) = NIL THEN RETURN FALSE
   StrCopy(ns, cur)
   DisposeLink(cur)
@@ -9266,7 +9399,10 @@ PROC edload(path)
         ENDIF
         k := k + 1
       ENDWHILE
-      IF edgrow(ednum - 1, col) = FALSE
+      IF col > EDLMAX
+        showmsg('a line is too long for the editor (32000+ characters)')
+        ok := FALSE
+      ELSEIF edgrow(ednum - 1, col) = FALSE
         showmsg('not enough memory')
         ok := FALSE
       ELSE
@@ -9956,6 +10092,10 @@ PROC confeed(buf, n)
         ccol := 0
         i := i + 1
       ELSEIF c = 9
+        -> b52: a full row wraps FIRST - the old loop wrote m[ccol] and
+        -> only then tested the column, so a tab at ncols (a CSI C, a
+        -> full line) wrote past the row; the wrap tested 80, not ncols
+        IF ccol >= ncols THEN cmnl({pend})
         m := cmodel + Mul(cmrow, ncols)
         REPEAT
           m[ccol] := 32
@@ -9963,7 +10103,6 @@ PROC confeed(buf, n)
         UNTIL ((ccol AND 7) = 0) OR (ccol >= ncols)    -> X2: no DIVS
         IF cmrow < dlo THEN dlo := cmrow
         IF cmrow > dhi THEN dhi := cmrow
-        IF ccol >= 80 THEN cmnl({pend})
         i := i + 1
       ELSEIF c >= 32
         j := i
@@ -10066,6 +10205,7 @@ PROC confeeddirect(buf, n)
       ccol := 0
       i := i + 1
     ELSEIF c = 9
+      IF ccol >= ncols THEN connl()    -> b52: wrap first, as above
       REPEAT
         Move(rp, x0 + (ccol * cw), panetop + (crow * ch) + baseline)
         Text(rp, ' ', 1)
@@ -10075,7 +10215,6 @@ PROC confeeddirect(buf, n)
         ENDIF
         ccol := ccol + 1
       UNTIL ((ccol AND 7) = 0) OR (ccol >= ncols)    -> X2: no DIVS
-      IF ccol >= 80 THEN connl()
       i := i + 1
     ELSEIF c >= 32
       j := i
@@ -11578,12 +11717,22 @@ PROC sizedir()
     ENDIF
   ELSE
     buildfull(path, ppath[p], enames[i])
-    showmsg('measuring - please wait')
+    showmsg('measuring - Esc stops')
     statbytes := 0
     statfiles := 0
+    -> b52: Esc stops a measure (treestat checks it, but only while a
+    -> cancellable op runs - a whole drive used to freeze CFile)
+    cancelok := TRUE
+    abort := FALSE
     treestat(path, 0)
-    esize[i] := statbytes
+    cancelok := FALSE
     clearmsg()    -> restores the paths row
+    IF abort
+      abort := FALSE
+      showmsg('measuring stopped')
+      RETURN
+    ENDIF
+    esize[i] := statbytes
   ENDIF
   drawrow(p, esel[p] - etop[p])
   drawpaths()    -> a marked measured dir now weighs into the border total
@@ -11772,7 +11921,11 @@ PROC dorename()
                 StrCopy(itname, tname)
                 StrAdd(itname, '.info')
                 buildfull(idst, ppath[p], itname)
-                Rename(isrc, idst)
+                -> b52: an icon already under the new name stays, and
+                -> the user hears that the old one did not follow
+                IF Rename(isrc, idst) = FALSE
+                  showmsg('renamed - but its icon could not follow')
+                ENDIF
               ENDIF
             ENDIF
           ELSE
@@ -11842,6 +11995,10 @@ PROC arcnewdefer(p, name, member, wantdir)
   IF slot >= 0
     st := amst[p]
     st[slot] := MST_ADD
+  ELSE
+    -> b52: still staged and still written at commit - but the pane
+    -> cannot list it, and the user should not wonder where it went
+    showmsg('added - but the archive listing is full, so it is not shown')
   ENDIF
   StrCopy(prevname, name)
   refreshsel(p)    -> R5: one draw, cursor pre-placed

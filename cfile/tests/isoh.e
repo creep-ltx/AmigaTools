@@ -113,6 +113,9 @@ PROC isodnext(s:PTR TO isoscan)
     ELSEIF (s.pos + len) > s.avail
       s.err := TRUE       -> record claims to straddle: broken image
       RETURN FALSE
+    ELSEIF (len < 34) OR ((33 + b[32]) > len)
+      s.err := TRUE
+      RETURN FALSE
     ELSE
       s.pos := s.pos + len
       il := b[32]
