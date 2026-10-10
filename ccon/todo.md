@@ -10,6 +10,20 @@ ROM option table). The renderer, the 4000-line scrollback model,
 the line editor and the scroll keys were already built and
 boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
 
+## OPEN BUG - found from CTerm (10.10.26), not fixed here yet
+
+**ACTION_CHANGE_SIGNAL's arg2 is a MESSAGE PORT, not a task.**
+`ccon-handler.e` (CASE ACTION_CHANGE_SIGNAL) stores `pkt.arg2` as
+`curcon.breaktask` and later Signal()s it. On OS 3.2.3 (A1200 and FS-UAE)
+every arg2 the Shell sent was exactly 0x5C past a process (sizeof(struct
+Task)): the process's `pr_MsgPort`. Signal() on a port ORs the break bit
+into its message list (`tc_SigRecvd` lies over `lh_TailPred`) and Exec may
+even try to wake it as a task. In CTerm's handler this made a Shell stop
+answering after a command and Ctrl-C. **Fix:** if arg2's `ln_Type` is
+NT_MSGPORT, keep `mp_SigTask` as the break task (NT_TASK/NT_PROCESS: the
+task itself). CTerm's fix: `src/console.c` (CHANGE_SIGNAL). Details and
+proof: Knowledge/amiga/amigados-handlers.md (the CHANGE_SIGNAL row).
+
 ## Verified facts (16.7.26, before any handler code)
 
 - **E binaries can be handlers — the wbmessage trick, proven by
