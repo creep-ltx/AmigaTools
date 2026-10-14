@@ -31,7 +31,8 @@ console (FXCONSIZE 4224; engine.bin rebuilt, byte-identical). Verified in FS-UAE
 3.2: csh (CShell 0.1b7) in a CCON: window, `Wait 30 | cat` and Ctrl-C - 1.3.0
 ignored the Ctrl-C (the pipe ran its 30 s), 1.3.1b1 broke both stages at once
 and a plain `Wait 30` after it broke too. ROM Shell Ctrl-C and `Execute` of a
-script worked in both.
+script worked in both. **Installed on the A1200 14.10.26** (L:ccon-handler-1.3.0
+kept), rebooted; the same csh pipe test broke at once there too.
 
 ## Verified facts (16.7.26, before any handler code)
 
