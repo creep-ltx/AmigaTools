@@ -142,7 +142,7 @@ CONST MARGIN=0,        -> v1.1b43: was 4 - stock CON: has no inset at
                         -> clamped to 255 (gridcalc), rows is not - a
                         -> window taller than DFROWS rows just runs the
                         -> legacy immediate path (dfstart declines)
-      FXCONSIZE=4220,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
+      FXCONSIZE=4224,   -> 1.2.8b9: SIZEOF console as engine/con.h has it
       WOBSZ=16384,      -> S5 write-behind buffer, bytes per console.
                         -> (1.2.8b9: 4096 -> 16384, so a paced flush
                         -> can pool several screens of a burst)
@@ -546,6 +546,9 @@ OBJECT console
   oldtab[8]:ARRAY OF LONG       -> 1.3.0b18 (Audit8 J23): anstab as it was
                                 -> when the window closed - reopenwin
                                 -> re-translates the cells that used it
+  breakarg                      -> 1.3.1b1: CHANGE_SIGNAL's last arg2 (a
+                                -> port), its res2; at the end so the C
+                                -> engine's offsets stay where they were
 ENDOBJECT
 
 DEF p96base=NIL,                -> 1.2.8b8: Picasso96API.library
@@ -1823,7 +1826,7 @@ ENDPROC
 -> (conbysender). curcon is set at exactly these boundaries.
 PROC dopkt(pkt:PTR TO dospacket)
   DEF len, old, id:PTR TO infodata, zp:PTR TO LONG, i, sender:PTR TO mp,
-      c:PTR TO console
+      c:PTR TO console, bn:PTR TO ln, bp:PTR TO mp
   -> 1.2.8b9: the common write, accepted by the C engine (wacc in
   -> engine.c: the conditions under which dowrite's accept is a pure
   -> copy-and-reply); anything else takes the E path below, unchanged
@@ -1987,9 +1990,24 @@ PROC dopkt(pkt:PTR TO dospacket)
       RETURN
     ENDIF
     curcon := c
-    -> arg2 = Task to signal on Ctrl+C..F (0 = just query); res2 = old
-    old := curcon.breaktask
-    IF pkt.arg2 THEN curcon.breaktask := pkt.arg2
+    -> arg2 = the MESSAGE PORT whose task gets Ctrl+C..F (0 = just
+    -> query); res2 = the old arg2. 1.3.1b1: it is a port, not a task -
+    -> on 3.2.3 every arg2 the Shell sent was the process's pr_MsgPort,
+    -> 0x5C past the process (found from CTerm, 10.10.26). Signal() on
+    -> a port ORs the break bit into its message list, and the console
+    -> lookup by task (conbysender) never matched. Take the port's
+    -> sigtask; a task or process given directly is kept as it is.
+    old := IF curcon.breakarg THEN curcon.breakarg ELSE curcon.breaktask
+    IF pkt.arg2
+      bn := pkt.arg2
+      IF bn.type = NT_MSGPORT
+        bp := pkt.arg2
+        IF (bp.flags AND PF_ACTION) = PA_SIGNAL THEN curcon.breaktask := bp.sigtask
+      ELSEIF (bn.type = NT_TASK) OR (bn.type = NT_PROCESS)
+        curcon.breaktask := pkt.arg2
+      ENDIF
+      curcon.breakarg := pkt.arg2
+    ENDIF
     ReplyPkt(pkt, DOSTRUE, old)
   CASE ACTION_DISK_INFO
     c := conbysender(pkt, FALSE)  -> B6: no list-head guess
@@ -12811,6 +12829,6 @@ PROC satisfyreads()
   ENDWHILE
 ENDPROC
 
-vers: CHAR '$VER: ccon-handler 1.3.0 (7.10.26) CCON: LTX console handler', 0
+vers: CHAR '$VER: ccon-handler 1.3.1b1 (14.10.26) CCON: LTX console handler', 0
 engine:
   INCBIN 'engine/engine.bin'

@@ -11,6 +11,20 @@ Dates are release/build dates. 1.0, 1.1, 1.2, 1.2.1, 1.2.2, 1.2.3,
 
 ---
 
+## [1.3.1b1] — 2026-10-14 (beta)
+
+### Fixed
+- **Ctrl+C reaches the program it should after `ACTION_CHANGE_SIGNAL`.**
+  The packet names a message port (on 3.2 the process's `pr_MsgPort`),
+  and CCON stored it as a task and signalled it: the break went nowhere
+  (into the port's message list) and could disturb that process. A shell
+  that hands Ctrl+C to a helper - csh while a pipe runs - could not be
+  stopped. CCON now takes the port's task (a task given directly still
+  works) and answers with the port given before. Found from CTerm,
+  which had the same bug.
+
+---
+
 ## [1.3.0] — 2026-10-07 (tag `ccon-1.3.0`; Aminet util/shell/ltx-ccon.lha)
 
 Its betas ran as 1.2.8b1 to 1.2.8b17 before the release was renamed

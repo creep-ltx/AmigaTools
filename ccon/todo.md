@@ -10,7 +10,7 @@ ROM option table). The renderer, the 4000-line scrollback model,
 the line editor and the scroll keys were already built and
 boot-tested in CTerm 0.1 (commit 71e29b1) — they transplant in.
 
-## OPEN BUG - found from CTerm (10.10.26), not fixed here yet
+## FIXED in 1.3.1b1 (14.10.26) - found from CTerm (10.10.26)
 
 **ACTION_CHANGE_SIGNAL's arg2 is a MESSAGE PORT, not a task.**
 `ccon-handler.e` (CASE ACTION_CHANGE_SIGNAL) stores `pkt.arg2` as
@@ -23,6 +23,15 @@ answering after a command and Ctrl-C. **Fix:** if arg2's `ln_Type` is
 NT_MSGPORT, keep `mp_SigTask` as the break task (NT_TASK/NT_PROCESS: the
 task itself). CTerm's fix: `src/console.c` (CHANGE_SIGNAL). Details and
 proof: Knowledge/amiga/amigados-handlers.md (the CHANGE_SIGNAL row).
+
+**Fixed 14.10.26, 1.3.1b1:** CHANGE_SIGNAL takes a port's `mp_SigTask` (PA_SIGNAL
+ports only), a task or process as itself; res2 is the arg2 given before (the
+break task until one was given). New field `breakarg` at the END of OBJECT
+console (FXCONSIZE 4224; engine.bin rebuilt, byte-identical). Verified in FS-UAE
+3.2: csh (CShell 0.1b7) in a CCON: window, `Wait 30 | cat` and Ctrl-C - 1.3.0
+ignored the Ctrl-C (the pipe ran its 30 s), 1.3.1b1 broke both stages at once
+and a plain `Wait 30` after it broke too. ROM Shell Ctrl-C and `Execute` of a
+script worked in both.
 
 ## Verified facts (16.7.26, before any handler code)
 

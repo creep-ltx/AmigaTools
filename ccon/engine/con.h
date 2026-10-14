@@ -214,4 +214,5 @@ struct con {
   LONG ppace; /* 4180 */
   LONG drishine; /* 4184 */
   LONG oldtab[8]; /* 4188 */
-}; /* size 4220 */
+  LONG breakarg; /* 4220 */
+}; /* size 4224 */
