@@ -14,7 +14,7 @@ A collection of small tools for AmigaOS.
 | [cmenu](cmenu/) | Full-screen text boot menu — runs before the Startup-Sequence and launches the chosen script or executable. Default item with countdown, rotating ANSI art headers or full-screen backgrounds, LIGHT/DARK/ANSI colour styles, ProTracker chip music while the menu is up, and a built-in config screen that edits everything in place. |
 | [conbench](conbench/) | Console speed benchmark — fifteen workloads (line output, block writes, colour runs, full-screen repaints, insert/delete blits) timed from the client side of the packet interface, with a SYNC barrier mode, a per-line `sync-line` test that exposes write-behind deferral, and a window-size probe that warns when the geometry would skew the comparison. |
 | [cterm](cterm/) | Terminal — a real AmigaDOS shell in a full-screen art-framed screen: a borderless window handed to the console handler of your choice (`CON:`, `CCON:`, `KCON:`, …) via the `WINDOW` option, plus a `FROM` startup script for aliases. Shell, line editing, raw mode, More and Ed are all the OS's own. Named CShell before 0.3. |
-| [cutils](cutils/) | **CUtils** — Unix-style file commands as one family: `ls`, `cp`, `mv`, `mkdir`, `rm`. Bundled `-la`-style flags, per-command AmigaDOS pattern matching, non-destructive by default (skips listed, `-f` to mean it, volume roots refused), metadata carried like `Copy CLONE`, trees walked with work lists and deleted deepest-first. One binary each for `C:`, per-command `.doc` references, separate versions per command. |
+| [cutils](https://github.com/creep-ltx/cutils) | **CUtils** — *moved to its own repository, [creep-ltx/cutils](https://github.com/creep-ltx/cutils)*: Unix-style commands (`ls cp mv rm mkdir cat grep head tail wc find`...), now in C. The Amiga E versions and their history went along. |
 | [dupfind](dupfind/) | Recursively scan a directory for duplicate files, with fast header-based, hash-confirmed checksum, or exact full-byte comparison modes. |
 
 Each tool lives in its own subdirectory with its own README covering
@@ -45,6 +45,4 @@ test harness on the host *and* under vamos before anything is deployed:
 cd cdiff && make test && make
 ```
 
-(`cutils/mkdir.c` is also C — a function-for-function twin of `mkdir.e`
-written to compare the two languages side by side. The shipped `cutils`
-binaries are the E ones.)
+
