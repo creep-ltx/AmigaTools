@@ -1,0 +1,148 @@
+; $VER: Install-CUtils 0.1 (28.7.26)
+;
+; Installer script for the ltx-cutils pack.
+;
+; Compares each tool in the archive's C drawer against the copy in C:
+; and reports, per tool, whether it is missing, stale, current, or
+; newer than the archive. Only missing/stale tools are copied.
+;
+; Comparison strategy: checksums decide WHETHER the installed copy
+; differs from the archive build; $VER only decides WHICH WAY.
+; (AmigaOS version strings are ver.rev - getversion reads "0.3" of
+; "0.3.4" and stops, so 0.3.4 vs 0.3.3 look identical to it. The
+; checksum has no such blind spot.)
+
+(welcome "This installer checks the CUtils in C: against this "
+         "archive and updates only what is missing or out of date.")
+
+(set @default-dest "C:")
+
+(set #report    "")
+(set #n-install 0)      ; missing from C:
+(set #n-update  0)      ; present but stale
+(set #n-newer   0)      ; C: copy newer than archive - left alone
+
+; ---- P_VSTR: format version #v into #vstr ------------------------
+(procedure P_VSTR
+  (if (= #v 0)
+    (set #vstr "no version")
+    (set #vstr ("%ld.%ld" (/ #v 65536) (BITAND #v 65535)))
+  )
+)
+
+; ---- P_CLASSIFY: examine tool #name ------------------------------
+; out: #src, #verdict, #action (1 = copy), #missing, #newer
+(procedure P_CLASSIFY
+  (set #src (tackon "C" #name))
+  (set #dst (tackon "C:" #name))
+  (set #action 0)
+  (set #missing 0)
+  (set #newer 0)
+  (if (= (exists #dst (noreq)) 0)
+    (
+      (set #verdict "not installed -> will install")
+      (set #action 1)
+      (set #missing 1)
+    )
+    (if (= (getsum #src) (getsum #dst))
+      (set #verdict "up to date")
+      (
+        (set #sv (getversion #src))
+        (set #dv (getversion #dst))
+        (set #v #sv) (P_VSTR) (set #svstr #vstr)
+        (set #v #dv) (P_VSTR) (set #dvstr #vstr)
+        (if (> #sv #dv)
+          (
+            (set #verdict ("%s -> will update to %s" #dvstr #svstr))
+            (set #action 1)
+          )
+          (if (< #sv #dv)
+            (
+              (set #verdict ("%s is NEWER than the archive's %s -> left alone"
+                             #dvstr #svstr))
+              (set #newer 1)
+            )
+            ; same reported version, different build
+            (
+              (set #verdict ("%s but differs from this build -> will update"
+                             #dvstr))
+              (set #action 1)
+            )
+          )
+        )
+      )
+    )
+  )
+)
+
+; ---- pass 1: survey one tool, feed the report --------------------
+(procedure P_SURVEY
+  (P_CLASSIFY)
+  (set #report (cat #report ("%s: %s\n" #name #verdict)))
+  (if #missing (set #n-install (+ #n-install 1)) 0)
+  (if (AND #action (NOT #missing)) (set #n-update (+ #n-update 1)) 0)
+  (if #newer (set #n-newer (+ #n-newer 1)) 0)
+)
+
+; ---- pass 2: copy one tool if the survey flagged it --------------
+(procedure P_UPDATE
+  (P_CLASSIFY)
+  (if #action
+    (copyfiles (prompt ("Copying %s" #name))
+               (help @copyfiles-help)
+               (source #src)
+               (dest "C:"))
+    0
+  )
+)
+
+(set #name "ls")    (P_SURVEY)
+(complete 10)
+(set #name "cp")    (P_SURVEY)
+(complete 20)
+(set #name "mv")    (P_SURVEY)
+(complete 30)
+(set #name "mkdir") (P_SURVEY)
+(complete 40)
+(set #name "rm")    (P_SURVEY)
+(complete 50)
+
+(set #n-copy (+ #n-install #n-update))
+
+(message (cat "CUtils version check against C:\n\n"
+              #report
+              "\nTo install: " ("%ld" #n-install)
+              "   To update: " ("%ld" #n-update)
+              ; NB: format string must be ONE literal - with two literals
+              ; the second becomes the first %ld argument (prints a pointer)
+              (if (> #n-newer 0)
+                ("\n\n%ld tool(s) in C: are newer than this archive and will not be touched." #n-newer)
+                ""
+              )
+        )
+)
+
+(if (= #n-copy 0)
+  (message "Nothing to do - everything in C: is up to date.")
+  (if (askbool (prompt ("Copy the %ld flagged tool(s) to C: now?" #n-copy))
+               (help "Only tools reported as missing or out of date "
+                     "are copied. Tools that are up to date, or newer "
+                     "in C: than in this archive, are not touched.")
+               (default 1))
+    (
+      (set #name "ls")    (P_UPDATE)
+      (complete 60)
+      (set #name "cp")    (P_UPDATE)
+      (complete 70)
+      (set #name "mv")    (P_UPDATE)
+      (complete 80)
+      (set #name "mkdir") (P_UPDATE)
+      (complete 90)
+      (set #name "rm")    (P_UPDATE)
+    )
+    (message "No files were changed.")
+  )
+)
+
+(complete 100)
+(exit (quiet))
