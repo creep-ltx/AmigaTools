@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # live20.sh BUILD NAME - cold-start FS-UAE stock, BUILD as live L:ccon-handler, conbench REPS3 SCALE1 SYNC in a 77x30 CCON: window
-H="/home/creep/FS-UAE/Hard Drives/AmigaOS3.2"; export WASABI_HOST=127.0.0.1
+H="${UAE_HD:?set UAE_HD to the FS-UAE hard drive folder of the stock AmigaOS 3.2 machine}"; export WASABI_HOST=127.0.0.1
 pkill -x fs-uae; sleep 2
 cp "$1" "$H/L/ccon-handler"
 printf 'FailAt 30\nStack 20000\nC:conbench CCON TO SYS:T/cb-%s.txt REPS 3 SCALE %s SYNC\nEndCLI\n' $2 ${SCALE:-1} > "$H/S/x30"; rm -f "$H/T/cb-$2.txt"

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prof2.sh PROFBUILD [tests...] - cold-start FS-UAE stock, run cbone per test in XC1:, ccstat2 after each
 S=$(cd "$(dirname "$0")" && pwd)
-H="/home/creep/FS-UAE/Hard Drives/AmigaOS3.2"
+H="${UAE_HD:?set UAE_HD to the FS-UAE hard drive folder of the stock AmigaOS 3.2 machine}"
 B=$1; shift; T=${*:-plain block scroll sgr perchar sync eeol}
 export WASABI_HOST=127.0.0.1
 pkill -x fs-uae; sleep 2

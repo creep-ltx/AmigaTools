@@ -1,7 +1,7 @@
 # CFile — performance audit (post-0.4)
 
 A hunt for speed, run with the measured playbook from the CCON campaigns
-(`~/Projects/AmigaReferences/`): blit COUNT is the master metric
+(the knowledge base, amiga/): blit COUNT is the master metric
 (~34ms per ScrollRaster-class call on the target, regardless of rows
 moved; a full-row `Text` ~1.3ms; a full-window `RectFill` ~23ms),
 Text-ed spaces lose to `RectFill`, packet round trips dominate real

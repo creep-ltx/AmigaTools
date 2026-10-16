@@ -5,7 +5,8 @@
 CC      = /opt/amiga/bin/m68k-amigaos-gcc
 CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -I$(GUI)
 HOSTCC  = cc
-DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
+# deploy copies the binary into a folder an emulator mounts: make deploy DEPLOY=<folder>
+DEPLOY ?=
 # cedit b0: the shared GUI chassis, built from here rather than
 # copied - one fix, both tools
 GUI     = ../ltxgui
@@ -28,6 +29,7 @@ test-vamos: tests/difftest.c diff.c diff.h
 	vamos -q -s 64 tests/difftest
 
 deploy: cdiff
+	@test -n "$(DEPLOY)" || { echo "set DEPLOY: make deploy DEPLOY=<folder the emulator mounts>"; exit 1; }
 	cp cdiff "$(DEPLOY)/cdiff"
 
 clean:

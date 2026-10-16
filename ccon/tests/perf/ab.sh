@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ab.sh NAME1 BUILD1 NAME2 BUILD2 [rounds] - alternate full conbench runs on the stock A1200, print per-test table
 S=$(cd "$(dirname "$0")" && pwd)
-H="/home/creep/FS-UAE/Hard Drives/AmigaOS3.2"
+H="${UAE_HD:?set UAE_HD to the FS-UAE hard drive folder of the stock AmigaOS 3.2 machine}"
 R=${5:-2}
 for r in $(seq 1 $R); do
   $S/live30.sh $2 $1-$r >/dev/null 2>&1
@@ -9,8 +9,8 @@ for r in $(seq 1 $R); do
 done
 pkill -x fs-uae
 python3 - "$1" "$3" "$R" <<'PY'
-import sys,re
-H="/home/creep/FS-UAE/Hard Drives/AmigaOS3.2/T"
+import sys,re,os
+H=os.environ["UAE_HD"]+"/T"
 a,b,R=sys.argv[1],sys.argv[2],int(sys.argv[3])
 def load(n):
     d={}

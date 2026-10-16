@@ -4103,8 +4103,8 @@ Boot checklist (REBOOT FIRST):
 
 ## 1.2.6b1 — the REAL iconify gadget (25.7.26): the v1.2 dead end, undone
 
-Research session (full story: ~/Projects/AmigaReferences/
-intuition-iconify.md): the v1.2 "title-bar gadgets are UNHOOKABLE"
+Research session (full story: the knowledge base,
+amiga/intuition-iconify.md): the v1.2 "title-bar gadgets are UNHOOKABLE"
 verdict was wrong on both halves. (1) The V47.4+ standard gadget
 (WA_ICONIFYGADGET) reports its click as **IDCMP_CLOSEWINDOW with
 Code=1** (a true close is Code 0) — straight from the NDK3.2
@@ -4144,8 +4144,8 @@ Boot checklist (REBOOT FIRST):
 
 The amiga-news thread asked what colour the KingCON/3.1-CON cursor
 is ("vielleicht Fillpen?"). Disassembled console.device 46.1 again
-(fresh ROM split; full write-up: ~/Projects/AmigaReferences/
-graphics-and-performance.md): the stock cursor has NO colour — it is
+(fresh ROM split; full write-up: the knowledge base,
+amiga/graphics-and-performance.md): the stock cursor has NO colour — it is
 ONE RectFill in COMPLEMENT draw mode over the cell, rp_Mask forced
 to $FF for the fill, i.e. a bitwise invert of whatever pens are
 under it. Default 4-colour WB: pen-0 background -> pen 3 (the blue
@@ -4731,7 +4731,7 @@ bullets + the 1.2.6 HISTORY block; **root README.md** ccon row →
 1.2.6 with the new features named.
 
 NOT done (his call, the remaining ladder): tag ccon-1.2.6, GH
-release, .lha from his staging ~/Documents/Releases/CCon/ (+ his
+release, .lha from his release staging folder (+ his
 Aminet readme).
 
 ## 1.2.7b1 — per-shell history order (5.8.26): Timm's mail, answered with owner tags
@@ -5863,7 +5863,7 @@ window, REPS 3 SCALE 8 SYNC, all same boot, conbench driven via
   now 10.7x (JUMP8) / 12.1x (JUMP32) faster than stock overall
   under SYNC, and the last tied row (sync-line, the S5-era blit
   floor) is won 4.7-11x.
-Full numbers in ~/Projects/ccon-perf.md (J1 campaign section) and
+Full numbers in the ccon-perf.md notes (J1 campaign section) and
 S:cb-#?.txt on the machine.
 
 Still to do before 1.2.8 ships: his own eyes on the jump-scroll
@@ -6393,7 +6393,7 @@ Not done / next:
 ### b8, continued: planar / stock (4.10.26, FS-UAE A1200-Stock-net)
 
 His ruling: "Most Amigas don't have RTG. It should be fast on ALL
-Amigas." Rig: new config ~/FS-UAE/Configurations/A1200-Stock-net.fs-uae
+Amigas." Rig: new FS-UAE config A1200-Stock-net.fs-uae
 (A1200-Stock + bsdsocket_library = 1) with wasabid started from
 S:User-Startup only when bsdsocket.library exists (FailAt-guarded
 Version probe); wasabi --host 127.0.0.1 (WASABI_HOST). Also
@@ -6997,21 +6997,21 @@ shipped default stays the shine pen.
 
 $VER 1.3.0 (7.10.26), fxdiff 7200/0, syncheck clean. ccon.readme: the
 1.3.0 features and history entry (his voice to reword). Staged in
-~/Documents/Releases/CCon/CCon_v1.3.0/ on the 1.2.7 layout (icons
+the release staging folder (CCon_v1.3.0/) on the 1.2.7 layout (icons
 copied from 1.2.7); file_id.diz: only the title's version changed
 (1.2.7 copy at /tmp only); ltx-cc130.readme = 1.2.7's Aminet header
 (Short/Version bumped) + the new readme. ltx-cc130.lha built on the
 A1200 with C:lha (LhA 2.15) - Linux /usr/bin/lha is now Lhasa,
 list/extract only. Verified: extracts byte-identical to staging, all
-CRCs OK. Copies in ~/Documents/Amiga/Download/. Not done: the tag,
+CRCs OK. Copies in the Amiga download folder. Not done: the tag,
 the GH release, Aminet, README.md.
 Installed on his A1200 7.10.26: L:ccon-handler = 1.3.0 (the archive's
 own binary; b18 kept as L:ccon-handler-1.3.0b18), rebooted, a8test
 green. Archive + Aminet readme for his check on the NAS:
-/mnt/nas/home/Downloads/ccon-1.3.0/ (= NAS:Downloads/ccon-1.3.0 on the A1200).
+Downloads/ccon-1.3.0/ (= NAS:Downloads/ccon-1.3.0 on the A1200).
 Aminet pair (his rule): ltx-ccon.lha / ltx-ccon.readme = byte copies of
 ltx-cc130.*, next to them in Releases/CCon, NAS:Downloads/ccon-1.3.0 and
-~/Documents/Amiga/Download. ltx-cc130.* stays the local + GitHub name.
+the Amiga download folder. ltx-cc130.* stays the local + GitHub name.
 Uploaded to Aminet 8.10.26 (his go-ahead): ltx-ccon.lha (98790) +
 ltx-ccon.readme (18194) via anonymous FTP (curl -T) to main.aminet.net/new,
 226 both; both listed in /new. Replaces util/shell/ltx-ccon.lha (1.2.7).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # trace2.sh DRIVER BLOB N - instruction trace of the engine under vamos; per function, then per C source line (>= 15/iter)
 S=$(cd "$(dirname "$0")" && pwd)
-cd ~/Projects/AmigaTools/ccon/engine; T=$HOME/opt/m68k-elf/bin/m68k-elf
+cd "$S/../../engine"; T=$HOME/opt/m68k-elf/bin/m68k-elf
 $T-gcc -m68020 -O2 -fno-late-combine-instructions -fno-strict-aliasing -fomit-frame-pointer -ffreestanding -fno-builtin -fno-tree-loop-distribute-patterns -fno-pic -mpcrel -Wall -g -c engine.c -o $S/gbuild/engine.o
 vasmm68k_mot -Felf -m68020 -quiet -o $S/gbuild/pg.o pgroups.s
 $T-ld -nostdlib -e _start -Ttext=0 entry.o $S/gbuild/engine.o $S/gbuild/pg.o -o $S/gbuild/e.elf
@@ -29,7 +29,7 @@ for a,o in zip(addrs,out):
     k=o.split('/')[-1].split(' ')[0]
     if k.startswith('engine.c'): lines[int(k.split(':')[1])]+=pcs[a]
 print('C total per iter', sum(lines.values())/N)
-src=open(os.path.expanduser('~/Projects/AmigaTools/ccon/engine/engine.c')).read().split('\n')
+src=open(os.path.join(S,'../../engine/engine.c')).read().split('\n')
 for k,v in sorted(lines.items()):
     if v/N>=15: print(f'{k:5d} {v/N:6.0f}  {src[k-1].strip()[:70]}')
 PY

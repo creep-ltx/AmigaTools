@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include "/home/creep/Projects/AmigaTools/ccon/engine/con.h"
+#include "../../engine/con.h"
 struct fx { struct con **curcon; LONG *dfon,*dfpend,*dffull,*dflo,*dfhi,*dflost,*dfgen,*alteat,*dfnarrow,*maskon; UBYTE **dfd,**dfx0,**dfx1; LONG *dfo; UBYTE *dfdb,*dfx0b,*dfx1b; };
 struct pctx { const UBYTE *gl; LONG cs, ch, s, xb; UBYTE *pl[8]; LONG bpr, depth; UBYTE *sty; ULONG *tmp; };
 typedef LONG (*pp_t)(struct pctx *, struct fx *, LONG);

@@ -5,7 +5,7 @@
 #include <devices/timer.h>
 #include <stdio.h>
 #include <string.h>
-#include "/home/creep/Projects/AmigaTools/ccon/engine/con.h"
+#include "../../engine/con.h"
 typedef unsigned long ULONG_;
 struct fx { struct con **curcon; LONG *dfon,*dfpend,*dffull,*dflo,*dfhi,*dflost,*dfgen,*alteat,*dfnarrow,*maskon; UBYTE **dfd,**dfx0,**dfx1; LONG *dfo; UBYTE *dfdb,*dfx0b,*dfx1b; };
 struct Device *TimerBase;

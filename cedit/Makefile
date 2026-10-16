@@ -5,7 +5,8 @@
 CC      = /opt/amiga/bin/m68k-amigaos-gcc
 GUI     = ../ltxgui
 CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -I$(GUI)
-DEPLOY  = /home/creep/Documents/FS-UAE/Hard Drives/Dump/Code
+# deploy copies the binary into a folder an emulator mounts: make deploy DEPLOY=<folder>
+DEPLOY ?=
 
 HOSTCC  = cc
 
@@ -43,6 +44,7 @@ lex-vamos: tests/lextest.c elex.c elex.h
 	vamos -q -s 64 tests/lextest
 
 deploy: cedit
+	@test -n "$(DEPLOY)" || { echo "set DEPLOY: make deploy DEPLOY=<folder the emulator mounts>"; exit 1; }
 	cp cedit "$(DEPLOY)/cedit"
 
 clean:

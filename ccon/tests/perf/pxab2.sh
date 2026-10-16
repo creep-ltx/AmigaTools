@@ -2,7 +2,7 @@
 # pxab2.sh BUILD FILE - cold-start stock FS-UAE, BUILD as XC1:, Type FILE into a DPFORCE and a NODIRECT
 # window at several x positions, compare the windows' row hashes (wgrab)
 S=$(cd "$(dirname "$0")" && pwd)
-H="/home/creep/FS-UAE/Hard Drives/AmigaOS3.2"
+H="${UAE_HD:?set UAE_HD to the FS-UAE hard drive folder of the stock AmigaOS 3.2 machine}"
 export WASABI_HOST=127.0.0.1
 pkill -x fs-uae; sleep 2
 cp "$1" "$H/L/xc1-handler"

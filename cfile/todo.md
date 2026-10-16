@@ -27,8 +27,8 @@ A point release, not a `.0`: it is the 0.3 archive system reaching one more
 format, not a new capability. Turned out *simpler* than lha: LZX 1.21's `d`
 removes a stored directory member directly (with the trailing slash), so no
 rebuild path; `d` globs with no `-Qw`, so member names are `'`-escaped. Four
-probe rounds captured lzx's real output first (~/Documents/Amiga/
-lzxhelp.txt, lzxprobe[/2/3]). Docs updated. `$VER`/help not yet bumped, not
+probe rounds captured lzx's real output first (lzxhelp.txt,
+lzxprobe[/2/3] in the user's Amiga folder). Docs updated. `$VER`/help not yet bumped, not
 yet released.
 
 **VERSIONING (30.7.26, his call): the 0.4.1 line IS 0.5.** What

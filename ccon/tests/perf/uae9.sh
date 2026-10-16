@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# uae9.sh CONFIG - start FS-UAE with ~/FS-UAE/Configurations/CONFIG.fs-uae and
+# uae9.sh CONFIG - start FS-UAE with $FSUAE_DIR/Configurations/CONFIG.fs-uae (FSUAE_DIR: FS-UAE's
+# base folder, default $HOME/FS-UAE) and
 # put its window on workspace (tag) 9 without switching the view there
 cfg=${1:-A1200-Stock-net}
-(cd ~/FS-UAE && setsid fs-uae "Configurations/$cfg.fs-uae" >/dev/null 2>&1 &)
+(cd "${FSUAE_DIR:-$HOME/FS-UAE}" && setsid fs-uae "Configurations/$cfg.fs-uae" >/dev/null 2>&1 &)
 for i in $(seq 1 40); do
   id=$(mmsg get all-clients 2>/dev/null | python3 -c 'import json,sys
 for c in json.load(sys.stdin)["clients"]:
