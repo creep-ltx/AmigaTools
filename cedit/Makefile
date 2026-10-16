@@ -2,7 +2,10 @@
 # Builds against the shared GUI chassis in ../ltxgui rather than a
 # copy of it: one fix, both tools.
 
-CC      = /opt/amiga/bin/m68k-amigaos-gcc
+# Bebbo's m68k-amigaos-gcc: set AMIGA to where it is installed, otherwise it is
+# looked for in the usual places (/opt/amiga, its own default, then ~/opt/amiga).
+AMIGA   ?= $(firstword $(wildcard /opt/amiga $(HOME)/opt/amiga))
+CC      = $(AMIGA)/bin/m68k-amigaos-gcc
 GUI     = ../ltxgui
 CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -I$(GUI)
 # deploy copies the binary into a folder an emulator mounts: make deploy DEPLOY=<folder>

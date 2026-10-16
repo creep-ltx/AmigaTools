@@ -2,7 +2,10 @@
 # `make test` proves the engine on the host AND under vamos before
 # anything boots - the harness-first rule.
 
-CC      = /opt/amiga/bin/m68k-amigaos-gcc
+# Bebbo's m68k-amigaos-gcc: set AMIGA to where it is installed, otherwise it is
+# looked for in the usual places (/opt/amiga, its own default, then ~/opt/amiga).
+AMIGA   ?= $(firstword $(wildcard /opt/amiga $(HOME)/opt/amiga))
+CC      = $(AMIGA)/bin/m68k-amigaos-gcc
 CFLAGS  = -O2 -noixemul -fomit-frame-pointer -Wall -I$(GUI)
 HOSTCC  = cc
 # deploy copies the binary into a folder an emulator mounts: make deploy DEPLOY=<folder>
